@@ -15,7 +15,7 @@ use crate::rendering::{dim_predictions_enabled, map_color, dim_color, centered_r
 use crate::style::parse_tmux_style_components;
 use crate::config::{parse_key_string, normalize_key_for_binding};
 use crate::copy_mode::{copy_to_system_clipboard, read_from_system_clipboard};
-use crate::debug_log::{client_log, client_log_enabled};
+use crate::debug_log::{client_log, client_log_enabled, input_log, input_log_enabled};
 use crate::layout::RowRunsJson;
 use crate::tree::split_with_gaps;
 
@@ -499,6 +499,29 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         {
             let mut _pending_evt = input.read_timeout(Duration::from_millis(poll_ms))?;
             while let Some(_cur_evt) = _pending_evt {
+                // Input debug: log every raw event BEFORE filtering
+                if input_log_enabled() {
+                    match &_cur_evt {
+                        Event::Key(key) => {
+                            input_log("event", &format!(
+                                "Key code={:?} mods={:?} kind={:?} state={:?}",
+                                key.code, key.modifiers, key.kind, key.state
+                            ));
+                        }
+                        Event::Mouse(me) => {
+                            input_log("event", &format!("Mouse {:?}", me.kind));
+                        }
+                        Event::Resize(w, h) => {
+                            input_log("event", &format!("Resize {}x{}", w, h));
+                        }
+                        Event::Paste(d) => {
+                            input_log("event", &format!("Paste ({} bytes)", d.len()));
+                        }
+                        other => {
+                            input_log("event", &format!("Other {:?}", other));
+                        }
+                    }
+                }
                 match _cur_evt {
                     Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
                         // Dynamic prefix key check (default: Ctrl+B, configurable via .psmux.conf)
@@ -1213,6 +1236,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         // without waiting for a dump-state round-trip
         let sent_keys_this_iter = !cmd_batch.is_empty();
         if sent_keys_this_iter {
+            if input_log_enabled() {
+                for cmd in &cmd_batch {
+                    input_log("send", &format!("→ {}", cmd.trim()));
+                }
+            }
             for cmd in &cmd_batch {
                 if writer.write_all(cmd.as_bytes()).is_err() {
                     break; // Connection lost

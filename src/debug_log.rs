@@ -9,8 +9,7 @@
 //! | Variable               | Log file                          | Description                          |
 //! |------------------------|-----------------------------------|--------------------------------------|
 //! | `PSMUX_CLIENT_DEBUG=1` | `~/.psmux/client_debug.log`       | Client TUI rendering, draw, status   |
-//! | `PSMUX_STYLE_DEBUG=1`  | `~/.psmux/style_debug.log`        | Style/theme parsing, inline styles   |
-//! | `PSMUX_MOUSE_DEBUG=1`  | `~/.psmux/mouse_debug.log`        | Mouse injection (existing)           |
+//! | `PSMUX_STYLE_DEBUG=1`  | `~/.psmux/style_debug.log`        | Style/theme parsing, inline styles   |/// | `PSMUX_INPUT_DEBUG=1`  | `~/.psmux/input_debug.log`        | Every crossterm event + console mode |//! | `PSMUX_MOUSE_DEBUG=1`  | `~/.psmux/mouse_debug.log`        | Mouse injection (existing)           |
 //! | `PSMUX_SSH_DEBUG=1`    | `~/.psmux/ssh_input.log`          | SSH input handling (existing)        |
 //! | `PSMUX_LATENCY_LOG=1`  | `~/.psmux/latency.log`            | Keypress-to-render latency (existing)|
 //!
@@ -138,4 +137,45 @@ pub fn style_log(component: &str, msg: &str) {
 /// Returns `true` if style debug logging is active.
 pub fn style_log_enabled() -> bool {
     STYLE_LOG.lock().ok().map_or(false, |g| g.is_some())
+}
+
+// ─── Input debug log ────────────────────────────────────────────────────────
+
+/// Input event debug log, gated by `PSMUX_INPUT_DEBUG=1`.
+/// Traces every crossterm event + console input mode at startup.
+static INPUT_LOG: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| {
+    if !env_enabled("PSMUX_INPUT_DEBUG") { return Mutex::new(None); }
+    Mutex::new(open_log("input_debug.log"))
+});
+
+static INPUT_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+const INPUT_LOG_CAP: u32 = 10000;
+
+/// Log an input debug message. No-op unless `PSMUX_INPUT_DEBUG=1`.
+pub fn input_log(component: &str, msg: &str) {
+    let n = INPUT_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if n >= INPUT_LOG_CAP {
+        if n == INPUT_LOG_CAP {
+            if let Ok(mut guard) = INPUT_LOG.lock() {
+                if let Some(ref mut f) = *guard {
+                    let _ = writeln!(f, "[{}][log] --- log cap reached ---",
+                        chrono::Local::now().format("%H:%M:%S%.3f"));
+                    let _ = f.flush();
+                }
+            }
+        }
+        return;
+    }
+    if let Ok(mut guard) = INPUT_LOG.lock() {
+        if let Some(ref mut f) = *guard {
+            let _ = writeln!(f, "[{}][{}] {}",
+                chrono::Local::now().format("%H:%M:%S%.3f"), component, msg);
+            let _ = f.flush();
+        }
+    }
+}
+
+/// Returns `true` if input debug logging is active.
+pub fn input_log_enabled() -> bool {
+    INPUT_LOG.lock().ok().map_or(false, |g| g.is_some())
 }

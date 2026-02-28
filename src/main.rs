@@ -382,6 +382,15 @@ fn run_main() -> io::Result<()> {
                 return run_server(name, server_socket_name, initial_cmd, raw_cmd, srv_start_dir, srv_window_name, srv_init_size);
             }
             "new-session" | "new" => {
+                // Prevent nesting — block new-session inside an existing psmux session
+                if env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1") {
+                    if env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1")
+                        || env::var("PSMUX_SESSION").ok().as_deref() == Some("1")
+                    {
+                        eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
+                        return Ok(());
+                    }
+                }
                 // Strict getopt-style parsing for new-session flags.
                 // tmux template: "Ac:dDe:EF:f:n:Ps:t:x:Xy:"
                 // Flags that take a value (letter followed by ':'):
@@ -2303,30 +2312,47 @@ fn run_main() -> io::Result<()> {
         env::set_var("PSMUX_REMOTE_ATTACH", "1");
     }
     
-    if env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1") {
-        eprintln!("psmux: nested sessions are not allowed");
-        return Ok(());
+    // Prevent nesting — similar to tmux checking $TMUX.
+    // PSMUX_ACTIVE is set on the client process itself.
+    // PSMUX_SESSION is set on child panes spawned by the server.
+    // Both indicate we're already inside psmux.
+    // Override with PSMUX_ALLOW_NESTING=1 if nesting is intentional.
+    if env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1") {
+        if env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1")
+            || env::var("PSMUX_SESSION").ok().as_deref() == Some("1")
+        {
+            eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
+            return Ok(());
+        }
     }
     env::set_var("PSMUX_ACTIVE", "1");
 
     let mut stdout = io::stdout();
     enable_virtual_terminal_processing();
     enable_raw_mode()?;
+
+    // Detect terminal type for input handling.
+    let is_ssh = is_ssh_session();
+    let use_vt_input = is_ssh;
+
+    // For standard terminals (not SSH), clear VTI flag from stdin if
+    // crossterm or another layer set it — keeps normal ReadConsoleInputW
+    // behavior via proper INPUT_RECORDs.
+    if !use_vt_input {
+        crate::platform::disable_vti_on_stdin();
+    }
+
     execute!(stdout, EnterAlternateScreen, EnableBlinking, EnableMouseCapture, EnableBracketedPaste)?;
     apply_cursor_style(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Set up input source — detects SSH and enables VT mouse parsing if needed.
-    let is_ssh = is_ssh_session();
-    let input = InputSource::new(is_ssh)?;
+    let input = InputSource::new(use_vt_input)?;
 
-    // Over SSH, explicitly (re-)send mouse-enable escape sequences.
-    // ConPTY may have consumed crossterm's EnableMouseCapture output
-    // without forwarding it to sshd → the remote terminal never got told
-    // to enable mouse reporting.  This sends it again via WriteFile and
-    // stdout write to maximize the chance it reaches the client.
-    if is_ssh {
+    // For VT input mode (SSH), explicitly (re-)send mouse-enable escape
+    // sequences.  ConPTY may have consumed crossterm's EnableMouseCapture
+    // output without forwarding it.
+    if use_vt_input {
         send_mouse_enable();
     }
 

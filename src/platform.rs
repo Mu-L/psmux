@@ -138,6 +138,59 @@ pub fn enable_virtual_terminal_processing() {
     // No-op on non-Windows platforms
 }
 
+/// Clear `ENABLE_VIRTUAL_TERMINAL_INPUT` (VTI, 0x0200) from the console stdin.
+///
+/// crossterm 0.28's `enable_raw_mode()` sets VTI.  When psmux runs inside a
+/// ConPTY-based terminal (e.g. WezTerm), VTI tells conhost to pass VT bytes
+/// through as raw KEY_EVENT records instead of properly translating them to
+/// INPUT_RECORDs with virtual-key codes.  This breaks crossterm's event parser
+/// because it expects translated INPUT_RECORDs for regular key events.
+///
+/// For local (non-SSH) sessions, we do not need VTI — crossterm reads native
+/// INPUT_RECORDs via `ReadConsoleInputW`.  The SSH input path has its OWN
+/// `SetConsoleMode(+VTI)` call, so this only runs for local mode.
+///
+/// Windows Terminal is unaffected because it IS the console host (no ConPTY
+/// pipe translation).  The fix specifically helps ConPTY-hosted terminals.
+#[cfg(windows)]
+pub fn disable_vti_on_stdin() {
+    const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+        fn GetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, lpMode: *mut u32) -> i32;
+        fn SetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, dwMode: u32) -> i32;
+    }
+
+    unsafe {
+        let handle = GetStdHandle(STD_INPUT_HANDLE);
+        if handle.is_null() || handle == (-1isize) as *mut std::ffi::c_void {
+            return;
+        }
+        let mut mode: u32 = 0;
+        if GetConsoleMode(handle, &mut mode) != 0 {
+            let had_vti = mode & ENABLE_VIRTUAL_TERMINAL_INPUT != 0;
+            crate::debug_log::input_log("console", &format!(
+                "stdin mode before: 0x{:04X} VTI={}", mode, had_vti
+            ));
+            if had_vti {
+                let new_mode = mode & !ENABLE_VIRTUAL_TERMINAL_INPUT;
+                SetConsoleMode(handle, new_mode);
+                crate::debug_log::input_log("console", &format!(
+                    "stdin mode after: 0x{:04X} (VTI cleared)", new_mode
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn disable_vti_on_stdin() {
+    // No-op on non-Windows platforms
+}
+
 /// Install a console control handler on Windows to prevent termination on client detach.
 #[cfg(windows)]
 pub fn install_console_ctrl_handler() {
