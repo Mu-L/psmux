@@ -18,7 +18,7 @@ use crate::types::{AppState, CtrlReq, LayoutKind, Mode};
 use crate::tree::{active_pane_mut, compute_rects, resize_all_panes, kill_all_children,
     find_window_index_by_id, focus_pane_by_id, focus_pane_by_index, reap_children};
 use crate::pane::{create_window, split_active_with_command, kill_active_pane};
-use crate::input::{handle_key, handle_mouse, send_text_to_active, send_key_to_active};
+use crate::input::{handle_key, handle_mouse, send_text_to_active, send_key_to_active, send_paste_to_active};
 use crate::rendering::{render_window, parse_status, centered_rect};
 use crate::style::{parse_tmux_style, parse_inline_styles, spans_visual_width};
 use crate::config::load_config;
@@ -106,12 +106,27 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     }
                     i += 1;
                 }
-                if let Some(wid) = target_win { let _ = tx.send(CtrlReq::FocusWindow(wid)); }
-                if let Some(pid) = target_pane { 
-                    if pane_is_id {
-                        let _ = tx.send(CtrlReq::FocusPane(pid));
+                let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp");
+                if let Some(wid) = target_win {
+                    if is_focus_cmd {
+                        let _ = tx.send(CtrlReq::FocusWindow(wid));
                     } else {
-                        let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
+                        let _ = tx.send(CtrlReq::FocusWindowTemp(wid));
+                    }
+                }
+                if let Some(pid) = target_pane {
+                    if is_focus_cmd {
+                        if pane_is_id {
+                            let _ = tx.send(CtrlReq::FocusPane(pid));
+                        } else {
+                            let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
+                        }
+                    } else {
+                        if pane_is_id {
+                            let _ = tx.send(CtrlReq::FocusPaneTemp(pid));
+                        } else {
+                            let _ = tx.send(CtrlReq::FocusPaneByIndexTemp(pid));
+                        }
                     }
                 }
                 match cmd {
@@ -634,6 +649,10 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         last_resize = Instant::now();
                     }
                 }
+                Event::Paste(text) => {
+                    crate::debug_log::input_log("paste", &format!("Event::Paste received, len={} text={:?}", text.len(), &text[..text.len().min(200)]));
+                    send_paste_to_active(&mut app, &text)?;
+                }
                 _ => {}
             }
         }
@@ -660,8 +679,11 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     if let Some(text) = capture_active_pane_range(&mut app, s, e)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
                 CtrlReq::FocusWindow(wid) => { if let Some(idx) = find_window_index_by_id(&app, wid) { app.active_idx = idx; } }
+                CtrlReq::FocusWindowTemp(wid) => { if let Some(idx) = find_window_index_by_id(&app, wid) { app.active_idx = idx; } }
                 CtrlReq::FocusPane(pid) => { focus_pane_by_id(&mut app, pid); }
                 CtrlReq::FocusPaneByIndex(idx) => { focus_pane_by_index(&mut app, idx); }
+                CtrlReq::FocusPaneTemp(pid) => { focus_pane_by_id(&mut app, pid); }
+                CtrlReq::FocusPaneByIndexTemp(idx) => { focus_pane_by_index(&mut app, idx); }
                 CtrlReq::SessionInfo(resp) => {
                     let attached = if app.attached_clients > 0 { "(attached)" } else { "(detached)" };
                     let windows = app.windows.len();
@@ -683,7 +705,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 }
                 CtrlReq::SendText(s) => { send_text_to_active(&mut app, &s)?; }
                 CtrlReq::SendKey(k) => { send_key_to_active(&mut app, &k)?; }
-                CtrlReq::SendPaste(s) => { send_text_to_active(&mut app, &s)?; }
+                CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; }
                 CtrlReq::ZoomPane => { toggle_zoom(&mut app); }
                 CtrlReq::CopyEnter => { enter_copy_mode(&mut app); }
                 CtrlReq::CopyMove(dx, dy) => { move_copy_cursor(&mut app, dx, dy); }

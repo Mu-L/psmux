@@ -556,8 +556,13 @@ pub enum CtrlReq {
     CapturePane(mpsc::Sender<String>),
     CapturePaneStyled(mpsc::Sender<String>, Option<i32>, Option<i32>),
     FocusWindow(usize),
+    /// Temporary focus for -t targeting: server saves/restores active_idx
+    FocusWindowTemp(usize),
     FocusPane(usize),
     FocusPaneByIndex(usize),
+    /// Temporary pane focus for -t targeting
+    FocusPaneTemp(usize),
+    FocusPaneByIndexTemp(usize),
     SessionInfo(mpsc::Sender<String>),
     CapturePaneRange(mpsc::Sender<String>, Option<i32>, Option<i32>),
     ClientAttach,

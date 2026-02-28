@@ -652,6 +652,133 @@ pub mod mouse_inject {
             result != 0
         }
     }
+
+    /// Inject bracketed paste text into a child process's console input buffer.
+    ///
+    /// Sends `\x1b[200~` + text + `\x1b[201~` as KEY_EVENT records via
+    /// WriteConsoleInputW, bypassing ConPTY's VT input parser entirely.
+    /// ConPTY strips bracketed paste sequences written to the PTY master pipe,
+    /// so this direct injection is the only way to deliver them to the child.
+    ///
+    /// The text is encoded as UTF-16 for proper Unicode support (file paths
+    /// may contain non-ASCII characters).
+    pub fn send_bracketed_paste(child_pid: u32, text: &str, bracket: bool) -> bool {
+        unsafe {
+            let had_console = GetConsoleWindow() != 0;
+            FreeConsole();
+
+            if AttachConsole(child_pid) == 0 {
+                let err = GetLastError();
+                debug_log(&format!("send_bracketed_paste: AttachConsole({}) FAILED err={}", child_pid, err));
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return false;
+            }
+
+            let conin: [u16; 7] = [
+                'C' as u16, 'O' as u16, 'N' as u16,
+                'I' as u16, 'N' as u16, '$' as u16, 0,
+            ];
+            let handle = CreateFileW(
+                conin.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null(),
+            );
+
+            if handle == INVALID_HANDLE || handle == 0 {
+                let err = GetLastError();
+                debug_log(&format!("send_bracketed_paste: CreateFileW(CONIN$) FAILED err={}", err));
+                FreeConsole();
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return false;
+            }
+
+            const KEY_EVENT: u16 = 0x0001;
+
+            #[repr(C)]
+            #[derive(Copy, Clone)]
+            struct KEY_EVENT_RECORD {
+                key_down: i32,
+                repeat_count: u16,
+                virtual_key_code: u16,
+                virtual_scan_code: u16,
+                u_char: u16,
+                control_key_state: u32,
+            }
+
+            #[repr(C)]
+            struct KEY_INPUT_RECORD {
+                event_type: u16,
+                _padding: u16,
+                event: KEY_EVENT_RECORD,
+            }
+
+            // Build bracket-open, text, bracket-close as UTF-16 chars
+            let bracket_open: &[u8] = b"\x1b[200~";
+            let bracket_close: &[u8] = b"\x1b[201~";
+
+            // Collect all UTF-16 code units to send
+            let mut chars: Vec<u16> = Vec::new();
+            if bracket {
+                for &b in bracket_open {
+                    chars.push(b as u16);
+                }
+            }
+            // Encode paste text as UTF-16
+            for c in text.chars() {
+                let mut buf = [0u16; 2];
+                let encoded = c.encode_utf16(&mut buf);
+                for &unit in encoded.iter() {
+                    chars.push(unit);
+                }
+            }
+            if bracket {
+                for &b in bracket_close {
+                    chars.push(b as u16);
+                }
+            }
+
+            // Build KEY_EVENT records (key-down only; key-up not needed for
+            // console input injection — only key-down events carry characters).
+            let mut records: Vec<KEY_INPUT_RECORD> = Vec::with_capacity(chars.len());
+            for &wch in &chars {
+                records.push(KEY_INPUT_RECORD {
+                    event_type: KEY_EVENT,
+                    _padding: 0,
+                    event: KEY_EVENT_RECORD {
+                        key_down: 1,
+                        repeat_count: 1,
+                        virtual_key_code: 0,
+                        virtual_scan_code: 0,
+                        u_char: wch,
+                        control_key_state: 0,
+                    },
+                });
+            }
+
+            let mut written: u32 = 0;
+            let result = WriteConsoleInputW(
+                handle,
+                records.as_ptr() as *const INPUT_RECORD,
+                records.len() as u32,
+                &mut written,
+            );
+
+            debug_log(&format!("send_bracketed_paste: pid={} bracket={} text_len={} records={} written={} ok={}",
+                child_pid, bracket, text.len(), records.len(), written, result != 0));
+
+            CloseHandle(handle);
+            FreeConsole();
+            if had_console {
+                AttachConsole(ATTACH_PARENT_PROCESS);
+            }
+
+            result != 0
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -660,6 +787,7 @@ pub mod mouse_inject {
     pub fn send_mouse_event(_pid: u32, _col: i16, _row: i16, _btn: u32, _flags: u32, _reattach: bool) -> bool { false }
     pub fn send_vt_sequence(_pid: u32, _sequence: &[u8]) -> bool { false }
     pub fn query_vti_enabled(_pid: u32) -> Option<bool> { None }
+    pub fn send_bracketed_paste(_pid: u32, _text: &str, _bracket: bool) -> bool { false }
 }
 
 // ---------------------------------------------------------------------------

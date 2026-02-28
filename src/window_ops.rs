@@ -341,6 +341,11 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
     if y == status_row {
         for &(win_idx, x_start, x_end) in app.tab_positions.iter() {
             if x >= x_start && x < x_end && win_idx < app.windows.len() {
+                if win_idx != app.active_idx {
+                    crate::debug_log::server_log("switch", &format!(
+                        "TAB CLICK: active_idx {} -> {} x={} y={} status_row={} tab_range={}..{}",
+                        app.active_idx, win_idx, x, y, status_row, x_start, x_end));
+                }
                 app.last_window_idx = app.active_idx;
                 app.active_idx = win_idx;
                 return;

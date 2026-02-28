@@ -179,3 +179,44 @@ pub fn input_log(component: &str, msg: &str) {
 pub fn input_log_enabled() -> bool {
     INPUT_LOG.lock().ok().map_or(false, |g| g.is_some())
 }
+
+// ─── Server debug log ───────────────────────────────────────────────────────
+
+/// Server debug log, gated by `PSMUX_SERVER_DEBUG=1`.
+/// Traces active_idx changes, command dispatch, etc.
+static SERVER_LOG: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| {
+    if !env_enabled("PSMUX_SERVER_DEBUG") { return Mutex::new(None); }
+    Mutex::new(open_log("server_debug.log"))
+});
+
+static SERVER_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+const SERVER_LOG_CAP: u32 = 10000;
+
+/// Log a server debug message. No-op unless `PSMUX_SERVER_DEBUG=1`.
+pub fn server_log(component: &str, msg: &str) {
+    let n = SERVER_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if n >= SERVER_LOG_CAP {
+        if n == SERVER_LOG_CAP {
+            if let Ok(mut guard) = SERVER_LOG.lock() {
+                if let Some(ref mut f) = *guard {
+                    let _ = writeln!(f, "[{}][log] --- log cap reached ---",
+                        chrono::Local::now().format("%H:%M:%S%.3f"));
+                    let _ = f.flush();
+                }
+            }
+        }
+        return;
+    }
+    if let Ok(mut guard) = SERVER_LOG.lock() {
+        if let Some(ref mut f) = *guard {
+            let _ = writeln!(f, "[{}][{}] {}",
+                chrono::Local::now().format("%H:%M:%S%.3f"), component, msg);
+            let _ = f.flush();
+        }
+    }
+}
+
+/// Returns `true` if server debug logging is active.
+pub fn server_log_enabled() -> bool {
+    SERVER_LOG.lock().ok().map_or(false, |g| g.is_some())
+}

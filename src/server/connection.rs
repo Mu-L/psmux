@@ -192,12 +192,28 @@ let args: Vec<&str> = {
     }
     filtered
 };
-if let Some(wid) = target_win { let _ = tx.send(CtrlReq::FocusWindow(wid)); }
-if let Some(pid) = target_pane { 
-    if pane_is_id {
-        let _ = tx.send(CtrlReq::FocusPane(pid));
+// Commands that should permanently change focus when used with -t
+let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp");
+if let Some(wid) = target_win {
+    if is_focus_cmd {
+        let _ = tx.send(CtrlReq::FocusWindow(wid));
     } else {
-        let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
+        let _ = tx.send(CtrlReq::FocusWindowTemp(wid));
+    }
+}
+if let Some(pid) = target_pane {
+    if is_focus_cmd {
+        if pane_is_id {
+            let _ = tx.send(CtrlReq::FocusPane(pid));
+        } else {
+            let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
+        }
+    } else {
+        if pane_is_id {
+            let _ = tx.send(CtrlReq::FocusPaneTemp(pid));
+        } else {
+            let _ = tx.send(CtrlReq::FocusPaneByIndexTemp(pid));
+        }
     }
 }
 match cmd {

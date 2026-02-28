@@ -24,7 +24,7 @@ use helpers::{collect_pane_paths_server, serialize_bindings_json, json_escape_st
     list_windows_json_with_tabs, combined_data_version, TMUX_COMMANDS};
 use options::{get_option_value, apply_set_option};
 
-use crate::input::{send_text_to_active, send_key_to_active, move_focus};
+use crate::input::{send_text_to_active, send_key_to_active, send_paste_to_active, move_focus};
 use crate::copy_mode::{enter_copy_mode, exit_copy_mode, move_copy_cursor, current_prompt_pos,
     yank_selection, scroll_copy_up, scroll_copy_down, switch_with_copy_save,
     capture_active_pane_text, capture_active_pane_range, capture_active_pane_styled};
@@ -223,9 +223,39 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     CtrlReq::DumpLayout(_) => 1,
                     _ => 0,
                 });
+                // Track temporary -t focus: save (active_idx, active_path) when
+                // FocusWindowTemp/FocusPaneTemp is seen, restore after next
+                // non-temp command so the user's view doesn't jump.
+                let mut temp_focus_restore: Option<(usize, Vec<usize>)> = None;
                 for req in pending {
                     let mutates_state = !matches!(&req, CtrlReq::DumpState(..));
+                    let is_temp_focus = matches!(&req,
+                        CtrlReq::FocusWindowTemp(_) | CtrlReq::FocusPaneTemp(_) | CtrlReq::FocusPaneByIndexTemp(_));
                     let mut hook_event: Option<&str> = None;
+                    // Track active_idx changes for debugging window-switch issues
+                    let _prev_active_idx = app.active_idx;
+                    let _req_tag: &str = match &req {
+                        CtrlReq::NextWindow => "NextWindow",
+                        CtrlReq::PrevWindow => "PrevWindow",
+                        CtrlReq::SelectWindow(_) => "SelectWindow",
+                        CtrlReq::FocusWindow(_) => "FocusWindow",
+                        CtrlReq::FocusWindowTemp(_) => "FocusWindowTemp",
+                        CtrlReq::FocusWindowCmd(_) => "FocusWindowCmd",
+                        CtrlReq::LastWindow => "LastWindow",
+                        CtrlReq::MouseDown(..) => "MouseDown",
+                        CtrlReq::MouseDownRight(..) => "MouseDownRight",
+                        CtrlReq::MouseDownMiddle(..) => "MouseDownMiddle",
+                        CtrlReq::FocusPane(_) => "FocusPane",
+                        CtrlReq::FocusPaneTemp(_) => "FocusPaneTemp",
+                        CtrlReq::NewWindow(..) => "NewWindow",
+                        CtrlReq::KillWindow => "KillWindow",
+                        CtrlReq::KillPane => "KillPane",
+                        CtrlReq::BreakPane => "BreakPane",
+                        CtrlReq::JoinPane(_) => "JoinPane",
+                        CtrlReq::MoveWindow(..) => "MoveWindow",
+                        CtrlReq::SwapWindow(_) => "SwapWindow",
+                        _ => "",
+                    };
                     match req {
                 CtrlReq::NewWindow(cmd, name, detached, start_dir) => {
                     let prev_idx = app.active_idx;
@@ -337,6 +367,34 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if app.windows[app.active_idx].active_path != old_path { unzoom_if_zoomed(&mut app); }
                     meta_dirty = true;
                 }
+                // ── Temporary focus variants for -t targeting ────────────
+                // These switch active_idx/active_path so the NEXT command
+                // in the batch operates on the correct window/pane.
+                // After the entire pending batch is processed, we restore
+                // the original focus (see temp_focus_restore below).
+                CtrlReq::FocusWindowTemp(wid) => {
+                    if temp_focus_restore.is_none() {
+                        temp_focus_restore = Some((app.active_idx, app.windows[app.active_idx].active_path.clone()));
+                    }
+                    if wid >= app.window_base_index {
+                        let internal_idx = wid - app.window_base_index;
+                        if internal_idx < app.windows.len() {
+                            app.active_idx = internal_idx;
+                        }
+                    }
+                }
+                CtrlReq::FocusPaneTemp(pid) => {
+                    if temp_focus_restore.is_none() {
+                        temp_focus_restore = Some((app.active_idx, app.windows[app.active_idx].active_path.clone()));
+                    }
+                    focus_pane_by_id(&mut app, pid);
+                }
+                CtrlReq::FocusPaneByIndexTemp(idx) => {
+                    if temp_focus_restore.is_none() {
+                        temp_focus_restore = Some((app.active_idx, app.windows[app.active_idx].active_path.clone()));
+                    }
+                    focus_pane_by_index(&mut app, idx);
+                }
                 CtrlReq::SessionInfo(resp) => {
                     let attached = if app.attached_clients > 0 { " (attached)" } else { "" };
                     let windows = app.windows.len();
@@ -385,8 +443,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // instead of cloning 50-100KB of JSON.
                     // Only allowed for persistent connections that already have
                     // the previous frame; one-shot connections always need full state.
+                    // Skip the fast-path while any pane in the active window still
+                    // has a default placeholder title — we need layout serialisation
+                    // to keep running infer_title_from_prompt until a real title is
+                    // resolved.
+                    let has_placeholder_title = app.windows.get(app.active_idx)
+                        .and_then(|w| crate::tree::active_pane(&w.root, &w.active_path))
+                        .map_or(false, |p| p.title.starts_with("pane %"));
                     if allow_nc
                         && !state_dirty
+                        && !has_placeholder_title
                         && !cached_dump_state.is_empty()
                         && cached_data_version == combined_data_version(&app)
                     {
@@ -464,7 +530,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::SendText(s) => { send_text_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::SendKey(k) => { send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
-                CtrlReq::SendPaste(s) => { send_text_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
+                CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::ZoomPane => { toggle_zoom(&mut app); hook_event = Some("after-resize-pane"); }
                 CtrlReq::CopyEnter => { enter_copy_mode(&mut app); }
                 CtrlReq::CopyEnterPageUp => {
@@ -1865,17 +1931,46 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
             }
+            // Log any active_idx change for debugging window-switch issues
+            if app.active_idx != _prev_active_idx && crate::debug_log::server_log_enabled() {
+                crate::debug_log::server_log("switch", &format!(
+                    "active_idx changed {} -> {} by req={} hook={:?}",
+                    _prev_active_idx, app.active_idx, _req_tag, hook_event));
+            }
             // Fire any hooks registered for the event that just occurred
             if let Some(event) = hook_event {
+                let _pre_hook_idx = app.active_idx;
                 let cmds: Vec<String> = app.hooks.get(event).cloned().unwrap_or_default();
                 for cmd in cmds {
                     parse_config_line(&mut app, &cmd);
+                }
+                // Check if the hook itself changed active_idx
+                if app.active_idx != _pre_hook_idx && crate::debug_log::server_log_enabled() {
+                    crate::debug_log::server_log("switch", &format!(
+                        "active_idx changed {} -> {} by HOOK event={}",
+                        _pre_hook_idx, app.active_idx, event));
+                }
+            }
+            // Restore temporary -t focus after non-temp command completes
+            if !is_temp_focus {
+                if let Some((restore_idx, restore_path)) = temp_focus_restore.take() {
+                    if restore_idx < app.windows.len() {
+                        app.active_idx = restore_idx;
+                        app.windows[restore_idx].active_path = restore_path;
+                    }
                 }
             }
             if mutates_state {
                 state_dirty = true;
             }
         }
+                // Clean up any trailing temp focus at end of batch
+                if let Some((restore_idx, restore_path)) = temp_focus_restore {
+                    if restore_idx < app.windows.len() {
+                        app.active_idx = restore_idx;
+                        app.windows[restore_idx].active_path = restore_path;
+                    }
+                }
             }
         }
         // ── Status-interval timer: fire hooks periodically ──
@@ -1883,9 +1978,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             let elapsed = app.last_status_interval_fire.elapsed().as_secs();
             if elapsed >= app.status_interval {
                 app.last_status_interval_fire = std::time::Instant::now();
+                let _pre_status_idx = app.active_idx;
                 let cmds: Vec<String> = app.hooks.get("status-interval").cloned().unwrap_or_default();
                 for cmd in cmds {
                     parse_config_line(&mut app, &cmd);
+                }
+                if app.active_idx != _pre_status_idx && crate::debug_log::server_log_enabled() {
+                    crate::debug_log::server_log("switch", &format!(
+                        "active_idx changed {} -> {} by status-interval hook",
+                        _pre_status_idx, app.active_idx));
                 }
             }
         }

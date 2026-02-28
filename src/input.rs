@@ -1495,6 +1495,132 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
     Ok(())
 }
 
+/// Send pasted text to the active pane, wrapping in bracketed-paste
+/// sequences (\x1b[200~ … \x1b[201~) when the child has enabled that mode.
+/// This is the correct handler for `Event::Paste` (crossterm) and
+/// drag-and-drop file paths, ensuring applications like Claude CLI can
+/// distinguish paste/drop from typed input.
+pub fn send_paste_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
+    // In clock mode, any input exits back to passthrough
+    if matches!(app.mode, Mode::ClockMode) {
+        app.mode = Mode::Passthrough;
+        return Ok(());
+    }
+    // In copy / copy-search modes, treat like regular text
+    if matches!(app.mode, Mode::CopyMode) {
+        return send_text_to_active(app, text);
+    }
+    if matches!(app.mode, Mode::CopySearch { .. }) {
+        return send_text_to_active(app, text);
+    }
+
+    // Check if the child requested bracketed paste mode
+    let use_bracket = {
+        let win = &app.windows[app.active_idx];
+        if let Some(p) = crate::tree::active_pane(&win.root, &win.active_path) {
+            if let Ok(parser) = p.term.lock() {
+                let bp = parser.screen().bracketed_paste();
+                crate::debug_log::input_log("paste", &format!("child bracketed_paste()={}", bp));
+                bp
+            } else {
+                crate::debug_log::input_log("paste", "term lock failed");
+                false
+            }
+        } else {
+            crate::debug_log::input_log("paste", "no active pane");
+            false
+        }
+    };
+    crate::debug_log::input_log("paste", &format!("use_bracket={} text_len={} text_preview={:?}", use_bracket, text.len(), &text[..text.len().min(100)]));
+
+    // On Windows, ConPTY strips bracketed paste VT sequences (\x1b[200~/201~)
+    // from the input pipe.  To deliver them to the child, we must inject
+    // directly into the child's console input buffer via WriteConsoleInputW.
+    // This bypasses ConPTY's VT input parser entirely.
+    #[cfg(windows)]
+    {
+        use crate::platform::mouse_inject;
+
+        // Helper: resolve child_pid and inject paste via console API
+        fn inject_paste_console(p: &mut crate::types::Pane, text: &str, bracket: bool) -> bool {
+            if p.child_pid.is_none() {
+                p.child_pid = mouse_inject::get_child_pid(&*p.child);
+            }
+            if let Some(pid) = p.child_pid {
+                crate::debug_log::input_log("paste", &format!(
+                    "console inject: pid={} bracket={} text_len={}", pid, bracket, text.len()));
+                mouse_inject::send_bracketed_paste(pid, text, bracket)
+            } else {
+                crate::debug_log::input_log("paste", "console inject: no child_pid, falling back to PTY write");
+                false
+            }
+        }
+
+        if app.sync_input {
+            let win = &mut app.windows[app.active_idx];
+            fn inject_all(node: &mut crate::types::Node, text: &str, bracket: bool) {
+                match node {
+                    crate::types::Node::Leaf(p) => {
+                        if !inject_paste_console(p, text, bracket) {
+                            // Fallback: write to PTY pipe (brackets may be stripped)
+                            if bracket { let _ = p.writer.write_all(b"\x1b[200~"); }
+                            let _ = p.writer.write_all(text.as_bytes());
+                            if bracket { let _ = p.writer.write_all(b"\x1b[201~"); }
+                            let _ = p.writer.flush();
+                        }
+                    }
+                    crate::types::Node::Split { children, .. } => {
+                        for c in children { inject_all(c, text, bracket); }
+                    }
+                }
+            }
+            inject_all(&mut win.root, text, use_bracket);
+        } else {
+            let win = &mut app.windows[app.active_idx];
+            if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                if !inject_paste_console(p, text, use_bracket) {
+                    // Fallback: write to PTY pipe
+                    if use_bracket { let _ = p.writer.write_all(b"\x1b[200~"); }
+                    let _ = p.writer.write_all(text.as_bytes());
+                    if use_bracket { let _ = p.writer.write_all(b"\x1b[201~"); }
+                    let _ = p.writer.flush();
+                }
+            }
+        }
+    }
+
+    // On non-Windows, use standard PTY pipe write with bracket sequences
+    #[cfg(not(windows))]
+    {
+        if app.sync_input {
+            let win = &mut app.windows[app.active_idx];
+            fn write_paste_all_panes(node: &mut Node, text: &[u8], bracket: bool) {
+                match node {
+                    Node::Leaf(p) => {
+                        if bracket { let _ = p.writer.write_all(b"\x1b[200~"); }
+                        let _ = p.writer.write_all(text);
+                        if bracket { let _ = p.writer.write_all(b"\x1b[201~"); }
+                        let _ = p.writer.flush();
+                    }
+                    Node::Split { children, .. } => {
+                        for c in children { write_paste_all_panes(c, text, bracket); }
+                    }
+                }
+            }
+            write_paste_all_panes(&mut win.root, text.as_bytes(), use_bracket);
+        } else {
+            let win = &mut app.windows[app.active_idx];
+            if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                if use_bracket { let _ = p.writer.write_all(b"\x1b[200~"); }
+                let _ = p.writer.write_all(text.as_bytes());
+                if use_bracket { let _ = p.writer.write_all(b"\x1b[201~"); }
+                let _ = p.writer.flush();
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
     // In clock mode, any input exits back to passthrough
     if matches!(app.mode, Mode::ClockMode) {

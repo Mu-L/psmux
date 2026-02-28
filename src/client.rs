@@ -324,6 +324,26 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
     // Synced bindings from server (updated each frame from DumpState)
     let mut synced_bindings: Vec<BindingEntry> = Vec::new();
 
+    // ── Windows paste detection state ──────────────────────────────────
+    // On Windows, Ctrl+V paste injects individual Key events BEFORE the
+    // Ctrl+V Release event arrives (~184ms later).  We buffer ALL printable
+    // chars for a short 20ms window.  If ≥3 chars arrive within 20ms, it's
+    // almost certainly a paste — hold the buffer until Ctrl+V Release confirms
+    // (up to 300ms), then send as a single bracketed paste (send-paste).
+    // If <3 chars arrive within 20ms, flush them as normal send-text.
+    // Pending chars being examined for paste detection.
+    #[cfg(windows)]
+    let mut paste_pend: String = String::new();
+    // When the first char of the current pending group arrived.
+    #[cfg(windows)]
+    let mut paste_pend_start: Option<Instant> = None;
+    // True once the 20ms window showed ≥3 chars — waiting for Ctrl+V Release.
+    #[cfg(windows)]
+    let mut paste_stage2: bool = false;
+    // Set to true when Ctrl+V Release is seen — confirms the burst was a paste.
+    #[cfg(windows)]
+    let mut paste_confirmed: bool = false;
+
     // list-keys overlay state (C-b ?)
     let mut keys_viewer = false;
     let mut keys_viewer_lines: Vec<String> = Vec::new();
@@ -501,7 +521,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         // When typing: cap at ~100fps to avoid flooding the server with
         // dump-state requests (each one is ~50-100KB of JSON over TCP).
         // When idle: 50ms refresh (20fps) saves CPU.
-        let poll_ms = if got_frame { 0 }
+        // Use fast poll when paste chars are pending (need timely detection)
+        #[cfg(windows)]
+        let paste_pend_active = !paste_pend.is_empty();
+        #[cfg(not(windows))]
+        let paste_pend_active = false;
+
+        let poll_ms = if paste_pend_active { 1 }
+            else if got_frame { 0 }
             else if dump_in_flight { 5 }
             else if force_dump { 0 }
             else if typing_active {
@@ -521,6 +548,85 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
             };
 
         cmd_batch.clear();
+
+        // ── Windows paste pending-buffer management ────────────────────
+        // Flush or promote chars based on how long they've been buffered.
+        #[cfg(windows)]
+        {
+            if let Some(start) = paste_pend_start {
+                let elapsed = start.elapsed();
+                if paste_confirmed {
+                    // Ctrl+V Release already seen — send as paste now
+                    if !paste_pend.is_empty() {
+                        if input_log_enabled() {
+                            input_log("paste", &format!("paste CONFIRMED (top), sending {} chars as send-paste: {:?}",
+                                paste_pend.len(), &paste_pend[..paste_pend.len().min(200)]));
+                        }
+                        let encoded = base64_encode(&paste_pend);
+                        cmd_batch.push(format!("send-paste {}\n", encoded));
+                    }
+                    paste_pend.clear();
+                    paste_pend_start = None;
+                    paste_stage2 = false;
+                    paste_confirmed = false;
+                } else if !paste_stage2 && elapsed > Duration::from_millis(20) {
+                    // 20ms window expired
+                    if paste_pend.len() >= 3 {
+                        // ≥3 chars in 20ms → likely paste, enter stage 2
+                        paste_stage2 = true;
+                        if input_log_enabled() {
+                            input_log("paste", &format!("stage2: {} chars in 20ms, waiting for Ctrl+V Release", paste_pend.len()));
+                        }
+                    } else {
+                        // <3 chars → normal typing, flush as send-text
+                        if input_log_enabled() {
+                            input_log("paste", &format!("flush {} chars as normal (< 3 in 20ms)", paste_pend.len()));
+                        }
+                        for c in paste_pend.chars() {
+                            match c {
+                                '\n' => { cmd_batch.push("send-key enter\n".into()); }
+                                '\t' => { cmd_batch.push("send-key tab\n".into()); }
+                                ' '  => { cmd_batch.push("send-key space\n".into()); }
+                                _ => {
+                                    let escaped = match c {
+                                        '"' => "\\\"".to_string(),
+                                        '\\' => "\\\\".to_string(),
+                                        _ => c.to_string(),
+                                    };
+                                    cmd_batch.push(format!("send-text \"{}\"\n", escaped));
+                                }
+                            }
+                        }
+                        paste_pend.clear();
+                        paste_pend_start = None;
+                    }
+                } else if paste_stage2 && elapsed > Duration::from_millis(300) {
+                    // Stage 2 timeout — no Ctrl+V Release arrived, flush as text
+                    if input_log_enabled() {
+                        input_log("paste", &format!("stage2 timeout, flushing {} chars as normal", paste_pend.len()));
+                    }
+                    for c in paste_pend.chars() {
+                        match c {
+                            '\n' => { cmd_batch.push("send-key enter\n".into()); }
+                            '\t' => { cmd_batch.push("send-key tab\n".into()); }
+                            ' '  => { cmd_batch.push("send-key space\n".into()); }
+                            _ => {
+                                let escaped = match c {
+                                    '"' => "\\\"".to_string(),
+                                    '\\' => "\\\\".to_string(),
+                                    _ => c.to_string(),
+                                };
+                                cmd_batch.push(format!("send-text \"{}\"\n", escaped));
+                            }
+                        }
+                    }
+                    paste_pend.clear();
+                    paste_pend_start = None;
+                    paste_stage2 = false;
+                }
+            }
+        }
+
         {
             let mut _pending_evt = input.read_timeout(Duration::from_millis(poll_ms))?;
             while let Some(_cur_evt) = _pending_evt {
@@ -548,7 +654,44 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                     }
                 }
                 match _cur_evt {
+                    // ── Windows Ctrl+V paste interception ────────────────
+                    // On Windows, Windows Terminal intercepts Ctrl+V Press,
+                    // reads the clipboard, and injects the paste content as
+                    // a byte stream into the ConPTY input pipe — bypassing
+                    // the console input buffer that crossterm reads via
+                    // ReadConsoleInputW.  Only the Ctrl+V *Release* event
+                    // leaks through.  We use that Release as a trigger to
+                    // read the clipboard ourselves and forward the content
+                    // as a bracketed-paste so child apps (Claude CLI, etc.)
+                    // can distinguish paste from typed input.
+                    #[cfg(windows)]
+                    Event::Key(key) if key.kind == KeyEventKind::Release
+                        && matches!(key.code, KeyCode::Char('v'))
+                        && key.modifiers == KeyModifiers::CONTROL =>
+                    {
+                        if input_log_enabled() {
+                            input_log("paste", &format!("Ctrl+V Release detected, paste_pend len={}", paste_pend.len()));
+                        }
+                        paste_confirmed = true;
+                    }
                     Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
+                        // Flush pending paste buffer before processing any non-bufferable key.
+                        // Bufferable keys are: plain Char, Space, Enter (if pend non-empty), Tab (if pend non-empty).
+                        #[cfg(windows)]
+                        {
+                            if !paste_pend.is_empty() {
+                                let is_bufferable = match key.code {
+                                    KeyCode::Char(' ') => true,
+                                    KeyCode::Char(_) => !key.modifiers.contains(KeyModifiers::CONTROL)
+                                                     && !key.modifiers.contains(KeyModifiers::ALT),
+                                    KeyCode::Enter | KeyCode::Tab => true, // buffered when pend non-empty
+                                    _ => false,
+                                };
+                                if !is_bufferable {
+                                    flush_paste_pend_as_text(&mut paste_pend, &mut paste_pend_start, &mut paste_stage2, &mut cmd_batch);
+                                }
+                            }
+                        }
                         // Dynamic prefix key check (default: Ctrl+B, configurable via .psmux.conf)
                         let is_prefix = (key.code, key.modifiers) == prefix_key
                             || prefix_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c))
@@ -1010,7 +1153,19 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                     }
                                 }
                                 KeyCode::Esc if chooser => { chooser = false; }
-                                KeyCode::Char(' ') => { cmd_batch.push("send-key space\n".into()); }
+                                KeyCode::Char(' ') => {
+                                    #[cfg(windows)]
+                                    {
+                                        paste_pend.push(' ');
+                                        if paste_pend_start.is_none() {
+                                            paste_pend_start = Some(Instant::now());
+                                        }
+                                    }
+                                    #[cfg(not(windows))]
+                                    {
+                                        cmd_batch.push("send-key space\n".into());
+                                    }
+                                }
                                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && key.modifiers.contains(KeyModifiers::ALT) => {
                                     cmd_batch.push(format!("send-key C-M-{}\n", c.to_ascii_lowercase()));
                                 }
@@ -1025,15 +1180,47 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                     cmd_batch.push(format!("send-key C-{}\n", ctrl_letter));
                                 }
                                 KeyCode::Char(c) => {
-                                    let escaped = match c {
-                                        '"' => "\\\"".to_string(),
-                                        '\\' => "\\\\".to_string(),
-                                        _ => c.to_string(),
-                                    };
-                                    cmd_batch.push(format!("send-text \"{}\"\n", escaped));
+                                    #[cfg(windows)]
+                                    {
+                                        paste_pend.push(c);
+                                        if paste_pend_start.is_none() {
+                                            paste_pend_start = Some(Instant::now());
+                                        }
+                                    }
+                                    #[cfg(not(windows))]
+                                    {
+                                        let escaped = match c {
+                                            '"' => "\\\"".to_string(),
+                                            '\\' => "\\\\".to_string(),
+                                            _ => c.to_string(),
+                                        };
+                                        cmd_batch.push(format!("send-text \"{}\"\n", escaped));
+                                    }
                                 }
-                                KeyCode::Enter => { cmd_batch.push("send-key enter\n".into()); }
-                                KeyCode::Tab => { cmd_batch.push("send-key tab\n".into()); }
+                                KeyCode::Enter => {
+                                    #[cfg(windows)]
+                                    {
+                                        if !paste_pend.is_empty() {
+                                            paste_pend.push('\n');
+                                        } else {
+                                            cmd_batch.push("send-key enter\n".into());
+                                        }
+                                    }
+                                    #[cfg(not(windows))]
+                                    { cmd_batch.push("send-key enter\n".into()); }
+                                }
+                                KeyCode::Tab => {
+                                    #[cfg(windows)]
+                                    {
+                                        if !paste_pend.is_empty() {
+                                            paste_pend.push('\t');
+                                        } else {
+                                            cmd_batch.push("send-key tab\n".into());
+                                        }
+                                    }
+                                    #[cfg(not(windows))]
+                                    { cmd_batch.push("send-key tab\n".into()); }
+                                }
                                 KeyCode::BackTab => { cmd_batch.push("send-key btab\n".into()); }
                                 KeyCode::Backspace => { cmd_batch.push("send-key backspace\n".into()); }
                                 KeyCode::Delete => { cmd_batch.push("send-key delete\n".into()); }
@@ -1241,6 +1428,37 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
             }
         }
         if quit { break; }
+
+        // ── Windows paste buffer flush (post-event) ────────────────────
+        // If Ctrl+V Release was seen in this iteration AND we have pending
+        // chars, immediately send as send-paste (don't wait for top-of-loop).
+        #[cfg(windows)]
+        {
+            if paste_confirmed && !paste_pend.is_empty() {
+                if input_log_enabled() {
+                    input_log("paste", &format!("paste CONFIRMED (post-event), sending {} chars as send-paste: {:?}",
+                        paste_pend.len(), &paste_pend[..paste_pend.len().min(200)]));
+                }
+                let encoded = base64_encode(&paste_pend);
+                cmd_batch.push(format!("send-paste {}\n", encoded));
+                paste_pend.clear();
+                paste_pend_start = None;
+                paste_stage2 = false;
+                paste_confirmed = false;
+            } else if paste_confirmed && paste_pend.is_empty() {
+                // Ctrl+V with no buffered chars — read clipboard as fallback
+                if let Some(text) = read_from_system_clipboard() {
+                    if !text.is_empty() {
+                        if input_log_enabled() {
+                            input_log("paste", &format!("paste CONFIRMED (no buffer), clipboard read len={}", text.len()));
+                        }
+                        let encoded = base64_encode(&text);
+                        cmd_batch.push(format!("send-paste {}\n", encoded));
+                    }
+                }
+                paste_confirmed = false;
+            }
+        }
 
         // ── STEP 2: Send commands immediately, refresh screen at capped rate ──
         // Send client-size if changed
@@ -2173,4 +2391,37 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
     let _ = writer.write_all(b"client-detach\n");
     let _ = writer.flush();
     Ok(())
+}
+
+/// Flush the paste-pending buffer as individual send-text / send-key commands.
+/// Called when a non-bufferable key (Backspace, Delete, Esc, BackTab) interrupts
+/// a potential paste burst, so we emit whatever we had as normal keystrokes.
+#[cfg(windows)]
+fn flush_paste_pend_as_text(
+    paste_pend: &mut String,
+    paste_pend_start: &mut Option<Instant>,
+    paste_stage2: &mut bool,
+    cmd_batch: &mut Vec<String>,
+) {
+    if paste_pend.is_empty() {
+        return;
+    }
+    for c in paste_pend.chars() {
+        match c {
+            '\n' => { cmd_batch.push("send-key enter\n".into()); }
+            '\t' => { cmd_batch.push("send-key tab\n".into()); }
+            ' '  => { cmd_batch.push("send-key space\n".into()); }
+            _ => {
+                let escaped = match c {
+                    '"' => "\\\"".to_string(),
+                    '\\' => "\\\\".to_string(),
+                    _ => c.to_string(),
+                };
+                cmd_batch.push(format!("send-text \"{}\"\n", escaped));
+            }
+        }
+    }
+    paste_pend.clear();
+    *paste_pend_start = None;
+    *paste_stage2 = false;
 }
