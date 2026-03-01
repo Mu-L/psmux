@@ -13,8 +13,7 @@ use crate::commands::{execute_action, execute_command_prompt, execute_command_st
 use crate::config::normalize_key_for_binding;
 use crate::copy_mode::{enter_copy_mode, exit_copy_mode, switch_with_copy_save, move_copy_cursor,
     scroll_copy_up, scroll_copy_down, paste_latest, yank_selection,
-    search_copy_mode, search_next, search_prev, scroll_to_top, scroll_to_bottom,
-    save_copy_state_to_pane, restore_copy_state_from_pane};
+    search_copy_mode, search_next, search_prev, scroll_to_top, scroll_to_bottom};
 use crate::layout::{cycle_top_layout, apply_layout};
 use crate::window_ops::{toggle_zoom, swap_pane, break_pane_to_window};
 
@@ -644,13 +643,11 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     }
                 }
                 KeyCode::Char('v') => {
-                    // Start char-wise selection (vi visual mode)
-                    if let Some((r,c)) = crate::copy_mode::get_copy_pos(app) {
-                        app.copy_anchor = Some((r,c));
-                        app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-                        app.copy_pos = Some((r,c));
-                        app.copy_selection_mode = crate::types::SelectionMode::Char;
-                    }
+                    // tmux parity #62: rectangle-toggle (not begin-selection)
+                    app.copy_selection_mode = match app.copy_selection_mode {
+                        crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
+                        _ => crate::types::SelectionMode::Rect,
+                    };
                 }
                 KeyCode::Char('V') => {
                     // Start line-wise selection (vi visual-line mode)
@@ -991,7 +988,10 @@ pub fn move_focus(app: &mut AppState, dir: FocusDir) {
     for (i, (path, _)) in rects.iter().enumerate() { if *path == win.active_path { active_idx = Some(i); break; } }
     let Some(ai) = active_idx else { return; };
     let (_, arect) = &rects[ai];
-    if let Some(ni) = find_best_pane_in_direction(&rects, ai, arect, dir) {
+    // Try direct neighbour first, then wrap to opposite edge (tmux parity #61)
+    let target = find_best_pane_in_direction(&rects, ai, arect, dir)
+        .or_else(|| find_wrap_target(&rects, ai, arect, dir));
+    if let Some(ni) = target {
         win.active_path = rects[ni].0.clone();
     }
 }
@@ -1078,6 +1078,82 @@ pub fn find_best_pane_in_direction(
 
         if !dominated {
             best = Some((i, primary_gap, perp_dist, perp_overlap));
+        }
+    }
+
+    best.map(|(idx, _, _, _)| idx)
+}
+
+/// Wrap-around pane navigation (tmux parity #61): when no pane exists in the
+/// requested direction, wrap to the pane on the opposite edge.
+/// For Right → leftmost pane, Left → rightmost, Down → topmost, Up → bottommost.
+/// Prefers panes with perpendicular overlap, then closest to center.
+pub fn find_wrap_target(
+    rects: &[(Vec<usize>, Rect)],
+    ai: usize,
+    arect: &Rect,
+    dir: FocusDir,
+) -> Option<usize> {
+    let acx = arect.x as i32 * 2 + arect.width as i32;
+    let acy = arect.y as i32 * 2 + arect.height as i32;
+
+    let ranges_overlap = |a_start: u16, a_len: u16, b_start: u16, b_len: u16| -> bool {
+        let a_end = a_start + a_len;
+        let b_end = b_start + b_len;
+        a_start < b_end && b_start < a_end
+    };
+
+    // (index, edge_score, perp_center_dist, has_perp_overlap)
+    // edge_score: lower = better (closer to the target edge after wrapping)
+    let mut best: Option<(usize, i32, i32, bool)> = None;
+
+    for (i, (_, r)) in rects.iter().enumerate() {
+        if i == ai { continue; }
+
+        let (edge_score, perp_overlap) = match dir {
+            // Going right, wrap to leftmost → prefer smallest x
+            FocusDir::Right => {
+                (r.x as i32, ranges_overlap(r.y, r.height, arect.y, arect.height))
+            }
+            // Going left, wrap to rightmost → prefer largest x+width (negate)
+            FocusDir::Left => {
+                (-((r.x + r.width) as i32), ranges_overlap(r.y, r.height, arect.y, arect.height))
+            }
+            // Going down, wrap to topmost → prefer smallest y
+            FocusDir::Down => {
+                (r.y as i32, ranges_overlap(r.x, r.width, arect.x, arect.width))
+            }
+            // Going up, wrap to bottommost → prefer largest y+height (negate)
+            FocusDir::Up => {
+                (-((r.y + r.height) as i32), ranges_overlap(r.x, r.width, arect.x, arect.width))
+            }
+        };
+
+        let rcx = r.x as i32 * 2 + r.width as i32;
+        let rcy = r.y as i32 * 2 + r.height as i32;
+        let perp_dist = match dir {
+            FocusDir::Left | FocusDir::Right => (rcy - acy).abs(),
+            FocusDir::Up | FocusDir::Down => (rcx - acx).abs(),
+        };
+
+        let dominated = if let Some((_, be, bd, bo)) = best {
+            if perp_overlap && !bo {
+                false
+            } else if !perp_overlap && bo {
+                true
+            } else if edge_score < be {
+                false
+            } else if edge_score > be {
+                true
+            } else {
+                perp_dist >= bd
+            }
+        } else {
+            false
+        };
+
+        if !dominated {
+            best = Some((i, edge_score, perp_dist, perp_overlap));
         }
     }
 
@@ -1216,8 +1292,8 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
         return Ok(());
     }
 
-    // If a left-click lands on a different pane while in copy mode, save
-    // copy state to the current pane and restore from the new pane (tmux parity #43).
+    // If a left-click lands on a different pane while in copy mode,
+    // exit copy mode entirely and switch to the clicked pane (tmux parity #62).
     if matches!(me.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left))
         && matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. })
     {
@@ -1234,16 +1310,14 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             }
         }
         if let Some(np) = clicked_new_path {
-            // Save copy state to current pane, reset its scrollback
-            save_copy_state_to_pane(app);
+            // Exit copy mode cleanly (resets scroll, clears selection)
+            exit_copy_mode(app);
             // Switch active pane path
             {
                 let win = &mut app.windows[app.active_idx];
                 app.last_pane_path = win.active_path.clone();
                 win.active_path = np;
             }
-            // Restore from new pane (likely Passthrough if it wasn't in copy mode)
-            restore_copy_state_from_pane(app);
         }
     }
 
@@ -1361,6 +1435,8 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
                     if a != p {
                         let _ = yank_selection(app);
+                        // tmux parity #62: auto-exit copy mode after mouse yank
+                        exit_copy_mode(app);
                     }
                 }
                 return Ok(());
@@ -1406,6 +1482,12 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                         app.copy_selection_mode = crate::types::SelectionMode::Char;
                     }
                     app.copy_pos = Some((row, col));
+                    // tmux parity #62: auto-scroll when dragging at pane edges
+                    if me.row <= area.y {
+                        scroll_copy_up(app, 1);
+                    } else if me.row >= area.y + area.height.saturating_sub(1) {
+                        scroll_copy_down(app, 1);
+                    }
                 }
                 return Ok(());
             }
@@ -1413,12 +1495,32 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             if let Some(d) = &app.drag {
                 adjust_split_sizes(&mut win.root, d, me.column, me.row);
             } else {
-                if let Some(area) = active_area {
-                    if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                        forward_mouse_to_pane_ex(active, area, me.column, me.row,
-                            crate::platform::mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED,
-                            crate::platform::mouse_inject::MOUSE_MOVED,
-                            32, true); // SGR button 32 = left-drag
+                // tmux parity #62: drag from normal mode enters copy mode
+                // and starts selection (when child doesn't want mouse).
+                let child_wants = {
+                    let win2 = &app.windows[app.active_idx];
+                    active_pane(&win2.root, &win2.active_path)
+                        .map_or(false, |p| crate::window_ops::pane_wants_mouse(p))
+                };
+                if child_wants {
+                    if let Some(area) = active_area {
+                        let win2 = &mut app.windows[app.active_idx];
+                        if let Some(active) = active_pane_mut(&mut win2.root, &win2.active_path) {
+                            forward_mouse_to_pane_ex(active, area, me.column, me.row,
+                                crate::platform::mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED,
+                                crate::platform::mouse_inject::MOUSE_MOVED,
+                                32, true); // SGR button 32 = left-drag
+                        }
+                    }
+                } else {
+                    // Shell prompt: enter copy mode, start selection
+                    enter_copy_mode(app);
+                    if let Some(area) = active_area {
+                        let (row, col) = copy_cell(area, me.column, me.row);
+                        app.copy_anchor = Some((row, col));
+                        app.copy_anchor_scroll_offset = app.copy_scroll_offset;
+                        app.copy_selection_mode = crate::types::SelectionMode::Char;
+                        app.copy_pos = Some((row, col));
                     }
                 }
             }

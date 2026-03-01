@@ -970,7 +970,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     }
                                 }
                                 KeyCode::Char('q') => { chooser = true; }
-                                KeyCode::Char('v') => { cmd_batch.push("copy-anchor\n".into()); }
+                                KeyCode::Char('v') => { cmd_batch.push("rectangle-toggle\n".into()); }
                                 KeyCode::Char('y') => { cmd_batch.push("copy-yank\n".into()); }
                                 // Session navigation (like tmux prefix+( and prefix+))
                                 KeyCode::Char('(') | KeyCode::Char(')') => {

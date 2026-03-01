@@ -357,6 +357,7 @@ match cmd {
         if args.len() >= 2 { if let (Ok(dx), Ok(dy)) = (args[0].parse::<i16>(), args[1].parse::<i16>()) { let _ = tx.send(CtrlReq::CopyMove(dx, dy)); } }
     }
     "copy-anchor" => { let _ = tx.send(CtrlReq::CopyAnchor); }
+    "rectangle-toggle" => { let _ = tx.send(CtrlReq::CopyRectToggle); }
     "copy-yank" => { let _ = tx.send(CtrlReq::CopyYank); }
     "client-size" => {
         if args.len() >= 2 { if let (Ok(w), Ok(h)) = (args[0].parse::<u16>(), args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::ClientSize(w, h)); } }

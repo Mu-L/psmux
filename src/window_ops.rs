@@ -635,7 +635,10 @@ pub fn swap_pane(app: &mut AppState, dir: FocusDir) {
     let Some(ai) = active_idx else { return; };
     let (_, arect) = &rects[ai];
     
-    if let Some(ni) = crate::input::find_best_pane_in_direction(&rects, ai, arect, dir) {
+    // Try direct neighbour first, then wrap to opposite edge (tmux parity #61)
+    let target = crate::input::find_best_pane_in_direction(&rects, ai, arect, dir)
+        .or_else(|| crate::input::find_wrap_target(&rects, ai, arect, dir));
+    if let Some(ni) = target {
         win.active_path = rects[ni].0.clone();
     }
 }

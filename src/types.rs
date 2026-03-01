@@ -581,6 +581,7 @@ pub enum CtrlReq {
     CopyMove(i16, i16),
     CopyAnchor,
     CopyYank,
+    CopyRectToggle,
     ClientSize(u16, u16),
     FocusPaneCmd(usize),
     FocusWindowCmd(usize),

@@ -558,6 +558,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::CopyMove(dx, dy) => { move_copy_cursor(&mut app, dx, dy); }
                 CtrlReq::CopyAnchor => { if let Some((r,c)) = current_prompt_pos(&mut app) { app.copy_anchor = Some((r,c)); app.copy_anchor_scroll_offset = app.copy_scroll_offset; app.copy_pos = Some((r,c)); } }
                 CtrlReq::CopyYank => { let _ = yank_selection(&mut app); exit_copy_mode(&mut app); }
+                CtrlReq::CopyRectToggle => {
+                    app.copy_selection_mode = match app.copy_selection_mode {
+                        crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
+                        _ => crate::types::SelectionMode::Rect,
+                    };
+                }
                 CtrlReq::ClientSize(w, h) => { 
                     app.last_window_area = Rect { x: 0, y: 0, width: w, height: h }; 
                     resize_all_panes(&mut app);
