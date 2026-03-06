@@ -98,6 +98,34 @@ fn spawn_warm_server(app: &AppState) {
     }
 }
 
+/// Compute the effective display size from all connected clients' terminal sizes.
+/// Returns None if no clients have reported sizes.
+fn compute_effective_client_size(app: &AppState) -> Option<(u16, u16)> {
+    if app.client_sizes.is_empty() { return None; }
+    match app.window_size.as_str() {
+        "smallest" => Some((
+            app.client_sizes.values().map(|s| s.0).min().unwrap(),
+            app.client_sizes.values().map(|s| s.1).min().unwrap(),
+        )),
+        "largest" => Some((
+            app.client_sizes.values().map(|s| s.0).max().unwrap(),
+            app.client_sizes.values().map(|s| s.1).max().unwrap(),
+        )),
+        _ => {
+            // "latest" — use latest client's size, fall back to smallest
+            if let Some(cid) = app.latest_client_id {
+                if let Some(&size) = app.client_sizes.get(&cid) {
+                    return Some(size);
+                }
+            }
+            Some((
+                app.client_sizes.values().map(|s| s.0).min().unwrap(),
+                app.client_sizes.values().map(|s| s.1).min().unwrap(),
+            ))
+        }
+    }
+}
+
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>) -> io::Result<()> {
     // DEBUG: absolute first thing in run_server
     let home_dbg = std::env::var("USERPROFILE").unwrap_or_default();
@@ -565,9 +593,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let line = format!("{}: {} windows (created {}){}\n", app.session_name, windows, created, attached);
                     let _ = resp.send(line);
                 }
-                CtrlReq::ClientAttach => { app.attached_clients = app.attached_clients.saturating_add(1); hook_event = Some("client-attached"); }
-                CtrlReq::ClientDetach => {
+                CtrlReq::ClientAttach(cid) => { app.attached_clients = app.attached_clients.saturating_add(1); app.latest_client_id = Some(cid); hook_event = Some("client-attached"); }
+                CtrlReq::ClientDetach(cid) => {
                     app.attached_clients = app.attached_clients.saturating_sub(1);
+                    app.client_sizes.remove(&cid);
+                    if app.latest_client_id == Some(cid) {
+                        app.latest_client_id = None;
+                    }
+                    // Recompute effective size from remaining clients
+                    if let Some((w, h)) = compute_effective_client_size(&app) {
+                        app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                        resize_all_panes(&mut app);
+                    }
                     hook_event = Some("client-detached");
                     if app.attached_clients == 0 && app.destroy_unattached {
                         // Only exit on last detach when no live panes remain;
@@ -758,14 +795,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         _ => crate::types::SelectionMode::Rect,
                     };
                 }
-                CtrlReq::ClientSize(w, h) => { 
-                    app.last_window_area = Rect { x: 0, y: 0, width: w, height: h }; 
+                CtrlReq::ClientSize(cid, w, h) => { 
+                    app.client_sizes.insert(cid, (w, h));
+                    app.latest_client_id = Some(cid);
+                    let (ew, eh) = compute_effective_client_size(&app).unwrap_or((w, h));
+                    app.last_window_area = Rect { x: 0, y: 0, width: ew, height: eh }; 
                     resize_all_panes(&mut app);
                     // Respawn warm pane at the new terminal dimensions so
                     // the next new-window gets a pane whose parser grid
                     // already matches the display — no resize reflow needed,
                     // prompt appears pixel-perfect on the first frame.
-                    let need_respawn = app.warm_pane.as_ref().map_or(true, |wp| wp.rows != h || wp.cols != w);
+                    let need_respawn = app.warm_pane.as_ref().map_or(true, |wp| wp.rows != eh || wp.cols != ew);
                     if need_respawn {
                         if let Some(mut old) = app.warm_pane.take() { old.child.kill().ok(); }
                         match spawn_warm_pane(&*pty_system, &mut app) {

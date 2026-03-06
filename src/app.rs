@@ -474,8 +474,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         }
                         if let Ok(text) = rrx.recv() { let _ = write!(stream, "{}", text); }
                     }
-                    "client-attach" => { let _ = tx.send(CtrlReq::ClientAttach); let _ = write!(stream, "ok\n"); }
-                    "client-detach" => { let _ = tx.send(CtrlReq::ClientDetach); let _ = write!(stream, "ok\n"); }
+                    "client-attach" => { let _ = tx.send(CtrlReq::ClientAttach(0)); let _ = write!(stream, "ok\n"); }
+                    "client-detach" => { let _ = tx.send(CtrlReq::ClientDetach(0)); let _ = write!(stream, "ok\n"); }
                     "session-info" => {
                         let (rtx, rrx) = mpsc::channel::<String>();
                         let _ = tx.send(CtrlReq::SessionInfo(rtx));
@@ -1090,8 +1090,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     let line = format!("{}: {} windows (created {}) [{}x{}] {}\n", app.session_name, windows, created, w, h, attached);
                     let _ = resp.send(line);
                 }
-                CtrlReq::ClientAttach => { app.attached_clients = app.attached_clients.saturating_add(1); }
-                CtrlReq::ClientDetach => { app.attached_clients = app.attached_clients.saturating_sub(1); }
+                CtrlReq::ClientAttach(_cid) => { app.attached_clients = app.attached_clients.saturating_add(1); }
+                CtrlReq::ClientDetach(_cid) => { app.attached_clients = app.attached_clients.saturating_sub(1); }
                 CtrlReq::DumpLayout(resp) => {
                     let json = dump_layout_json(&mut app)?;
                     let _ = resp.send(json);
@@ -1110,7 +1110,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         _ => crate::types::SelectionMode::Rect,
                     };
                 }
-                CtrlReq::ClientSize(w, h) => { 
+                CtrlReq::ClientSize(_cid, w, h) => { 
                     app.last_window_area = Rect { x: 0, y: 0, width: w, height: h }; 
                     resize_all_panes(&mut app);
                 }

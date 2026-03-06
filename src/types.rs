@@ -279,6 +279,10 @@ pub struct AppState {
     /// When set, port/key files are stored as `{socket_name}__{session_name}.port`.
     pub socket_name: Option<String>,
     pub attached_clients: usize,
+    /// Per-client terminal sizes for multi-client resize tracking.
+    pub client_sizes: std::collections::HashMap<u64, (u16, u16)>,
+    /// The most recently active client ID (for window_size="latest").
+    pub latest_client_id: Option<u64>,
     pub created_at: chrono::DateTime<Local>,
     pub next_win_id: usize,
     pub next_pane_id: usize,
@@ -472,6 +476,8 @@ impl AppState {
             },
             socket_name: None,
             attached_clients: 0,
+            client_sizes: std::collections::HashMap::new(),
+            latest_client_id: None,
             created_at: Local::now(),
             next_win_id: 1,
             next_pane_id: 1,
@@ -617,8 +623,8 @@ pub enum CtrlReq {
     FocusPaneByIndexTemp(usize),
     SessionInfo(mpsc::Sender<String>),
     CapturePaneRange(mpsc::Sender<String>, Option<i32>, Option<i32>),
-    ClientAttach,
-    ClientDetach,
+    ClientAttach(u64),
+    ClientDetach(u64),
     DumpLayout(mpsc::Sender<String>),
     DumpState(mpsc::Sender<String>, bool),  // (resp, allow_nc)
     SendText(String),
@@ -631,7 +637,7 @@ pub enum CtrlReq {
     CopyAnchor,
     CopyYank,
     CopyRectToggle,
-    ClientSize(u16, u16),
+    ClientSize(u64, u16, u16),
     FocusPaneCmd(usize),
     FocusWindowCmd(usize),
     MouseDown(u16,u16),

@@ -1,11 +1,14 @@
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::net::TcpStream;
 
 use crate::types::{CtrlReq, LayoutKind, WaitForOp};
 use crate::cli::parse_target;
 use crate::util::base64_decode;
+
+static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use crate::commands::parse_command_line;
 use super::helpers::TMUX_COMMANDS;
 
@@ -18,6 +21,7 @@ pub(crate) fn handle_connection(
     session_key: &str,
     aliases: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
 ) {
+let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
 // Enable TCP_NODELAY for low-latency responses
 let _ = stream.set_nodelay(true);
 // Clone stream for writing, original goes into BufReader for reading
@@ -139,7 +143,7 @@ loop {
             Ok(0) => {
                 // EOF - client disconnected
                 if attached_sent {
-                    let _ = tx.send(CtrlReq::ClientDetach);
+                    let _ = tx.send(CtrlReq::ClientDetach(client_id));
                 }
                 break;
             }
@@ -150,7 +154,7 @@ loop {
                     continue;
                 }
                 if attached_sent {
-                    let _ = tx.send(CtrlReq::ClientDetach);
+                    let _ = tx.send(CtrlReq::ClientDetach(client_id));
                 }
                 break; // Real error or non-persistent timeout
             }
@@ -381,7 +385,7 @@ match cmd {
     "rectangle-toggle" => { let _ = tx.send(CtrlReq::CopyRectToggle); }
     "copy-yank" => { let _ = tx.send(CtrlReq::CopyYank); }
     "client-size" => {
-        if args.len() >= 2 { if let (Ok(w), Ok(h)) = (args[0].parse::<u16>(), args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::ClientSize(w, h)); } }
+        if args.len() >= 2 { if let (Ok(w), Ok(h)) = (args[0].parse::<u16>(), args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::ClientSize(client_id, w, h)); } }
     }
     "focus-pane" => {
         if let Some(pid) = args.get(0).and_then(|s| s.parse::<usize>().ok()) { let _ = tx.send(CtrlReq::FocusPaneCmd(pid)); }
@@ -705,13 +709,13 @@ match cmd {
     }
     "client-attach" => {
         if !attached_sent {
-            let _ = tx.send(CtrlReq::ClientAttach);
+            let _ = tx.send(CtrlReq::ClientAttach(client_id));
             attached_sent = true;
         }
         if !persistent { let _ = write!(write_stream, "ok\n"); }
     }
     "client-detach" => {
-        let _ = tx.send(CtrlReq::ClientDetach);
+        let _ = tx.send(CtrlReq::ClientDetach(client_id));
         attached_sent = false;
         if !persistent { let _ = write!(write_stream, "ok\n"); }
     }
@@ -1022,12 +1026,12 @@ match cmd {
     }
     // tmux standard aliases
     "detach-client" | "detach" => {
-        let _ = tx.send(CtrlReq::ClientDetach);
+        let _ = tx.send(CtrlReq::ClientDetach(client_id));
         attached_sent = false;
     }
     "attach-session" | "attach" => {
         if !attached_sent {
-            let _ = tx.send(CtrlReq::ClientAttach);
+            let _ = tx.send(CtrlReq::ClientAttach(client_id));
             attached_sent = true;
         }
     }
@@ -1190,7 +1194,7 @@ match cmd {
         Ok(0) => {
             // EOF - client disconnected
             if attached_sent {
-                let _ = tx.send(CtrlReq::ClientDetach);
+                let _ = tx.send(CtrlReq::ClientDetach(client_id));
             }
             break;
         }
@@ -1200,7 +1204,7 @@ match cmd {
                 continue; // Persistent mode - keep waiting
             }
             if attached_sent {
-                let _ = tx.send(CtrlReq::ClientDetach);
+                let _ = tx.send(CtrlReq::ClientDetach(client_id));
             }
             break; // Non-persistent timeout or real error
         }
