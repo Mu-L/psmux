@@ -388,6 +388,9 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
 
 pub fn kill_active_pane(app: &mut AppState) -> io::Result<()> {
     let win = &mut app.windows[app.active_idx];
+    // Find the neighbor pane's ID BEFORE removing the active one.
+    let neighbor_id = crate::tree::next_leaf_path(&win.root, &win.active_path)
+        .and_then(|p| crate::tree::get_active_pane_id(&win.root, &p));
     // Explicitly kill the active pane's process tree FIRST.
     // remove_node() doesn't call kill_node() when the root is a single Leaf,
     // so we must do it here to ensure no orphaned processes.
@@ -395,6 +398,10 @@ pub fn kill_active_pane(app: &mut AppState) -> io::Result<()> {
         crate::platform::process_kill::kill_process_tree(&mut p.child);
     }
     kill_leaf(&mut win.root, &win.active_path);
+    // Focus the neighbor by ID (tree structure may have shifted).
+    win.active_path = neighbor_id
+        .and_then(|id| crate::tree::find_path_by_id(&win.root, id))
+        .unwrap_or_else(|| crate::tree::first_leaf_path(&win.root));
     Ok(())
 }
 

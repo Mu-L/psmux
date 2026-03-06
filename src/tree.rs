@@ -423,6 +423,49 @@ pub fn first_leaf_path(node: &Node) -> Vec<usize> {
     rec(node, &mut Vec::new()).unwrap_or_default()
 }
 
+/// Find the tree path to a pane by its ID.  Returns None if not found.
+pub fn find_path_by_id(node: &Node, id: usize) -> Option<Vec<usize>> {
+    fn rec(n: &Node, id: usize, path: &mut Vec<usize>) -> Option<Vec<usize>> {
+        match n {
+            Node::Leaf(p) => if p.id == id { Some(path.clone()) } else { None },
+            Node::Split { children, .. } => {
+                for (i, c) in children.iter().enumerate() {
+                    path.push(i);
+                    if let Some(p) = rec(c, id, path) { return Some(p); }
+                    path.pop();
+                }
+                None
+            }
+        }
+    }
+    rec(node, id, &mut Vec::new())
+}
+
+/// Collect all leaf pane paths in DFS order.
+fn collect_leaf_paths(node: &Node, path: &mut Vec<usize>, out: &mut Vec<(usize, Vec<usize>)>) {
+    match node {
+        Node::Leaf(p) => out.push((p.id, path.clone())),
+        Node::Split { children, .. } => {
+            for (i, c) in children.iter().enumerate() {
+                path.push(i);
+                collect_leaf_paths(c, path, out);
+                path.pop();
+            }
+        }
+    }
+}
+
+/// Find the next pane path after `active_path` in DFS order (wraps around).
+/// Returns the path of the next pane, or None if there's only one pane.
+pub fn next_leaf_path(node: &Node, active_path: &[usize]) -> Option<Vec<usize>> {
+    let mut leaves = Vec::new();
+    collect_leaf_paths(node, &mut Vec::new(), &mut leaves);
+    if leaves.len() <= 1 { return None; }
+    let pos = leaves.iter().position(|(_, p)| p.as_slice() == active_path).unwrap_or(0);
+    let next = if pos + 1 < leaves.len() { pos + 1 } else { pos.saturating_sub(1) };
+    Some(leaves[next].1.clone())
+}
+
 /// Get the pane ID of the active pane
 pub fn get_active_pane_id(node: &Node, path: &[usize]) -> Option<usize> {
     match node {
@@ -585,6 +628,7 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool)> {
             continue;
         }
         let leaves_before = count_panes(&app.windows[i].root);
+        let active_pane_id = get_active_pane_id(&app.windows[i].root, &app.windows[i].active_path);
         let root = std::mem::replace(&mut app.windows[i].root, Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
         match prune_exited(root, remain) {
             Some(new_root) => {
@@ -594,7 +638,10 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool)> {
                 }
                 app.windows[i].root = new_root;
                 if !path_exists(&app.windows[i].root, &app.windows[i].active_path) {
-                    app.windows[i].active_path = first_leaf_path(&app.windows[i].root);
+                    // The active pane's path shifted due to tree restructuring.
+                    // Try to find it by ID to preserve focus on the same pane.
+                    let found = active_pane_id.and_then(|id| find_path_by_id(&app.windows[i].root, id));
+                    app.windows[i].active_path = found.unwrap_or_else(|| first_leaf_path(&app.windows[i].root));
                 }
             }
             None => {
