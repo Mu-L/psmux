@@ -251,6 +251,98 @@ if ($output -match "TMUX_VAR=.+") {
 Start-Sleep -Seconds 1
 
 # ============================================================
+# Test 7: RUNTIME set-option changes default-shell (THE ACTUAL BUG)
+# This is the exact user scenario from issue #99: user types
+# set -g default-shell "C:/Program Files/Git/bin/bash.exe"
+# at the command prompt (prefix+:), then tries new-window.
+# ============================================================
+Write-Host ""
+Write-Test "7. Runtime set-option to change default-shell to bash"
+
+# Start session with NO custom default-shell (uses pwsh)
+Remove-Item $confPath -Force -ErrorAction SilentlyContinue
+
+$session = "issue99_test7"
+& $PSMUX new-session -d -s $session 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+
+# Verify first pane runs pwsh (default shell)
+$cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) | Out-String
+Write-Info "  Initial shell: $($cmd.Trim())"
+if ($cmd.Trim() -match "pwsh|powershell|cmd") {
+    Write-Pass "Initial pane runs default shell (pwsh/cmd)"
+} else {
+    Write-Info "  Initial pane command: $($cmd.Trim()) (expected pwsh/cmd but got something else)"
+}
+
+# NOW change default-shell at runtime via set-option (simulates prefix+: input)
+& $PSMUX set-option -g default-shell '"C:/Program Files/Git/bin/bash.exe"' -t $session 2>&1 | Out-Null
+Start-Sleep -Seconds 1
+
+# Verify the option was applied
+$shellVal = (& $PSMUX show-options -v default-shell -t $session 2>&1) | Out-String
+Write-Info "  default-shell after set-option: $($shellVal.Trim())"
+if ($shellVal.Trim() -match "bash") {
+    Write-Pass "default-shell option updated to bash"
+} else {
+    Write-Fail "default-shell option NOT updated (got: $($shellVal.Trim()))"
+}
+
+# Create a new window — this MUST use bash now
+& $PSMUX new-window -t $session 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+
+$cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) | Out-String
+Write-Info "  new-window after runtime set: $($cmd.Trim())"
+if ($cmd.Trim() -match "bash") {
+    Write-Pass "New window uses bash after runtime default-shell change"
+} else {
+    Write-Fail "New window NOT using bash after runtime change (got: $($cmd.Trim()))"
+}
+
+# Split window — also must use bash
+& $PSMUX split-window -t $session -v 2>&1 | Out-Null
+Start-Sleep -Seconds 2
+
+$cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) | Out-String
+Write-Info "  split-window after runtime set: $($cmd.Trim())"
+if ($cmd.Trim() -match "bash") {
+    Write-Pass "Split pane uses bash after runtime default-shell change"
+} else {
+    Write-Fail "Split pane NOT using bash after runtime change (got: $($cmd.Trim()))"
+}
+
+& $PSMUX kill-session -t $session 2>$null | Out-Null
+Start-Sleep -Seconds 1
+
+# ============================================================
+# Test 8: Runtime set with bare "bash" name
+# ============================================================
+Write-Host ""
+Write-Test "8. Runtime set-option with bare bash name"
+
+$session = "issue99_test8"
+& $PSMUX new-session -d -s $session 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+
+& $PSMUX set-option -g default-shell bash -t $session 2>&1 | Out-Null
+Start-Sleep -Seconds 1
+
+& $PSMUX new-window -t $session 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+
+$cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) | Out-String
+Write-Info "  new-window with bare 'bash': $($cmd.Trim())"
+if ($cmd.Trim() -match "bash") {
+    Write-Pass "Runtime set with bare 'bash' works"
+} else {
+    Write-Fail "Runtime set with bare 'bash' failed (got: $($cmd.Trim()))"
+}
+
+& $PSMUX kill-session -t $session 2>$null | Out-Null
+Start-Sleep -Seconds 1
+
+# ============================================================
 # CLEANUP — restore original config
 # ============================================================
 Write-Host ""

@@ -1817,7 +1817,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::SetOptionQuiet(option, value, quiet) => {
+                    let old_shell = app.default_shell.clone();
                     apply_set_option(&mut app, &option, &value, quiet);
+                    // If default-shell changed, kill the warm pane so the next
+                    // new-window spawns the correct shell (fixes #99).
+                    if app.default_shell != old_shell {
+                        if let Some(mut wp) = app.warm_pane.take() {
+                            wp.child.kill().ok();
+                        }
+                    }
                     // Update shared aliases if command-alias changed
                     if option == "command-alias" {
                         if let Ok(mut map) = shared_aliases_main.write() {

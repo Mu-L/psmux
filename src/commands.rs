@@ -380,7 +380,14 @@ pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
                 }
             }
         }
-        _ => {}
+        _ => {
+            // Apply config change locally (client-side state) and also
+            // forward to the server so it takes effect for pane spawning.
+            crate::config::parse_config_line(app, &cmdline);
+            if let Some(port) = app.control_port {
+                let _ = send_control_to_port(port, &format!("{}\n", cmdline));
+            }
+        }
     }
     Ok(())
 }
@@ -780,7 +787,15 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             }
         }
         _ => {
-            // Forward unknown commands to server (catch-all for tmux compat)
+            // Apply config locally (handles set, bind, source, etc.)
+            let old_shell = app.default_shell.clone();
+            crate::config::parse_config_line(app, cmd);
+            if app.default_shell != old_shell {
+                if let Some(mut wp) = app.warm_pane.take() {
+                    wp.child.kill().ok();
+                }
+            }
+            // Also forward unknown commands to server (catch-all for tmux compat)
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd));
             }
