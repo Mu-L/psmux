@@ -1890,6 +1890,40 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
     Ok(())
 }
 
+/// Chunked PTY write for paste delivery.  The PTY pipe can silently
+/// drop bytes when a large payload (140+ lines) is written in a single
+/// call because the OS pipe buffer fills up.  We split the text into
+/// ~2 KiB chunks with small yields between them so the consumer
+/// (shell / PSReadLine / nvim) has time to drain.  Bracket sequences
+/// are tiny and always written in one shot.
+fn write_paste_chunked(writer: &mut dyn std::io::Write, text: &[u8], bracket: bool) {
+    const CHUNK: usize = 512;
+    if bracket { let _ = writer.write_all(b"\x1b[200~"); }
+    let mut offset: usize = 0;
+    while offset < text.len() {
+        let remaining = (text.len() - offset).min(CHUNK);
+        let chunk = &text[offset..offset + remaining];
+        match writer.write(chunk) {
+            Ok(0) => {
+                // Zero bytes written — yield and retry once
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                match writer.write(chunk) {
+                    Ok(n) if n > 0 => { offset += n; }
+                    _ => break, // give up on persistent failure
+                }
+            }
+            Ok(n) => { offset += n; }
+            Err(_) => break,
+        }
+        // Yield between chunks to let the consumer drain the buffer
+        if offset < text.len() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    if bracket { let _ = writer.write_all(b"\x1b[201~"); }
+    let _ = writer.flush();
+}
+
 /// Send pasted text to the active pane, wrapping in bracketed-paste
 /// sequences (\x1b[200~ … \x1b[201~) when the child has enabled that mode.
 /// This is the correct handler for `Event::Paste` (crossterm) and
@@ -1951,30 +1985,23 @@ pub fn send_paste_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
     // still arrives reliably.
     #[cfg(windows)]
     {
-        fn write_paste_pty(p: &mut crate::types::Pane, text: &str, bracket: bool) {
-            if bracket { let _ = p.writer.write_all(b"\x1b[200~"); }
-            let _ = p.writer.write_all(text.as_bytes());
-            if bracket { let _ = p.writer.write_all(b"\x1b[201~"); }
-            let _ = p.writer.flush();
-        }
-
         if app.sync_input {
             let win = &mut app.windows[app.active_idx];
-            fn write_all_panes(node: &mut crate::types::Node, text: &str, bracket: bool) {
+            fn write_all_panes(node: &mut crate::types::Node, text: &[u8], bracket: bool) {
                 match node {
                     crate::types::Node::Leaf(p) => {
-                        write_paste_pty(p, text, bracket);
+                        write_paste_chunked(&mut p.writer, text, bracket);
                     }
                     crate::types::Node::Split { children, .. } => {
                         for c in children { write_all_panes(c, text, bracket); }
                     }
                 }
             }
-            write_all_panes(&mut win.root, text, use_bracket);
+            write_all_panes(&mut win.root, text.as_bytes(), use_bracket);
         } else {
             let win = &mut app.windows[app.active_idx];
             if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-                write_paste_pty(p, text, use_bracket);
+                write_paste_chunked(&mut p.writer, text.as_bytes(), use_bracket);
             }
         }
     }
@@ -1987,10 +2014,7 @@ pub fn send_paste_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
             fn write_paste_all_panes(node: &mut Node, text: &[u8], bracket: bool) {
                 match node {
                     Node::Leaf(p) => {
-                        if bracket { let _ = p.writer.write_all(b"\x1b[200~"); }
-                        let _ = p.writer.write_all(text);
-                        if bracket { let _ = p.writer.write_all(b"\x1b[201~"); }
-                        let _ = p.writer.flush();
+                        write_paste_chunked(&mut p.writer, text, bracket);
                     }
                     Node::Split { children, .. } => {
                         for c in children { write_paste_all_panes(c, text, bracket); }
@@ -2001,10 +2025,7 @@ pub fn send_paste_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
         } else {
             let win = &mut app.windows[app.active_idx];
             if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-                if use_bracket { let _ = p.writer.write_all(b"\x1b[200~"); }
-                let _ = p.writer.write_all(text.as_bytes());
-                if use_bracket { let _ = p.writer.write_all(b"\x1b[201~"); }
-                let _ = p.writer.flush();
+                write_paste_chunked(&mut p.writer, text.as_bytes(), use_bracket);
             }
         }
     }

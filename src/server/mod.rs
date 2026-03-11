@@ -1107,7 +1107,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     if let Some(c) = s.chars().nth(2) {
                                         let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
                                         send_text_to_active(&mut app, &String::from(ctrl as char))?;
-
+                                        // On Windows, writing 0x03 to the PTY pipe doesn't
+                                        // generate CTRL_C_EVENT when ENABLE_PROCESSED_INPUT
+                                        // is disabled (e.g. after a TUI app).  Fire the real
+                                        // signal via the platform helper so detached/headless
+                                        // send-keys C-c reliably interrupts processes.
+                                        #[cfg(windows)]
+                                        if ctrl == 0x03 {
+                                            if let Some(win) = app.windows.get_mut(app.active_idx) {
+                                                if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                                                    if p.child_pid.is_none() {
+                                                        p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
+                                                    }
+                                                    if let Some(pid) = p.child_pid {
+                                                        crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 s if s.starts_with("M-") => {
@@ -1619,6 +1636,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     app.session_name = name;
+                    // Re-load user config so the claimed session reflects the
+                    // current config file.  The warm server loaded config at
+                    // its own startup, but the user may have changed their
+                    // config since then (or the warm server was spawned by a
+                    // different session with a different PSMUX_CONFIG_FILE).
+                    load_config(&mut app);
+                    // Update shared aliases after config reload
+                    if let Ok(mut w) = shared_aliases_main.write() {
+                        *w = app.command_aliases.clone();
+                    }
+                    meta_dirty = true;
+                    state_dirty = true;
                     let _ = resp.send("OK\n".to_string());
                     // Spawn a replacement warm server for the NEXT new-session
                     spawn_warm_server(&app);

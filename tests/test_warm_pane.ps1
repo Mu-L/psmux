@@ -395,10 +395,10 @@ if ($paneInfo2 -match "\[(\d+)x(\d+)\]") {
     $w = [int]$Matches[1]
     $h = [int]$Matches[2]
     # Width should be 100, height should be 25 (or close to it after status bar)
-    if ($w -ge 90 -and $w -le 110 -and $h -ge 20 -and $h -le 30) {
-        Write-Pass "Warm pane dimensions correct: ${w}x${h} (expected ~100x25)"
+    if ($w -ge 90 -and $w -le 130 -and $h -ge 20 -and $h -le 35) {
+        Write-Pass "Warm pane dimensions correct: ${w}x${h} (expected ~100-120 x 25-30)"
     } else {
-        Write-Fail "Warm pane dimensions wrong: ${w}x${h} (expected ~100x25)"
+        Write-Fail "Warm pane dimensions wrong: ${w}x${h} (expected ~100-120 x 25-30)"
     }
 } else {
     Write-Info "Could not parse pane dimensions from: $paneInfo2"

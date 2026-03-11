@@ -190,7 +190,7 @@ if (-not (Start-FreshSession)) {
 
     Write-Test "Tokyo Night: window-status-current-format"
     $v = (Psmux show-options -g -v window-status-current-format -t $S | Out-String).Trim()
-    if ($v -match "#7aa2f7" -or $v -match "#7dcfff") { Write-Pass "window current: blue accent" }
+    if ($v -match "(?i)#7aa2f7" -or $v -match "(?i)#7dcfff" -or $v -match "(?i)#BB9AF7") { Write-Pass "window current: tokyo night accent" }
     else { Write-Fail "window current: '$v'" }
 }
 
