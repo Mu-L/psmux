@@ -370,18 +370,33 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut keys_viewer_scroll: usize = 0;
 
     // ── Server-side overlay state (updated each frame) ──
+    // Initial values are overwritten on the first render frame; defaults
+    // are kept here for safety in case the first state message is delayed.
+    #[allow(unused_assignments)]
     let mut srv_popup_active = false;
+    #[allow(unused_assignments)]
     let mut srv_popup_command = String::new();
+    #[allow(unused_assignments)]
     let mut srv_popup_width: u16 = 80;
+    #[allow(unused_assignments)]
     let mut srv_popup_height: u16 = 24;
+    #[allow(unused_assignments)]
     let mut srv_popup_lines: Vec<String> = Vec::new();
+    #[allow(unused_assignments)]
     let mut srv_confirm_active = false;
+    #[allow(unused_assignments)]
     let mut srv_confirm_prompt = String::new();
+    #[allow(unused_assignments)]
     let mut srv_menu_active = false;
+    #[allow(unused_assignments)]
     let mut srv_menu_title = String::new();
+    #[allow(unused_assignments)]
     let mut srv_menu_selected: usize = 0;
+    #[allow(unused_assignments)]
     let mut srv_menu_items: Vec<ServerMenuItem> = Vec::new();
+    #[allow(unused_assignments)]
     let mut srv_display_panes = false;
+    #[allow(unused_assignments)]
     let mut clock_active = false;
 
     #[derive(serde::Deserialize, Default)]

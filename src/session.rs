@@ -124,7 +124,7 @@ pub fn send_control(line: String) -> io::Result<()> {
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok()).ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("no server running on session '{}'", target)))?.clone();
     let session_key = read_session_key(&target).unwrap_or_default();
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100))?;
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
     let _ = write!(stream, "AUTH {}\n", session_key);

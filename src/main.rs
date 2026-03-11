@@ -69,8 +69,7 @@ fn run_main() -> io::Result<()> {
         .unwrap_or("");
     let needs_cleanup = matches!(subcmd,
         "" | "ls" | "list-sessions" | "attach" | "attach-session" | "a"
-        | "has-session" | "has" | "new-session" | "new" | "start-server"
-        | "kill-server");
+        | "has-session" | "has" | "start-server" | "kill-server");
     if needs_cleanup {
         cleanup_stale_port_files();
     }
@@ -570,7 +569,7 @@ fn run_main() -> io::Result<()> {
                                 let addr = format!("127.0.0.1:{}", port);
                                 if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
                                     &addr.parse().unwrap(),
-                                    Duration::from_millis(500),
+                                    Duration::from_millis(100),
                                 ) {
                                     let _ = stream.set_nodelay(true);
                                     let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
@@ -697,13 +696,13 @@ fn run_main() -> io::Result<()> {
                 } // end else (not PSMUX_REMOTE_ATTACH)
                 
                 // Wait for server to create port file (up to 5 seconds)
-                // Poll fast (10ms) — the server writes the port file early,
-                // before spawning ConPTY/pwsh, so it should appear quickly.
-                for _ in 0..500 {
+                // Poll at 1ms — the server writes the port file before spawning
+                // ConPTY/pwsh, so it appears within a few ms of process start.
+                for _ in 0..5000 {
                     if std::path::Path::new(&port_path).exists() {
                         break;
                     }
-                    std::thread::sleep(Duration::from_millis(10));
+                    std::thread::sleep(Duration::from_millis(1));
                 }
 
                 // Verify the server is actually alive — the TCP listener is
@@ -2339,10 +2338,10 @@ fn run_main() -> io::Result<()> {
                     let addr = format!("127.0.0.1:{}", port);
                     if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
                         &addr.parse().unwrap(),
-                        Duration::from_millis(500),
+                        Duration::from_millis(100),
                     ) {
                         let _ = stream.set_nodelay(true);
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
                         let _ = write!(stream, "AUTH {}\n", warm_key);
                         let _ = write!(stream, "claim-session {}\n", session_name);
                         let _ = stream.flush();
@@ -2379,12 +2378,12 @@ fn run_main() -> io::Result<()> {
                 let _child = cmd.spawn().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("failed to spawn server: {e}")))?;
             }
 
-            // Wait for server to start (fast polling — port file is written early)
-            for _ in 0..500 {
+            // Wait for server to start (1ms polling — port file is written early)
+            for _ in 0..5000 {
                 if std::path::Path::new(&port_path).exists() {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
 
