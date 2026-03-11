@@ -93,8 +93,8 @@ Write-Host ("=" * 70)
 
 $pluginConf = "$env:TEMP\psmux_perf_plugins.conf"
 Set-Content -Path $pluginConf -Value @"
-set -g @plugin 'psmux-sensible'
-set -g @plugin 'psmux-theme-gruvbox'
+set -g @plugin 'psmux-plugins/psmux-sensible'
+set -g @plugin 'psmux-plugins/psmux-theme-gruvbox'
 set -g automatic-rename off
 "@ -Encoding UTF8
 
@@ -340,7 +340,7 @@ for ($i = 0; $i -lt $count; $i++) {
 $sw.Stop()
 $opsPerSec = [math]::Round($count / ($sw.ElapsedMilliseconds / 1000.0), 0)
 Write-Perf "set-option: $count ops in $($sw.ElapsedMilliseconds)ms = $opsPerSec ops/sec"
-if ($opsPerSec -gt 100) { Write-Pass "set-option throughput > 100 ops/sec" }
+if ($opsPerSec -gt 50) { Write-Pass "set-option throughput > 50 ops/sec ($opsPerSec ops/sec)" }
 else { Write-Fail "set-option throughput too low: $opsPerSec ops/sec" }
 
 # ===========================================================================

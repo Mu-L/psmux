@@ -635,6 +635,8 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
                     let candidates = [
                         format!("{}\\.psmux\\plugins\\{}\\plugin.conf", home, value.replace('/', "\\")),
                         format!("{}\\.psmux\\plugins\\{}\\plugin.conf", home, plugin_name),
+                        // Common layout: plugins installed under psmux-plugins/ subdirectory
+                        format!("{}\\.psmux\\plugins\\psmux-plugins\\{}\\plugin.conf", home, plugin_name),
                     ];
                     for conf in &candidates {
                         if std::path::Path::new(conf).exists() {

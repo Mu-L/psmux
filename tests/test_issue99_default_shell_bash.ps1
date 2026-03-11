@@ -50,7 +50,10 @@ if (Test-Path $confPath) {
     $confBackup = Get-Content $confPath -Raw
 }
 & $PSMUX kill-server 2>$null | Out-Null
-Start-Sleep -Seconds 2
+Start-Sleep -Seconds 3
+# Ensure all psmux processes are truly gone before starting fresh
+Get-Process psmux -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
 Remove-Item "$env:USERPROFILE\.psmux\*.port" -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:USERPROFILE\.psmux\*.key" -Force -ErrorAction SilentlyContinue
 
@@ -69,7 +72,7 @@ Set-Content -Path $confPath -Value 'set -g default-shell "C:/Program Files/Git/b
 
 $session = "issue99_test1"
 & $PSMUX new-session -d -s $session 2>&1 | Out-Null
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 5
 
 $hasSession = & $PSMUX has-session -t $session 2>&1
 if ($LASTEXITCODE -eq 0) {
