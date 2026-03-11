@@ -920,8 +920,11 @@ fn run_main() -> io::Result<()> {
                 // Quote arguments that contain spaces to preserve them
                 for k in keys { 
                     if k.contains(' ') || k.contains('\t') {
-                        // Escape any existing quotes and wrap in quotes
-                        let escaped = k.replace('\\', "\\\\").replace('"', "\\\"");
+                        // Escape double-quotes and wrap in quotes.
+                        // Do NOT double backslashes — the server parser treats
+                        // backslash as literal inside double-quotes (only \"
+                        // is an escape), and Windows uses \ as path separator.
+                        let escaped = k.replace('"', "\\\"");
                         cmd.push_str(&format!(" \"{}\"", escaped));
                     } else {
                         cmd.push_str(&format!(" {}", k)); 
