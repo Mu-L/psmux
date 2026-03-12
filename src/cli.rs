@@ -445,7 +445,7 @@ pub fn print_commands() {
   show-window-options (showw)- Show window options
   source-file (source)      - Execute commands from a file
   split-window (splitw)     - Split a window into panes
-  start-server              - Start the psmux server
+  start-server (warmup)     - Pre-spawn a warm server for instant session creation
   suspend-client (suspendc) - Suspend the client
   swap-pane (swapp)         - Swap two panes
   swap-window (swapw)       - Swap two windows

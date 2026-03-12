@@ -20,6 +20,7 @@
         "pmux.exe",
         "tmux.exe"
     ],
+    "post_install": "Start-Process -FilePath \"$dir\\psmux.exe\" -ArgumentList 'warmup' -WindowStyle Hidden",
     "checkver": {
         "github": "https://github.com/marlocarlo/psmux"
     },

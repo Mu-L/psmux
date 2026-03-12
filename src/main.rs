@@ -69,7 +69,7 @@ fn run_main() -> io::Result<()> {
         .unwrap_or("");
     let needs_cleanup = matches!(subcmd,
         "" | "ls" | "list-sessions" | "attach" | "attach-session" | "a"
-        | "has-session" | "has" | "start-server" | "kill-server");
+        | "has-session" | "has" | "start-server" | "warmup" | "kill-server");
     if needs_cleanup {
         cleanup_stale_port_files();
     }
@@ -2202,9 +2202,62 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             // start-server - Start the server if not running
-            "start-server" | "start" => {
-                // In psmux, the server starts automatically with new-session.
-                // If we're here, a session exists. This is a compatibility no-op.
+            "start-server" | "start" | "warmup" => {
+                // Pre-spawn a warm __warm__ server so the next new-session is
+                // instant.  Also triggers Windows Defender's scan cache on the
+                // binary, eliminating the ~200-400ms first-run penalty.
+                let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                let warm_base = if let Some(ref l) = l_socket_name {
+                    format!("{}____warm__", l)
+                } else {
+                    "__warm__".to_string()
+                };
+                let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
+                // Check if warm server is already running
+                let already_running = if std::path::Path::new(&warm_port_path).exists() {
+                    if let Ok(port_str) = std::fs::read_to_string(&warm_port_path) {
+                        if let Ok(port) = port_str.trim().parse::<u16>() {
+                            std::net::TcpStream::connect_timeout(
+                                &format!("127.0.0.1:{}", port).parse().unwrap(),
+                                Duration::from_millis(100),
+                            ).is_ok()
+                        } else { false }
+                    } else { false }
+                } else { false };
+                if already_running {
+                    // Warm server already running — nothing to do
+                    return Ok(());
+                }
+                // Clean up stale port file if any
+                let _ = std::fs::remove_file(&warm_port_path);
+                // Spawn the warm server
+                let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
+                let mut server_args: Vec<String> = vec!["server".into(), "-s".into(), "__warm__".into()];
+                if let Some(ref l) = l_socket_name {
+                    server_args.push("-L".into());
+                    server_args.push(l.clone());
+                }
+                // Detect terminal size for the warm server
+                if let Ok((tw, th)) = crossterm::terminal::size() {
+                    let h = th.saturating_sub(1);
+                    if tw > 0 && h > 0 {
+                        server_args.push("-x".into());
+                        server_args.push(tw.to_string());
+                        server_args.push("-y".into());
+                        server_args.push(h.to_string());
+                    }
+                }
+                #[cfg(windows)]
+                crate::platform::spawn_server_hidden(&exe, &server_args)?;
+                #[cfg(not(windows))]
+                {
+                    let mut cmd = std::process::Command::new(&exe);
+                    for a in &server_args { cmd.arg(a); }
+                    cmd.stdin(std::process::Stdio::null());
+                    cmd.stdout(std::process::Stdio::null());
+                    cmd.stderr(std::process::Stdio::null());
+                    let _child = cmd.spawn().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("failed to spawn warm server: {e}")))?;
+                }
                 return Ok(());
             }
             // confirm-before - Ask for confirmation before running a command

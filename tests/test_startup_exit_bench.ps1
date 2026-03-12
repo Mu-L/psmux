@@ -156,6 +156,58 @@ if ($avgColdPrompt) { Add-Benchmark "Cold start AVG (prompt)" $avgColdPrompt }
 Report "Cold start completes" $true "avg port: $([math]::Round($avgColdPort,1))ms"
 
 ###############################################################################
+# BENCHMARK 1b: Warmup + New-Session (simulates post-install warmup)
+###############################################################################
+Write-Host "`n--- BENCHMARK 1b: Warmup-Assisted Start ---" -ForegroundColor Yellow
+Kill-All
+
+$warmupTimes = @()
+for ($i = 1; $i -le $iterations; $i++) {
+    Kill-All
+
+    # Run warmup first (absorbs Defender scan penalty + spawns warm server)
+    $swW = [System.Diagnostics.Stopwatch]::StartNew()
+    & $PSMUX warmup 2>$null
+    $swW.Stop()
+    Add-Benchmark "warmup command #$i" $swW.ElapsedMilliseconds
+
+    # Wait for warm server to be fully ready
+    $warmReady = Wait-PortFile -Session "__warm__" -TimeoutMs 10000
+    if ($warmReady) {
+        Start-Sleep -Seconds 2  # Let shell finish loading
+    }
+
+    # Now time new-session (should claim warm server)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    & $PSMUX new-session -d -s "bench_warmup_$i" -x 120 -y 30 2>$null
+    $portReady = Wait-PortFile -Session "bench_warmup_$i" -TimeoutMs 10000
+    $sw.Stop()
+    $portMs = $sw.ElapsedMilliseconds
+
+    if ($portReady) {
+        $promptMs = Wait-PanePrompt -Session "bench_warmup_$i" -TimeoutMs 30000
+        if ($promptMs -gt 0) { $promptMs += $portMs }
+    } else {
+        $promptMs = -1
+    }
+
+    $warmupTimes += [PSCustomObject]@{ Port = $portMs; Prompt = $promptMs }
+    Add-Benchmark "warmup-assisted start #$i (port file ready)" $portMs
+    if ($promptMs -gt 0) {
+        Add-Benchmark "warmup-assisted start #$i (prompt ready)" $promptMs
+    }
+
+    & $PSMUX kill-session -t "bench_warmup_$i" 2>$null
+    Start-Sleep -Milliseconds 500
+}
+
+$avgWarmupPort = ($warmupTimes | Measure-Object -Property Port -Average).Average
+$avgWarmupPrompt = ($warmupTimes | Where-Object { $_.Prompt -gt 0 } | Measure-Object -Property Prompt -Average).Average
+Add-Benchmark "Warmup-assisted start AVG (port file)" $avgWarmupPort
+if ($avgWarmupPrompt) { Add-Benchmark "Warmup-assisted start AVG (prompt)" $avgWarmupPrompt }
+Report "Warmup-assisted start completes" $true "avg port: $([math]::Round($avgWarmupPort,1))ms"
+
+###############################################################################
 # BENCHMARK 2: Warm Start Time (warm server pre-spawned)
 ###############################################################################
 Write-Host "`n--- BENCHMARK 2: Warm Start Time (warm server available) ---" -ForegroundColor Yellow
@@ -436,6 +488,10 @@ Write-Host ("   Cold start (avg):     {0,8:N1} ms" -f $avgColdPort)
 if ($avgColdPrompt) {
     Write-Host ("   Cold prompt (avg):    {0,8:N1} ms" -f $avgColdPrompt)
 }
+Write-Host ("   Warmup-assisted (avg):{0,8:N1} ms" -f $avgWarmupPort)
+if ($avgWarmupPrompt) {
+    Write-Host ("   Warmup prompt (avg):  {0,8:N1} ms" -f $avgWarmupPrompt)
+}
 Write-Host ("   Warm start (avg):     {0,8:N1} ms" -f $avgWarmPort)
 if ($avgWarmPrompt) {
     Write-Host ("   Warm prompt (avg):    {0,8:N1} ms" -f $avgWarmPrompt)
@@ -443,6 +499,10 @@ if ($avgWarmPrompt) {
 if ($avgColdPort -gt 0 -and $avgWarmPort -gt 0) {
     $speedup = [math]::Round($avgColdPort / [math]::Max($avgWarmPort, 1), 1)
     Write-Host ("   Warm speedup:         {0}x faster" -f $speedup)
+}
+if ($avgColdPort -gt 0 -and $avgWarmupPort -gt 0) {
+    $warmupSpeedup = [math]::Round($avgColdPort / [math]::Max($avgWarmupPort, 1), 1)
+    Write-Host ("   Warmup speedup:       {0}x faster" -f $warmupSpeedup)
 }
 
 Write-Host ""
