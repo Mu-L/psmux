@@ -169,9 +169,37 @@ fn run_main() -> io::Result<()> {
             env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
         }
     } else if env::var("PSMUX_TARGET_SESSION").is_err() {
-        // No -t flag: resolve session from TMUX env var
+        // No -t flag: resolve session from TMUX env var first,
+        // then auto-discover the most recent session (tmux parity).
         if let Some(port_file_base) = resolve_session_from_tmux_env() {
             env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
+        } else {
+            // Auto-discover: scan .psmux/*.port files, pick the most
+            // recently modified one. This matches tmux behavior where
+            // commands without -t target the most recent session.
+            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+            let psmux_dir = format!("{}\\.psmux", home);
+            if let Ok(entries) = std::fs::read_dir(&psmux_dir) {
+                let mut best: Option<(String, std::time::SystemTime)> = None;
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "port").unwrap_or(false) {
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            // Skip internal warm server sessions
+                            if stem == "__warm__" { continue; }
+                            let mtime = entry.metadata().ok().and_then(|m| m.modified().ok());
+                            if let Some(mt) = mtime {
+                                if best.as_ref().map_or(true, |(_, bt)| mt > *bt) {
+                                    best = Some((stem.to_string(), mt));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((name, _)) = best {
+                    env::set_var("PSMUX_TARGET_SESSION", &name);
+                }
+            }
         }
     }
     
