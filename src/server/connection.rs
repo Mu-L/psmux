@@ -1042,7 +1042,8 @@ match cmd {
         }
     }
     "display-popup" | "popup" => {
-        let close_on_exit = args.iter().any(|a| *a == "-E");
+        // Default close-on-exit = true (tmux parity: popup closes when command finishes)
+        let close_on_exit = !args.iter().any(|a| *a == "-K");
         let mut width: u16 = 80;
         let mut height: u16 = 24;
         let mut skip_indices = std::collections::HashSet::new();
@@ -1051,7 +1052,7 @@ match cmd {
             match args[i] {
                 "-w" => { if let Some(v) = args.get(i+1) { width = v.trim_end_matches('%').parse().unwrap_or(80); skip_indices.insert(i); skip_indices.insert(i+1); i += 1; } }
                 "-h" => { if let Some(v) = args.get(i+1) { height = v.trim_end_matches('%').parse().unwrap_or(24); skip_indices.insert(i); skip_indices.insert(i+1); i += 1; } }
-                "-E" => { skip_indices.insert(i); }
+                "-E" | "-K" => { skip_indices.insert(i); }
                 _ => {}
             }
             i += 1;

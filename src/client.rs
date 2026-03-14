@@ -946,6 +946,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     cmd_batch.push(format!("menu-select {}\n", srv_menu_selected));
                                 }
                                 KeyCode::Esc | KeyCode::Char('q') => { cmd_batch.push("overlay-close\n".into()); }
+                                KeyCode::Char(c) => {
+                                    // Shortcut key: find menu item with matching key
+                                    if let Some(idx) = srv_menu_items.iter().position(|item| {
+                                        item.key.as_ref().map(|k| k.len() == 1 && k.chars().next() == Some(c)).unwrap_or(false)
+                                    }) {
+                                        cmd_batch.push(format!("menu-select {}\n", idx));
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -2811,7 +2819,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     width: w,
                     height: h,
                 };
-                let title = if srv_popup_command.is_empty() { "Popup" } else { &srv_popup_command };
+                let title = if srv_popup_command.is_empty() { "Popup".to_string() } else { let max_title = (w as usize).saturating_sub(4); if srv_popup_command.len() > max_title { format!("{}...", &srv_popup_command[..max_title.saturating_sub(3)]) } else { srv_popup_command.clone() } };
                 let block = Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Yellow))

@@ -277,6 +277,7 @@ pub struct AppState {
     pub current_key_table: Option<String>,
     pub control_rx: Option<mpsc::Receiver<CtrlReq>>,
     pub control_port: Option<u16>,
+    pub session_key: String,
     pub session_name: String,
     /// Numeric session ID (tmux-compatible: $0, $1, $2...).
     pub session_id: usize,
@@ -499,6 +500,7 @@ impl AppState {
             current_key_table: None,
             control_rx: None,
             control_port: None,
+            session_key: String::new(),
             session_name,
             session_id: {
                 static NEXT_SESSION_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
