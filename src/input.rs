@@ -1367,7 +1367,20 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Enter => {
             let m = modifier_param(key.modifiers);
             if m > 1 {
-                // xterm modified-Enter: CSI 13 ; mod ~
+                // On Windows, CSI 13;mod~ is non-standard and dropped by ConPTY.
+                // Send ESC+CR (\x1b\r) for Shift/Alt+Enter — the same bytes VS Code's
+                // xterm.js sends.  libuv preserves ESC as Alt prefix, so Node.js apps
+                // (Claude Code) receive \x1b\r and interpret it as Shift+Enter.
+                // Ctrl+Enter and Ctrl+Shift+Enter still use CSI encoding (those are
+                // less common and consumed by other layers).
+                #[cfg(windows)]
+                {
+                    let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                    if !has_ctrl {
+                        return Some(b"\x1b\r".to_vec());
+                    }
+                }
+                // Non-Windows or Ctrl combos: xterm modified-Enter: CSI 13 ; mod ~
                 format!("\x1b[13;{}~", m).into_bytes()
             } else {
                 b"\r".to_vec()
@@ -1992,6 +2005,28 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
 /// are tiny and always written in one shot.
 fn write_paste_chunked(writer: &mut dyn std::io::Write, text: &[u8], bracket: bool) {
     const CHUNK: usize = 512;
+    // Normalize line endings to CR for ConPTY.  Clipboard text may arrive
+    // with LF (\n) or CRLF (\r\n), but ConPTY's input parser expects CR
+    // (\r) for Enter.  Bare LF is misinterpreted by PSReadLine, causing
+    // multi-line pastes to appear in reverse order.
+    let text = {
+        let mut out = Vec::with_capacity(text.len());
+        let mut i = 0;
+        while i < text.len() {
+            if text[i] == b'\r' && i + 1 < text.len() && text[i + 1] == b'\n' {
+                out.push(b'\r');
+                i += 2; // CRLF → CR
+            } else if text[i] == b'\n' {
+                out.push(b'\r');
+                i += 1; // LF → CR
+            } else {
+                out.push(text[i]);
+                i += 1;
+            }
+        }
+        out
+    };
+    let text = &text[..];
     if bracket { let _ = writer.write_all(b"\x1b[200~"); }
     let mut offset: usize = 0;
     while offset < text.len() {
@@ -2609,6 +2644,31 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     let _ = p.writer.write_all(&[0x1b, ctrl_char]);
                 }
             }
+            // Modified Enter: on Windows, send ESC+CR (\x1b\r) for Shift/Alt+Enter.
+            // CSI 13;mod~ is non-standard and dropped by ConPTY.  ESC+CR matches
+            // what VS Code xterm.js sends; the round-trip works because libuv
+            // preserves ESC as Alt prefix, so Node.js apps (Claude Code) receive
+            // \x1b\r and interpret it as Shift+Enter.
+            #[cfg(windows)]
+            s if {
+                let u = s.to_uppercase();
+                let r = u.trim_start_matches("C-").trim_start_matches("M-").trim_start_matches("S-");
+                r == "ENTER" || r == "RETURN" || r == "CR"
+            } => {
+                let upper = s.to_uppercase();
+                let has_shift = upper.contains("S-");
+                let has_ctrl = upper.contains("C-");
+                let has_alt = upper.contains("M-");
+                if (has_shift || has_alt) && !has_ctrl {
+                    // Shift+Enter or Alt+Enter: ESC + CR, same as xterm.js
+                    let _ = p.writer.write_all(b"\x1b\r");
+                } else {
+                    // Ctrl+Enter and other combos: fall through to CSI encoding
+                    if let Some(seq) = parse_modified_special_key(s) {
+                        let _ = p.writer.write_all(seq.as_bytes());
+                    }
+                }
+            }
             // Modifier + special key combos: C-Left, S-Right, C-S-Up, C-M-Home, etc.
             s if parse_modified_special_key(s).is_some() => {
                 let seq = parse_modified_special_key(s).unwrap();
@@ -2784,9 +2844,12 @@ mod tests {
     }
 
     #[test]
-    fn shift_enter_produces_csi_13_2() {
+    fn shift_enter_produces_correct_encoding() {
         let ev = key(KeyCode::Enter, KeyModifiers::SHIFT);
         let bytes = encode_key_event(&ev).unwrap();
+        #[cfg(windows)]
+        assert_eq!(bytes, b"\x1b\r", "Shift+Enter on Windows must produce ESC+CR for ConPTY");
+        #[cfg(not(windows))]
         assert_eq!(bytes, b"\x1b[13;2~", "Shift+Enter must produce CSI 13;2~");
     }
 
@@ -2805,9 +2868,12 @@ mod tests {
     }
 
     #[test]
-    fn alt_enter_produces_csi_13_3() {
+    fn alt_enter_produces_correct_encoding() {
         let ev = key(KeyCode::Enter, KeyModifiers::ALT);
         let bytes = encode_key_event(&ev).unwrap();
+        #[cfg(windows)]
+        assert_eq!(bytes, b"\x1b\r", "Alt+Enter on Windows must produce ESC+CR for ConPTY");
+        #[cfg(not(windows))]
         assert_eq!(bytes, b"\x1b[13;3~", "Alt+Enter must produce CSI 13;3~");
     }
 
@@ -2847,5 +2913,81 @@ mod tests {
     #[test]
     fn parse_ctrl_left_unchanged() {
         assert_eq!(parse_modified_special_key("C-Left"), Some("\x1b[1;5D".to_string()));
+    }
+
+    // ── PR #131: paste line-ending normalization tests ──
+
+    /// Helper: capture what write_paste_chunked writes to a Vec<u8>.
+    fn capture_paste(text: &[u8], bracket: bool) -> Vec<u8> {
+        let mut buf: Vec<u8> = Vec::new();
+        super::write_paste_chunked(&mut buf, text, bracket);
+        buf
+    }
+
+    #[test]
+    fn paste_lf_normalized_to_cr() {
+        // Multi-line paste with LF line endings should produce CR
+        let input = b"line1\nline2\nline3";
+        let output = capture_paste(input, false);
+        assert_eq!(output, b"line1\rline2\rline3",
+            "bare LF must be normalized to CR for ConPTY; got {:?}", String::from_utf8_lossy(&output));
+    }
+
+    #[test]
+    fn paste_crlf_normalized_to_cr() {
+        // Multi-line paste with CRLF line endings should produce CR (not CRLF)
+        let input = b"line1\r\nline2\r\nline3";
+        let output = capture_paste(input, false);
+        assert_eq!(output, b"line1\rline2\rline3",
+            "CRLF must be normalized to CR for ConPTY; got {:?}", String::from_utf8_lossy(&output));
+    }
+
+    #[test]
+    fn paste_mixed_endings_normalized() {
+        // Mixed: some lines LF, some CRLF
+        let input = b"a\nb\r\nc";
+        let output = capture_paste(input, false);
+        assert_eq!(output, b"a\rb\rc",
+            "mixed line endings must all become CR; got {:?}", String::from_utf8_lossy(&output));
+    }
+
+    #[test]
+    fn paste_no_line_endings_unchanged() {
+        // Text without newlines should pass through unchanged
+        let input = b"hello world";
+        let output = capture_paste(input, false);
+        assert_eq!(output, b"hello world");
+    }
+
+    #[test]
+    fn paste_bracket_markers_with_normalization() {
+        // Bracketed paste should still wrap with markers AND normalize
+        let input = b"a\nb";
+        let output = capture_paste(input, true);
+        assert_eq!(output, b"\x1b[200~a\rb\x1b[201~",
+            "bracketed paste must normalize line endings; got {:?}", String::from_utf8_lossy(&output));
+    }
+
+    // ── PR #132: Shift+Enter ConPTY encoding tests ──
+
+    #[cfg(windows)]
+    #[test]
+    fn shift_enter_encoding_for_conpty() {
+        // On Windows, Shift+Enter should produce \x1b\r (ESC+CR) instead of
+        // \x1b[13;2~ which ConPTY drops (code 13 is non-standard).
+        let ev = key(KeyCode::Enter, KeyModifiers::SHIFT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"\x1b\r",
+            "Shift+Enter on Windows must produce ESC+CR for ConPTY compatibility; got {:?}", bytes);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn alt_enter_encoding_for_conpty() {
+        // Alt+Enter should also produce \x1b\r on Windows
+        let ev = key(KeyCode::Enter, KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"\x1b\r",
+            "Alt+Enter on Windows must produce ESC+CR for ConPTY; got {:?}", bytes);
     }
 }
