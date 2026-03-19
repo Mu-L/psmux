@@ -53,7 +53,7 @@ path = "src/main.rs"
 
 [dependencies]
 ratatui = "0.30"
-crossterm = "0.28"
+crossterm = "0.29"
 portable-pty = { version = "0.9.1", path = "crates/portable-pty-psmux", package = "portable-pty-psmux" }
 which = "8"
 chrono = "0.4"
