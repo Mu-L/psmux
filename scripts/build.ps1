@@ -93,6 +93,30 @@ try {
         }
     }
 
+    # ── Portable test zip (temp dir) ─────────────────────────────────
+    # Creates a zip of the release binaries in TEMP for test_install_speed.ps1.
+    # Nothing is written inside the repo.
+    $srcDir = "$repoDir\target\release"
+    if (Test-Path "$srcDir\psmux.exe") {
+        $zipDir = Join-Path $env:TEMP "psmux-test-artifacts"
+        New-Item -ItemType Directory -Path $zipDir -Force | Out-Null
+        $zipPath = Join-Path $zipDir "psmux-local-test.zip"
+        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+
+        $stagingDir = Join-Path $env:TEMP "psmux-zip-staging"
+        if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
+        New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+        foreach ($bin in @("psmux.exe", "pmux.exe", "tmux.exe")) {
+            $binSrc = Join-Path $srcDir $bin
+            if (Test-Path $binSrc) { Copy-Item $binSrc $stagingDir }
+        }
+        Compress-Archive -Path "$stagingDir\*" -DestinationPath $zipPath -Force
+        Remove-Item $stagingDir -Recurse -Force
+
+        $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
+        Write-Host "[build] Test zip created: $zipPath ($sizeMB MB)" -ForegroundColor Green
+    }
+
     Write-Host "[build] Done!" -ForegroundColor Green
 } finally {
     Pop-Location
