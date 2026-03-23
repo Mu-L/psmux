@@ -370,10 +370,12 @@ fn show_hooks_lists_all_hooks_with_commands() {
     execute_command_string(&mut app, "show-hooks").unwrap();
     let (_, out) = extract_popup(&app);
     let lines: Vec<&str> = out.lines().collect();
-    // 2 commands for after-new-window + 1 for pane-died = 3 lines
+    // 2 indexed commands for after-new-window + 1 for pane-died = 3 lines
     assert_eq!(lines.len(), 3, "should have 3 hook entries, got:\n{}", out);
-    assert!(out.contains("after-new-window -> run-shell"), "should show hook name -> command");
-    assert!(out.contains("after-new-window -> display-message"), "should show second command for same hook");
+    // Multi-command hooks use indexed format: name[0] -> cmd, name[1] -> cmd
+    assert!(out.contains("after-new-window[0] -> run-shell"), "should show indexed hook[0] -> command");
+    assert!(out.contains("after-new-window[1] -> display-message"), "should show indexed hook[1] -> command");
+    // Single-command hook uses plain format: name -> cmd
     assert!(out.contains("pane-died -> kill-pane"), "should show pane-died hook");
 }
 

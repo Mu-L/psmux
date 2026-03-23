@@ -2613,11 +2613,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // duplicate hooks on config reload (issue #133).
                     app.hooks.insert(hook, vec![cmd]);
                 }
+                CtrlReq::AppendHook(hook, cmd) => {
+                    // -a/-ga: append to existing hook list so multiple
+                    // plugins can register separate handlers (tmux semantics).
+                    app.hooks.entry(hook).or_insert_with(Vec::new).push(cmd);
+                }
                 CtrlReq::ShowHooks(resp) => {
                     let mut output = String::new();
                     for (name, commands) in &app.hooks {
-                        for cmd in commands {
-                            output.push_str(&format!("{} -> {}\n", name, cmd));
+                        if commands.len() == 1 {
+                            output.push_str(&format!("{} -> {}\n", name, commands[0]));
+                        } else {
+                            for (i, cmd) in commands.iter().enumerate() {
+                                output.push_str(&format!("{}[{}] -> {}\n", name, i, cmd));
+                            }
                         }
                     }
                     if output.is_empty() {

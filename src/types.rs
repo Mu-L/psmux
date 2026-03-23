@@ -796,6 +796,7 @@ pub enum CtrlReq {
     UnsetEnvironment(String),
     ShowEnvironment(mpsc::Sender<String>),
     SetHook(String, String),
+    AppendHook(String, String),
     ShowHooks(mpsc::Sender<String>),
     RemoveHook(String),
     KillServer,

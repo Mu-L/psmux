@@ -66,8 +66,12 @@ fn generate_list_clients(app: &AppState) -> String {
 fn generate_show_hooks(app: &AppState) -> String {
     let mut output = String::new();
     for (name, commands) in &app.hooks {
-        for cmd in commands {
-            output.push_str(&format!("{} -> {}\n", name, cmd));
+        if commands.len() == 1 {
+            output.push_str(&format!("{} -> {}\n", name, commands[0]));
+        } else {
+            for (i, cmd) in commands.iter().enumerate() {
+                output.push_str(&format!("{}[{}] -> {}\n", name, i, cmd));
+            }
         }
     }
     if output.is_empty() {

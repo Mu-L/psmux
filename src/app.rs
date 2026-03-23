@@ -1146,8 +1146,12 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 CtrlReq::ShowHooks(resp) => {
                     let mut output = String::new();
                     for (name, commands) in &app.hooks {
-                        for cmd in commands {
-                            output.push_str(&format!("{} -> {}\n", name, cmd));
+                        if commands.len() == 1 {
+                            output.push_str(&format!("{} -> {}\n", name, commands[0]));
+                        } else {
+                            for (i, cmd) in commands.iter().enumerate() {
+                                output.push_str(&format!("{}[{}] -> {}\n", name, i, cmd));
+                            }
                         }
                     }
                     if output.is_empty() {

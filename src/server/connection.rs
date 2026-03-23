@@ -1089,6 +1089,7 @@ match cmd {
     }
     "set-hook" => {
         let has_unset = args.iter().any(|a| *a == "-u" || *a == "-gu" || *a == "-ug");
+        let has_append = args.iter().any(|a| *a == "-a" || *a == "-ga" || *a == "-ag");
         let non_flag: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
         if has_unset {
             // set-hook -gu <hook-name>  →  remove the hook
@@ -1096,7 +1097,11 @@ match cmd {
                 let _ = tx.send(CtrlReq::RemoveHook(name.to_string()));
             }
         } else if non_flag.len() >= 2 {
-            let _ = tx.send(CtrlReq::SetHook(non_flag[0].to_string(), non_flag[1..].join(" ")));
+            if has_append {
+                let _ = tx.send(CtrlReq::AppendHook(non_flag[0].to_string(), non_flag[1..].join(" ")));
+            } else {
+                let _ = tx.send(CtrlReq::SetHook(non_flag[0].to_string(), non_flag[1..].join(" ")));
+            }
         }
     }
     "show-hooks" => {

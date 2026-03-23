@@ -287,12 +287,14 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
         parse_if_shell(app, l);
     }
     else if l.starts_with("set-hook ") {
-        // Parse set-hook: set-hook [-g] [-u] hook-name [command]
+        // Parse set-hook: set-hook [-g] [-a] [-u] hook-name [command]
         let parts: Vec<&str> = l.split_whitespace().collect();
         let mut i = 1;
         let mut unset = false;
+        let mut append = false;
         while i < parts.len() && parts[i].starts_with('-') {
             if parts[i].contains('u') { unset = true; }
+            if parts[i].contains('a') { append = true; }
             i += 1;
         }
         if unset {
@@ -319,9 +321,14 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
                     cmd
                 }
             };
-            // Replace (not append) to match tmux – prevents duplicates on
-            // config reload (issue #133).
-            app.hooks.insert(hook, vec![cmd]);
+            if append {
+                // -a/-ga: append to existing hook list (tmux multi-handler)
+                app.hooks.entry(hook).or_insert_with(Vec::new).push(cmd);
+            } else {
+                // Replace (not append) to match tmux – prevents duplicates on
+                // config reload (issue #133).
+                app.hooks.insert(hook, vec![cmd]);
+            }
         }
     }
     else if l.starts_with("set-environment ") || l.starts_with("setenv ") {
