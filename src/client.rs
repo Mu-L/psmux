@@ -302,6 +302,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut pane_title_buf = String::new();
     let mut command_input = false;
     let mut command_buf = String::new();
+    let mut command_cursor: usize = 0;
+    let mut command_history: Vec<String> = Vec::new();
+    let mut command_history_idx: usize = 0;
 
     let mut tree_chooser = false;
     let mut tree_entries: Vec<(bool, usize, usize, String, String)> = Vec::new();  // (is_win, id, sub_id, label, session_name)
@@ -1041,6 +1044,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         }
                         else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || tree_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
                             command_input = false;
+                            command_cursor = 0;
                             renaming = false;
                             pane_renaming = false;
                             tree_chooser = false;
@@ -1153,7 +1157,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                                 KeyCode::Char('t') => { cmd_batch.push("clock-mode\n".into()); }
                                 KeyCode::Char('=') => { cmd_batch.push("choose-buffer\n".into()); }
-                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); }
+                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len(); }
                                 KeyCode::Char('w') => {
                                     tree_chooser = true;
                                     tree_entries.clear();
@@ -1476,10 +1480,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                                 KeyCode::Char(c) if renaming && !key.modifiers.contains(KeyModifiers::CONTROL) => { rename_buf.push(c); }
                                 KeyCode::Char(c) if pane_renaming && !key.modifiers.contains(KeyModifiers::CONTROL) => { pane_title_buf.push(c); }
-                                KeyCode::Char(c) if command_input && !key.modifiers.contains(KeyModifiers::CONTROL) => { command_buf.push(c); }
+                                KeyCode::Char(c) if command_input && !key.modifiers.contains(KeyModifiers::CONTROL) => { command_buf.insert(command_cursor, c); command_cursor += 1; }
                                 KeyCode::Backspace if renaming => { let _ = rename_buf.pop(); }
                                 KeyCode::Backspace if pane_renaming => { let _ = pane_title_buf.pop(); }
-                                KeyCode::Backspace if command_input => { let _ = command_buf.pop(); }
+                                KeyCode::Backspace if command_input => { if command_cursor > 0 { command_buf.remove(command_cursor - 1); command_cursor -= 1; } }
                                 KeyCode::Enter if renaming => {
                                     if session_renaming {
                                         cmd_batch.push(format!("rename-session {}\n", quote_arg(&rename_buf)));
@@ -1493,13 +1497,57 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Enter if command_input => {
                                     let trimmed = command_buf.trim().to_string();
                                     if !trimmed.is_empty() {
+                                        command_history.push(trimmed.clone());
+                                        command_history_idx = command_history.len();
                                         cmd_batch.push(format!("{}\n", trimmed));
                                     }
                                     command_input = false;
+                                    command_cursor = 0;
                                 }
                                 KeyCode::Esc if renaming => { renaming = false; session_renaming = false; }
                                 KeyCode::Esc if pane_renaming => { pane_renaming = false; }
-                                KeyCode::Esc if command_input => { command_input = false; }
+                                KeyCode::Esc if command_input => { command_input = false; command_cursor = 0; }
+
+                                // Command prompt: cursor movement, history, and editing keys
+                                KeyCode::Left if command_input => { if command_cursor > 0 { command_cursor -= 1; } }
+                                KeyCode::Right if command_input => { if command_cursor < command_buf.len() { command_cursor += 1; } }
+                                KeyCode::Home if command_input => { command_cursor = 0; }
+                                KeyCode::End if command_input => { command_cursor = command_buf.len(); }
+                                KeyCode::Delete if command_input => { if command_cursor < command_buf.len() { command_buf.remove(command_cursor); } }
+                                KeyCode::Up if command_input => {
+                                    if command_history_idx > 0 {
+                                        command_history_idx -= 1;
+                                        command_buf = command_history[command_history_idx].clone();
+                                        command_cursor = command_buf.len();
+                                    }
+                                }
+                                KeyCode::Down if command_input => {
+                                    if command_history_idx < command_history.len() {
+                                        command_history_idx += 1;
+                                        command_buf = if command_history_idx < command_history.len() {
+                                            command_history[command_history_idx].clone()
+                                        } else {
+                                            String::new()
+                                        };
+                                        command_cursor = command_buf.len();
+                                    }
+                                }
+                                KeyCode::Char('a') if command_input && key.modifiers.contains(KeyModifiers::CONTROL) => { command_cursor = 0; }
+                                KeyCode::Char('e') if command_input && key.modifiers.contains(KeyModifiers::CONTROL) => { command_cursor = command_buf.len(); }
+                                KeyCode::Char('u') if command_input && key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    command_buf.drain(..command_cursor);
+                                    command_cursor = 0;
+                                }
+                                KeyCode::Char('k') if command_input && key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    command_buf.truncate(command_cursor);
+                                }
+                                KeyCode::Char('w') if command_input && key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    let mut pos = command_cursor;
+                                    while pos > 0 && command_buf.as_bytes().get(pos - 1) == Some(&b' ') { pos -= 1; }
+                                    while pos > 0 && command_buf.as_bytes().get(pos - 1) != Some(&b' ') { pos -= 1; }
+                                    command_buf.drain(pos..command_cursor);
+                                    command_cursor = pos;
+                                }
 
                                 KeyCode::Char(' ') => {
                                     #[cfg(windows)]
@@ -2838,8 +2886,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 let oa = centered_rect(60, 3, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
+                let inner = overlay.inner(oa);
                 let para = Paragraph::new(format!(": {}", command_buf));
-                f.render_widget(para, overlay.inner(oa));
+                f.render_widget(para, inner);
+                // Show cursor at the correct position within the prompt
+                let cx = inner.x + 2 + command_cursor as u16; // +2 for ": "
+                f.set_cursor_position((cx, inner.y));
             }
             if let Some(ref cmd) = confirm_cmd {
                 let overlay = Block::default().borders(Borders::ALL).title("confirm");
