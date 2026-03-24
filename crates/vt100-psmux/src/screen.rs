@@ -118,11 +118,14 @@ pub struct Screen {
     /// Used as a fallback for CWD when PEB walking fails (SSH, WSL).
     osc7_path: Option<String>,
 
-    /// Set to `true` when the vt100 parser receives OSC 9999 (psmux
-    /// internal sentinel).  The layout serialiser checks this flag to
-    /// know that injected cd+cls commands have finished executing and
-    /// the squelch can be lifted.
+    /// Set to `true` when the screen is cleared (CSI 2J) while
+    /// `squelch_clear_pending` is active.  The layout serialiser
+    /// checks this flag to know that `cls` has finished.
     pub(crate) squelch_cleared: bool,
+
+    /// Set by the server before injecting `cd; cls`.  When true,
+    /// the next CSI 2J (erase display mode 2) sets `squelch_cleared`.
+    pub(crate) squelch_clear_pending: bool,
 }
 
 impl Screen {
@@ -145,6 +148,7 @@ impl Screen {
             osc_title: String::new(),
             osc7_path: None,
             squelch_cleared: false,
+            squelch_clear_pending: false,
         }
     }
 
@@ -679,8 +683,8 @@ impl Screen {
         }
     }
 
-    /// Returns `true` if the parser received OSC 9999 (psmux internal
-    /// sentinel signalling that injected commands have completed).
+    /// Returns `true` if a screen clear (CSI 2J) was detected while
+    /// squelch was pending, signalling that `cls`/`clear` finished.
     /// Calling this does NOT clear the flag; use [`take_squelch_cleared`]
     /// for a consume-style check.
     #[must_use]
@@ -688,11 +692,17 @@ impl Screen {
         self.squelch_cleared
     }
 
-    /// Returns `true` and resets the flag if OSC 9999 was received.
+    /// Returns `true` and resets the flag if screen clear was detected.
     pub fn take_squelch_cleared(&mut self) -> bool {
         let v = self.squelch_cleared;
         self.squelch_cleared = false;
         v
+    }
+
+    /// Arm the squelch detector: the next CSI 2J (erase display) will
+    /// set `squelch_cleared` to `true`.
+    pub fn set_squelch_clear_pending(&mut self, v: bool) {
+        self.squelch_clear_pending = v;
     }
 
     /// Returns the currently active foreground color.
@@ -1126,7 +1136,13 @@ impl Screen {
         match mode {
             0 => self.grid_mut().erase_all_forward(attrs),
             1 => self.grid_mut().erase_all_backward(attrs),
-            2 => self.grid_mut().erase_all(attrs),
+            2 => {
+                self.grid_mut().erase_all(attrs);
+                if self.squelch_clear_pending {
+                    self.squelch_cleared = true;
+                    self.squelch_clear_pending = false;
+                }
+            }
             3 => self.grid_mut().clear_scrollback(),
             _ => unhandled(self),
         }

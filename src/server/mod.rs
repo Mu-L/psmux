@@ -1931,22 +1931,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 // user.  Leading space keeps it out of shell
                                 // history; the clear wipes visible traces.
                                 //
-                                // After cls/clear, a sentinel OSC 9999 is
-                                // emitted so the renderer knows exactly when
-                                // the clear has finished (event-driven, no
-                                // fixed timeout).  The safety timeout is only
-                                // a fallback for shells that cannot emit the
-                                // sentinel (e.g. cmd.exe).
+                                // The vt100 parser watches for the CSI 2J
+                                // that cls/clear generates, which tells the
+                                // layout serialiser the clear finished
+                                // (event-driven, no guessing).  A safety
+                                // timeout is a fallback for unusual shells.
                                 if let Some(win) = app.windows.last_mut() {
                                     if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
                                         use std::io::Write as _;
                                         let escaped = cwd.replace('\'', "''");
-                                        let (clear, sentinel) = if cfg!(windows) {
-                                            ("cls", "; [Console]::Write([char]0x1b + ']9999;;' + [char]0x1b + '\\')")
-                                        } else {
-                                            ("clear", "; printf '\\033]9999;;\\033\\\\'")
-                                        };
-                                        let cd_cmd = format!(" cd '{}'; {}{}\r", escaped, clear, sentinel);
+                                        let clear = if cfg!(windows) { "cls" } else { "clear" };
+                                        let cd_cmd = format!(" cd '{}'; {}\r", escaped, clear);
+                                        // Tell the vt100 parser to watch for the
+                                        // next screen-clear event (CSI 2J).
+                                        if let Ok(mut parser) = p.term.lock() {
+                                            parser.screen_mut().set_squelch_clear_pending(true);
+                                        }
                                         p.squelch_until = Some(Instant::now() + Duration::from_secs(5));
                                         let _ = p.writer.write_all(cd_cmd.as_bytes());
                                         let _ = p.writer.flush();
