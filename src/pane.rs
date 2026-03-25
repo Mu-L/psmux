@@ -612,7 +612,6 @@ const ENV_SHIM_PS: &str = concat!(
 /// NullReferenceException in GetHistoryItems() during ConPTY startup.
 /// See https://github.com/psmux/psmux/issues/109
 const PSRL_FIX: &str = concat!(
-    "$PSStyle.OutputRendering = 'Ansi'; ",
     "try { Set-PSReadLineOption -PredictionSource None -ErrorAction Stop } catch {}; ",
     "try { Set-PSReadLineOption -PredictionViewStyle InlineView -ErrorAction Stop } catch {}; ",
     "try { Remove-PSReadLineKeyHandler -Chord 'F2' -ErrorAction Stop } catch {}",
@@ -624,17 +623,15 @@ const PSRL_FIX: &str = concat!(
 /// at whatever the system default is.  Used pre-profile when allow-predictions
 /// is on (#150).
 const PSRL_CRASH_GUARD: &str = concat!(
-    "$PSStyle.OutputRendering = 'Ansi'; ",
     "$Global:__psmux_origPred = try { (Get-PSReadLineOption).PredictionSource } catch { 'History' }; ",
     "try { Set-PSReadLineOption -PredictionSource None -ErrorAction Stop } catch {}",
 );
 
 /// Post-profile prediction restore: if PredictionSource is still None (meaning
 /// the user's profile did not explicitly set it), restore the saved original.
-/// If the profile DID set a value, we leave it alone.  Also re-applies ANSI
-/// output rendering.  Used post-profile when allow-predictions is on (#150).
+/// If the profile DID set a value, we leave it alone.
+/// Used post-profile when allow-predictions is on (#150).
 const PSRL_PRED_RESTORE: &str = concat!(
-    "$PSStyle.OutputRendering = 'Ansi'; ",
     "if ((Get-PSReadLineOption).PredictionSource -eq 'None' -and $Global:__psmux_origPred -ne 'None') { ",
     "try { Set-PSReadLineOption -PredictionSource $Global:__psmux_origPred -ErrorAction Stop } catch {} ",
     "}",

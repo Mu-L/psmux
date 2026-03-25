@@ -218,6 +218,7 @@ pub fn render_node(
                         if cell.inverse() { style = style.add_modifier(Modifier::REVERSED); }
                         if cell.blink() { style = style.add_modifier(Modifier::SLOW_BLINK); }
                         if cell.hidden() { style = style.add_modifier(Modifier::HIDDEN); }
+                        if cell.strikethrough() { style = style.add_modifier(Modifier::CROSSED_OUT); }
                         let text = cell.contents().to_string();
                         let w = UnicodeWidthStr::width(text.as_str()) as u16;
                         if w == 0 {
