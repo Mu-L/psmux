@@ -1539,3 +1539,128 @@ fn respawn_pane_without_port_does_not_crash() {
     execute_command_string(&mut app, "respawn-pane").unwrap();
     execute_command_string(&mut app, "respawnp").unwrap();
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Window index prompt (prefix + '): jump to any window by typed number
+// ════════════════════════════════════════════════════════════════════════════
+
+use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+use crate::input::handle_key;
+
+fn press(code: KeyCode) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
+#[test]
+fn prefix_single_quote_enters_window_index_prompt() {
+    let mut app = mock_app_with_windows(&["w0", "w1", "w2"]);
+    app.mode = Mode::Prefix { armed_at: std::time::Instant::now() };
+    handle_key(&mut app, press(KeyCode::Char('\''))).unwrap();
+    assert!(matches!(app.mode, Mode::WindowIndexPrompt { .. }), "prefix+' should enter WindowIndexPrompt mode");
+}
+
+#[test]
+fn window_index_prompt_accepts_digits_only() {
+    let mut app = mock_app_with_windows(&["w0", "w1", "w2"]);
+    app.mode = Mode::WindowIndexPrompt { input: String::new() };
+    // Type digit '1'
+    handle_key(&mut app, press(KeyCode::Char('1'))).unwrap();
+    if let Mode::WindowIndexPrompt { ref input } = app.mode {
+        assert_eq!(input, "1", "digit should be appended");
+    } else {
+        panic!("should still be in WindowIndexPrompt");
+    }
+    // Type non-digit 'a' should be ignored
+    handle_key(&mut app, press(KeyCode::Char('a'))).unwrap();
+    if let Mode::WindowIndexPrompt { ref input } = app.mode {
+        assert_eq!(input, "1", "non-digit should be ignored");
+    } else {
+        panic!("should still be in WindowIndexPrompt");
+    }
+}
+
+#[test]
+fn window_index_prompt_backspace_removes_digit() {
+    let mut app = mock_app_with_windows(&["w0", "w1"]);
+    app.mode = Mode::WindowIndexPrompt { input: "12".to_string() };
+    handle_key(&mut app, press(KeyCode::Backspace)).unwrap();
+    if let Mode::WindowIndexPrompt { ref input } = app.mode {
+        assert_eq!(input, "1", "backspace should remove last digit");
+    } else {
+        panic!("should still be in WindowIndexPrompt");
+    }
+}
+
+#[test]
+fn window_index_prompt_esc_cancels() {
+    let mut app = mock_app_with_windows(&["w0", "w1"]);
+    app.mode = Mode::WindowIndexPrompt { input: "5".to_string() };
+    handle_key(&mut app, press(KeyCode::Esc)).unwrap();
+    assert!(matches!(app.mode, Mode::Passthrough), "Esc should cancel to Passthrough");
+    assert_eq!(app.active_idx, 0, "active window should not change on cancel");
+}
+
+#[test]
+fn window_index_prompt_enter_jumps_to_window() {
+    let mut app = mock_app_with_windows(&["w0", "w1", "w2"]);
+    app.mode = Mode::WindowIndexPrompt { input: "2".to_string() };
+    handle_key(&mut app, press(KeyCode::Enter)).unwrap();
+    assert!(matches!(app.mode, Mode::Passthrough), "Enter should return to Passthrough");
+    assert_eq!(app.active_idx, 2, "should jump to window 2");
+    assert_eq!(app.last_window_idx, 0, "previous window should be saved as last");
+}
+
+#[test]
+fn window_index_prompt_enter_multidigit() {
+    let mut app = mock_app_with_windows(&["w0", "w1", "w2", "w3", "w4", "w5",
+                                           "w6", "w7", "w8", "w9", "w10", "w11"]);
+    app.mode = Mode::WindowIndexPrompt { input: "11".to_string() };
+    handle_key(&mut app, press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.active_idx, 11, "should jump to window 11 (multidigit)");
+}
+
+#[test]
+fn window_index_prompt_out_of_range_stays_put() {
+    let mut app = mock_app_with_windows(&["w0", "w1"]);
+    app.mode = Mode::WindowIndexPrompt { input: "99".to_string() };
+    handle_key(&mut app, press(KeyCode::Enter)).unwrap();
+    assert!(matches!(app.mode, Mode::Passthrough));
+    assert_eq!(app.active_idx, 0, "out-of-range index should not change window");
+}
+
+#[test]
+fn window_index_prompt_empty_enter_stays_put() {
+    let mut app = mock_app_with_windows(&["w0", "w1"]);
+    app.mode = Mode::WindowIndexPrompt { input: String::new() };
+    handle_key(&mut app, press(KeyCode::Enter)).unwrap();
+    assert!(matches!(app.mode, Mode::Passthrough));
+    assert_eq!(app.active_idx, 0, "empty input should not change window");
+}
+
+#[test]
+fn window_index_prompt_respects_base_index() {
+    let mut app = mock_app_with_windows(&["w0", "w1", "w2"]);
+    app.window_base_index = 1;
+    // With base_index=1, typing "2" means internal index 1
+    app.mode = Mode::WindowIndexPrompt { input: "2".to_string() };
+    handle_key(&mut app, press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.active_idx, 1, "target 2 with base_index 1 should select internal idx 1");
+}
+
+#[test]
+fn window_index_prompt_full_flow_via_prefix() {
+    // Simulate the full flow: prefix mode -> ' -> type "1" -> Enter
+    let mut app = mock_app_with_windows(&["alpha", "beta", "gamma"]);
+    app.mode = Mode::Prefix { armed_at: std::time::Instant::now() };
+    handle_key(&mut app, press(KeyCode::Char('\''))).unwrap();
+    assert!(matches!(app.mode, Mode::WindowIndexPrompt { .. }));
+    handle_key(&mut app, press(KeyCode::Char('1'))).unwrap();
+    handle_key(&mut app, press(KeyCode::Enter)).unwrap();
+    assert!(matches!(app.mode, Mode::Passthrough));
+    assert_eq!(app.active_idx, 1, "full flow should jump to window 1 (beta)");
+}
