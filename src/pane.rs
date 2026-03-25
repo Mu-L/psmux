@@ -1001,4 +1001,8 @@ pub fn spawn_reader_thread(
     });
 }
 
+#[cfg(test)]
+#[path = "../tests-rs/test_issue151_strict_mode.rs"]
+mod test_issue151_strict_mode;
+
 // reap_children is in tree.rs
