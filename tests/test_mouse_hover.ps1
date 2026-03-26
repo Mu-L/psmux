@@ -153,7 +153,7 @@ Test "Hover does NOT use raw alternate_screen() (ConPTY strips it)" (-not $rawAl
 
 # Verify server sets state_dirty for MouseMove (so client sees frame updates)
 $serverRs = Get-Content (Join-Path $srcRoot "server\mod.rs") -Raw
-$serverMouseMove = [regex]::Match($serverRs, 'MouseMove\(x,y\)\s*=>\s*\{([^}]+)\}').Groups[1].Value
+$serverMouseMove = [regex]::Match($serverRs, 'MouseMove\([^)]+\)\s*=>\s*\{([^}]+)\}').Groups[1].Value
 $hasStateDirty = $serverMouseMove -match 'state_dirty\s*=\s*true'
 Test "Server MouseMove sets state_dirty for frame updates" $hasStateDirty
 

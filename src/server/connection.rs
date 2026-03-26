@@ -809,9 +809,6 @@ match cmd {
     "bind-key" | "bind" => {
         let mut table = "prefix".to_string();
         let mut repeatable = false;
-        // Parse bind-key's own flags first, then extract key + command.
-        // bind-key flags: -T <table>, -n (root), -r (repeatable)
-        // Everything after the key is the command string verbatim.
         let mut i = 0;
         while i < args.len() {
             match args[i] {
@@ -821,10 +818,9 @@ match cmd {
                 }
                 "-n" => { table = "root".to_string(); i += 1; continue; }
                 "-r" => { repeatable = true; i += 1; continue; }
-                _ => break, // First non-flag arg = the key
+                _ => break,
             }
         }
-        // args[i] = the key, args[i+1..] = the command (preserve all flags)
         if i < args.len() && i + 1 < args.len() {
             let key = args[i].to_string();
             let command = args[i + 1..].join(" ");

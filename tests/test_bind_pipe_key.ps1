@@ -182,9 +182,16 @@ $symbolTests = @(
     @{ Key = "~"; Cmd = "display-message"; Desc = "tilde" }
 )
 
+# Use System.Diagnostics.Process for bind-key to bypass PowerShell's
+# PSNativePSPathResolution which expands ~ to the home directory path
 foreach ($st in $symbolTests) {
     Write-Test "bind-key $($st.Key) ($($st.Desc))"
-    & $PSMUX bind-key -t $S2 $st.Key $st.Cmd 2>&1 | Out-Null
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($PSMUX)
+    $psi.Arguments = "bind-key -t $S2 $($st.Key) $($st.Cmd)"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.WaitForExit()
     Start-Sleep -Milliseconds 300
 }
 

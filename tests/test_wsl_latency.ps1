@@ -20,7 +20,7 @@ if ($LASTEXITCODE -ne 0 -or $distroCheck.Trim().Length -eq 0) {
 
 $exe = ".\target\release\psmux.exe"
 $home_ = $env:USERPROFILE
-$session = "default"
+$session = "0"
 
 Write-Host "=== psmux WSL Echo Latency Test (Realistic) ===" -ForegroundColor Cyan
 Write-Host ""

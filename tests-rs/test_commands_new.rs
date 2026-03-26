@@ -960,10 +960,11 @@ fn choose_client_is_noop() {
 }
 
 #[test]
-fn customize_mode_is_noop() {
+fn customize_mode_shows_options_popup() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "customize-mode").unwrap();
-    assert!(matches!(app.mode, Mode::Passthrough));
+    // customize-mode now shows an options popup instead of being a no-op
+    assert!(matches!(app.mode, Mode::PopupMode { .. }));
 }
 
 // ════════════════════════════════════════════════════════════════════════════

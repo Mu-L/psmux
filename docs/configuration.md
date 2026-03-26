@@ -221,11 +221,13 @@ psmux show-environment -g
 
 Environment variables set this way are injected at the process level when new panes spawn, so they are completely invisible (no commands echoed in the shell).
 
-## PSReadLine Predictions
+## PSReadLine Predictions (Intellisense / Autocompletion)
 
-By default, psmux disables PSReadLine inline predictions (the grayed-out history suggestions) during ConPTY initialization to prevent a startup crash. This means `PredictionSource` defaults to `None` inside psmux, even if your profile sets it to `HistoryAndPlugin`.
+By default, psmux disables PSReadLine inline predictions (the grayed-out autocompletion/intellisense suggestions that appear as you type) to avoid additional unexpected bugs caused by the interaction between predictions and ConPTY. This means `PredictionSource` defaults to `None` inside psmux, even if your profile sets it to `HistoryAndPlugin` ([#150](https://github.com/psmux/psmux/issues/150)).
 
-To preserve your prediction settings, enable `allow-predictions`:
+If enough people test predictions and the community supports enabling them by default, this will be changed in a future release.
+
+To preserve your prediction/autocompletion settings, enable `allow-predictions`:
 
 ```tmux
 set -g allow-predictions on
@@ -234,7 +236,6 @@ set -g allow-predictions on
 With this enabled:
 - If your profile sets `PredictionSource`, psmux respects your choice
 - If your profile does not set it, psmux restores the system default (typically `HistoryAndPlugin`)
-- ConPTY startup crash prevention still works (predictions are temporarily disabled during initialization only)
 
 ## Prediction Dimming
 

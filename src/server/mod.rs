@@ -66,6 +66,22 @@ fn should_spawn_warm_server(app: &AppState) -> bool {
     app.warm_enabled && app.session_name != "__warm__" && !app.destroy_unattached
 }
 
+/// Check if the active pane is currently squelched (hiding injected cd+cls).
+/// Uses the non-consuming `squelch_cleared()` so the layout serialiser can
+/// still properly consume the sentinel via `take_squelch_cleared()`.
+fn is_active_pane_squelched(app: &AppState) -> bool {
+    if app.windows.is_empty() { return false; }
+    let win = &app.windows[app.active_idx];
+    if let Some(p) = active_pane(&win.root, &win.active_path) {
+        if let Some(deadline) = p.squelch_until {
+            let sentinel = p.term.lock()
+                .map(|parser| parser.screen().squelch_cleared())
+                .unwrap_or(false);
+            !sentinel && Instant::now() < deadline
+        } else { false }
+    } else { false }
+}
+
 /// Spawn a standby "warm server" process that pre-loads config + shell.
 /// When `psmux new-session` is run later, the CLI claims this warm server
 /// via `claim-session` instead of cold-spawning, making session creation
@@ -794,13 +810,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::KillPane => { unzoom_if_zoomed(&mut app); let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane"); }
                 CtrlReq::KillPaneById(pid) => { unzoom_if_zoomed(&mut app); let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane"); }
                 CtrlReq::CapturePane(resp) => {
-                    if let Some(text) = capture_active_pane_text(&mut app)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
+                    if is_active_pane_squelched(&app) {
+                        let _ = resp.send(String::new());
+                    } else if let Some(text) = capture_active_pane_text(&mut app)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
                 CtrlReq::CapturePaneStyled(resp, s, e) => {
-                    if let Some(text) = capture_active_pane_styled(&mut app, s, e)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
+                    if is_active_pane_squelched(&app) {
+                        let _ = resp.send(String::new());
+                    } else if let Some(text) = capture_active_pane_styled(&mut app, s, e)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
                 CtrlReq::CapturePaneRange(resp, s, e) => {
-                    if let Some(text) = capture_active_pane_range(&mut app, s, e)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
+                    if is_active_pane_squelched(&app) {
+                        let _ = resp.send(String::new());
+                    } else if let Some(text) = capture_active_pane_range(&mut app, s, e)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
                 CtrlReq::FocusWindow(wid) => {
                     // wid is a display index (same as tmux window number), convert to internal array index
@@ -2345,7 +2367,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.windows.swap(app.active_idx, target);
                     }
                 }
-                CtrlReq::LinkWindow(_target) => {}
+                CtrlReq::LinkWindow(_target) => {
+                    // link-window: not supported in single-session model
+                    app.status_message = Some(("link-window: not supported (single-session model)".to_string(), std::time::Instant::now()));
+                    state_dirty = true;
+                }
                 CtrlReq::UnlinkWindow => {
                     if app.windows.len() > 1 {
                         let mut win = app.windows.remove(app.active_idx);
@@ -2474,7 +2500,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     ));
                     let _ = resp.send(output);
                 }
-                CtrlReq::SwitchClient(_target) => {}
+                CtrlReq::SwitchClient(_target) => {
+                    // switch-client: single-session model, show feedback
+                    app.status_message = Some(("switch-client: only one session available".to_string(), std::time::Instant::now()));
+                    state_dirty = true;
+                }
                 CtrlReq::SwitchClientTable(table) => {
                     app.current_key_table = Some(table);
                     state_dirty = true;
@@ -2483,9 +2513,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let cmds = TMUX_COMMANDS.join("\n");
                     let _ = resp.send(cmds);
                 }
-                CtrlReq::LockClient => {}
+                CtrlReq::LockClient => {
+                    app.status_message = Some(("lock: not available on Windows".to_string(), std::time::Instant::now()));
+                    state_dirty = true;
+                }
                 CtrlReq::RefreshClient => { state_dirty = true; meta_dirty = true; }
-                CtrlReq::SuspendClient => {}
+                CtrlReq::SuspendClient => {
+                    app.status_message = Some(("suspend: not available on Windows".to_string(), std::time::Instant::now()));
+                    state_dirty = true;
+                }
                 CtrlReq::CopyModePageUp => {
                     enter_copy_mode(&mut app);
                     move_copy_cursor(&mut app, 0, -20);

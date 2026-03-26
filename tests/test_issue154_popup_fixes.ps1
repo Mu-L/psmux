@@ -87,7 +87,7 @@ try {
     # ================================================================
     # Test 1: Percentage width should resolve to actual terminal percentage
     # ================================================================
-    Send-PersistentCmd "display-popup -w 50% -h 50% echo percenttest"
+    Send-PersistentCmd "display-popup -w 50% -h 50% pwsh -NoProfile -Command 'Write-Host percenttest; Start-Sleep 60'"
     $json = Get-DumpState
     if ($json -match '"popup_active"\s*:\s*true') {
         if ($json -match '"popup_width"\s*:\s*(\d+)') {
@@ -116,7 +116,7 @@ try {
     # ================================================================
     # Test 2: Absolute dimensions should still work
     # ================================================================
-    Send-PersistentCmd "display-popup -w 60 -h 15 echo abstest"
+    Send-PersistentCmd "display-popup -w 60 -h 15 pwsh -NoProfile -Command 'Write-Host abstest; Start-Sleep 60'"
     $json = Get-DumpState
     if ($json -match '"popup_active"\s*:\s*true') {
         $w_ok = $json -match '"popup_width"\s*:\s*60\b'
@@ -132,7 +132,7 @@ try {
     # ================================================================
     # Test 3: -d flag should NOT leak into command string
     # ================================================================
-    Send-PersistentCmd "display-popup -d C:\Users echo dirtest"
+    Send-PersistentCmd "display-popup -d C:\Users pwsh -NoProfile -Command 'Write-Host dirtest; Start-Sleep 60'"
     $json = Get-DumpState
     if ($json -match '"popup_active"\s*:\s*true') {
         if ($json -match '"popup_command"\s*:\s*"([^"]*)"') {
@@ -150,7 +150,7 @@ try {
     # ================================================================
     # Test 4: -d flag should be parsed without error (popup should open)
     # ================================================================
-    Send-PersistentCmd "popup -d . echo test_d_works"
+    Send-PersistentCmd "popup -d . pwsh -NoProfile -Command 'Write-Host test_d_works; Start-Sleep 60'"
     $json = Get-DumpState
     $d_active = $json -match '"popup_active"\s*:\s*true'
     Add-Result "popup_d_flag_opens" $d_active "popup opened with -d flag"
@@ -159,7 +159,7 @@ try {
     # ================================================================
     # Test 5: -c flag should also work for directory (alias of -d)
     # ================================================================
-    Send-PersistentCmd "popup -c . echo test_c_works"
+    Send-PersistentCmd "popup -c . pwsh -NoProfile -Command 'Write-Host test_c_works; Start-Sleep 60'"
     $json = Get-DumpState
     $c_active = $json -match '"popup_active"\s*:\s*true'
     Add-Result "popup_c_flag_opens" $c_active "popup opened with -c flag"
@@ -168,7 +168,7 @@ try {
     # ================================================================
     # Test 6: Combined -d and percentage dims
     # ================================================================
-    Send-PersistentCmd "popup -w 95% -h 90% -d . echo combined_test"
+    Send-PersistentCmd "popup -w 95% -h 90% -d . pwsh -NoProfile -Command 'Write-Host combined_test; Start-Sleep 60'"
     $json = Get-DumpState
     if ($json -match '"popup_active"\s*:\s*true') {
         if ($json -match '"popup_width"\s*:\s*(\d+)') {

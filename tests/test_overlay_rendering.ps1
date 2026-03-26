@@ -252,9 +252,9 @@ if ($null -eq $json) {
 }
 
 # ============================================================
-# Test 8: Popup content — verify PTY output appears in popup_lines
+# Test 8: Popup content — verify PTY output appears in popup_rows or popup_lines
 # ============================================================
-Write-Test "display-popup PTY output appears in popup_lines"
+Write-Test "display-popup PTY output appears in popup_rows"
 & $PSMUX display-popup -t $SESSION -w 50 -h 10 "pwsh -NoProfile -Command 'Write-Host OVERLAY_CONTENT_CHECK; Start-Sleep 60'" 2>$null
 Start-Sleep -Seconds 3
 $json = Get-DumpState -Session $SESSION
@@ -262,15 +262,23 @@ if ($null -eq $json) {
     Write-Fail "Could not get dump-state for popup content check"
 } else {
     $state = $json | ConvertFrom-Json -ErrorAction SilentlyContinue
-    if ($state.popup_active -eq $true -and $state.popup_lines) {
-        $allLines = $state.popup_lines -join "`n"
-        if ($allLines -match "OVERLAY_CONTENT_CHECK") {
-            Write-Pass "popup_lines contains 'OVERLAY_CONTENT_CHECK'"
-        } else {
-            Write-Fail "popup_active=true but 'OVERLAY_CONTENT_CHECK' not found in popup_lines (lines=$($state.popup_lines.Count))"
+    if ($state.popup_active -eq $true) {
+        $found = $false
+        # PTY popups have content in popup_rows (run-length encoded), not popup_lines
+        if ($state.popup_has_pty -and $state.popup_rows) {
+            $allText = ($state.popup_rows | ForEach-Object { ($_.runs | ForEach-Object { $_.text }) -join "" }) -join "`n"
+            if ($allText -match "OVERLAY_CONTENT_CHECK") { $found = $true }
         }
-    } elseif ($state.popup_active -eq $true) {
-        Write-Fail "popup_active=true but popup_lines missing or empty"
+        # Non-PTY popups have content in popup_lines
+        if (-not $found -and $state.popup_lines) {
+            $allLines = $state.popup_lines -join "`n"
+            if ($allLines -match "OVERLAY_CONTENT_CHECK") { $found = $true }
+        }
+        if ($found) {
+            Write-Pass "popup content contains 'OVERLAY_CONTENT_CHECK'"
+        } else {
+            Write-Fail "popup_active=true but 'OVERLAY_CONTENT_CHECK' not found in popup_rows or popup_lines"
+        }
     } else {
         Write-Fail "popup not active (may have auto-closed)"
     }
@@ -397,7 +405,7 @@ Write-Host "  4. display-menu: menu_active + menu_title + menu_items in JSON"
 Write-Host "  5. display-panes: display_panes=true in JSON"
 Write-Host "  6. clock-mode: clock_mode=true in JSON"
 Write-Host "  7. Overlay dismiss: all overlay fields cleared"
-Write-Host "  8. Popup content: PTY output present in popup_lines"
+Write-Host "  8. Popup content: PTY output present in popup_rows"
 Write-Host "  9. send-keys n dismisses confirm-before"
 Write-Host " 10. send-keys Escape dismisses popup"
 Write-Host " 11. send-keys Escape dismisses menu"

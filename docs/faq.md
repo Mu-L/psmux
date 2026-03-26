@@ -30,8 +30,8 @@ A: PowerShell 7 (default), PowerShell 5, cmd.exe, Git Bash, WSL, nushell, and an
 **Q: Is it stable for daily use?**
 A: Yes. psmux is stress-tested with 15+ rapid windows, 18+ concurrent panes, 5 concurrent sessions, kill+recreate cycles, and sustained load, all with zero hangs or resource leaks.
 
-**Q: PSReadLine predictions (inline history suggestions) are disabled inside psmux. How do I fix this?**
-A: Add `set -g allow-predictions on` to your `~/.psmux.conf`. This tells psmux to preserve your `PredictionSource` setting after initialization. See [configuration.md](configuration.md) for details.
+**Q: PSReadLine predictions / intellisense / autocompletion (inline history suggestions) are disabled inside psmux. How do I enable them?**
+A: Add `set -g allow-predictions on` to your `~/.psmux.conf`. This tells psmux to preserve your `PredictionSource` setting after initialization. If your profile sets `PredictionSource` explicitly, psmux respects that. If not, psmux restores the system default (typically `HistoryAndPlugin`). See the [PSReadLine Predictions](configuration.md#psreadline-predictions-intellisense--autocompletion) section in the configuration docs for details.
 
 **Q: How do I use a custom config file?**
 A: Use the `-f` flag: `psmux -f /path/to/config.conf`. This loads the specified file instead of the default search order.
