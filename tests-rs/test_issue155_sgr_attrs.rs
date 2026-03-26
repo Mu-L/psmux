@@ -1,5 +1,3 @@
-use super::*;
-
 // ── Issue #155: Strikethrough and Hidden SGR attributes ──────────────
 //
 // Verifies that SGR 8 (hidden), SGR 9 (strikethrough), and their reset
@@ -10,7 +8,7 @@ use super::*;
 
 #[test]
 fn sgr9_sets_strikethrough_on_cell() {
-    let mut parser = crate::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 80, 0);
     // ESC[9m = strikethrough on, then write "abc"
     parser.process(b"\x1b[9mabc");
     let screen = parser.screen();
@@ -22,7 +20,7 @@ fn sgr9_sets_strikethrough_on_cell() {
 
 #[test]
 fn sgr29_clears_strikethrough_on_cell() {
-    let mut parser = crate::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 80, 0);
     // SGR 9 on, write "ab", SGR 29 off, write "cd"
     parser.process(b"\x1b[9mab\x1b[29mcd");
     let screen = parser.screen();
@@ -34,7 +32,7 @@ fn sgr29_clears_strikethrough_on_cell() {
 
 #[test]
 fn sgr8_sets_hidden_on_cell() {
-    let mut parser = crate::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 80, 0);
     parser.process(b"\x1b[8mhidden");
     let screen = parser.screen();
     for i in 0..6 {
@@ -44,7 +42,7 @@ fn sgr8_sets_hidden_on_cell() {
 
 #[test]
 fn sgr28_clears_hidden_on_cell() {
-    let mut parser = crate::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 80, 0);
     parser.process(b"\x1b[8mab\x1b[28mcd");
     let screen = parser.screen();
     assert!(screen.cell(0, 0).unwrap().hidden());
@@ -55,7 +53,7 @@ fn sgr28_clears_hidden_on_cell() {
 
 #[test]
 fn sgr0_resets_strikethrough_and_hidden() {
-    let mut parser = crate::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 80, 0);
     parser.process(b"\x1b[8;9mab\x1b[0mcd");
     let screen = parser.screen();
     assert!(screen.cell(0, 0).unwrap().hidden());
@@ -68,7 +66,7 @@ fn sgr0_resets_strikethrough_and_hidden() {
 
 #[test]
 fn contents_formatted_includes_sgr9_for_strikethrough() {
-    let mut parser = crate::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 80, 0);
     parser.process(b"\x1b[9mstrike\x1b[29mnormal");
     let formatted = parser.screen().contents_formatted();
     let s = String::from_utf8_lossy(&formatted);
@@ -82,7 +80,7 @@ fn contents_formatted_includes_sgr9_for_strikethrough() {
 
 #[test]
 fn contents_formatted_includes_sgr29_to_clear_strikethrough() {
-    let mut parser = crate::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 80, 0);
     parser.process(b"\x1b[9mstrike\x1b[29mnormal");
     let formatted = parser.screen().contents_formatted();
     let s = String::from_utf8_lossy(&formatted);
@@ -101,7 +99,7 @@ fn contents_formatted_includes_sgr29_to_clear_strikethrough() {
 
 #[test]
 fn contents_formatted_includes_sgr8_for_hidden() {
-    let mut parser = crate::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 80, 0);
     parser.process(b"\x1b[8msecret\x1b[28mvisible");
     let formatted = parser.screen().contents_formatted();
     let s = String::from_utf8_lossy(&formatted);
@@ -114,7 +112,7 @@ fn contents_formatted_includes_sgr8_for_hidden() {
 
 #[test]
 fn combined_strikethrough_hidden_bold_roundtrip() {
-    let mut parser = crate::Parser::new(24, 80, 0);
+    let mut parser = vt100::Parser::new(24, 80, 0);
     parser.process(b"\x1b[1;8;9mcombined\x1b[0mplain");
     let screen = parser.screen();
     let cell = screen.cell(0, 0).unwrap();
@@ -129,7 +127,7 @@ fn combined_strikethrough_hidden_bold_roundtrip() {
     // Verify formatted output roundtrips: parse the formatted output
     // into a second parser and verify cell attributes match
     let formatted = screen.contents_formatted();
-    let mut parser2 = crate::Parser::new(24, 80, 0);
+    let mut parser2 = vt100::Parser::new(24, 80, 0);
     parser2.process(&formatted);
     let cell2 = parser2.screen().cell(0, 0).unwrap();
     assert!(cell2.bold(), "bold should survive roundtrip");

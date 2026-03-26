@@ -355,6 +355,9 @@ pub fn render_popup_overlay(
                             if cell.hidden() {
                                 style = style.add_modifier(Modifier::HIDDEN);
                             }
+                            if cell.strikethrough() {
+                                style = style.add_modifier(Modifier::CROSSED_OUT);
+                            }
                             let ch = cell.contents();
                             if style != current_style {
                                 if !current_text.is_empty() {
