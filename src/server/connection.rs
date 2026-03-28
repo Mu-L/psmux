@@ -680,11 +680,15 @@ match cmd {
         }
     }
     "split-sizes" => {
-        // split-sizes PATH SIZE1,SIZE2,...
+        // split-sizes PATH SIZE1,SIZE2,...  (PATH is "_" for root, or dot-separated indices)
         if args.len() >= 2 {
-            let path: Vec<usize> = args[0].split('.').filter_map(|s| s.parse().ok()).collect();
+            let path: Vec<usize> = if args[0] == "_" {
+                Vec::new()
+            } else {
+                args[0].split('.').filter_map(|s| s.parse().ok()).collect()
+            };
             let sizes: Vec<u16> = args[1].split(',').filter_map(|s| s.parse().ok()).collect();
-            if !path.is_empty() && sizes.len() >= 2 {
+            if sizes.len() >= 2 {
                 let _ = tx.send(CtrlReq::SplitSetSizes(client_id, path, sizes));
             }
         }

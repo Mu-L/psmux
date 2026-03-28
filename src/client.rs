@@ -1938,7 +1938,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         new_sizes[d.index] = left;
                                         new_sizes[d.index + 1] = right;
 
-                                        let path_str = d.path.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(".");
+                                        let path_str = if d.path.is_empty() { "_".to_string() } else { d.path.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(".") };
                                         let sizes_str = new_sizes.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",");
                                         cmd_batch.push(format!("split-sizes {} {}\n", path_str, sizes_str));
                                     }
