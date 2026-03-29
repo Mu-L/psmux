@@ -833,8 +833,10 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
 
     let Some(path) = found_path else { return; };
 
-    // Focus the target pane
-    if win.active_path != path {
+    // Focus the target pane only on actual clicks (not drag/hover).
+    // tmux behavior: click-to-focus, not focus-follows-mouse.
+    let is_click = matches!(button, 0 | 1 | 2) && press;
+    if is_click && win.active_path != path {
         win.active_path = path.clone();
         if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &path) {
             crate::tree::touch_mru(&mut win.pane_mru, pid);
