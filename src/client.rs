@@ -1798,7 +1798,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     // Border detection
                                     let mut on_border = false;
                                     if !client_zoomed {
-                                        let tol = 1u16;
+                                        let tol = 0u16;
                                         for (bpath, bkind, bidx, bpos, btotal, bsizes, barea) in &client_borders {
                                             let hit = if bkind == "Horizontal" {
                                                 me.column >= bpos.saturating_sub(tol) && me.column <= bpos + tol
@@ -2020,7 +2020,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 // Detect border hover for visual preview
                                 let mut new_hover: Option<(u16, String, Rect)> = None;
                                 if !client_zoomed {
-                                    let tol = 1u16;
+                                    let tol = 0u16;
                                     for (_, bkind, _, bpos, _, _, barea) in &client_borders {
                                         let hit = if bkind == "Horizontal" {
                                             me.column >= bpos.saturating_sub(tol) && me.column <= bpos + tol
