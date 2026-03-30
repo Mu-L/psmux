@@ -120,9 +120,13 @@ pub fn render_window(f: &mut Frame, app: &mut AppState, area: Rect) {
     let border_style = parse_tmux_style(&app.pane_border_style);
     let active_border_style = parse_tmux_style(&app.pane_active_border_style);
     let copy_cursor = if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) { app.copy_pos } else { None };
+    let window_style = app.user_options.get("window-style").map(|s| parse_tmux_style(s));
+    let window_active_style = app.user_options.get("window-active-style").map(|s| parse_tmux_style(s));
+    let border_status = app.user_options.get("pane-border-status").cloned().unwrap_or_else(|| "off".to_string());
+    let border_format = app.user_options.get("pane-border-format").cloned().unwrap_or_default();
     let win = &mut app.windows[app.active_idx];
     let active_rect = compute_active_rect(&win.root, &win.active_path, area);
-    render_node(f, &mut win.root, &win.active_path, &mut Vec::new(), area, dim_preds, border_style, active_border_style, copy_cursor, active_rect);
+    render_node(f, &mut win.root, &win.active_path, &mut Vec::new(), area, dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_style, window_active_style, &border_status, &border_format, &mut 0);
     fix_border_intersections(f.buffer_mut());
 }
 
@@ -199,6 +203,11 @@ pub fn render_node(
     active_border_style: Style,
     copy_cursor: Option<(u16, u16)>,
     active_rect: Option<Rect>,
+    window_style: Option<Style>,
+    window_active_style: Option<Style>,
+    border_status: &str,
+    border_format: &str,
+    pane_idx: &mut usize,
 ) {
     match node {
         Node::Leaf(pane) => {
@@ -225,7 +234,13 @@ pub fn render_node(
                 while c < target_cols {
                     if let Some(cell) = screen.cell(r, c) {
                         let mut fg = vt_to_color(cell.fgcolor());
-                        let bg = vt_to_color(cell.bgcolor());
+                        let mut bg = vt_to_color(cell.bgcolor());
+                        // Apply window-style / window-active-style defaults for unset colors
+                        let ws = if is_active { window_active_style } else { window_style };
+                        if let Some(ws) = ws {
+                            if fg == Color::Reset { if let Some(wfg) = ws.fg { fg = wfg; } }
+                            if bg == Color::Reset { if let Some(wbg) = ws.bg { bg = wbg; } }
+                        }
                         if dim_preds && !screen.alternate_screen()
                             && (r > cur_r || (r == cur_r && c >= cur_c))
                         {
@@ -290,6 +305,19 @@ pub fn render_node(
                     f.set_cursor_position((cx, cy));
                 }
             }
+            // Pane border format/status overlay
+            if border_status != "off" && !border_format.is_empty() && area.height > 1 {
+                let pane_label = border_format.replace("#{pane_index}", &pane_idx.to_string())
+                    .replace("#P", &pane_idx.to_string());
+                let label_width = UnicodeWidthStr::width(pane_label.as_str()) as u16;
+                if label_width > 0 && area.width >= label_width {
+                    let label_y = if border_status == "bottom" { area.y + area.height.saturating_sub(1) } else { area.y };
+                    let label_area = Rect::new(area.x, label_y, label_width.min(area.width), 1);
+                    let label_style = if is_active { active_border_style } else { border_style };
+                    f.render_widget(Paragraph::new(Line::from(Span::styled(pane_label, label_style))), label_area);
+                }
+            }
+            *pane_idx += 1;
         }
         Node::Split { kind, sizes, children } => {
             let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
@@ -300,7 +328,7 @@ pub fn render_node(
             for (i, child) in children.iter_mut().enumerate() {
                 cur_path.push(i);
                 if i < rects.len() {
-                    render_node(f, child, active_path, cur_path, rects[i], dim_preds, border_style, active_border_style, copy_cursor, active_rect);
+                    render_node(f, child, active_path, cur_path, rects[i], dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_style, window_active_style, border_status, border_format, pane_idx);
                 }
                 cur_path.pop();
             }

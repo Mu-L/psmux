@@ -956,6 +956,7 @@ pub fn break_pane_to_window(app: &mut AppState) {
             layout_index: 0,
             pane_mru: initial_mru,
             zoom_saved: None,
+            linked_from: None,
         });
         app.next_win_id += 1;
         

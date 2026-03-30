@@ -130,6 +130,7 @@ fn mock_window(name: &str) -> crate::types::Window {
         layout_index: 0,
         pane_mru: vec![],
         zoom_saved: None,
+        linked_from: None,
     }
 }
 
@@ -339,6 +340,12 @@ fn test_appstate_defaults_bell_action() {
 }
 
 #[test]
+fn test_appstate_defaults_bell_forward() {
+    let app = mock_app();
+    assert!(!app.bell_forward, "bell_forward must default to false");
+}
+
+#[test]
 fn test_appstate_defaults_activity_action() {
     let app = mock_app();
     assert_eq!(app.activity_action, "other");
@@ -362,4 +369,199 @@ fn test_appstate_defaults_update_environment() {
     assert!(app.update_environment.contains(&"DISPLAY".to_string()));
     assert!(app.update_environment.contains(&"SSH_AUTH_SOCK".to_string()));
     assert!(app.update_environment.contains(&"SSH_AGENT_PID".to_string()));
+}
+
+// ── Session group format variable tests ─────────────────────────
+
+#[test]
+fn test_session_group_empty_by_default() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    assert_eq!(expand_var("session_group", &app, 0), "");
+}
+
+#[test]
+fn test_session_group_returns_group_name() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.session_group = Some("mygroup".to_string());
+    assert_eq!(expand_var("session_group", &app, 0), "mygroup");
+}
+
+#[test]
+fn test_session_group_list_returns_group_name() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.session_group = Some("mygroup".to_string());
+    assert_eq!(expand_var("session_group_list", &app, 0), "mygroup");
+}
+
+#[test]
+fn test_session_grouped_false_by_default() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    assert_eq!(expand_var("session_grouped", &app, 0), "0");
+}
+
+#[test]
+fn test_session_grouped_true_when_in_group() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.session_group = Some("grp".to_string());
+    assert_eq!(expand_var("session_grouped", &app, 0), "1");
+}
+
+#[test]
+fn test_session_group_attached_when_grouped_and_attached() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.session_group = Some("grp".to_string());
+    app.attached_clients = 1;
+    assert_eq!(expand_var("session_group_attached", &app, 0), "1");
+}
+
+#[test]
+fn test_session_group_attached_zero_when_not_grouped() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.attached_clients = 1;
+    assert_eq!(expand_var("session_group_attached", &app, 0), "0");
+}
+
+#[test]
+fn test_session_group_attached_zero_when_no_clients() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.session_group = Some("grp".to_string());
+    app.attached_clients = 0;
+    assert_eq!(expand_var("session_group_attached", &app, 0), "0");
+}
+
+#[test]
+fn test_session_group_size_when_grouped() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.session_group = Some("grp".to_string());
+    assert_eq!(expand_var("session_group_size", &app, 0), "1");
+}
+
+#[test]
+fn test_session_group_size_zero_when_not_grouped() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    assert_eq!(expand_var("session_group_size", &app, 0), "0");
+}
+
+// ── Window linked format variable tests ─────────────────────────
+
+#[test]
+fn test_window_linked_false_by_default() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    assert_eq!(expand_var("window_linked", &app, 0), "0");
+}
+
+#[test]
+fn test_window_linked_true_when_linked() {
+    let mut app = mock_app();
+    let mut win = mock_window("win0");
+    win.linked_from = Some(42);
+    app.windows.push(win);
+    assert_eq!(expand_var("window_linked", &app, 0), "1");
+}
+
+#[test]
+fn test_window_linked_sessions_mirrors_linked() {
+    let mut app = mock_app();
+    let mut win = mock_window("win0");
+    win.linked_from = Some(5);
+    app.windows.push(win);
+    assert_eq!(expand_var("window_linked_sessions", &app, 0), "1");
+}
+
+#[test]
+fn test_window_linked_sessions_list_empty() {
+    let mut app = mock_app();
+    let mut win = mock_window("win0");
+    win.linked_from = Some(5);
+    app.windows.push(win);
+    assert_eq!(expand_var("window_linked_sessions_list", &app, 0), "");
+}
+
+// ── Pane fg/bg default tests ────────────────────────────────────
+// Without a real PTY pane, pane_fg and pane_bg should return "default"
+
+#[test]
+fn test_pane_fg_default_without_real_pane() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    // No panes in the split node, so target_pane() returns None -> "default"
+    assert_eq!(expand_var("pane_fg", &app, 0), "default");
+}
+
+#[test]
+fn test_pane_bg_default_without_real_pane() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    assert_eq!(expand_var("pane_bg", &app, 0), "default");
+}
+
+// ── Mouse position format variable tests ────────────────────────
+
+#[test]
+fn test_mouse_x_initial_zero() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    assert_eq!(expand_var("mouse_x", &app, 0), "0");
+}
+
+#[test]
+fn test_mouse_y_initial_zero() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    assert_eq!(expand_var("mouse_y", &app, 0), "0");
+}
+
+#[test]
+fn test_mouse_x_tracks_last_position() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.last_mouse_x = 42;
+    assert_eq!(expand_var("mouse_x", &app, 0), "42");
+}
+
+#[test]
+fn test_mouse_y_tracks_last_position() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.last_mouse_y = 17;
+    assert_eq!(expand_var("mouse_y", &app, 0), "17");
+}
+
+// ── Session many_attached format variable tests ─────────────────
+
+#[test]
+fn test_session_many_attached_zero_single_client() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.attached_clients = 1;
+    assert_eq!(expand_var("session_many_attached", &app, 0), "0");
+}
+
+#[test]
+fn test_session_many_attached_one_when_multiple() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.attached_clients = 3;
+    assert_eq!(expand_var("session_many_attached", &app, 0), "1");
+}
+
+// ── Session format var (alias for session_many_attached) ────────
+
+#[test]
+fn test_session_format_alias() {
+    let mut app = mock_app();
+    app.windows.push(mock_window("win0"));
+    app.attached_clients = 2;
+    assert_eq!(expand_var("session_format", &app, 0), "1");
 }

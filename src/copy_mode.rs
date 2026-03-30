@@ -720,7 +720,14 @@ pub fn search_copy_mode(app: &mut AppState, query: &str, forward: bool) {
 /// Jump to the next search match in copy mode.
 pub fn search_next(app: &mut AppState) {
     if app.copy_search_matches.is_empty() { return; }
-    app.copy_search_idx = (app.copy_search_idx + 1) % app.copy_search_matches.len();
+    let wrap = app.user_options.get("wrap-search").map(|v| v.as_str()) != Some("off");
+    let next = app.copy_search_idx + 1;
+    if next >= app.copy_search_matches.len() {
+        if !wrap { return; }
+        app.copy_search_idx = 0;
+    } else {
+        app.copy_search_idx = next;
+    }
     let (r, c, _) = app.copy_search_matches[app.copy_search_idx];
     app.copy_pos = Some((r, c));
 }
@@ -891,7 +898,9 @@ pub fn copy_end_of_line(app: &mut AppState) -> io::Result<()> {
 /// Jump to the previous search match in copy mode.
 pub fn search_prev(app: &mut AppState) {
     if app.copy_search_matches.is_empty() { return; }
+    let wrap = app.user_options.get("wrap-search").map(|v| v.as_str()) != Some("off");
     if app.copy_search_idx == 0 {
+        if !wrap { return; }
         app.copy_search_idx = app.copy_search_matches.len() - 1;
     } else {
         app.copy_search_idx -= 1;

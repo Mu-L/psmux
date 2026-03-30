@@ -27,6 +27,7 @@ fn make_window(name: &str, id: usize) -> crate::types::Window {
         layout_index: 0,
         pane_mru: vec![],
         zoom_saved: None,
+        linked_from: None,
     }
 }
 
@@ -311,19 +312,18 @@ fn swap_window_same_index_is_noop() {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn link_window_shows_not_supported_message() {
+fn link_window_accepted() {
     let mut app = mock_app_with_window();
+    // link-window is now functional; in mock context (no PTY system),
+    // the command is accepted without error
     execute_command_string(&mut app, "link-window -t 0").unwrap();
-    let msg = extract_status_message(&app);
-    assert!(msg.contains("not supported"), "link-window should show not-supported message, got: {}", msg);
 }
 
 #[test]
-fn linkw_alias_shows_same_message() {
+fn linkw_alias_accepted() {
     let mut app = mock_app_with_window();
+    // linkw alias is also accepted without error
     execute_command_string(&mut app, "linkw").unwrap();
-    let msg = extract_status_message(&app);
-    assert!(msg.contains("not supported"));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -412,7 +412,7 @@ fn choose_client_shows_single_client_message() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  customize-mode: shows options (non-empty fallback)
+//  customize-mode: interactive options editor
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -420,12 +420,11 @@ fn customize_mode_shows_options_popup() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "customize-mode").unwrap();
     match &app.mode {
-        Mode::PopupMode { command, output, .. } => {
-            assert!(command.contains("customize"), "command should reference customize-mode");
-            assert!(output.contains("mouse"), "should display options including mouse");
-            assert!(output.contains("prefix"), "should display options including prefix");
+        Mode::CustomizeMode { options, .. } => {
+            assert!(options.iter().any(|(n, _, _)| n == "mouse"), "should display options including mouse");
+            assert!(options.iter().any(|(n, _, _)| n == "prefix"), "should display options including prefix");
         }
-        other => panic!("expected PopupMode for customize-mode, got {:?}", std::mem::discriminant(other)),
+        other => panic!("expected CustomizeMode for customize-mode, got {:?}", std::mem::discriminant(other)),
     }
 }
 

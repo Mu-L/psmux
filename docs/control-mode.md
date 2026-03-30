@@ -143,7 +143,7 @@ Data in `%output` notifications uses octal escaping for non-printable bytes:
 |------|----------|
 | Printable ASCII (0x20 to 0x7E) | Passed through as-is |
 | Tab (0x09) | Passed through as-is |
-| Backslash (0x5C) | `\134` |
+| Backslash (0x5C) | `\\` (doubled) |
 | Carriage return (0x0D) | `\015` |
 | Line feed (0x0A) | `\012` |
 | Any other byte | `\NNN` (3-digit octal) |
@@ -206,6 +206,21 @@ list-commands      # List all available commands
 server-info        # Server information
 kill-server        # Shut down the server
 ```
+
+### psmux Extension Commands
+
+These commands are available in psmux but do not exist in tmux:
+
+| Command | Description |
+|---|---|
+| `dump-state` | Returns the entire session state as a JSON blob (windows, panes, options, sizes, screen content). Invaluable for building rich UIs. |
+| `dump-layout` | Returns the pane layout tree structure |
+| `list-tree` | Returns a hierarchical session/window/pane tree view |
+| `send-text <text>` | Send raw text directly to the active pane (no key name parsing) |
+| `send-paste <text>` | Send text as a bracketed paste sequence |
+| `claim-session` | Claim a warm (pre spawned) session for faster startup |
+| `set-pane-title <title>` | Set the title of the current pane |
+| `toggle-sync` | Toggle synchronized input across all panes in a window |
 
 ## Building a Plugin
 
@@ -351,6 +366,28 @@ psmux control mode is wire-compatible with tmux's protocol. A few features that 
 | Unlinked window notifications | N/A | psmux uses one session per server |
 
 The core protocol (framing, notifications, escaping, IDs, command dispatch) is fully compatible. Plugins targeting the basic tmux control mode protocol will work identically on psmux.
+
+### Windows ConPTY Considerations
+
+If you are porting a Unix tmux plugin to psmux, be aware of these ConPTY behaviors:
+
+- **SMCUP/RMCUP consumed internally.** ConPTY processes alternate screen buffer switches before the output reaches psmux. The `alternate_on` flag is always false. psmux uses a heuristic (last row content analysis) to detect fullscreen TUI applications.
+- **Output normalization.** ConPTY may normalize line endings and process certain cursor movement sequences internally. `%output` data may look slightly different from what a Unix tmux session would produce for the same shell command.
+- **`capture-pane` always reflects the primary screen buffer.** There is no reliable way to detect whether a pane is showing the alternate screen.
+- **Ctrl+C propagation.** `GenerateConsoleCtrlEvent` sends to ALL processes sharing the console, not just the foreground process. When testing TUI apps via `send-keys`, prefer using the app's quit key (e.g. `q`) rather than `C-c`.
+- **TUI exit timing.** After a TUI application exits and sends RMCUP, ConPTY needs time to generate the restore sequences. If you `capture-pane` immediately after a TUI exits, you may still see TUI content. Allow 4 to 6 seconds for the screen to settle.
+
+### Namespace Isolation
+
+Use `-L` to run multiple independent psmux servers on the same machine:
+
+```powershell
+psmux -L dev new-session -d -s myapp -x 120 -y 30
+$env:PSMUX_SESSION_NAME = "dev__myapp"
+psmux -CC
+```
+
+The `PSMUX_SESSION_NAME` value follows the format `<namespace>__<session>` when using `-L`. The double underscore is the separator.
 
 ## Format Variables
 

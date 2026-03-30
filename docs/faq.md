@@ -41,3 +41,6 @@ A: Add `set -g warm off` to your config, or set `$env:PSMUX_NO_WARM = "1"`. See 
 
 **Q: Can I set environment variables for panes?**
 A: Yes. Use `psmux set-environment -g VARNAME value` to set env vars inherited by all new panes. Use `-gu` to unset. See [configuration.md](configuration.md) for details.
+
+**Q: How do I mute the audible bell inside psmux?**
+A: Add `set -g bell-action none` to your `~/.psmux.conf`. This silences both the audible beep and the status bar bell flag. To keep the visual flag but mute the sound, this is not currently split into separate controls. See the [Bell](configuration.md#bell) section in the configuration docs.

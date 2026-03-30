@@ -26,6 +26,17 @@ pub enum ControlNotification {
     ClientDetached { client: String },
     Continue { pane_id: usize },
     Pause { pane_id: usize },
+    /// Extended output with age information (when pause-after is active).
+    ExtendedOutput { pane_id: usize, age_ms: u64, data: String },
+    /// Subscription value changed notification.
+    SubscriptionChanged {
+        name: String,
+        session_id: usize,
+        window_id: usize,
+        window_index: usize,
+        pane_id: usize,
+        value: String,
+    },
     Exit { reason: Option<String> },
     PasteBufferChanged { name: String },
     PasteBufferDeleted { name: String },
@@ -40,6 +51,34 @@ pub struct ControlClient {
     pub echo_enabled: bool,
     pub notification_tx: mpsc::SyncSender<ControlNotification>,
     pub paused_panes: HashSet<usize>,
+    /// `refresh-client -B name:what:format` subscriptions.
+    /// Key = subscription name, Value = (target, format_string).
+    pub subscriptions: HashMap<String, (String, String)>,
+    /// Last expanded value for each subscription (for change detection).
+    pub subscription_values: HashMap<String, String>,
+    /// Last time each subscription was checked (rate limit: 1/s per sub).
+    pub subscription_last_check: HashMap<String, Instant>,
+    /// `refresh-client -f pause-after=N`: pause output if client falls behind by N seconds.
+    pub pause_after_secs: Option<u64>,
+    /// Panes whose output is currently paused due to pause-after threshold.
+    pub output_paused_panes: HashSet<usize>,
+    /// Timestamp of last output sent per pane (for pause-after age tracking).
+    pub pane_last_output: HashMap<usize, Instant>,
+}
+
+/// Per-client metadata stored in the server's client registry.
+/// Tracks every attached PERSISTENT and CONTROL client.
+#[derive(Clone, Debug)]
+pub struct ClientInfo {
+    pub id: u64,
+    pub width: u16,
+    pub height: u16,
+    pub connected_at: std::time::Instant,
+    pub last_activity: std::time::Instant,
+    /// Synthetic TTY name for display (e.g. "/dev/pts/1")
+    pub tty_name: String,
+    /// True for CONTROL/CONTROL_NOECHO clients
+    pub is_control: bool,
 }
 
 pub struct Pane {
@@ -119,7 +158,7 @@ pub struct WarmPane {
     pub output_ring: Arc<Mutex<VecDeque<u8>>>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LayoutKind { Horizontal, Vertical }
 
 pub enum Node {
@@ -156,6 +195,8 @@ pub struct Window {
     /// When `Some(...)`, one pane in this window is zoomed; the vec stores saved split sizes
     /// for restoration on unzoom.
     pub zoom_saved: Option<Vec<(Vec<usize>, Vec<u16>)>>,
+    /// If this window is a linked reference, stores the source window ID it was linked from.
+    pub linked_from: Option<usize>,
 }
 
 /// A menu item for display-menu
@@ -244,6 +285,16 @@ pub enum Mode {
     BufferChooser { selected: usize },
     /// Window index prompt (prefix ') — jump to window by number
     WindowIndexPrompt { input: String },
+    /// Interactive option editor (tmux 3.2+ customize-mode)
+    CustomizeMode {
+        options: Vec<(String, String, String)>,
+        selected: usize,
+        scroll_offset: usize,
+        editing: bool,
+        edit_buffer: String,
+        edit_cursor: usize,
+        filter: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -345,6 +396,8 @@ pub struct AppState {
     pub client_sizes: std::collections::HashMap<u64, (u16, u16)>,
     /// The most recently active client ID (for window_size="latest").
     pub latest_client_id: Option<u64>,
+    /// Client registry: all active PERSISTENT and CONTROL clients.
+    pub client_registry: std::collections::HashMap<u64, ClientInfo>,
     pub created_at: chrono::DateTime<Local>,
     pub next_win_id: usize,
     pub next_pane_id: usize,
@@ -460,6 +513,8 @@ pub struct AppState {
     pub command_history: Vec<String>,
     /// Command prompt history index (for up/down navigation)
     pub command_history_idx: usize,
+    /// Whether the command prompt vi mode is in normal (true) vs insert (false)
+    pub command_vi_normal: bool,
     /// status-interval: seconds between status-line refreshes (default 15)
     pub status_interval: u64,
     /// Last time the status-interval hook was fired
@@ -490,6 +545,8 @@ pub struct AppState {
     pub set_clipboard: String,
     /// One-shot clipboard text to be sent to the client via OSC 52 (set by yank, consumed by dump-state).
     pub clipboard_osc52: Option<String>,
+    /// One-shot bell forward flag: set when an audible bell should be emitted on the client terminal.
+    pub bell_forward: bool,
     /// env-shim: inject a Unix-compatible `env` function into PowerShell panes
     /// so that `env VAR=val command` syntax works (required by Claude Code, etc.).
     /// Default: on
@@ -512,6 +569,9 @@ pub struct AppState {
     /// Last mouse hover position (col, row) for same-coordinate deduplication.
     /// Windows Terminal suppresses consecutive MOUSE_MOVED at the same position.
     pub last_hover_pos: Option<(u16, u16)>,
+    /// Last mouse event position (col, row) for #{mouse_x}, #{mouse_y} format variables.
+    pub last_mouse_x: u16,
+    pub last_mouse_y: u16,
     /// Transient status-bar message from display-message (without -p).
     /// Tuple of (message_text, timestamp_when_set).
     pub status_message: Option<(String, std::time::Instant)>,
@@ -525,6 +585,9 @@ pub struct AppState {
     pub pending_plugin_scripts: Vec<String>,
     /// Connected control mode clients (keyed by client_id).
     pub control_clients: HashMap<u64, ControlClient>,
+    /// Session group name (set by `new-session -t target` for tmux group semantics).
+    /// Sessions in the same group logically share a window list.
+    pub session_group: Option<String>,
 }
 
 impl AppState {
@@ -581,6 +644,7 @@ impl AppState {
             attached_clients: 0,
             client_sizes: std::collections::HashMap::new(),
             latest_client_id: None,
+            client_registry: std::collections::HashMap::new(),
             created_at: Local::now(),
             next_win_id: 1,
             next_pane_id: 1,
@@ -649,6 +713,7 @@ impl AppState {
             visual_bell: false,
             command_history: Vec::new(),
             command_history_idx: 0,
+            command_vi_normal: false,
             status_interval: 15,
             last_status_interval_fire: std::time::Instant::now(),
             status_justify: "left".to_string(),
@@ -664,15 +729,19 @@ impl AppState {
             command_aliases: std::collections::HashMap::new(),
             set_clipboard: "on".to_string(),
             clipboard_osc52: None,
+            bell_forward: false,
             env_shim: true,
             claude_code_fix_tty: true,
             claude_code_force_interactive: true,
             last_hover_pos: None,
+            last_mouse_x: 0,
+            last_mouse_y: 0,
             status_message: None,
             warm_enabled: std::env::var("PSMUX_NO_WARM").map(|v| v != "1" && v != "true").unwrap_or(true),
             warm_pane: None,
             pending_plugin_scripts: Vec::new(),
             control_clients: HashMap::new(),
+            session_group: None,
         }
     }
 
@@ -830,17 +899,44 @@ pub enum CtrlReq {
     SourceFile(String),
     MoveWindow(Option<usize>),
     SwapWindow(usize),
-    LinkWindow(String),
+    /// link-window: (source window index, target insertion index)
+    LinkWindow(Option<usize>, Option<usize>),
     UnlinkWindow,
+    /// Set session group (used by new-session -t)
+    SetSessionGroup(String),
     FindWindow(mpsc::Sender<String>, String),
     MovePane(usize),
     PipePane(String, bool, bool, bool),
     SelectLayout(String),
     NextLayout,
     ListClients(mpsc::Sender<String>),
+    ListClientsFormat(mpsc::Sender<String>, String),
+    ForceDetachClient(u64),
     SwitchClient(String),
     LockClient,
     RefreshClient,
+    /// `refresh-client -B name:what:format` subscription management.
+    ControlSubscribe {
+        client_id: u64,
+        name: String,
+        target: String,
+        format: String,
+    },
+    /// `refresh-client -B name:` remove subscription.
+    ControlUnsubscribe {
+        client_id: u64,
+        name: String,
+    },
+    /// `refresh-client -f pause-after=N` set pause-after flag.
+    ControlSetPauseAfter {
+        client_id: u64,
+        pause_after_secs: Option<u64>,
+    },
+    /// `refresh-client -A '%N:continue'` resume paused pane output.
+    ControlContinuePane {
+        client_id: u64,
+        pane_id: usize,
+    },
     SuspendClient,
     CopyModePageUp,
     ClearHistory,
@@ -889,6 +985,10 @@ pub enum CtrlReq {
     /// Show static text in a popup overlay (title, content).
     /// Used by the persistent client command prompt for list-* commands.
     ShowTextPopup(String, String),
+    /// Clear the command prompt history.
+    ClearPromptHistory,
+    /// Show the command prompt history in a popup.
+    ShowPromptHistory(bool),
     /// Register a control mode client.
     ControlRegister {
         client_id: u64,
@@ -899,6 +999,22 @@ pub enum CtrlReq {
     ControlDeregister {
         client_id: u64,
     },
+    /// Open customize-mode (interactive options editor)
+    CustomizeMode,
+    /// Navigate customize-mode (delta: -1 = up, +1 = down)
+    CustomizeNavigate(i32),
+    /// Begin editing the selected option in customize-mode
+    CustomizeEdit,
+    /// Update the edit buffer text in customize-mode
+    CustomizeEditUpdate(String),
+    /// Confirm the edit (apply value) in customize-mode
+    CustomizeEditConfirm,
+    /// Cancel the edit in customize-mode
+    CustomizeEditCancel,
+    /// Reset selected option to default in customize-mode
+    CustomizeResetDefault,
+    /// Set filter string in customize-mode
+    CustomizeFilter(String),
 }
 
 /// Global flag set by PTY reader threads when new output arrives.
@@ -911,13 +1027,13 @@ pub static PTY_DATA_READY: std::sync::atomic::AtomicBool = std::sync::atomic::At
 /// `shutdown()` them before `process::exit(0)`.  Without this, Windows
 /// does not reliably deliver TCP RST on loopback sockets when a process
 /// exits, leaving the client's blocking `read_line()` stuck forever.
-static PERSISTENT_STREAMS: std::sync::Mutex<Vec<std::net::TcpStream>> = std::sync::Mutex::new(Vec::new());
+static PERSISTENT_STREAMS: std::sync::Mutex<Vec<(u64, std::net::TcpStream)>> = std::sync::Mutex::new(Vec::new());
 
-/// Register a persistent client stream (call from connection handler).
-pub fn register_persistent_stream(stream: &std::net::TcpStream) {
+/// Register a persistent client stream tagged with client_id (call from connection handler).
+pub fn register_persistent_stream(client_id: u64, stream: &std::net::TcpStream) {
     if let Ok(cloned) = stream.try_clone() {
         if let Ok(mut v) = PERSISTENT_STREAMS.lock() {
-            v.push(cloned);
+            v.push((client_id, cloned));
         }
     }
 }
@@ -925,9 +1041,27 @@ pub fn register_persistent_stream(stream: &std::net::TcpStream) {
 /// Shut down all tracked persistent client streams so their readers get EOF.
 pub fn shutdown_persistent_streams() {
     if let Ok(mut v) = PERSISTENT_STREAMS.lock() {
-        for s in v.drain(..) {
+        for (_, s) in v.drain(..) {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
+    }
+}
+
+/// Shut down a specific client's persistent stream and remove its frame sender.
+/// Used by force-detach to disconnect a targeted client.
+pub fn shutdown_client_stream(client_id: u64) {
+    if let Ok(mut v) = PERSISTENT_STREAMS.lock() {
+        v.retain(|(cid, s)| {
+            if *cid == client_id {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+                false
+            } else {
+                true
+            }
+        });
+    }
+    if let Ok(mut v) = FRAME_PUSH_SENDERS.lock() {
+        v.retain(|(cid, _)| *cid != client_id);
     }
 }
 
@@ -936,20 +1070,21 @@ pub fn shutdown_persistent_streams() {
 /// serialized frames through these channels whenever state changes.
 /// Each sender feeds a `Receiver<String>` into the persistent connection's
 /// existing writer-thread pipeline (which expects oneshot receivers).
-static FRAME_PUSH_SENDERS: std::sync::Mutex<Vec<std::sync::mpsc::Sender<std::sync::mpsc::Receiver<String>>>> =
+static FRAME_PUSH_SENDERS: std::sync::Mutex<Vec<(u64, std::sync::mpsc::Sender<std::sync::mpsc::Receiver<String>>)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Register a persistent connection's resp_tx clone for server-pushed frames.
-pub fn register_frame_sender(tx: std::sync::mpsc::Sender<std::sync::mpsc::Receiver<String>>) {
+/// Register a persistent connection's resp_tx clone for server-pushed frames,
+/// tagged with client_id for targeted operations (e.g. force-detach).
+pub fn register_frame_sender(client_id: u64, tx: std::sync::mpsc::Sender<std::sync::mpsc::Receiver<String>>) {
     if let Ok(mut v) = FRAME_PUSH_SENDERS.lock() {
-        v.push(tx);
+        v.push((client_id, tx));
     }
 }
 
 /// Push a serialized frame to all persistent clients.  Dead senders are pruned.
 pub fn push_frame(frame: &str) {
     if let Ok(mut senders) = FRAME_PUSH_SENDERS.lock() {
-        senders.retain(|tx| {
+        senders.retain(|(_, tx)| {
             let (rtx, rrx) = std::sync::mpsc::channel();
             // Send the frame through a oneshot so it fits the existing writer thread protocol
             if rtx.send(frame.to_string()).is_err() { return false; }

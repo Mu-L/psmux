@@ -152,10 +152,12 @@ pub(crate) fn window_data_version(win: &Window) -> u64 {
 /// Check non-active windows for output activity and set their activity_flag.
 /// Also checks bell_pending on all panes and sets window bell_flag,
 /// and checks monitor-silence timeout to set silence_flag.
-pub(crate) fn check_window_activity(app: &mut AppState) {
+pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
     let active = app.active_idx;
     let monitor_silence_secs = app.monitor_silence;
     let bell_action = app.bell_action.clone();
+    let mut triggered_hooks: Vec<&'static str> = Vec::new();
+    let mut forward_bell = false;
 
     for (i, win) in app.windows.iter_mut().enumerate() {
         // ── Bell detection: check all panes for pending bells ──
@@ -164,12 +166,18 @@ pub(crate) fn check_window_activity(app: &mut AppState) {
             // Apply bell-action: "any" = always, "current" = only active (skip),
             // "other" = only non-active (this path), "none" = never
             match bell_action.as_str() {
-                "any" | "other" => { win.bell_flag = true; }
+                "any" | "other" => {
+                    if !win.bell_flag { win.bell_flag = true; triggered_hooks.push("alert-bell"); }
+                    forward_bell = true;
+                }
                 _ => {} // "none" or "current" — don't flag non-active windows
             }
         } else if has_bell && i == active {
             match bell_action.as_str() {
-                "any" | "current" => { win.bell_flag = true; }
+                "any" | "current" => {
+                    if !win.bell_flag { win.bell_flag = true; triggered_hooks.push("alert-bell"); }
+                    forward_bell = true;
+                }
                 _ => {}
             }
         }
@@ -188,8 +196,9 @@ pub(crate) fn check_window_activity(app: &mut AppState) {
         }
         let cur = window_data_version(win);
         if cur != win.last_seen_version {
-            if app.monitor_activity {
+            if app.monitor_activity && !win.activity_flag {
                 win.activity_flag = true;
+                triggered_hooks.push("alert-activity");
             }
             win.last_output_time = std::time::Instant::now();
             win.silence_flag = false; // Reset silence on new output
@@ -201,9 +210,14 @@ pub(crate) fn check_window_activity(app: &mut AppState) {
             let elapsed = win.last_output_time.elapsed().as_secs();
             if elapsed >= monitor_silence_secs && !win.silence_flag {
                 win.silence_flag = true;
+                triggered_hooks.push("alert-silence");
             }
         }
     }
+    if forward_bell {
+        app.bell_forward = true;
+    }
+    triggered_hooks
 }
 
 /// Walk a pane tree and check/consume bell_pending flags.

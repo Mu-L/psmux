@@ -458,6 +458,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 Mode::ClockMode => "CLOCK",
                 Mode::BufferChooser { .. } => "BUF",
                 Mode::WindowIndexPrompt { .. } => "WIN#",
+                Mode::CustomizeMode { .. } => "CUSTOMIZE",
             };
             let time_str = Local::now().format("%H:%M").to_string();
 

@@ -127,7 +127,7 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `word-separators` | Str | `" -_@"` | Copy-mode word delimiters |
 | `activity-action` | Str | `other` | Action on window activity: `any`, `none`, `current`, `other` |
 | `silence-action` | Str | `other` | Action on window silence: `any`, `none`, `current`, `other` |
-| `bell-action` | Str | `any` | Bell action: `any`, `none`, `current`, `other` |
+| `bell-action` | Str | `any` | Bell action: controls audible bell forwarding and status bar flag (`any`, `none`, `current`, `other`) |
 | `visual-bell` | Bool | `off` | Visual bell indicator |
 | `allow-passthrough` | Str | `off` | Allow terminal passthrough sequences (`on`/`off`/`all`) |
 | `allow-rename` | Bool | `on` | Allow programs to set window title via escape sequences |
@@ -164,6 +164,39 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `window-status-activity-style` | Str | `reverse` | Activity tab style |
 | `window-status-bell-style` | Str | `reverse` | Bell tab style |
 | `window-status-last-style` | Str | | Last-active tab style |
+
+### Bell
+
+When a program inside a pane emits BEL (`\x07`), psmux forwards the bell character to your host terminal so you hear the audible beep. The `bell-action` option controls when this happens and when the status bar tab gets a bell flag (`!`):
+
+```tmux
+# Forward bell from any window (default)
+set -g bell-action any
+
+# Forward bell only from the active window
+set -g bell-action current
+
+# Forward bell only from non-active windows
+set -g bell-action other
+
+# Mute bell completely (no sound, no status bar flag)
+set -g bell-action none
+```
+
+The `window-status-bell-style` option controls how the tab looks when flagged:
+
+```tmux
+set -g window-status-bell-style "fg=red,bold"
+```
+
+PowerShell example to test:
+
+```powershell
+# These should all produce an audible beep inside psmux:
+Write-Host "`a"
+[Console]::Beep()
+[char]7
+```
 
 ### psmux Extensions (Windows-specific)
 

@@ -1069,127 +1069,179 @@ pub fn cycle_layout_reverse(app: &mut AppState) {
 ///
 /// The `panes` vec provides existing pane nodes to fill the tree leaves.
 /// Returns `None` if parsing fails.
-pub fn parse_tmux_layout_string(layout_str: &str, panes: &mut Vec<Node>) -> Option<Node> {
-    // Skip the 4-hex-char checksum + comma prefix
+/// Parsed layout node from a tmux layout string.
+/// This is a layout descriptor that can be inspected, counted, and applied
+/// to existing panes without requiring pane objects during parsing.
+#[derive(Debug, Clone)]
+pub enum LayoutNode {
+    Leaf { width: u16, height: u16, x: u16, y: u16, pane_id: Option<usize> },
+    Split { kind: LayoutKind, width: u16, height: u16, x: u16, y: u16, children: Vec<LayoutNode> },
+}
+
+impl LayoutNode {
+    /// Count the number of leaf panes in this layout tree.
+    pub fn count_leaves(&self) -> usize {
+        match self {
+            LayoutNode::Leaf { .. } => 1,
+            LayoutNode::Split { children, .. } => children.iter().map(|c| c.count_leaves()).sum(),
+        }
+    }
+
+    fn width(&self) -> u16 {
+        match self { LayoutNode::Leaf { width, .. } | LayoutNode::Split { width, .. } => *width }
+    }
+
+    fn height(&self) -> u16 {
+        match self { LayoutNode::Leaf { height, .. } | LayoutNode::Split { height, .. } => *height }
+    }
+}
+
+/// Parse a tmux layout string into a `LayoutNode` descriptor tree.
+///
+/// Layout string format: `CHECKSUM,WxH,X,Y{...}` or `[...]` or `,PANE_ID`
+/// The 4-hex-digit checksum prefix is skipped.
+pub fn parse_layout_string(layout_str: &str) -> Option<LayoutNode> {
     let s = layout_str.trim();
     if s.len() < 5 { return None; }
-    // Find the first comma after the checksum
-    let after_checksum = s.find(',')? + 1;
-    let body = &s[after_checksum..];
-    
-    let (node, _) = parse_node(body, panes)?;
+    // Validate and skip the 4-hex-char checksum prefix followed by comma.
+    // tmux checksums are exactly 4 hex digits (e.g. "5e08,").
+    let bytes = s.as_bytes();
+    if bytes.len() < 5 || bytes[4] != b',' { return None; }
+    for &b in &bytes[..4] {
+        if !b.is_ascii_hexdigit() { return None; }
+    }
+    let body = &s[5..];
+    let (node, _) = parse_layout_node(body)?;
     Some(node)
 }
 
-/// Parse a single node from position in the string, returns (Node, chars_consumed)
-fn parse_node(s: &str, panes: &mut Vec<Node>) -> Option<(Node, usize)> {
-    // Parse WxH,X,Y first
-    let (_w, _h, consumed_dims) = parse_dimensions(s)?;
+/// Parse a tmux layout string into a Node tree using existing panes.
+///
+/// Parses the layout string into a LayoutNode descriptor, then converts
+/// it to a Node tree by assigning panes from the provided vec in leaf order.
+/// Returns `None` if parsing fails or there aren't enough panes.
+pub fn parse_tmux_layout_string(layout_str: &str, panes: &mut Vec<Node>) -> Option<Node> {
+    let layout = parse_layout_string(layout_str)?;
+    layout_node_to_node(&layout, panes)
+}
+
+/// Convert a LayoutNode descriptor tree into a Node tree,
+/// consuming panes from the vec in left-to-right leaf order.
+fn layout_node_to_node(layout: &LayoutNode, panes: &mut Vec<Node>) -> Option<Node> {
+    match layout {
+        LayoutNode::Leaf { .. } => {
+            if panes.is_empty() { return None; }
+            Some(panes.remove(0))
+        }
+        LayoutNode::Split { kind, children, .. } => {
+            let total_size: u32 = match kind {
+                LayoutKind::Horizontal => children.iter().map(|c| c.width() as u32).sum(),
+                LayoutKind::Vertical => children.iter().map(|c| c.height() as u32).sum(),
+            };
+            let sizes: Vec<u16> = if total_size == 0 {
+                let n = children.len().max(1) as u16;
+                vec![100 / n; children.len()]
+            } else {
+                let mut szs: Vec<u16> = children.iter().map(|c| {
+                    let dim = match kind {
+                        LayoutKind::Horizontal => c.width() as u32,
+                        LayoutKind::Vertical => c.height() as u32,
+                    };
+                    (dim * 100 / total_size) as u16
+                }).collect();
+                let sum: u16 = szs.iter().sum();
+                if sum < 100 { if let Some(last) = szs.last_mut() { *last += 100 - sum; } }
+                szs
+            };
+            let mut nodes = Vec::with_capacity(children.len());
+            for child in children {
+                nodes.push(layout_node_to_node(child, panes)?);
+            }
+            Some(Node::Split { kind: *kind, sizes, children: nodes })
+        }
+    }
+}
+
+/// Parse a single layout node from position in the string, returns (LayoutNode, chars_consumed).
+fn parse_layout_node(s: &str) -> Option<(LayoutNode, usize)> {
+    let (w, h, x, y, consumed_dims) = parse_dimensions(s)?;
     let rest = &s[consumed_dims..];
-    
-    // After dimensions, we have either:
-    // - '{' for horizontal split
-    // - '[' for vertical split  
-    // - ',' followed by pane_id (leaf)
-    // - end of string (leaf with no pane_id)
-    
+
     if rest.starts_with('{') {
-        // Horizontal split
-        let (children, consumed_bracket) = parse_children(&rest[1..], '}', panes)?;
-        let total_w: u32 = children.iter().map(|(cw, _, _)| *cw as u32).sum();
-        let sizes: Vec<u16> = if total_w == 0 {
-            vec![100 / children.len().max(1) as u16; children.len()]
-        } else {
-            let mut szs: Vec<u16> = children.iter().map(|(cw, _, _)| ((*cw as u32) * 100 / total_w) as u16).collect();
-            let sum: u16 = szs.iter().sum();
-            if sum < 100 { if let Some(last) = szs.last_mut() { *last += 100 - sum; } }
-            szs
-        };
-        let nodes: Vec<Node> = children.into_iter().map(|(_, _, n)| n).collect();
+        // Horizontal split (children side-by-side)
+        let (children, consumed_bracket) = parse_layout_children(&rest[1..], '}')?;
         Some((
-            Node::Split { kind: LayoutKind::Horizontal, sizes, children: nodes },
+            LayoutNode::Split { kind: LayoutKind::Horizontal, width: w, height: h, x, y, children },
             consumed_dims + 1 + consumed_bracket,
         ))
     } else if rest.starts_with('[') {
-        // Vertical split
-        let (children, consumed_bracket) = parse_children(&rest[1..], ']', panes)?;
-        let total_h: u32 = children.iter().map(|(_, ch, _)| *ch as u32).sum();
-        let sizes: Vec<u16> = if total_h == 0 {
-            vec![100 / children.len().max(1) as u16; children.len()]
-        } else {
-            let mut szs: Vec<u16> = children.iter().map(|(_, ch, _)| ((*ch as u32) * 100 / total_h) as u16).collect();
-            let sum: u16 = szs.iter().sum();
-            if sum < 100 { if let Some(last) = szs.last_mut() { *last += 100 - sum; } }
-            szs
-        };
-        let nodes: Vec<Node> = children.into_iter().map(|(_, _, n)| n).collect();
+        // Vertical split (children stacked top/bottom)
+        let (children, consumed_bracket) = parse_layout_children(&rest[1..], ']')?;
         Some((
-            Node::Split { kind: LayoutKind::Vertical, sizes, children: nodes },
+            LayoutNode::Split { kind: LayoutKind::Vertical, width: w, height: h, x, y, children },
             consumed_dims + 1 + consumed_bracket,
         ))
     } else {
-        // Leaf node — may have ,pane_id suffix
+        // Leaf node; may have ,pane_id suffix
         let mut extra = 0;
+        let mut pane_id = None;
         if rest.starts_with(',') {
-            // Skip pane_id
             let id_str = &rest[1..];
-            let end = id_str.find(|c: char| c == ',' || c == '{' || c == '[' || c == '}' || c == ']').unwrap_or(id_str.len());
+            let end = id_str.find(|c: char| c == ',' || c == '{' || c == '[' || c == '}' || c == ']')
+                .unwrap_or(id_str.len());
+            pane_id = id_str[..end].parse::<usize>().ok();
             extra = 1 + end;
         }
-        // Consume a pane from the provided vec
-        let leaf = if !panes.is_empty() { panes.remove(0) } else { return None; };
-        Some((leaf, consumed_dims + extra))
+        Some((
+            LayoutNode::Leaf { width: w, height: h, x, y, pane_id },
+            consumed_dims + extra,
+        ))
     }
 }
 
-/// Parse WxH,X,Y — returns (width, height, chars_consumed)
-fn parse_dimensions(s: &str) -> Option<(u16, u16, usize)> {
-    // Parse W (digits)
+/// Parse WxH,X,Y returning (width, height, x, y, chars_consumed).
+fn parse_dimensions(s: &str) -> Option<(u16, u16, u16, u16, usize)> {
     let x_pos = s.find('x')?;
     let w: u16 = s[..x_pos].parse().ok()?;
     let after_x = &s[x_pos + 1..];
-    // Parse H (digits until ',')
     let comma1 = after_x.find(',')?;
     let h: u16 = after_x[..comma1].parse().ok()?;
     let after_h = &after_x[comma1 + 1..];
-    // Parse X (digits until ',')
     let comma2 = after_h.find(',')?;
-    // _x coordinate (skip)
+    let xc: u16 = after_h[..comma2].parse().ok()?;
     let after_xcoord = &after_h[comma2 + 1..];
-    // Parse Y (digits until next non-digit)
     let y_end = after_xcoord.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_xcoord.len());
-    // Total consumed: W + 'x' + H + ',' + X + ',' + Y
+    let yc: u16 = after_xcoord[..y_end].parse().ok()?;
     let total = x_pos + 1 + comma1 + 1 + comma2 + 1 + y_end;
-    Some((w, h, total))
+    Some((w, h, xc, yc, total))
 }
 
-/// Parse comma-separated children inside brackets.
-/// Returns vec of (width, height, Node) and total chars consumed including closing bracket.
-fn parse_children(s: &str, closing: char, panes: &mut Vec<Node>) -> Option<(Vec<(u16, u16, Node)>, usize)> {
+/// Parse comma-separated layout children inside brackets.
+/// Returns vec of LayoutNode and total chars consumed including closing bracket.
+fn parse_layout_children(s: &str, closing: char) -> Option<(Vec<LayoutNode>, usize)> {
     let mut children = Vec::new();
     let mut pos = 0;
-    
+
     loop {
         if pos >= s.len() { return None; }
         if s.as_bytes()[pos] == closing as u8 {
-            pos += 1; // consume closing bracket
+            pos += 1;
             break;
         }
         if !children.is_empty() {
-            // Expect comma separator between children
-            if s.as_bytes()[pos] == b',' {
+            if s.as_bytes().get(pos).copied() == Some(b',') {
                 pos += 1;
             }
         }
-        
-        // Parse child dimensions first to get w,h
         let child_str = &s[pos..];
-        let (cw, ch, _) = parse_dimensions(child_str)?;
-        // Now parse full node
-        let (node, consumed) = parse_node(child_str, panes)?;
-        children.push((cw, ch, node));
+        let (node, consumed) = parse_layout_node(child_str)?;
+        children.push(node);
         pos += consumed;
     }
-    
+
     Some((children, pos))
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_layout.rs"]
+mod test_layout;

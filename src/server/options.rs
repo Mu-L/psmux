@@ -101,6 +101,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "warm" => if app.warm_enabled { "on".into() } else { "off".into() },
         "claude-code-fix-tty" => if app.claude_code_fix_tty { "on".into() } else { "off".into() },
         "claude-code-force-interactive" => if app.claude_code_force_interactive { "on".into() } else { "off".into() },
+        "session-group" => app.session_group.clone().unwrap_or_default(),
         _ => {
             // Check user_options first (@-prefixed), then environment
             app.user_options.get(name).cloned()
@@ -295,7 +296,12 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
             app.allow_predictions = matches!(value, "on" | "true" | "1");
         }
         "cursor-style" => { std::env::set_var("PSMUX_CURSOR_STYLE", value); }
-        "cursor-blink" => { std::env::set_var("PSMUX_CURSOR_BLINK", if matches!(value, "on"|"true"|"1") { "1" } else { "0" }); }
+        "cursor-blink" => {
+            let on = matches!(value, "on"|"true"|"1");
+            std::env::set_var("PSMUX_CURSOR_BLINK", if on { "1" } else { "0" });
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), if on { b"\x1b[?12h" } else { b"\x1b[?12l" });
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
         "pane-border-style" => { app.pane_border_style = value.to_string(); }
         "pane-active-border-style" => { app.pane_active_border_style = value.to_string(); }
         "window-status-format" => { app.window_status_format = value.to_string(); }
@@ -372,6 +378,13 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
         }
         "claude-code-force-interactive" => {
             app.claude_code_force_interactive = matches!(value, "on" | "true" | "1");
+        }
+        "session-group" => {
+            if value.is_empty() || value == "none" {
+                app.session_group = None;
+            } else {
+                app.session_group = Some(value.to_string());
+            }
         }
         _ => {
             // Handle status-format[N] patterns

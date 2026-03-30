@@ -340,3 +340,44 @@ fn combined_data_version_stable_when_copy_state_unchanged() {
     let v2 = combined_data_version(&app);
     assert_eq!(v1, v2, "version must be stable when nothing changes");
 }
+
+// ── Bell forwarding tests ───────────────────────────────────────
+
+#[test]
+fn bell_forward_defaults_to_false() {
+    let app = AppState::new("test".to_string());
+    assert!(!app.bell_forward, "bell_forward must default to false");
+}
+
+#[test]
+fn bell_action_none_suppresses_bell_forward() {
+    let mut app = AppState::new("test".to_string());
+    crate::config::parse_config_line(&mut app, "set -g bell-action none");
+    assert_eq!(app.bell_action, "none");
+    // With bell-action none, check_window_activity should never set bell_forward
+    // (no panes to trigger, but verify the option is accepted)
+    let hooks = super::helpers::check_window_activity(&mut app);
+    assert!(!app.bell_forward, "bell_forward must stay false with bell-action none");
+    assert!(hooks.is_empty());
+}
+
+#[test]
+fn bell_action_set_to_any_via_config() {
+    let mut app = AppState::new("test".to_string());
+    crate::config::parse_config_line(&mut app, "set -g bell-action any");
+    assert_eq!(app.bell_action, "any");
+}
+
+#[test]
+fn bell_action_set_to_current_via_config() {
+    let mut app = AppState::new("test".to_string());
+    crate::config::parse_config_line(&mut app, "set -g bell-action current");
+    assert_eq!(app.bell_action, "current");
+}
+
+#[test]
+fn bell_action_set_to_other_via_config() {
+    let mut app = AppState::new("test".to_string());
+    crate::config::parse_config_line(&mut app, "set -g bell-action other");
+    assert_eq!(app.bell_action, "other");
+}

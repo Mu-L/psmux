@@ -47,6 +47,12 @@ pub fn format_notification(notif: &ControlNotification) -> String {
         ControlNotification::Pause { pane_id } => {
             format!("%pause %{}", pane_id)
         }
+        ControlNotification::ExtendedOutput { pane_id, age_ms, data } => {
+            format!("%extended-output %{} {} : {}", pane_id, age_ms, escape_output(data))
+        }
+        ControlNotification::SubscriptionChanged { name, session_id, window_id, window_index, pane_id, value } => {
+            format!("%subscription-changed {} ${} @{} {} %{} - {}", name, session_id, window_id, window_index, pane_id, value)
+        }
         ControlNotification::Exit { reason } => {
             if let Some(r) = reason {
                 format!("%exit {}", r)
@@ -273,6 +279,12 @@ mod tests {
             echo_enabled: true,
             notification_tx: tx,
             paused_panes: std::collections::HashSet::new(),
+            subscriptions: std::collections::HashMap::new(),
+            subscription_values: std::collections::HashMap::new(),
+            subscription_last_check: std::collections::HashMap::new(),
+            pause_after_secs: None,
+            output_paused_panes: std::collections::HashSet::new(),
+            pane_last_output: std::collections::HashMap::new(),
         });
         assert!(has_control_clients(&app));
     }
@@ -287,6 +299,12 @@ mod tests {
             echo_enabled: false,
             notification_tx: tx,
             paused_panes: std::collections::HashSet::new(),
+            subscriptions: std::collections::HashMap::new(),
+            subscription_values: std::collections::HashMap::new(),
+            subscription_last_check: std::collections::HashMap::new(),
+            pause_after_secs: None,
+            output_paused_panes: std::collections::HashSet::new(),
+            pane_last_output: std::collections::HashMap::new(),
         });
         emit_notification(&app, ControlNotification::WindowAdd { window_id: 5 });
         let notif = rx.try_recv().unwrap();
@@ -305,6 +323,12 @@ mod tests {
             echo_enabled: false,
             notification_tx: tx,
             paused_panes: paused,
+            subscriptions: std::collections::HashMap::new(),
+            subscription_values: std::collections::HashMap::new(),
+            subscription_last_check: std::collections::HashMap::new(),
+            pause_after_secs: None,
+            output_paused_panes: std::collections::HashSet::new(),
+            pane_last_output: std::collections::HashMap::new(),
         });
         // Output for paused pane 3 should be dropped
         emit_notification(&app, ControlNotification::Output { pane_id: 3, data: "test".into() });
@@ -323,5 +347,97 @@ mod tests {
     fn test_escape_output_mixed() {
         // Mix of printable, backslash, control, and tab
         assert_eq!(escape_output("a\\b\tc\x01d"), "a\\134b\tc\\001d");
+    }
+
+    #[test]
+    fn test_format_notification_extended_output() {
+        let line = format_notification(&ControlNotification::ExtendedOutput {
+            pane_id: 2,
+            age_ms: 150,
+            data: "hello\r\n".to_string(),
+        });
+        assert_eq!(line, "%extended-output %2 150 : hello\\015\\012");
+    }
+
+    #[test]
+    fn test_format_notification_subscription_changed() {
+        let line = format_notification(&ControlNotification::SubscriptionChanged {
+            name: "mysub".to_string(),
+            session_id: 0,
+            window_id: 1,
+            window_index: 0,
+            pane_id: 3,
+            value: "pwsh".to_string(),
+        });
+        assert_eq!(line, "%subscription-changed mysub $0 @1 0 %3 - pwsh");
+    }
+
+    #[test]
+    fn test_format_notification_paste_buffer_changed() {
+        let line = format_notification(&ControlNotification::PasteBufferChanged {
+            name: "buffer0".to_string(),
+        });
+        assert_eq!(line, "%paste-buffer-changed buffer0");
+    }
+
+    #[test]
+    fn test_format_notification_paste_buffer_deleted() {
+        let line = format_notification(&ControlNotification::PasteBufferDeleted {
+            name: "buffer1".to_string(),
+        });
+        assert_eq!(line, "%paste-buffer-deleted buffer1");
+    }
+
+    #[test]
+    fn test_format_notification_client_session_changed() {
+        let line = format_notification(&ControlNotification::ClientSessionChanged {
+            client: "/dev/pts/0".to_string(),
+            session_id: 2,
+            name: "work".to_string(),
+        });
+        assert_eq!(line, "%client-session-changed /dev/pts/0 $2 work");
+    }
+
+    #[test]
+    fn test_format_notification_message() {
+        let line = format_notification(&ControlNotification::Message {
+            text: "hello world".to_string(),
+        });
+        assert_eq!(line, "%message hello world");
+    }
+
+    #[test]
+    fn test_format_notification_sessions_changed() {
+        let line = format_notification(&ControlNotification::SessionsChanged);
+        assert_eq!(line, "%sessions-changed");
+    }
+
+    #[test]
+    fn test_format_notification_pane_mode_changed() {
+        let line = format_notification(&ControlNotification::PaneModeChanged { pane_id: 7 });
+        assert_eq!(line, "%pane-mode-changed %7");
+    }
+
+    #[test]
+    fn test_format_notification_extended_output_with_escape() {
+        let line = format_notification(&ControlNotification::ExtendedOutput {
+            pane_id: 0,
+            age_ms: 5000,
+            data: "line1\\line2".to_string(),
+        });
+        assert_eq!(line, "%extended-output %0 5000 : line1\\134line2");
+    }
+
+    #[test]
+    fn test_format_notification_subscription_changed_empty_value() {
+        let line = format_notification(&ControlNotification::SubscriptionChanged {
+            name: "test_sub".to_string(),
+            session_id: 1,
+            window_id: 2,
+            window_index: 3,
+            pane_id: 4,
+            value: String::new(),
+        });
+        assert_eq!(line, "%subscription-changed test_sub $1 @2 3 %4 - ");
     }
 }

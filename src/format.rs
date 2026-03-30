@@ -1000,9 +1000,15 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "session_created_string" => app.created_at.format("%a %b %e %H:%M:%S %Y").to_string(),
         "session_activity" | "session_last_attached" => app.created_at.timestamp().to_string(),
         "session_activity_string" => app.created_at.format("%a %b %e %H:%M:%S %Y").to_string(),
-        "session_group" | "session_group_list" | "session_alerts" | "session_stack" => String::new(),
-        "session_group_attached" | "session_group_size" => "0".into(),
-        "session_grouped" => "0".into(),
+        "session_group" | "session_group_list" => app.session_group.clone().unwrap_or_default(),
+        "session_alerts" | "session_stack" => String::new(),
+        "session_group_attached" => {
+            if app.session_group.is_some() && app.attached_clients > 0 { "1".into() } else { "0".into() }
+        }
+        "session_group_size" => {
+            if app.session_group.is_some() { "1".into() } else { "0".into() }
+        }
+        "session_grouped" => if app.session_group.is_some() { "1".into() } else { "0".into() },
         "session_format" | "session_many_attached" => if app.attached_clients > 1 { "1".into() } else { "0".into() },
         "session_path" => env::var("HOME").or_else(|_| env::var("USERPROFILE")).unwrap_or_default(),
 
@@ -1031,8 +1037,8 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "window_activity" => app.created_at.timestamp().to_string(),
         "window_silence_flag" => if win.silence_flag { "1".into() } else { "0".into() },
         "window_bell_flag" => if win.bell_flag { "1".into() } else { "0".into() },
-        "window_linked" => "0".into(),
-        "window_linked_sessions" => "0".into(),
+        "window_linked" => if win.linked_from.is_some() { "1".into() } else { "0".into() },
+        "window_linked_sessions" => if win.linked_from.is_some() { "1".into() } else { "0".into() },
         "window_linked_sessions_list" => String::new(),
         "window_last_flag" => if win_idx == app.last_window_idx { "1".into() } else { "0".into() },
         "window_start_flag" => if win_idx == 0 { "1".into() } else { "0".into() },
@@ -1236,6 +1242,28 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "pane_search_string" => app.copy_search_query.clone(),
         "pane_start_command" => app.default_shell.clone(),
         "pane_start_path" | "pane_tabs" => String::new(),
+        "pane_fg" => {
+            if let Some(p) = target_pane() {
+                if let Ok(parser) = p.term.lock() {
+                    let (r, c) = parser.screen().cursor_position();
+                    if let Some(cell) = parser.screen().cell(r, c) {
+                        return format_vt100_color(cell.fgcolor());
+                    }
+                }
+            }
+            "default".into()
+        }
+        "pane_bg" => {
+            if let Some(p) = target_pane() {
+                if let Ok(parser) = p.term.lock() {
+                    let (r, c) = parser.screen().cursor_position();
+                    if let Some(cell) = parser.screen().cell(r, c) {
+                        return format_vt100_color(cell.bgcolor());
+                    }
+                }
+            }
+            "default".into()
+        }
 
         // ── Cursor ──
         "cursor_x" => {
@@ -1268,6 +1296,79 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
             String::new()
         }
         "cursor_flag" => "0".into(),
+
+        // ── Mouse ──
+        "mouse_x" => app.last_mouse_x.to_string(),
+        "mouse_y" => app.last_mouse_y.to_string(),
+        "mouse_line" => {
+            if let Some(w) = app.windows.get(win_idx) {
+                if let Some(p) = active_pane(&w.root, &w.active_path) {
+                    if let Ok(parser) = p.term.lock() {
+                        let screen = parser.screen();
+                        let cols = p.last_cols;
+                        // Convert screen-absolute mouse_y to pane-relative row
+                        let mut rects = Vec::new();
+                        crate::tree::compute_rects(&w.root, app.last_window_area, &mut rects);
+                        let pane_y_offset = rects.iter()
+                            .find(|(path, _)| crate::tree::get_active_pane_id_at_path(&w.root, path) == Some(p.id))
+                            .map(|(_, rect)| rect.y)
+                            .unwrap_or(0);
+                        let row = app.last_mouse_y.saturating_sub(pane_y_offset);
+                        let mut row_text = String::with_capacity(cols as usize);
+                        for col in 0..cols {
+                            if let Some(cell) = screen.cell(row, col) {
+                                let t = cell.contents();
+                                if t.is_empty() { row_text.push(' '); } else { row_text.push_str(t); }
+                            } else { row_text.push(' '); }
+                        }
+                        return row_text.trim_end().to_string();
+                    }
+                }
+            }
+            String::new()
+        }
+        "mouse_word" => {
+            if let Some(w) = app.windows.get(win_idx) {
+                if let Some(p) = active_pane(&w.root, &w.active_path) {
+                    if let Ok(parser) = p.term.lock() {
+                        let screen = parser.screen();
+                        let cols = p.last_cols;
+                        let mut rects = Vec::new();
+                        crate::tree::compute_rects(&w.root, app.last_window_area, &mut rects);
+                        let (pane_x_offset, pane_y_offset) = rects.iter()
+                            .find(|(path, _)| crate::tree::get_active_pane_id_at_path(&w.root, path) == Some(p.id))
+                            .map(|(_, rect)| (rect.x, rect.y))
+                            .unwrap_or((0, 0));
+                        let row = app.last_mouse_y.saturating_sub(pane_y_offset);
+                        let col = app.last_mouse_x.saturating_sub(pane_x_offset);
+                        let mut row_text = String::with_capacity(cols as usize);
+                        for c in 0..cols {
+                            if let Some(cell) = screen.cell(row, c) {
+                                let t = cell.contents();
+                                if t.is_empty() { row_text.push(' '); } else { row_text.push_str(t); }
+                            } else { row_text.push(' '); }
+                        }
+                        let chars: Vec<char> = row_text.chars().collect();
+                        let ci = col as usize;
+                        if ci < chars.len() && !chars[ci].is_whitespace() {
+                            let seps = &app.word_separators;
+                            let cls = |ch: &char| -> u8 {
+                                if ch.is_whitespace() { 0 }
+                                else if seps.contains(*ch) { 1 }
+                                else { 2 }
+                            };
+                            let target = cls(&chars[ci]);
+                            let mut start = ci;
+                            while start > 0 && cls(&chars[start - 1]) == target { start -= 1; }
+                            let mut end = ci;
+                            while end + 1 < chars.len() && cls(&chars[end + 1]) == target { end += 1; }
+                            return chars[start..=end].iter().collect();
+                        }
+                    }
+                }
+            }
+            String::new()
+        }
 
         // ── Copy mode ──
         "copy_cursor_x" => app.copy_pos.map(|(_, c)| c.to_string()).unwrap_or("0".into()),
@@ -1435,6 +1536,32 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
 }
 
 // ─────────────────── helper utilities ────────────────────────────
+
+fn format_vt100_color(color: vt100::Color) -> String {
+    match color {
+        vt100::Color::Default => "default".into(),
+        vt100::Color::Idx(i) => match i {
+            0 => "black".into(),
+            1 => "red".into(),
+            2 => "green".into(),
+            3 => "yellow".into(),
+            4 => "blue".into(),
+            5 => "magenta".into(),
+            6 => "cyan".into(),
+            7 => "white".into(),
+            8 => "bright black".into(),
+            9 => "bright red".into(),
+            10 => "bright green".into(),
+            11 => "bright yellow".into(),
+            12 => "bright blue".into(),
+            13 => "bright magenta".into(),
+            14 => "bright cyan".into(),
+            15 => "bright white".into(),
+            _ => format!("colour{}", i),
+        },
+        vt100::Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+    }
+}
 
 fn hostname_cached() -> String {
     use std::sync::OnceLock;

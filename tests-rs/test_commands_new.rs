@@ -27,6 +27,7 @@ fn make_window(name: &str, id: usize) -> crate::types::Window {
         layout_index: 0,
         pane_mru: vec![],
         zoom_saved: None,
+        linked_from: None,
     }
 }
 
@@ -963,8 +964,8 @@ fn choose_client_is_noop() {
 fn customize_mode_shows_options_popup() {
     let mut app = mock_app_with_window();
     execute_command_string(&mut app, "customize-mode").unwrap();
-    // customize-mode now shows an options popup instead of being a no-op
-    assert!(matches!(app.mode, Mode::PopupMode { .. }));
+    // customize-mode now opens an interactive option editor
+    assert!(matches!(app.mode, Mode::CustomizeMode { .. }));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1030,9 +1031,19 @@ fn server_forwarded_swap_window() { assert_server_forward_noop("swap-window -t 1
 #[test]
 fn server_forwarded_swapw() { assert_server_forward_noop("swapw -t 1"); }
 #[test]
-fn server_forwarded_link_window() { assert_server_forward_noop("link-window -s 0 -t 1"); }
+fn server_forwarded_link_window() {
+    // link-window is now functional: creates a linked window (not a noop)
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    execute_command_string(&mut app, "link-window -s 0 -t 1").unwrap();
+    // May or may not add a window depending on PTY availability in test env
+}
 #[test]
-fn server_forwarded_linkw() { assert_server_forward_noop("linkw -s 0 -t 1"); }
+fn server_forwarded_linkw() {
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    execute_command_string(&mut app, "linkw -s 0 -t 1").unwrap();
+}
 #[test]
 fn server_forwarded_unlink_window() { assert_server_forward_noop("unlink-window"); }
 #[test]

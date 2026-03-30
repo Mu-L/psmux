@@ -416,6 +416,24 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut srv_pane_base_index: usize = 0;
     #[allow(unused_assignments)]
     let mut clock_active = false;
+    #[allow(unused_assignments)]
+    let mut clock_colour_str: Option<String> = None;
+
+    // ── Customize-mode overlay state ──
+    #[allow(unused_assignments)]
+    let mut srv_customize_active = false;
+    #[allow(unused_assignments)]
+    let mut srv_customize_selected: usize = 0;
+    #[allow(unused_assignments)]
+    let mut srv_customize_scroll: usize = 0;
+    #[allow(unused_assignments)]
+    let mut srv_customize_editing = false;
+    #[allow(unused_assignments)]
+    let mut srv_customize_cursor: usize = 0;
+    let mut srv_customize_edit_buf = String::new();
+    let mut srv_customize_filter = String::new();
+    #[allow(unused_assignments)]
+    let mut srv_customize_options: Vec<CustomizeOption> = Vec::new();
 
     #[derive(serde::Deserialize, Default)]
     struct WinStatus { id: usize, name: String, active: bool, #[serde(default)] activity: bool, #[serde(default)] tab_text: String }
@@ -451,6 +469,19 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         key: Option<String>,
         #[serde(default)]
         sep: bool,
+    }
+
+    /// A customize-mode option row from server
+    #[derive(serde::Deserialize, Clone, Debug, Default)]
+    struct CustomizeOption {
+        /// Original index in the full options list
+        i: usize,
+        /// Option name
+        n: String,
+        /// Current value
+        v: String,
+        /// Scope (server/session/window/pane)
+        s: String,
     }
 
     #[derive(serde::Deserialize)]
@@ -495,6 +526,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// clock-mode active
         #[serde(default)]
         clock_mode: bool,
+        /// clock-mode-colour (tmux option)
+        #[serde(default)]
+        clock_colour: Option<String>,
         /// Dynamic key bindings from server
         #[serde(default)]
         bindings: Vec<BindingEntry>,
@@ -530,6 +564,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// One-shot clipboard text (base64-encoded) for OSC 52 delivery.
         #[serde(default)]
         clipboard_osc52: Option<String>,
+        /// One-shot bell flag: server signals client to emit \x07 to the host terminal.
+        #[serde(default)]
+        bell: bool,
         /// Repeat key timeout in ms (default: 500, synced from server)
         #[serde(default = "default_repeat_time")]
         repeat_time: u64,
@@ -575,6 +612,23 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// Status bar message from display-message (without -p)
         #[serde(default)]
         status_message: Option<String>,
+        /// Customize-mode overlay active
+        #[serde(default)]
+        customize_active: bool,
+        #[serde(default)]
+        customize_selected: usize,
+        #[serde(default)]
+        customize_scroll: usize,
+        #[serde(default)]
+        customize_editing: bool,
+        #[serde(default)]
+        customize_cursor: usize,
+        #[serde(default)]
+        customize_edit_buf: Option<String>,
+        #[serde(default)]
+        customize_filter: Option<String>,
+        #[serde(default)]
+        customize_options: Vec<CustomizeOption>,
     }
 
     let mut cmd_batch: Vec<String> = Vec::new();
@@ -604,6 +658,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Buffered OSC 52 clipboard text — written AFTER terminal.draw() to
     // avoid corrupting ratatui's output buffer.
     let mut pending_osc52: Option<String> = None;
+    let mut pending_bell = false;
     // VT input mode: periodically re-send mouse-enable escape sequences.
     // Covers SSH sessions and JetBrains JediTerm (which sends VT mouse
     // sequences through ConPTY instead of native MOUSE_EVENT records).
@@ -1046,6 +1101,48 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     cmd_batch.push(format!("display-panes-select {}\n", digit));
                                 }
                                 _ => { cmd_batch.push("overlay-close\n".into()); }
+                            }
+                        }
+                        else if srv_customize_active {
+                            if srv_customize_editing {
+                                match key.code {
+                                    KeyCode::Esc => { cmd_batch.push("customize-edit-cancel\n".into()); }
+                                    KeyCode::Enter => { cmd_batch.push("customize-edit-confirm\n".into()); }
+                                    KeyCode::Backspace => {
+                                        if srv_customize_cursor > 0 {
+                                            let mut buf = srv_customize_edit_buf.clone();
+                                            buf.remove(srv_customize_cursor - 1);
+                                            cmd_batch.push(format!("customize-edit-update {}\n", buf));
+                                        }
+                                    }
+                                    KeyCode::Char(c) => {
+                                        let mut buf = srv_customize_edit_buf.clone();
+                                        buf.insert(srv_customize_cursor, c);
+                                        cmd_batch.push(format!("customize-edit-update {}\n", buf));
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                match key.code {
+                                    KeyCode::Esc | KeyCode::Char('q') => { cmd_batch.push("overlay-close\n".into()); }
+                                    KeyCode::Up | KeyCode::Char('k') => { cmd_batch.push("customize-navigate -1\n".into()); }
+                                    KeyCode::Down | KeyCode::Char('j') => { cmd_batch.push("customize-navigate 1\n".into()); }
+                                    KeyCode::PageUp => { cmd_batch.push("customize-navigate -20\n".into()); }
+                                    KeyCode::PageDown => { cmd_batch.push("customize-navigate 20\n".into()); }
+                                    KeyCode::Home | KeyCode::Char('g') => { cmd_batch.push("customize-navigate -9999\n".into()); }
+                                    KeyCode::End | KeyCode::Char('G') => { cmd_batch.push("customize-navigate 9999\n".into()); }
+                                    KeyCode::Enter => { cmd_batch.push("customize-edit\n".into()); }
+                                    KeyCode::Char('d') => { cmd_batch.push("customize-reset-default\n".into()); }
+                                    KeyCode::Char('/') => {
+                                        // Toggle filter: if filter active, clear it
+                                        if !srv_customize_filter.is_empty() {
+                                            cmd_batch.push("customize-filter \n".into());
+                                        }
+                                        // For entering a new filter, we would need a mini prompt.
+                                        // For now, users type filter text via subsequent keystrokes.
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || tree_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
@@ -2024,6 +2121,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         let base_index = state.base_index;
         let dim_preds = state.prediction_dimming;
         clock_active = state.clock_mode;
+        clock_colour_str = state.clock_colour;
         let state_cursor_style_code = state.cursor_style_code;
         // Server-side overlay state (update persistent variables)
         srv_popup_active = state.popup_active;
@@ -2046,6 +2144,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         srv_menu_items = state.menu_items;
         srv_display_panes = state.display_panes;
         srv_pane_base_index = state.pane_base_index;
+        srv_customize_active = state.customize_active;
+        srv_customize_selected = state.customize_selected;
+        srv_customize_scroll = state.customize_scroll;
+        srv_customize_editing = state.customize_editing;
+        srv_customize_cursor = state.customize_cursor;
+        srv_customize_edit_buf = state.customize_edit_buf.unwrap_or_default();
+        srv_customize_filter = state.customize_filter.unwrap_or_default();
+        srv_customize_options = state.customize_options;
 
         // ── Extract active pane's cursor state ──────────────────────
         // We collect cursor info here but DON'T use
@@ -2087,6 +2193,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 copy_to_system_clipboard(&clip_text);
                 pending_osc52 = Some(clip_text);
             }
+        }
+
+        // ── Audible bell: forward BEL to host terminal ──────────────
+        if state.bell {
+            pending_bell = true;
         }
 
         // Update prefix key from server config (if provided)
@@ -2226,7 +2337,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             };
 
             /// Render a large ASCII clock overlay (tmux clock-mode)
-            fn render_clock_overlay(f: &mut Frame, area: Rect) {
+            fn render_clock_overlay(f: &mut Frame, area: Rect, colour: Color) {
                 // Big digit font (5 rows high, 3 cols wide per digit + colon)
                 const DIGITS: [&[&str; 5]; 10] = [
                     &["###", "# #", "# #", "# #", "###"],  // 0
@@ -2257,13 +2368,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     for ch in time_str.chars() {
                         if ch == ':' {
                             let cell_area = Rect::new(x, start_y + row, 1, 1);
-                            let s = Span::styled(COLON[row as usize], Style::default().fg(Color::Cyan));
+                            let s = Span::styled(COLON[row as usize], Style::default().fg(colour));
                             f.render_widget(Paragraph::new(Line::from(s)), cell_area);
                             x += 2;
                         } else if let Some(d) = ch.to_digit(10) {
                             let pattern = DIGITS[d as usize][row as usize];
                             let cell_area = Rect::new(x, start_y + row, 3, 1);
-                            let s = Span::styled(pattern, Style::default().fg(Color::Cyan));
+                            let s = Span::styled(pattern, Style::default().fg(colour));
                             f.render_widget(Paragraph::new(Line::from(s)), cell_area);
                             x += 4;
                         }
@@ -2271,7 +2382,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 }
             }
 
-            fn render_json(f: &mut Frame, node: &LayoutJson, area: Rect, dim_preds: bool, border_fg: Color, active_border_fg: Color, clock_mode: bool, active_rect: Option<Rect>, mode_style_str: &str, zoomed: bool) {
+            fn render_json(f: &mut Frame, node: &LayoutJson, area: Rect, dim_preds: bool, border_fg: Color, active_border_fg: Color, clock_mode: bool, clock_colour: Color, active_rect: Option<Rect>, mode_style_str: &str, zoomed: bool) {
                 match node {
                     LayoutJson::Leaf {
                         id: _,
@@ -2476,7 +2587,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         if *active && !*copy_mode {
                             // Clock mode overlay
                             if clock_mode {
-                                render_clock_overlay(f, inner);
+                                render_clock_overlay(f, inner, clock_colour);
                             }
                             // Cursor visibility is handled entirely outside
                             // the draw callback — see the post-draw atomic
@@ -2524,7 +2635,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
 
                         // Render children first
                         for (i, child) in children.iter().enumerate() {
-                            if i < rects.len() { render_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, active_rect, mode_style_str, zoomed); }
+                            if i < rects.len() { render_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed); }
                         }
 
                         // Draw separator lines between children using direct buffer access.
@@ -2621,7 +2732,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             }
 
             let active_rect = compute_active_rect_json(&root, content_chunk);
-            render_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, active_rect, &mode_style_str, state.zoomed);
+            let clock_col = clock_colour_str.as_deref().map(|s| map_color(s)).unwrap_or(Color::Cyan);
+            render_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed);
             fix_border_intersections(f.buffer_mut());
 
             // ── Left-click drag text selection overlay ────────────────
@@ -3080,6 +3192,98 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 let para = Paragraph::new(Text::from(lines));
                 f.render_widget(para, inner);
             }
+            if srv_customize_active {
+                // Full-screen overlay for customize-mode
+                let area = content_chunk;
+                let overlay = Rect {
+                    x: area.x + 2,
+                    y: area.y + 1,
+                    width: area.width.saturating_sub(4).min(100),
+                    height: area.height.saturating_sub(2),
+                };
+                f.render_widget(Clear, overlay);
+                let header_style = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
+                let header = if srv_customize_filter.is_empty() {
+                    " Customize Mode  [q:exit  /:filter  Enter:edit  d:reset default] "
+                } else {
+                    " Customize Mode  [q:exit  /:clear filter  Enter:edit  d:reset] "
+                };
+                if overlay.height > 0 {
+                    let header_area = Rect { x: overlay.x, y: overlay.y, width: overlay.width, height: 1 };
+                    let hdr = Paragraph::new(Line::from(Span::styled(
+                        format!("{:<width$}", header, width = overlay.width as usize),
+                        header_style,
+                    )));
+                    f.render_widget(hdr, header_area);
+                }
+                // Filter indicator
+                let body_start = overlay.y + 1;
+                if !srv_customize_filter.is_empty() && overlay.height > 1 {
+                    let filter_area = Rect { x: overlay.x, y: body_start, width: overlay.width, height: 1 };
+                    let filter_style = Style::default().fg(Color::Yellow).bg(Color::DarkGray);
+                    let ftxt = format!(" Filter: {} ", srv_customize_filter);
+                    f.render_widget(Paragraph::new(Line::from(Span::styled(
+                        format!("{:<width$}", ftxt, width = overlay.width as usize), filter_style,
+                    ))), filter_area);
+                }
+                let list_start = if srv_customize_filter.is_empty() { body_start } else { body_start + 1 };
+                let list_height = overlay.y.saturating_add(overlay.height).saturating_sub(list_start) as usize;
+                // Column header
+                if list_height > 0 {
+                    let col_hdr_area = Rect { x: overlay.x, y: list_start, width: overlay.width, height: 1 };
+                    let col_style = Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+                    let name_w = (overlay.width as usize / 2).max(20);
+                    let col_text = format!(" {:<nw$} {}", "Option", "Value", nw = name_w.saturating_sub(2));
+                    f.render_widget(Paragraph::new(Line::from(Span::styled(
+                        format!("{:<width$}", col_text, width = overlay.width as usize), col_style,
+                    ))), col_hdr_area);
+                }
+                let rows_start = list_start + 1;
+                let rows_height = overlay.y.saturating_add(overlay.height).saturating_sub(rows_start) as usize;
+                // Render visible option rows
+                let visible_opts: Vec<&CustomizeOption> = srv_customize_options.iter()
+                    .skip(srv_customize_scroll)
+                    .take(rows_height)
+                    .collect();
+                for (row_idx, opt) in visible_opts.iter().enumerate() {
+                    if rows_start + row_idx as u16 >= overlay.y + overlay.height { break; }
+                    let row_area = Rect {
+                        x: overlay.x,
+                        y: rows_start + row_idx as u16,
+                        width: overlay.width,
+                        height: 1,
+                    };
+                    let is_selected = opt.i == srv_customize_selected;
+                    let name_w = (overlay.width as usize / 2).max(20);
+                    let scope_prefix = match opt.s.as_str() {
+                        "server" => "[S] ",
+                        "session" => "[s] ",
+                        "window" => "[w] ",
+                        "pane" => "[p] ",
+                        _ => "    ",
+                    };
+                    let name_display = format!("{}{}", scope_prefix, opt.n);
+                    let value_display = if is_selected && srv_customize_editing {
+                        let buf = &srv_customize_edit_buf;
+                        format!("{}|", buf)
+                    } else {
+                        opt.v.clone()
+                    };
+                    let line_text = format!(" {:<nw$} {}", name_display, value_display, nw = name_w.saturating_sub(2));
+                    let style = if is_selected {
+                        if srv_customize_editing {
+                            Style::default().fg(Color::Black).bg(Color::Yellow)
+                        } else {
+                            Style::default().fg(Color::Black).bg(Color::White)
+                        }
+                    } else {
+                        Style::default().fg(Color::White).bg(Color::Reset)
+                    };
+                    f.render_widget(Paragraph::new(Line::from(Span::styled(
+                        format!("{:<width$}", line_text, width = overlay.width as usize), style,
+                    ))), row_area);
+                }
+            }
             if srv_display_panes {
                 // Render pane numbers overlay (like tmux display-panes)
                 fn collect_leaf_rects(node: &LayoutJson, area: Rect, out: &mut Vec<Rect>) {
@@ -3135,6 +3339,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         // ratatui's VT output buffer.
         if let Some(clip_text) = pending_osc52.take() {
             crate::copy_mode::emit_osc52(&mut std::io::stdout(), &clip_text);
+        }
+
+        // ── Post-draw: emit audible bell ─────────────────────────────
+        if pending_bell {
+            pending_bell = false;
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), b"\x07");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
         }
 
         // ── SSH: periodic mouse-enable refresh ───────────────────────

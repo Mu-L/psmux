@@ -85,7 +85,7 @@ if line.trim() == "PERSISTENT" {
     // Track this stream so the server can explicitly shut it down before
     // process::exit(0).  Without this, the client never gets EOF on
     // Windows loopback sockets.
-    crate::types::register_persistent_stream(&write_stream);
+    crate::types::register_persistent_stream(client_id, &write_stream);
     
     // Spawn a dedicated writer thread so the read loop never blocks
     // waiting for dump-state responses.  The read loop sends oneshot
@@ -97,7 +97,7 @@ if line.trim() == "PERSISTENT" {
     // Register a clone for server-pushed frames (event-driven rendering).
     // The server auto-pushes serialized frames when PTY output arrives,
     // eliminating the need for the client to poll dump-state.
-    crate::types::register_frame_sender(resp_tx.clone());
+    crate::types::register_frame_sender(client_id, resp_tx.clone());
 
     std::thread::spawn(move || {
         while let Ok(rrx) = resp_rx.recv() {
@@ -125,9 +125,9 @@ if control_echo || control_noecho {
     let _ = write_stream.set_nodelay(true);
     let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(5000)));
 
-    crate::types::register_persistent_stream(&write_stream);
-
     let ctrl_client_id = crate::types::next_control_client_id();
+    crate::types::register_persistent_stream(ctrl_client_id, &write_stream);
+
     let (notif_tx, notif_rx) = std::sync::mpsc::sync_channel::<ControlNotification>(4096);
 
     // Register with server
@@ -1176,8 +1176,12 @@ match cmd {
         }
     }
     "link-window" | "linkw" => {
-        let target = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"").to_string();
-        let _ = tx.send(CtrlReq::LinkWindow(target));
+        // Parse -s source_window and -t target_index
+        let src_idx = args.windows(2).find(|w| w[0] == "-s")
+            .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
+        let dst_idx = args.windows(2).find(|w| w[0] == "-t")
+            .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
+        let _ = tx.send(CtrlReq::LinkWindow(src_idx, dst_idx));
     }
     "unlink-window" | "unlinkw" => {
         let _ = tx.send(CtrlReq::UnlinkWindow);
@@ -1220,8 +1224,13 @@ match cmd {
         let _ = tx.send(CtrlReq::NextLayout);
     }
     "list-clients" | "lsc" => {
+        let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
         let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::ListClients(rtx));
+        if let Some(fmt_str) = fmt {
+            let _ = tx.send(CtrlReq::ListClientsFormat(rtx, fmt_str));
+        } else {
+            let _ = tx.send(CtrlReq::ListClients(rtx));
+        }
         if let Ok(text) = rrx.recv() {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("list-clients".to_string(), text));
@@ -1404,8 +1413,15 @@ match cmd {
     }
     // tmux standard aliases
     "detach-client" | "detach" => {
-        let _ = tx.send(CtrlReq::ClientDetach(client_id));
-        attached_sent = false;
+        // Check for -t flag targeting a specific client (already parsed into raw_target)
+        let target_cid: Option<u64> = raw_target.as_ref()
+            .and_then(|t| t.trim_start_matches('%').parse::<u64>().ok());
+        if let Some(cid) = target_cid {
+            let _ = tx.send(CtrlReq::ForceDetachClient(cid));
+        } else {
+            let _ = tx.send(CtrlReq::ClientDetach(client_id));
+            attached_sent = false;
+        }
     }
     "attach-session" | "attach" => {
         if !attached_sent {
@@ -1470,6 +1486,30 @@ match cmd {
     "menu-navigate" => {
         let delta = args.get(0).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
         let _ = tx.send(CtrlReq::MenuNavigate(delta));
+    }
+    "customize-navigate" => {
+        let delta = args.get(0).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+        let _ = tx.send(CtrlReq::CustomizeNavigate(delta));
+    }
+    "customize-edit" => {
+        let _ = tx.send(CtrlReq::CustomizeEdit);
+    }
+    "customize-edit-update" => {
+        let text = args.join(" ");
+        let _ = tx.send(CtrlReq::CustomizeEditUpdate(text));
+    }
+    "customize-edit-confirm" => {
+        let _ = tx.send(CtrlReq::CustomizeEditConfirm);
+    }
+    "customize-edit-cancel" => {
+        let _ = tx.send(CtrlReq::CustomizeEditCancel);
+    }
+    "customize-reset-default" => {
+        let _ = tx.send(CtrlReq::CustomizeResetDefault);
+    }
+    "customize-filter" => {
+        let text = args.join(" ");
+        let _ = tx.send(CtrlReq::CustomizeFilter(text));
     }
     "show-messages" | "showmsgs" => {
         let (rtx, rrx) = mpsc::channel::<String>();
@@ -1581,7 +1621,11 @@ match cmd {
         if !persistent { break; }
     }
     "new-session" | "new" => {
-        // Accept but ignore in server context (requires a new process)
+        // new-session -t target: set session group on this server
+        if let Some(target) = args.windows(2).find(|w| w[0] == "-t").map(|w| w[1].to_string()) {
+            let _ = tx.send(CtrlReq::SetSessionGroup(target));
+        }
+        // Full new-session requires a new process (handled by CLI)
     }
     "list-commands" | "lscm" => {
         let cmds = TMUX_COMMANDS.join("\n");
@@ -1634,20 +1678,27 @@ match cmd {
     "focus-in" => { let _ = tx.send(CtrlReq::FocusIn); }
     "focus-out" => { let _ = tx.send(CtrlReq::FocusOut); }
     "choose-client" => {
-        // Single-client model — choose-client is a no-op
+        let (rtx, rrx) = mpsc::channel::<String>();
+        let _ = tx.send(CtrlReq::ListClients(rtx));
+        if let Ok(text) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("choose-client".to_string(), text));
+            } else {
+                let _ = write!(write_stream, "{}", text);
+                let _ = write_stream.flush();
+            }
+        }
+        if !persistent { break; }
     }
     "customize-mode" => {
-        // tmux 3.2+ customize-mode — stub for compatibility
+        // tmux 3.2+ customize-mode: interactive options editor
+        let _ = tx.send(CtrlReq::CustomizeMode);
     }
     "clear-prompt-history" | "clearphist" => {
-        // Prompt history not tracked — stub for compatibility
+        let _ = tx.send(CtrlReq::ClearPromptHistory);
     }
     "show-prompt-history" | "showphist" => {
-        // Prompt history not tracked — stub for compatibility
-        if persistent {
-            let _ = tx.send(CtrlReq::ShowTextPopup("show-prompt-history".to_string(),
-                "(prompt history not available)\n".to_string()));
-        }
+        let _ = tx.send(CtrlReq::ShowPromptHistory(persistent));
     }
     "server-access" => {
         // Multi-user server access — not applicable to psmux
@@ -1689,7 +1740,7 @@ fn dispatch_control_command(
     target_pane: Option<usize>,
     pane_is_id: bool,
     _raw_target: Option<&str>,
-    _client_id: u64,
+    client_id: u64,
 ) -> bool {
     match cmd {
         "list-windows" | "lsw" => {
@@ -1822,8 +1873,13 @@ fn dispatch_control_command(
             let _ = resp_tx.send(String::new());
             true
         }
-        "kill-window" | "killw" | "unlink-window" | "unlinkw" => {
+        "kill-window" | "killw" => {
             let _ = tx.send(CtrlReq::KillWindow);
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "unlink-window" | "unlinkw" => {
+            let _ = tx.send(CtrlReq::UnlinkWindow);
             let _ = resp_tx.send(String::new());
             true
         }
@@ -1942,8 +1998,13 @@ fn dispatch_control_command(
             true
         }
         "list-clients" | "lsc" => {
+            let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::ListClients(rtx));
+            if let Some(fmt_str) = fmt {
+                let _ = tx.send(CtrlReq::ListClientsFormat(rtx, fmt_str));
+            } else {
+                let _ = tx.send(CtrlReq::ListClients(rtx));
+            }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);
             }
@@ -2142,6 +2203,86 @@ fn dispatch_control_command(
                      else { WaitForOp::Wait };
             if let Some(channel) = args.iter().find(|a| !a.starts_with('-')) {
                 let _ = tx.send(CtrlReq::WaitFor(channel.to_string(), op));
+            }
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        "refresh-client" | "refresh" => {
+            // Parse -B name:what:format (subscription management)
+            let mut i = 0;
+            while i < args.len() {
+                if args[i] == "-B" {
+                    if let Some(spec) = args.get(i + 1) {
+                        // Format: "name:what:format" or "name:" (remove)
+                        let spec = spec.trim_matches('"');
+                        if let Some(colon1) = spec.find(':') {
+                            let name = spec[..colon1].to_string();
+                            let rest = &spec[colon1 + 1..];
+                            if rest.is_empty() {
+                                // Remove subscription: "name:"
+                                let _ = tx.send(CtrlReq::ControlUnsubscribe {
+                                    client_id,
+                                    name,
+                                });
+                            } else if let Some(colon2) = rest.find(':') {
+                                let target = rest[..colon2].to_string();
+                                let format = rest[colon2 + 1..].to_string();
+                                let _ = tx.send(CtrlReq::ControlSubscribe {
+                                    client_id,
+                                    name,
+                                    target,
+                                    format,
+                                });
+                            }
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                // Parse -f flags (e.g. pause-after=N)
+                if args[i] == "-f" {
+                    if let Some(flag_val) = args.get(i + 1) {
+                        let flag_val = flag_val.trim_matches('"');
+                        if let Some(stripped) = flag_val.strip_prefix("pause-after=") {
+                            let secs = stripped.parse::<u64>().ok();
+                            let _ = tx.send(CtrlReq::ControlSetPauseAfter {
+                                client_id,
+                                pause_after_secs: secs,
+                            });
+                        } else if flag_val == "no-pause" {
+                            let _ = tx.send(CtrlReq::ControlSetPauseAfter {
+                                client_id,
+                                pause_after_secs: None,
+                            });
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                // Parse -A '%N:continue' (resume paused pane)
+                if args[i] == "-A" {
+                    if let Some(spec) = args.get(i + 1) {
+                        let spec = spec.trim_matches('"').trim_matches('\'');
+                        // Format: %N:continue or %N:pause
+                        if let Some(colon) = spec.find(':') {
+                            let pane_spec = &spec[..colon];
+                            let action = &spec[colon + 1..];
+                            if action == "continue" {
+                                if let Some(pid_str) = pane_spec.strip_prefix('%') {
+                                    if let Ok(pid) = pid_str.parse::<usize>() {
+                                        let _ = tx.send(CtrlReq::ControlContinuePane {
+                                            client_id,
+                                            pane_id: pid,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                i += 1;
             }
             let _ = resp_tx.send(String::new());
             true

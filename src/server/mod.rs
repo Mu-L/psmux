@@ -1,5 +1,6 @@
 pub(crate) mod helpers;
-mod options;
+pub(crate) mod options;
+pub(crate) mod option_catalog;
 mod connection;
 
 use std::io::{self, Write};
@@ -272,7 +273,7 @@ fn drain_plugin_req(
     }
 }
 
-pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>) -> io::Result<()> {
+pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>) -> io::Result<()> {
     // Write crash info to a log file when stderr is unavailable (detached server)
     std::panic::set_hook(Box::new(|info| {
         let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
@@ -287,6 +288,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 
     let mut app = AppState::new(session_name);
     app.socket_name = socket_name;
+    app.session_group = group_target;
     // Server starts detached with a reasonable default window size
     app.attached_clients = 0;
 
@@ -508,6 +510,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             let _ = execute_command_string(&mut app, &cmd);
         }
     }
+    // Fire session-created hook at startup
+    {
+        let cmds: Vec<String> = app.hooks.get("session-created").cloned().unwrap_or_default();
+        for cmd in cmds {
+            let _ = execute_command_string(&mut app, &cmd);
+        }
+    }
     // Spawn a warm server for the NEXT new-session when the current session
     // is allowed to keep background state alive.
     if should_spawn_warm_server(&app) {
@@ -565,19 +574,62 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             state_dirty = true;
             // Drain output ring buffers and send %output notifications to control clients
             if !app.control_clients.is_empty() {
+                // Collect output from all panes first, then dispatch to clients
+                let mut pane_outputs: Vec<(usize, String)> = Vec::new();
                 for win in &app.windows {
                     crate::tree::for_each_pane(&win.root, &mut |pane: &crate::types::Pane| {
                         if let Ok(mut ring) = pane.output_ring.lock() {
                             if !ring.is_empty() {
                                 let bytes: Vec<u8> = ring.drain(..).collect();
                                 let data = String::from_utf8_lossy(&bytes).to_string();
-                                control::emit_notification(&app, crate::types::ControlNotification::Output {
-                                    pane_id: pane.id,
-                                    data,
-                                });
+                                pane_outputs.push((pane.id, data));
                             }
                         }
                     });
+                }
+                // Dispatch to each control client with pause-after logic
+                let now = std::time::Instant::now();
+                for (pane_id, data) in &pane_outputs {
+                    for client in app.control_clients.values_mut() {
+                        if client.paused_panes.contains(pane_id) {
+                            continue;
+                        }
+                        if client.output_paused_panes.contains(pane_id) {
+                            // Pane is paused for this client; drop output
+                            continue;
+                        }
+                        if let Some(pause_secs) = client.pause_after_secs {
+                            // Track output timing per pane
+                            let last = client.pane_last_output.entry(*pane_id).or_insert(now);
+                            let age = now.duration_since(*last);
+                            *last = now;
+                            if age.as_secs() >= pause_secs {
+                                // Client fell behind: pause this pane
+                                client.output_paused_panes.insert(*pane_id);
+                                let _ = client.notification_tx.try_send(
+                                    crate::types::ControlNotification::Pause { pane_id: *pane_id }
+                                );
+                                continue;
+                            }
+                            // Send as extended-output with age
+                            let age_ms = age.as_millis() as u64;
+                            let _ = client.notification_tx.try_send(
+                                crate::types::ControlNotification::ExtendedOutput {
+                                    pane_id: *pane_id,
+                                    age_ms,
+                                    data: data.clone(),
+                                }
+                            );
+                        } else {
+                            // No pause-after: send normal %output
+                            let _ = client.notification_tx.try_send(
+                                crate::types::ControlNotification::Output {
+                                    pane_id: *pane_id,
+                                    data: data.clone(),
+                                }
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -666,6 +718,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     match req {
                 CtrlReq::NewWindow(cmd, name, detached, start_dir) => {
+                    if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let prev_idx = app.active_idx;
                     // Expand format variables like #{pane_current_path} (#111)
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
@@ -691,6 +744,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
                 CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp) => {
+                    if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let prev_idx = app.active_idx;
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
@@ -718,6 +772,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
                 CtrlReq::SplitWindow(k, cmd, detached, start_dir, size_pct, resp) => {
+                    if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // tmux: split-window without -Z permanently unzooms (#82)
                     unzoom_if_zoomed(&mut app);
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
@@ -776,6 +831,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                 }
                 CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, size_pct, format_str, resp) => {
+                    if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     unzoom_if_zoomed(&mut app);
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
@@ -825,8 +881,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                 }
-                CtrlReq::KillPane => { unzoom_if_zoomed(&mut app); let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane"); }
-                CtrlReq::KillPaneById(pid) => { unzoom_if_zoomed(&mut app); let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane"); }
+                CtrlReq::KillPane => {
+                    if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    unzoom_if_zoomed(&mut app); let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
+                }
+                CtrlReq::KillPaneById(pid) => {
+                    if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    unzoom_if_zoomed(&mut app); let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
+                }
                 CtrlReq::CapturePane(resp) => {
                     if is_active_pane_squelched(&app) {
                         let _ = resp.send(String::new());
@@ -921,15 +983,34 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     focus_pane_by_index(&mut app, idx);
                 }
                 CtrlReq::SessionInfo(resp) => {
-                    let attached = if app.attached_clients > 0 { " (attached)" } else { "" };
+                    let num_attached = app.client_registry.len();
+                    let attached = if num_attached > 0 { " (attached)" } else { "" };
+                    let group = if let Some(ref g) = app.session_group {
+                        format!(" (group {})", g)
+                    } else {
+                        String::new()
+                    };
                     let windows = app.windows.len();
                     let created = app.created_at.format("%a %b %e %H:%M:%S %Y");
-                    let line = format!("{}: {} windows (created {}){}\n", app.session_name, windows, created, attached);
+                    let line = format!("{}: {} windows (created {}){}{}\n", app.session_name, windows, created, group, attached);
                     let _ = resp.send(line);
                 }
                 CtrlReq::ClientAttach(cid) => {
                     app.attached_clients = app.attached_clients.saturating_add(1);
                     app.latest_client_id = Some(cid);
+                    // Register in client registry if not already present
+                    app.client_registry.entry(cid).or_insert_with(|| {
+                        let tty = format!("/dev/pts/{}", cid);
+                        crate::types::ClientInfo {
+                            id: cid,
+                            width: app.last_window_area.width,
+                            height: app.last_window_area.height,
+                            connected_at: std::time::Instant::now(),
+                            last_activity: std::time::Instant::now(),
+                            tty_name: tty,
+                            is_control: false,
+                        }
+                    });
                     hook_event = Some("client-attached");
                     // update-environment: refresh env vars from the attaching client's environment
                     let update_vars = app.update_environment.clone();
@@ -948,6 +1029,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ClientDetach(cid) => {
                     app.attached_clients = app.attached_clients.saturating_sub(1);
                     app.client_sizes.remove(&cid);
+                    app.client_registry.remove(&cid);
                     app.client_prefix_active = false;
                     if app.latest_client_id == Some(cid) {
                         app.latest_client_id = None;
@@ -979,7 +1061,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::DumpState(resp, allow_nc) => {
                     // ── Activity / bell / silence detection ──
-                    helpers::check_window_activity(&mut app);
+                    let alert_hooks = helpers::check_window_activity(&mut app);
+                    for event in &alert_hooks {
+                        if let Some(cmds) = app.hooks.get(*event) { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    }
 
                     // ── Automatic rename / allow-rename: resolve window names ──
                     {
@@ -1046,6 +1131,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         .map_or(false, |p| p.squelch_until.is_some());
                     if allow_nc
                         && !state_dirty
+                        && !app.bell_forward
                         && !has_placeholder_title
                         && !has_squelch
                         && !cached_dump_state.is_empty()
@@ -1107,6 +1193,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     ));
                     // Inject overlay state (popup, menu, confirm, display_panes)
                     {
+                        // Inject clock_colour if set
+                        if let Some(cc) = app.user_options.get("clock-mode-colour") {
+                            if combined_buf.ends_with('}') {
+                                combined_buf.pop();
+                                combined_buf.push_str(",\"clock_colour\":\"");
+                                combined_buf.push_str(&json_escape_string(cc));
+                                combined_buf.push_str("\"}");
+                            }
+                        }
                         let overlay_json = serialize_overlay_json(&app);
                         if !overlay_json.is_empty() && combined_buf.ends_with('}') {
                             combined_buf.pop();
@@ -1130,6 +1225,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             combined_buf.push_str("\"}");
                         }
                     }
+                    // Forward audible bell to client terminal
+                    if app.bell_forward {
+                        app.bell_forward = false;
+                        if combined_buf.ends_with('}') {
+                            combined_buf.pop();
+                            combined_buf.push_str(",\"bell\":true}");
+                        }
+                    }
                     cached_data_version = combined_data_version(&app);
                     state_dirty = false;
                     // Timing log: dump-state build time
@@ -1151,7 +1254,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Without this, the DumpState handler clears state_dirty,
                     // and the bottom-of-loop push section never fires for frames
                     // already served to the requesting client.
-                    crate::types::push_frame(&cached_dump_state);
+                    // Push combined_buf (not cached_dump_state) so one-shot
+                    // fields like bell and clipboard reach all clients.
+                    // The cached copy omits them for NC dedup safety.
+                    crate::types::push_frame(&combined_buf);
                     let _ = resp.send(combined_buf.clone());
                 }
                 CtrlReq::SendText(s) => { app.status_message = None; send_text_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
@@ -1160,18 +1266,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ZoomPane => { toggle_zoom(&mut app); state_dirty = true; hook_event = Some("after-resize-pane"); }
                 CtrlReq::PrefixBegin => { app.client_prefix_active = true; state_dirty = true; }
                 CtrlReq::PrefixEnd => { app.client_prefix_active = false; state_dirty = true; }
-                CtrlReq::CopyEnter => { enter_copy_mode(&mut app); }
+                CtrlReq::CopyEnter => { enter_copy_mode(&mut app); hook_event = Some("pane-mode-changed"); }
                 CtrlReq::CopyEnterPageUp => {
                     enter_copy_mode(&mut app);
                     let half = app.windows.get(app.active_idx)
                         .and_then(|w| active_pane(&w.root, &w.active_path))
                         .map(|p| p.last_rows as usize).unwrap_or(20);
                     scroll_copy_up(&mut app, half);
+                    hook_event = Some("pane-mode-changed");
                 }
-                CtrlReq::ClockMode => { app.mode = Mode::ClockMode; state_dirty = true; }
+                CtrlReq::ClockMode => { app.mode = Mode::ClockMode; state_dirty = true; hook_event = Some("pane-mode-changed"); }
                 CtrlReq::CopyMove(dx, dy) => { move_copy_cursor(&mut app, dx, dy); }
                 CtrlReq::CopyAnchor => { if let Some((r,c)) = current_prompt_pos(&mut app) { app.copy_anchor = Some((r,c)); app.copy_anchor_scroll_offset = app.copy_scroll_offset; app.copy_pos = Some((r,c)); } }
-                CtrlReq::CopyYank => { let _ = yank_selection(&mut app); exit_copy_mode(&mut app); }
+                CtrlReq::CopyYank => {
+                    let _ = yank_selection(&mut app);
+                    if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    exit_copy_mode(&mut app);
+                    hook_event = Some("pane-mode-changed");
+                }
                 CtrlReq::CopyRectToggle => {
                     app.copy_selection_mode = match app.copy_selection_mode {
                         crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
@@ -1181,6 +1293,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ClientSize(cid, w, h) => { 
                     app.client_sizes.insert(cid, (w, h));
                     app.latest_client_id = Some(cid);
+                    // Update registry with new size and activity timestamp
+                    if let Some(info) = app.client_registry.get_mut(&cid) {
+                        info.width = w;
+                        info.height = h;
+                        info.last_activity = std::time::Instant::now();
+                    }
                     let (ew, eh) = compute_effective_client_size(&app).unwrap_or((w, h));
                     app.last_window_area = Rect { x: 0, y: 0, width: ew, height: eh }; 
                     resize_all_panes(&mut app);
@@ -1196,6 +1314,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             Err(_) => {}
                         }
                     }
+                    hook_event = Some("client-resized");
                 }
                 CtrlReq::FocusPaneCmd(pid) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
@@ -1214,9 +1333,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::MouseMove(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_motion(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::ScrollUp(cid, x, y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_scroll_up(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::ScrollDown(cid, x, y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_scroll_down(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
-                CtrlReq::NextWindow => { if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window"); }
-                CtrlReq::PrevWindow => { if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + app.windows.len() - 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window"); }
-                CtrlReq::RenameWindow(name) => { let win = &mut app.windows[app.active_idx]; win.name = name; win.manual_rename = true; meta_dirty = true; hook_event = Some("after-rename-window"); }
+                CtrlReq::NextWindow => {
+                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
+                }
+                CtrlReq::PrevWindow => {
+                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + app.windows.len() - 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
+                }
+                CtrlReq::RenameWindow(name) => {
+                    if let Some(cmds) = app.hooks.get("before-rename-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    let win = &mut app.windows[app.active_idx]; win.name = name; win.manual_rename = true; meta_dirty = true; hook_event = Some("after-rename-window");
+                }
                 CtrlReq::ListWindows(resp) => { let json = list_windows_json(&app)?; let _ = resp.send(json); }
                 CtrlReq::ListWindowsTmux(resp) => { let text = list_windows_tmux(&app); let _ = resp.send(text); }
                 CtrlReq::ListWindowsFormat(resp, fmt) => { let text = format_list_windows(&app, &fmt); let _ = resp.send(text); }
@@ -1398,6 +1526,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     parser.screen_mut().set_scrollback(0);
                                 }
                             }
+                            if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                         }
                         "begin-selection" => {
                             if let Some((r,c)) = crate::copy_mode::get_copy_pos(&mut app) {
@@ -1423,19 +1552,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         "copy-selection" => {
                             let _ = yank_selection(&mut app);
+                            if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                         }
                         "copy-selection-and-cancel" => {
                             let _ = yank_selection(&mut app);
+                            if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                             app.mode = Mode::Passthrough;
                             app.copy_scroll_offset = 0;
                             app.copy_pos = None;
+                            if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                         }
                         "copy-selection-no-clear" => {
                             let _ = yank_selection(&mut app);
+                            if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                         }
                         s if s.starts_with("copy-pipe-and-cancel") || s.starts_with("copy-pipe") => {
                             // copy-pipe[-and-cancel] [command] — yank + pipe to command
                             let _ = yank_selection(&mut app);
+                            if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                             // Extract pipe command from argument if present
                             let cancel = s.contains("cancel");
                             let pipe_cmd = cmd.strip_prefix("copy-pipe-and-cancel")
@@ -1463,6 +1597,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 app.mode = Mode::Passthrough;
                                 app.copy_scroll_offset = 0;
                                 app.copy_pos = None;
+                                if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                             }
                         }
                         "cursor-up" => { move_copy_cursor(&mut app, 0, -1); }
@@ -1532,6 +1667,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "append-selection" => {
                             // Append to existing buffer instead of replacing
                             let _ = yank_selection(&mut app);
+                            if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                             if app.paste_buffers.len() >= 2 {
                                 let appended = format!("{}{}", app.paste_buffers[1], app.paste_buffers[0]);
                                 app.paste_buffers[0] = appended;
@@ -1539,6 +1675,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         "append-selection-and-cancel" => {
                             let _ = yank_selection(&mut app);
+                            if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                             if app.paste_buffers.len() >= 2 {
                                 let appended = format!("{}{}", app.paste_buffers[1], app.paste_buffers[0]);
                                 app.paste_buffers[0] = appended;
@@ -1546,6 +1683,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             app.mode = Mode::Passthrough;
                             app.copy_scroll_offset = 0;
                             app.copy_pos = None;
+                            if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                         }
                         "copy-line" => {
                             // Select entire current line and yank
@@ -1558,10 +1696,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     .map(|p| p.last_cols).unwrap_or(80);
                                 app.copy_pos = Some((r, cols.saturating_sub(1)));
                                 let _ = yank_selection(&mut app);
+                                if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                             }
                             app.mode = Mode::Passthrough;
                             app.copy_scroll_offset = 0;
                             app.copy_pos = None;
+                            if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                         }
                         s if s.starts_with("goto-line") => {
                             // goto-line <N> — jump to line N in scrollback
@@ -1597,6 +1737,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::SelectPane(dir) => {
+                    if let Some(cmds) = app.hooks.get("before-select-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // Auto-unzoom when navigating to another pane (tmux behavior).
                     // For directional nav: unzoom first so compute_rects uses
                     // real geometry, then re-zoom only if focus didn't change.
@@ -1726,6 +1867,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("after-select-pane");
                 }
                 CtrlReq::SelectWindow(idx) => {
+                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     if idx >= app.window_base_index {
                         let internal_idx = idx - app.window_base_index;
                         if internal_idx < app.windows.len() && internal_idx != app.active_idx {
@@ -1812,6 +1954,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("window-closed");
                 }
                 CtrlReq::KillSession => {
+                    // Fire session-closed hook before cleanup
+                    if let Some(cmds) = app.hooks.get("session-closed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // Remove port/key files FIRST so clients see the session
                     // as gone immediately, then kill processes.
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
@@ -1833,6 +1977,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(true);
                 }
                 CtrlReq::RenameSession(name) => {
+                    if let Some(cmds) = app.hooks.get("before-rename-session") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                     let old_path = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                     let old_keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
@@ -1938,6 +2083,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Ok(mut w) = shared_aliases_main.write() {
                         *w = app.command_aliases.clone();
                     }
+                    // Fire client-session-changed hook (warm server claimed by new session)
+                    if let Some(cmds) = app.hooks.get("client-session-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     meta_dirty = true;
                     state_dirty = true;
                     let _ = resp.send("OK\n".to_string());
@@ -2337,6 +2484,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     output.push_str(&format!("activity-action {}\n", app.activity_action));
                     output.push_str(&format!("silence-action {}\n", app.silence_action));
                     output.push_str(&format!("update-environment \"{}\"\n", app.update_environment.join(" ")));
+                    if let Some(ref group) = app.session_group {
+                        output.push_str(&format!("session-group \"{}\"\n", group));
+                    }
                     for (alias, expansion) in &app.command_aliases {
                         output.push_str(&format!("command-alias \"{}={}\"\n", alias, expansion));
                     }
@@ -2385,9 +2535,39 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.windows.swap(app.active_idx, target);
                     }
                 }
-                CtrlReq::LinkWindow(_target) => {
-                    // link-window: not supported in single-session model
-                    app.status_message = Some(("link-window: not supported (single-session model)".to_string(), std::time::Instant::now()));
+                CtrlReq::LinkWindow(src_idx_opt, dst_idx_opt) => {
+                    // link-window: within a single session, create a linked window
+                    // referencing the source window. Since PTY handles can't be shared
+                    // across windows, this spawns a new shell and marks it as linked.
+                    let src = src_idx_opt.unwrap_or(app.active_idx);
+                    if src < app.windows.len() {
+                        let src_id = app.windows[src].id;
+                        let src_name = app.windows[src].name.clone();
+                        let dst = dst_idx_opt.unwrap_or(app.windows.len());
+                        let pty_system = portable_pty::native_pty_system();
+                        match crate::pane::create_window(&*pty_system, &mut app, None, None) {
+                            Ok(()) => {
+                                let new_idx = app.windows.len() - 1;
+                                app.windows[new_idx].linked_from = Some(src_id);
+                                app.windows[new_idx].name = src_name;
+                                if dst < new_idx {
+                                    let win = app.windows.remove(new_idx);
+                                    app.windows.insert(dst, win);
+                                    if app.active_idx > dst && app.active_idx <= new_idx {
+                                        app.active_idx = app.active_idx.saturating_sub(1);
+                                    }
+                                }
+                                resize_all_panes(&mut app);
+                                meta_dirty = true;
+                                hook_event = Some("window-linked");
+                            }
+                            Err(_e) => {
+                                app.status_message = Some(("link-window: failed to create linked window".to_string(), std::time::Instant::now()));
+                            }
+                        }
+                    } else {
+                        app.status_message = Some(("link-window: source window not found".to_string(), std::time::Instant::now()));
+                    }
                     state_dirty = true;
                 }
                 CtrlReq::UnlinkWindow => {
@@ -2397,7 +2577,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if app.active_idx >= app.windows.len() {
                             app.active_idx = app.windows.len() - 1;
                         }
+                        resize_all_panes(&mut app);
+                        meta_dirty = true;
+                        hook_event = Some("window-unlinked");
                     }
+                }
+                CtrlReq::SetSessionGroup(group_name) => {
+                    app.session_group = Some(group_name);
+                    state_dirty = true;
                 }
                 CtrlReq::FindWindow(resp, pattern) => {
                     let mut output = String::new();
@@ -2510,13 +2697,88 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::ListClients(resp) => {
                     let mut output = String::new();
-                    output.push_str(&format!("/dev/pts/0: {}: {} [{}x{}] (utf8)\n", 
-                        app.session_name, 
-                        app.windows[app.active_idx].name,
-                        app.last_window_area.width,
-                        app.last_window_area.height
-                    ));
+                    if app.client_registry.is_empty() {
+                        // Fallback for backward compat when no clients registered yet
+                        output.push_str(&format!("/dev/pts/0: {}: {} [{}x{}] (utf8)\n", 
+                            app.session_name, 
+                            app.windows[app.active_idx].name,
+                            app.last_window_area.width,
+                            app.last_window_area.height
+                        ));
+                    } else {
+                        let mut clients: Vec<&crate::types::ClientInfo> = app.client_registry.values().collect();
+                        clients.sort_by_key(|c| c.id);
+                        for ci in &clients {
+                            let activity_secs = ci.last_activity.elapsed().as_secs();
+                            let kind = if ci.is_control { " (control mode)" } else { "" };
+                            output.push_str(&format!("{}: {}: {} [{}x{}] (utf8){} [activity={}s ago]\n",
+                                ci.tty_name,
+                                app.session_name,
+                                app.windows[app.active_idx].name,
+                                ci.width, ci.height,
+                                kind,
+                                activity_secs,
+                            ));
+                        }
+                    }
                     let _ = resp.send(output);
+                }
+                CtrlReq::ListClientsFormat(resp, fmt) => {
+                    let mut output = String::new();
+                    let mut clients: Vec<&crate::types::ClientInfo> = app.client_registry.values().collect();
+                    clients.sort_by_key(|c| c.id);
+                    for ci in &clients {
+                        let activity_secs = ci.last_activity.elapsed().as_secs();
+                        let line = fmt
+                            .replace("#{client_name}", &ci.tty_name)
+                            .replace("#{client_tty}", &ci.tty_name)
+                            .replace("#{client_width}", &ci.width.to_string())
+                            .replace("#{client_height}", &ci.height.to_string())
+                            .replace("#{client_activity}", &activity_secs.to_string())
+                            .replace("#{client_session}", &app.session_name)
+                            .replace("#{session_name}", &app.session_name)
+                            .replace("#{client_control_mode}", if ci.is_control { "1" } else { "0" });
+                        output.push_str(&line);
+                        output.push('\n');
+                    }
+                    let _ = resp.send(output);
+                }
+                CtrlReq::ForceDetachClient(target_cid) => {
+                    // Force-detach a specific client by shutting down its TCP stream
+                    app.client_sizes.remove(&target_cid);
+                    let was_present = app.client_registry.remove(&target_cid).is_some();
+                    if was_present {
+                        app.attached_clients = app.attached_clients.saturating_sub(1);
+                    }
+                    if app.latest_client_id == Some(target_cid) {
+                        app.latest_client_id = app.client_registry.keys().max().copied();
+                    }
+                    // Shut down the TCP stream to force disconnect
+                    crate::types::shutdown_client_stream(target_cid);
+                    // Recompute effective size from remaining clients
+                    if let Some((w, h)) = compute_effective_client_size(&app) {
+                        app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                        resize_all_panes(&mut app);
+                    }
+                    // Fire detach notification
+                    control::emit_notification(&app, crate::types::ControlNotification::ClientDetached {
+                        client: format!("/dev/pts/{}", target_cid),
+                    });
+                    hook_event = Some("client-detached");
+                    if app.attached_clients == 0 && app.destroy_unattached {
+                        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                        let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
+                        let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                        let _ = std::fs::remove_file(&regpath);
+                        let _ = std::fs::remove_file(&keypath);
+                        crate::types::shutdown_persistent_streams();
+                        tree::kill_all_children_batch(&mut app.windows);
+                        if let Some(mut wp) = app.warm_pane.take() {
+                            wp.child.kill().ok();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        std::process::exit(0);
+                    }
                 }
                 CtrlReq::SwitchClient(_target) => {
                     // switch-client: single-session model, show feedback
@@ -2907,7 +3169,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::OverlayClose => {
                     match app.mode {
-                        Mode::PopupMode { .. } | Mode::MenuMode { .. } | Mode::ConfirmMode { .. } | Mode::PaneChooser { .. } | Mode::ClockMode => {
+                        Mode::PopupMode { .. } | Mode::MenuMode { .. } | Mode::ConfirmMode { .. } | Mode::PaneChooser { .. } | Mode::ClockMode | Mode::CustomizeMode { .. } => {
                             app.mode = Mode::Passthrough;
                             state_dirty = true;
                         }
@@ -2979,6 +3241,35 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     state_dirty = true;
                 }
+                CtrlReq::ClearPromptHistory => {
+                    app.command_history.clear();
+                    app.command_history_idx = 0;
+                }
+                CtrlReq::ShowPromptHistory(persistent) => {
+                    if persistent {
+                        let content = if app.command_history.is_empty() {
+                            "(no prompt history)\n".to_string()
+                        } else {
+                            app.command_history.iter().enumerate()
+                                .map(|(i, cmd)| format!("{}: {}", i, cmd))
+                                .collect::<Vec<_>>().join("\n")
+                        };
+                        let lines: Vec<&str> = content.lines().collect();
+                        let width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(20) as u16 + 4;
+                        let height = (lines.len() as u16 + 2).max(5);
+                        app.mode = Mode::PopupMode {
+                            command: "show-prompt-history".to_string(),
+                            output: content,
+                            process: None,
+                            width: width.min(120),
+                            height: height.min(40),
+                            close_on_exit: false,
+                            popup_pane: None,
+                            scroll_offset: 0,
+                        };
+                        state_dirty = true;
+                    }
+                }
                 CtrlReq::ControlRegister { client_id, echo, notif_tx } => {
                     app.control_clients.insert(client_id, crate::types::ControlClient {
                         client_id,
@@ -2986,10 +3277,172 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         echo_enabled: echo,
                         notification_tx: notif_tx,
                         paused_panes: std::collections::HashSet::new(),
+                        subscriptions: std::collections::HashMap::new(),
+                        subscription_values: std::collections::HashMap::new(),
+                        subscription_last_check: std::collections::HashMap::new(),
+                        pause_after_secs: None,
+                        output_paused_panes: std::collections::HashSet::new(),
+                        pane_last_output: std::collections::HashMap::new(),
                     });
+                    // Register control client in the client registry
+                    let tty = format!("/dev/pts/{}", client_id);
+                    app.client_registry.insert(client_id, crate::types::ClientInfo {
+                        id: client_id,
+                        width: app.last_window_area.width,
+                        height: app.last_window_area.height,
+                        connected_at: std::time::Instant::now(),
+                        last_activity: std::time::Instant::now(),
+                        tty_name: tty,
+                        is_control: true,
+                    });
+                    app.attached_clients = app.attached_clients.saturating_add(1);
+                }
+                CtrlReq::ControlSubscribe { client_id, name, target, format } => {
+                    if let Some(cc) = app.control_clients.get_mut(&client_id) {
+                        cc.subscriptions.insert(name.clone(), (target, format));
+                        // Clear cached value so the first check always emits
+                        cc.subscription_values.remove(&name);
+                        cc.subscription_last_check.remove(&name);
+                    }
+                }
+                CtrlReq::ControlUnsubscribe { client_id, name } => {
+                    if let Some(cc) = app.control_clients.get_mut(&client_id) {
+                        cc.subscriptions.remove(&name);
+                        cc.subscription_values.remove(&name);
+                        cc.subscription_last_check.remove(&name);
+                    }
+                }
+                CtrlReq::ControlSetPauseAfter { client_id, pause_after_secs } => {
+                    if let Some(cc) = app.control_clients.get_mut(&client_id) {
+                        cc.pause_after_secs = pause_after_secs;
+                        if pause_after_secs.is_none() {
+                            // Clear all pause state when disabling
+                            cc.output_paused_panes.clear();
+                            cc.pane_last_output.clear();
+                        }
+                    }
+                }
+                CtrlReq::ControlContinuePane { client_id, pane_id } => {
+                    if let Some(cc) = app.control_clients.get_mut(&client_id) {
+                        if cc.output_paused_panes.remove(&pane_id) {
+                            let _ = cc.notification_tx.try_send(
+                                crate::types::ControlNotification::Continue { pane_id }
+                            );
+                        }
+                    }
                 }
                 CtrlReq::ControlDeregister { client_id } => {
                     app.control_clients.remove(&client_id);
+                    app.client_registry.remove(&client_id);
+                    app.attached_clients = app.attached_clients.saturating_sub(1);
+                }
+                CtrlReq::CustomizeMode => {
+                    let options = crate::server::option_catalog::build_option_list(&app);
+                    app.mode = Mode::CustomizeMode {
+                        options,
+                        selected: 0,
+                        scroll_offset: 0,
+                        editing: false,
+                        edit_buffer: String::new(),
+                        edit_cursor: 0,
+                        filter: String::new(),
+                    };
+                    state_dirty = true;
+                }
+                CtrlReq::CustomizeNavigate(delta) => {
+                    if let Mode::CustomizeMode { ref options, ref mut selected, ref filter, ref mut scroll_offset, editing, .. } = app.mode {
+                        if !editing {
+                            let visible: Vec<usize> = options.iter().enumerate()
+                                .filter(|(_, (name, _, _))| filter.is_empty() || name.contains(filter.as_str()))
+                                .map(|(i, _)| i)
+                                .collect();
+                            if !visible.is_empty() {
+                                let cur_pos = visible.iter().position(|&i| i == *selected).unwrap_or(0);
+                                let new_pos = if delta > 0 {
+                                    (cur_pos + delta as usize).min(visible.len() - 1)
+                                } else {
+                                    cur_pos.saturating_sub((-delta) as usize)
+                                };
+                                *selected = visible[new_pos];
+                                // Update scroll offset to keep selection visible
+                                if new_pos < *scroll_offset {
+                                    *scroll_offset = new_pos;
+                                } else if new_pos >= *scroll_offset + 20 {
+                                    *scroll_offset = new_pos.saturating_sub(19);
+                                }
+                            }
+                            state_dirty = true;
+                        }
+                    }
+                }
+                CtrlReq::CustomizeEdit => {
+                    if let Mode::CustomizeMode { ref options, selected, ref mut editing, ref mut edit_buffer, ref mut edit_cursor, .. } = app.mode {
+                        if !*editing {
+                            if let Some((_, value, _)) = options.get(selected) {
+                                *edit_buffer = value.clone();
+                                *edit_cursor = edit_buffer.len();
+                                *editing = true;
+                                state_dirty = true;
+                            }
+                        }
+                    }
+                }
+                CtrlReq::CustomizeEditUpdate(text) => {
+                    if let Mode::CustomizeMode { editing, ref mut edit_buffer, ref mut edit_cursor, .. } = app.mode {
+                        if editing {
+                            *edit_buffer = text.clone();
+                            *edit_cursor = edit_buffer.len();
+                            state_dirty = true;
+                        }
+                    }
+                }
+                CtrlReq::CustomizeEditConfirm => {
+                    if let Mode::CustomizeMode { ref mut options, selected, ref mut editing, ref edit_buffer, .. } = app.mode {
+                        if *editing {
+                            let name = options[selected].0.clone();
+                            let value = edit_buffer.clone();
+                            options[selected].1 = value.clone();
+                            *editing = false;
+                            options::apply_set_option(&mut app, &name, &value, true);
+                            state_dirty = true;
+                        }
+                    }
+                }
+                CtrlReq::CustomizeEditCancel => {
+                    if let Mode::CustomizeMode { ref mut editing, ref mut edit_buffer, .. } = app.mode {
+                        if *editing {
+                            *editing = false;
+                            *edit_buffer = String::new();
+                            state_dirty = true;
+                        }
+                    }
+                }
+                CtrlReq::CustomizeResetDefault => {
+                    if let Mode::CustomizeMode { ref mut options, selected, editing, .. } = app.mode {
+                        if !editing {
+                            if let Some(def) = option_catalog::default_for(&options[selected].0) {
+                                let name = options[selected].0.clone();
+                                let value = def.to_string();
+                                options[selected].1 = value.clone();
+                                options::apply_set_option(&mut app, &name, &value, true);
+                                state_dirty = true;
+                            }
+                        }
+                    }
+                }
+                CtrlReq::CustomizeFilter(text) => {
+                    if let Mode::CustomizeMode { ref mut filter, ref mut selected, ref mut scroll_offset, ref options, .. } = app.mode {
+                        *filter = text;
+                        // Reset selection to first matching option
+                        let first_match = options.iter().enumerate()
+                            .find(|(_, (name, _, _))| filter.is_empty() || name.contains(filter.as_str()))
+                            .map(|(i, _)| i);
+                        if let Some(idx) = first_match {
+                            *selected = idx;
+                        }
+                        *scroll_offset = 0;
+                        state_dirty = true;
+                    }
                 }
             }
             // Log any active_idx change for debugging window-switch issues
@@ -3053,6 +3506,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 layout: format!("{}x{}", app.last_window_area.width, app.last_window_area.height),
                             });
                         }
+                        "window-linked" => {
+                            control::emit_notification(&app, crate::types::ControlNotification::WindowAdd { window_id: win_id });
+                        }
+                        "window-unlinked" => {
+                            control::emit_notification(&app, crate::types::ControlNotification::WindowClose { window_id: win_id });
+                        }
                         _ => {}
                     }
                 }
@@ -3096,6 +3555,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // frames arrive within 1-5ms of ConPTY output instead of waiting
         // for the next client poll cycle (up to 50ms).
         if (state_dirty || meta_dirty) && crate::types::has_frame_receivers() {
+            // Check bell/activity state for the pushed frame
+            let push_alert_hooks = helpers::check_window_activity(&mut app);
+            for event in &push_alert_hooks {
+                if let Some(cmds) = app.hooks.get(*event) { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+            }
             // Rebuild metadata cache if structural changes happened.
             if meta_dirty {
                 cached_windows_json = list_windows_json_with_tabs(&app)?;
@@ -3146,6 +3610,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             ));
             // Inject overlay state (popup, menu, confirm, display_panes)
             {
+                // Inject clock_colour if set
+                if let Some(cc) = app.user_options.get("clock-mode-colour") {
+                    if combined_buf.ends_with('}') {
+                        combined_buf.pop();
+                        combined_buf.push_str(",\"clock_colour\":\"");
+                        combined_buf.push_str(&json_escape_string(cc));
+                        combined_buf.push_str("\"}");
+                    }
+                }
                 let overlay_json = serialize_overlay_json(&app);
                 if !overlay_json.is_empty() && combined_buf.ends_with('}') {
                     combined_buf.pop();
@@ -3165,6 +3638,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             }
             cached_dump_state.clear();
             cached_dump_state.push_str(&combined_buf);
+            // Inject bell AFTER caching (one-shot: should not persist in cache)
+            if app.bell_forward {
+                app.bell_forward = false;
+                if combined_buf.ends_with('}') {
+                    combined_buf.pop();
+                    combined_buf.push_str(",\"bell\":true}");
+                }
+            }
             cached_data_version = combined_data_version(&app);
             state_dirty = false;
             crate::types::push_frame(&combined_buf);
@@ -3183,6 +3664,74 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     crate::debug_log::server_log("switch", &format!(
                         "active_idx changed {} -> {} by status-interval hook",
                         _pre_status_idx, app.active_idx));
+                }
+            }
+        }
+        // ── Subscription check: expand format strings and emit %subscription-changed ──
+        // Zero cost when no clients have subscriptions.
+        if !app.control_clients.is_empty() {
+            let now_sub = std::time::Instant::now();
+            // Phase 1: collect (client_id, sub_name, format) pairs that need checking
+            let mut to_check: Vec<(u64, String, String)> = Vec::new();
+            for client in app.control_clients.values_mut() {
+                if client.subscriptions.is_empty() {
+                    continue;
+                }
+                let sub_names: Vec<String> = client.subscriptions.keys().cloned().collect();
+                for name in sub_names {
+                    // Rate limit: at most once per second per subscription
+                    if let Some(last) = client.subscription_last_check.get(&name) {
+                        if now_sub.duration_since(*last).as_secs() < 1 {
+                            continue;
+                        }
+                    }
+                    client.subscription_last_check.insert(name.clone(), now_sub);
+                    let format = client.subscriptions[&name].1.clone();
+                    to_check.push((client.client_id, name, format));
+                }
+            }
+            // Phase 2: expand formats with immutable borrow of app
+            let mut sub_results: Vec<(u64, String, String)> = Vec::new();
+            for (cid, name, format) in &to_check {
+                let expanded = crate::format::expand_format(format, &app);
+                sub_results.push((*cid, name.clone(), expanded));
+            }
+            // Phase 3: compare and emit notifications
+            let active_win = &app.windows[app.active_idx];
+            let win_id = active_win.id;
+            let pane_id = get_active_pane_id(&active_win.root, &active_win.active_path).unwrap_or(0);
+            let session_id = app.session_id;
+            let win_idx = app.active_idx;
+            let mut sub_notifs: Vec<(u64, crate::types::ControlNotification)> = Vec::new();
+            for (cid, name, expanded) in sub_results {
+                if let Some(cc) = app.control_clients.get(&cid) {
+                    let changed = match cc.subscription_values.get(&name) {
+                        Some(prev) => prev != &expanded,
+                        None => true,
+                    };
+                    if changed {
+                        sub_notifs.push((cid, crate::types::ControlNotification::SubscriptionChanged {
+                            name: name.clone(),
+                            session_id,
+                            window_id: win_id,
+                            window_index: win_idx,
+                            pane_id,
+                            value: expanded.clone(),
+                        }));
+                    }
+                }
+            }
+            // Phase 4: update cached values and send notifications
+            for (cid, ref notif) in &sub_notifs {
+                if let Some(cc) = app.control_clients.get_mut(cid) {
+                    if let crate::types::ControlNotification::SubscriptionChanged { name, value, .. } = notif {
+                        cc.subscription_values.insert(name.clone(), value.clone());
+                    }
+                }
+            }
+            for (cid, notif) in sub_notifs {
+                if let Some(cc) = app.control_clients.get(&cid) {
+                    let _ = cc.notification_tx.try_send(notif);
                 }
             }
         }
@@ -3214,6 +3763,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 resize_all_panes(&mut app);
                 state_dirty = true;
                 meta_dirty = true;
+                // Fire pane-died / pane-exited hooks
+                if let Some(cmds) = app.hooks.get("pane-died") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                if let Some(cmds) = app.hooks.get("pane-exited") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
             }
             if app.exit_empty && all_empty {
                 let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();

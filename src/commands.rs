@@ -999,6 +999,7 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
         "command-prompt" => {
             // Support -I initial_text, -p prompt (ignored), -1 (ignored)
             let initial = parts.windows(2).find(|w| w[0] == "-I").map(|w| w[1].to_string()).unwrap_or_default();
+            app.command_vi_normal = false;
             app.mode = Mode::CommandPrompt { input: initial.clone(), cursor: initial.len() };
         }
         "paste-buffer" | "pasteb" => {
@@ -1276,9 +1277,33 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
         "link-window" | "linkw" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                // Intra-session link-window: parse -s and -t flags
+                let src_idx = parts.windows(2).find(|w| w[0] == "-s")
+                    .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
+                let dst_idx = parts.windows(2).find(|w| w[0] == "-t")
+                    .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
+                let src = src_idx.unwrap_or(app.active_idx);
+                if src < app.windows.len() {
+                    let src_id = app.windows[src].id;
+                    let src_name = app.windows[src].name.clone();
+                    let pty_system = portable_pty::native_pty_system();
+                    if let Ok(()) = crate::pane::create_window(&*pty_system, app, None, None) {
+                        let new_idx = app.windows.len() - 1;
+                        app.windows[new_idx].linked_from = Some(src_id);
+                        app.windows[new_idx].name = src_name;
+                        if let Some(dst) = dst_idx {
+                            if dst < new_idx {
+                                let win = app.windows.remove(new_idx);
+                                app.windows.insert(dst, win);
+                            }
+                        }
+                        fire_hooks(app, "window-linked");
+                    }
+                } else {
+                    app.status_message = Some(("link-window: source window not found".to_string(), Instant::now()));
+                }
             }
-            // link-window is not supported (single-session model)
-            app.status_message = Some(("link-window: not supported in psmux (single-session model)".to_string(), Instant::now()));
         }
         "unlink-window" | "unlinkw" => {
             if let Some(port) = app.control_port {
@@ -1289,6 +1314,7 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 if app.active_idx >= app.windows.len() {
                     app.active_idx = app.windows.len() - 1;
                 }
+                fire_hooks(app, "window-unlinked");
             }
         }
         "move-pane" | "movep" => {
@@ -1371,9 +1397,22 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             app.status_message = Some(("choose-client: single-client model (you are the only client)".to_string(), Instant::now()));
         }
         "customize-mode" => {
-            // tmux 3.2+ customize-mode: show options as an interactive display
-            let output = generate_show_options(app);
-            show_output_popup(app, "customize-mode (options)", output);
+            // tmux 3.2+ customize-mode: interactive options editor
+            if let Some(port) = app.control_port {
+                let _ = send_control_to_port(port, "customize-mode\n", &app.session_key);
+            } else {
+                // In-process fallback: build option list directly
+                let options = crate::server::option_catalog::build_option_list(app);
+                app.mode = Mode::CustomizeMode {
+                    options,
+                    selected: 0,
+                    scroll_offset: 0,
+                    editing: false,
+                    edit_buffer: String::new(),
+                    edit_cursor: 0,
+                    filter: String::new(),
+                };
+            }
         }
         "run-shell" | "run" => {
             // Parse with quote-aware parser to handle nested quotes properly
@@ -1438,3 +1477,7 @@ mod tests_new_commands;
 #[cfg(test)]
 #[path = "../tests-rs/test_commands_audit.rs"]
 mod tests_commands_audit;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_parity.rs"]
+mod tests_parity;

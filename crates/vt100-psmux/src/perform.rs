@@ -41,7 +41,10 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
 
     fn execute(&mut self, b: u8) {
         match b {
-            7 => self.callbacks.audible_bell(&mut self.screen),
+            7 => {
+                self.screen.audible_bell_count = self.screen.audible_bell_count.wrapping_add(1);
+                self.callbacks.audible_bell(&mut self.screen);
+            }
             8 => self.screen.bs(),
             9 => self.screen.tab(),
             10 => self.screen.lf(),

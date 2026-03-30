@@ -506,7 +506,12 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
             app.prediction_dimming = !matches!(value, "off" | "false" | "0");
         }
         "cursor-style" => env::set_var("PSMUX_CURSOR_STYLE", value),
-        "cursor-blink" => env::set_var("PSMUX_CURSOR_BLINK", if matches!(value, "on"|"true"|"1") { "1" } else { "0" }),
+        "cursor-blink" => {
+            let on = matches!(value, "on"|"true"|"1");
+            env::set_var("PSMUX_CURSOR_BLINK", if on { "1" } else { "0" });
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), if on { b"\x1b[?12h" } else { b"\x1b[?12l" });
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
         "status" => {
             if let Ok(n) = value.parse::<usize>() {
                 if n >= 2 {

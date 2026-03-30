@@ -26,6 +26,7 @@ fn test_generate_list_clients() {
         layout_index: 0,
         pane_mru: vec![],
         zoom_saved: None,
+        linked_from: None,
     };
     app.windows.push(win);
     let output = generate_list_clients(&app);
@@ -89,8 +90,10 @@ fn mock_app_with_window() -> AppState {
         layout_index: 0,
         pane_mru: vec![],
         zoom_saved: None,
+        linked_from: None,
     };
     app.windows.push(win);
+
     app
 }
 

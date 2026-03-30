@@ -252,6 +252,45 @@ pub fn serialize_popup_overlay(app: &AppState) -> String {
             out.push_str(",\"confirm_active\":false,\"confirm_prompt\":\"\"");
             out.push_str(",\"display_panes\":true");
         }
+        Mode::CustomizeMode { ref options, selected, scroll_offset, editing, ref edit_buffer, edit_cursor, ref filter } => {
+            out.push_str(",\"popup_active\":false,\"popup_rows\":[],\"popup_lines\":[],\"popup_has_pty\":false");
+            out.push_str(",\"menu_active\":false,\"menu_title\":\"\",\"menu_selected\":0,\"menu_items\":[]");
+            out.push_str(",\"confirm_active\":false,\"confirm_prompt\":\"\"");
+            out.push_str(",\"display_panes\":false");
+            out.push_str(",\"customize_active\":true");
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(",\"customize_selected\":{},\"customize_scroll\":{},\"customize_editing\":{},\"customize_cursor\":{}",
+                    selected, scroll_offset, editing, edit_cursor),
+            );
+            out.push_str(",\"customize_edit_buf\":\"");
+            out.push_str(&json_escape_string(edit_buffer));
+            out.push('"');
+            out.push_str(",\"customize_filter\":\"");
+            out.push_str(&json_escape_string(filter));
+            out.push('"');
+            // Serialize visible option rows
+            out.push_str(",\"customize_options\":[");
+            let filter_lower = filter.to_lowercase();
+            let mut first = true;
+            for (i, (name, value, scope)) in options.iter().enumerate() {
+                if !filter.is_empty() && !name.to_lowercase().contains(&filter_lower) {
+                    continue;
+                }
+                if !first { out.push(','); }
+                first = false;
+                out.push_str("{\"i\":");
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{}", i));
+                out.push_str(",\"n\":\"");
+                out.push_str(&json_escape_string(name));
+                out.push_str("\",\"v\":\"");
+                out.push_str(&json_escape_string(value));
+                out.push_str("\",\"s\":\"");
+                out.push_str(&json_escape_string(scope));
+                out.push_str("\"}");
+            }
+            out.push(']');
+        }
         _ => {
             out.push_str(",\"popup_active\":false,\"popup_rows\":[],\"popup_lines\":[],\"popup_has_pty\":false");
             out.push_str(",\"menu_active\":false,\"menu_title\":\"\",\"menu_selected\":0,\"menu_items\":[]");
@@ -315,9 +354,22 @@ pub fn render_popup_overlay(
         } else {
             command
         };
+        let border_style = if let Some(style_str) = app.user_options.get("popup-border-style") {
+            crate::style::parse_tmux_style(style_str)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+        let border_type = match app.user_options.get("popup-border-lines").map(|s| s.as_str()) {
+            Some("double") => ratatui::widgets::BorderType::Double,
+            Some("heavy") => ratatui::widgets::BorderType::Thick,
+            Some("rounded") => ratatui::widgets::BorderType::Rounded,
+            Some("none") | Some("simple") => ratatui::widgets::BorderType::Plain,
+            _ => ratatui::widgets::BorderType::Plain,
+        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
+            .border_style(border_style)
+            .border_type(border_type)
             .title(title);
 
         let content = if let Some(pane) = popup_pane {

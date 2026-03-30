@@ -192,6 +192,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Char('[') => { enter_copy_mode(app); true }
                 KeyCode::Char(']') => { paste_latest(app)?; app.mode = Mode::Passthrough; true }
                 KeyCode::Char(':') => {
+                    app.command_vi_normal = false;
                     app.mode = Mode::CommandPrompt { input: String::new(), cursor: 0 };
                     true
                 }
@@ -338,14 +339,132 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             Ok(false)
         }
         Mode::CommandPrompt { .. } => {
+            let vi_mode = app.user_options.get("status-keys").map(|v| v.as_str()) == Some("vi");
+
+            // Vi normal mode handling
+            if vi_mode && app.command_vi_normal {
+                match key.code {
+                    KeyCode::Esc => { app.command_vi_normal = false; app.mode = Mode::Passthrough; }
+                    KeyCode::Enter => {
+                        if let Mode::CommandPrompt { input, .. } = &app.mode {
+                            if !input.is_empty() {
+                                let cmd = input.clone();
+                                app.command_history.push(cmd);
+                                if app.command_history.len() > 100 { app.command_history.remove(0); }
+                                app.command_history_idx = app.command_history.len();
+                            }
+                        }
+                        app.command_vi_normal = false;
+                        execute_command_prompt(app)?;
+                    }
+                    KeyCode::Char('h') | KeyCode::Left => {
+                        if let Mode::CommandPrompt { cursor, .. } = &mut app.mode {
+                            if *cursor > 0 { *cursor -= 1; }
+                        }
+                    }
+                    KeyCode::Char('l') | KeyCode::Right => {
+                        if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                            if *cursor < input.len() { *cursor += 1; }
+                        }
+                    }
+                    KeyCode::Char('0') | KeyCode::Home => {
+                        if let Mode::CommandPrompt { cursor, .. } = &mut app.mode {
+                            *cursor = 0;
+                        }
+                    }
+                    KeyCode::Char('$') | KeyCode::End => {
+                        if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                            *cursor = input.len();
+                        }
+                    }
+                    KeyCode::Char('b') => {
+                        if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                            let mut pos = *cursor;
+                            while pos > 0 && input.as_bytes().get(pos - 1) == Some(&b' ') { pos -= 1; }
+                            while pos > 0 && input.as_bytes().get(pos - 1) != Some(&b' ') { pos -= 1; }
+                            *cursor = pos;
+                        }
+                    }
+                    KeyCode::Char('w') => {
+                        if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                            let len = input.len();
+                            let mut pos = *cursor;
+                            while pos < len && input.as_bytes().get(pos) != Some(&b' ') { pos += 1; }
+                            while pos < len && input.as_bytes().get(pos) == Some(&b' ') { pos += 1; }
+                            *cursor = pos;
+                        }
+                    }
+                    KeyCode::Char('x') | KeyCode::Delete => {
+                        if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                            if *cursor < input.len() { input.remove(*cursor); }
+                        }
+                    }
+                    KeyCode::Char('i') => { app.command_vi_normal = false; }
+                    KeyCode::Char('a') => {
+                        if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                            if *cursor < input.len() { *cursor += 1; }
+                        }
+                        app.command_vi_normal = false;
+                    }
+                    KeyCode::Char('A') => {
+                        if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                            *cursor = input.len();
+                        }
+                        app.command_vi_normal = false;
+                    }
+                    KeyCode::Char('I') => {
+                        if let Mode::CommandPrompt { cursor, .. } = &mut app.mode {
+                            *cursor = 0;
+                        }
+                        app.command_vi_normal = false;
+                    }
+                    KeyCode::Up => {
+                        if app.command_history_idx > 0 {
+                            app.command_history_idx -= 1;
+                            let cmd = app.command_history[app.command_history_idx].clone();
+                            let len = cmd.len();
+                            if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                                *input = cmd;
+                                *cursor = len;
+                            }
+                        }
+                    }
+                    KeyCode::Down => {
+                        if app.command_history_idx < app.command_history.len() {
+                            app.command_history_idx += 1;
+                            let cmd = if app.command_history_idx < app.command_history.len() {
+                                app.command_history[app.command_history_idx].clone()
+                            } else {
+                                String::new()
+                            };
+                            let len = cmd.len();
+                            if let Mode::CommandPrompt { input, cursor } = &mut app.mode {
+                                *input = cmd;
+                                *cursor = len;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return Ok(false);
+            }
+
+            // Emacs mode / vi insert mode
             match key.code {
-                KeyCode::Esc => { app.mode = Mode::Passthrough; }
+                KeyCode::Esc => {
+                    if vi_mode {
+                        app.command_vi_normal = true;
+                    } else {
+                        app.mode = Mode::Passthrough;
+                    }
+                }
                 KeyCode::Enter => {
                     // Save to history before executing
                     if let Mode::CommandPrompt { input, .. } = &app.mode {
                         if !input.is_empty() {
                             let cmd = input.clone();
                             app.command_history.push(cmd);
+                            if app.command_history.len() > 100 { app.command_history.remove(0); }
                             app.command_history_idx = app.command_history.len();
                         }
                     }
@@ -1012,6 +1131,175 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             app.mode = Mode::Passthrough;
             Ok(false)
         }
+        Mode::CustomizeMode { ref options, selected: _, ref filter, editing, .. } => {
+            if editing {
+                match key.code {
+                    KeyCode::Esc => {
+                        if let Mode::CustomizeMode { editing: ref mut e, edit_buffer: ref mut eb, .. } = app.mode {
+                            *e = false;
+                            *eb = String::new();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Mode::CustomizeMode { ref mut editing, ref options, selected, ref edit_buffer, .. } = app.mode {
+                            let name = options[selected].0.clone();
+                            let value = edit_buffer.clone();
+                            *editing = false;
+                            crate::server::options::apply_set_option(app, &name, &value, true);
+                            if let Mode::CustomizeMode { ref mut options, selected, .. } = app.mode {
+                                options[selected].1 = value;
+                            }
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if let Mode::CustomizeMode { ref mut edit_buffer, ref mut edit_cursor, .. } = app.mode {
+                            if *edit_cursor > 0 {
+                                edit_buffer.remove(*edit_cursor - 1);
+                                *edit_cursor -= 1;
+                            }
+                        }
+                    }
+                    KeyCode::Left => {
+                        if let Mode::CustomizeMode { ref mut edit_cursor, .. } = app.mode {
+                            *edit_cursor = edit_cursor.saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if let Mode::CustomizeMode { ref mut edit_cursor, ref edit_buffer, .. } = app.mode {
+                            if *edit_cursor < edit_buffer.len() { *edit_cursor += 1; }
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        if let Mode::CustomizeMode { ref mut edit_buffer, ref mut edit_cursor, .. } = app.mode {
+                            edit_buffer.insert(*edit_cursor, c);
+                            *edit_cursor += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                let _visible_count = options.iter()
+                    .filter(|(name, _, _)| filter.is_empty() || name.contains(filter.as_str()))
+                    .count();
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => { app.mode = Mode::Passthrough; }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if let Mode::CustomizeMode { ref options, ref mut selected, ref filter, ref mut scroll_offset, .. } = app.mode {
+                            let visible: Vec<usize> = options.iter().enumerate()
+                                .filter(|(_, (name, _, _))| filter.is_empty() || name.contains(filter.as_str()))
+                                .map(|(i, _)| i)
+                                .collect();
+                            if let Some(cur_pos) = visible.iter().position(|&i| i == *selected) {
+                                if cur_pos > 0 {
+                                    *selected = visible[cur_pos - 1];
+                                    if cur_pos - 1 < *scroll_offset {
+                                        *scroll_offset = cur_pos - 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if let Mode::CustomizeMode { ref options, ref mut selected, ref filter, ref mut scroll_offset, .. } = app.mode {
+                            let visible: Vec<usize> = options.iter().enumerate()
+                                .filter(|(_, (name, _, _))| filter.is_empty() || name.contains(filter.as_str()))
+                                .map(|(i, _)| i)
+                                .collect();
+                            if let Some(cur_pos) = visible.iter().position(|&i| i == *selected) {
+                                if cur_pos + 1 < visible.len() {
+                                    *selected = visible[cur_pos + 1];
+                                    if cur_pos + 1 >= *scroll_offset + 20 {
+                                        *scroll_offset = (cur_pos + 1).saturating_sub(19);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Mode::CustomizeMode { ref options, selected, ref mut editing, ref mut edit_buffer, ref mut edit_cursor, .. } = app.mode {
+                            if let Some((_, value, _)) = options.get(selected) {
+                                *edit_buffer = value.clone();
+                                *edit_cursor = edit_buffer.len();
+                                *editing = true;
+                            }
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        if let Mode::CustomizeMode { ref mut options, selected, .. } = app.mode {
+                            if let Some(def) = crate::server::option_catalog::default_for(&options[selected].0) {
+                                let name = options[selected].0.clone();
+                                let value = def.to_string();
+                                options[selected].1 = value.clone();
+                                crate::server::options::apply_set_option(app, &name, &value, true);
+                            }
+                        }
+                    }
+                    KeyCode::Char('/') => {
+                        // Enter filter mode via command prompt (simplified: clear filter or apply)
+                        if let Mode::CustomizeMode { ref mut filter, ref mut scroll_offset, ref mut selected, .. } = app.mode {
+                            if !filter.is_empty() {
+                                // Toggle filter off
+                                *filter = String::new();
+                                *scroll_offset = 0;
+                                *selected = 0;
+                            }
+                            // If filter is empty, we would need a mini prompt; for now users
+                            // use the server path for full filter support
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        if let Mode::CustomizeMode { ref options, ref mut selected, ref filter, ref mut scroll_offset, .. } = app.mode {
+                            let visible: Vec<usize> = options.iter().enumerate()
+                                .filter(|(_, (name, _, _))| filter.is_empty() || name.contains(filter.as_str()))
+                                .map(|(i, _)| i).collect();
+                            if let Some(cur_pos) = visible.iter().position(|&i| i == *selected) {
+                                let new_pos = cur_pos.saturating_sub(20);
+                                *selected = visible[new_pos];
+                                *scroll_offset = new_pos;
+                            }
+                        }
+                    }
+                    KeyCode::PageDown => {
+                        if let Mode::CustomizeMode { ref options, ref mut selected, ref filter, ref mut scroll_offset, .. } = app.mode {
+                            let visible: Vec<usize> = options.iter().enumerate()
+                                .filter(|(_, (name, _, _))| filter.is_empty() || name.contains(filter.as_str()))
+                                .map(|(i, _)| i).collect();
+                            if let Some(cur_pos) = visible.iter().position(|&i| i == *selected) {
+                                let new_pos = (cur_pos + 20).min(visible.len().saturating_sub(1));
+                                *selected = visible[new_pos];
+                                if new_pos >= *scroll_offset + 20 {
+                                    *scroll_offset = new_pos.saturating_sub(19);
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Home | KeyCode::Char('g') => {
+                        if let Mode::CustomizeMode { ref options, ref mut selected, ref filter, ref mut scroll_offset, .. } = app.mode {
+                            let first = options.iter().enumerate()
+                                .find(|(_, (name, _, _))| filter.is_empty() || name.contains(filter.as_str()))
+                                .map(|(i, _)| i);
+                            if let Some(idx) = first { *selected = idx; *scroll_offset = 0; }
+                        }
+                    }
+                    KeyCode::End | KeyCode::Char('G') => {
+                        if let Mode::CustomizeMode { ref options, ref mut selected, ref filter, ref mut scroll_offset, .. } = app.mode {
+                            let last = options.iter().enumerate()
+                                .filter(|(_, (name, _, _))| filter.is_empty() || name.contains(filter.as_str()))
+                                .map(|(i, _)| i).last();
+                            if let Some(idx) = last {
+                                *selected = idx;
+                                let visible_len = options.iter()
+                                    .filter(|(name, _, _)| filter.is_empty() || name.contains(filter.as_str()))
+                                    .count();
+                                *scroll_offset = visible_len.saturating_sub(20);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(false)
+        }
         Mode::BufferChooser { selected } => {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => { app.mode = Mode::Passthrough; }
@@ -1641,6 +1929,10 @@ fn forward_mouse_to_pane_ex(pane: &mut Pane, area: Rect, abs_x: u16, abs_y: u16,
 pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io::Result<()> {
     use crossterm::event::{MouseEventKind, MouseButton};
 
+    // Track last mouse position for #{mouse_x}, #{mouse_y} format variables
+    app.last_mouse_x = me.column;
+    app.last_mouse_y = me.row;
+
     // --- MenuMode: handle mouse clicks on menu items ---
     if let Mode::MenuMode { ref mut menu } = app.mode {
         if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -1695,6 +1987,11 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             }
             return Ok(());
         }
+        return Ok(());
+    }
+
+    // Customize mode: absorb all mouse events
+    if matches!(app.mode, Mode::CustomizeMode { .. }) {
         return Ok(());
     }
 

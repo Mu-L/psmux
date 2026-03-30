@@ -126,6 +126,11 @@ pub struct Screen {
     /// Set by the server before injecting `cd; cls`.  When true,
     /// the next CSI 2J (erase display mode 2) sets `squelch_cleared`.
     pub(crate) squelch_clear_pending: bool,
+
+    /// Incremented each time the parser encounters a standalone BEL (0x07)
+    /// that is NOT an OSC/DCS/APC string terminator.  Use `take_audible_bell()`
+    /// to consume the counter.
+    pub(crate) audible_bell_count: u32,
 }
 
 impl Screen {
@@ -149,6 +154,7 @@ impl Screen {
             osc7_path: None,
             squelch_cleared: false,
             squelch_clear_pending: false,
+            audible_bell_count: 0,
         }
     }
 
@@ -697,6 +703,14 @@ impl Screen {
         let v = self.squelch_cleared;
         self.squelch_cleared = false;
         v
+    }
+
+    /// Returns `true` if one or more audible bells (standalone BEL, not OSC
+    /// terminators) were received since the last call.  Resets the counter.
+    pub fn take_audible_bell(&mut self) -> bool {
+        let v = self.audible_bell_count;
+        self.audible_bell_count = 0;
+        v > 0
     }
 
     /// Arm the squelch detector: the next CSI 2J or CSI 3J will
