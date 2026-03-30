@@ -46,7 +46,7 @@ use crate::session::{cleanup_stale_port_files, read_session_key, send_control,
 use crate::rendering::apply_cursor_style;
 use crate::server::run_server;
 use crate::client::run_remote;
-use crate::ssh_input::{is_ssh_session, send_mouse_enable, InputSource};
+use crate::ssh_input::{send_mouse_enable, InputSource};
 
 fn main() {
     if let Err(e) = run_main() {
@@ -239,7 +239,7 @@ fn run_main() -> io::Result<()> {
             let psmux_dir = format!("{}\\.psmux", home);
             // Compute namespace prefix for -L filtering (matches list-sessions behavior)
             let ns_prefix = l_socket_name.as_ref().map(|l| format!("{l}__"));
-            let mut streams: Vec<std::net::TcpStream> = Vec::new();
+            let mut targets: Vec<(std::path::PathBuf, u16, String)> = Vec::new();
             let mut stale_ports: Vec<std::path::PathBuf> = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&psmux_dir) {
                 for entry in entries.flatten() {
@@ -254,25 +254,8 @@ fn run_main() -> io::Result<()> {
                             }
                             if let Ok(port_str) = std::fs::read_to_string(&path) {
                                 if let Ok(port) = port_str.trim().parse::<u16>() {
-                                    let addr = format!("127.0.0.1:{}", port);
                                     let sess_key = read_session_key(session_name).unwrap_or_default();
-                                    if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-                                        &addr.parse().unwrap(),
-                                        Duration::from_millis(1000),
-                                    ) {
-                                        let _ = stream.set_nodelay(true);
-                                        let _ = write!(stream, "AUTH {}\n", sess_key);
-                                        let _ = stream.flush();
-                                        let _ = std::io::Write::write_all(&mut stream, b"kill-server\n");
-                                        let _ = stream.flush();
-                                        // Shutdown write half to signal we're done sending.
-                                        // Keep read half open to detect server exit.
-                                        let _ = stream.shutdown(std::net::Shutdown::Write);
-                                        streams.push(stream);
-                                    } else {
-                                        // Server not reachable — stale port file
-                                        stale_ports.push(path.clone());
-                                    }
+                                    targets.push((path.clone(), port, sess_key));
                                 }
                             } else {
                                 stale_ports.push(path.clone());
@@ -281,30 +264,48 @@ fn run_main() -> io::Result<()> {
                     }
                 }
             }
-            // Wait for each server to exit (connection close = server exited)
-            for mut stream in streams {
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
-                let mut buf = [0u8; 64];
-                // Read until EOF or error — server closing connection means it processed kill-server
-                loop {
-                    match std::io::Read::read(&mut stream, &mut buf) {
-                        Ok(0) => break,  // EOF — server closed connection
-                        Err(_) => break, // timeout or error
-                        Ok(_) => continue, // drain any response
+            // Send kill-server to all sessions in parallel via threads
+            let handles: Vec<std::thread::JoinHandle<()>> = targets.into_iter().map(|(path, port, sess_key)| {
+                std::thread::spawn(move || {
+                    let addr = format!("127.0.0.1:{}", port);
+                    if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+                        &addr.parse().unwrap(),
+                        Duration::from_millis(500),
+                    ) {
+                        let _ = stream.set_nodelay(true);
+                        let _ = write!(stream, "AUTH {}\n", sess_key);
+                        let _ = stream.flush();
+                        let _ = std::io::Write::write_all(&mut stream, b"kill-server\n");
+                        let _ = stream.flush();
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                        // Wait for server to exit (EOF = done)
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+                        let mut buf = [0u8; 64];
+                        loop {
+                            match std::io::Read::read(&mut stream, &mut buf) {
+                                Ok(0) => break,
+                                Err(_) => break,
+                                Ok(_) => continue,
+                            }
+                        }
                     }
-                }
-            }
+                    // Remove port/key files regardless
+                    let _ = std::fs::remove_file(&path);
+                    let key_path = path.with_extension("key");
+                    let _ = std::fs::remove_file(&key_path);
+                })
+            }).collect();
+            // Wait for all threads to complete
+            for h in handles { let _ = h.join(); }
             // Clean up stale port/key files
             for path in &stale_ports {
                 let _ = std::fs::remove_file(path);
-                // Also remove the corresponding .key file
                 let key_path = path.with_extension("key");
                 let _ = std::fs::remove_file(&key_path);
             }
-            // Brief sleep then verify no processes remain; if any do, force-kill them.
-            // Only do the nuclear fallback when not using -L namespace filtering,
-            // because with -L we should only kill sessions in that namespace.
-            std::thread::sleep(Duration::from_millis(300));
+            // Brief wait then verify no processes remain; if any do, force-kill them.
+            // Only do the nuclear fallback when not using -L namespace filtering.
+            std::thread::sleep(Duration::from_millis(50));
             if ns_prefix.is_none() {
                 kill_remaining_server_processes();
             }
@@ -2304,10 +2305,62 @@ fn run_main() -> io::Result<()> {
                 print!("{}", resp);
                 return Ok(());
             }
-            // start-server - Start the server if not running
-            "start-server" | "start" => {
-                // In psmux, the server starts automatically with new-session.
-                // If we're here, a session exists. This is a compatibility no-op.
+            // start-server / warmup - Pre-spawn a warm server
+            "start-server" | "start" | "warmup" => {
+                // Pre-spawn a warm __warm__ server so the next new-session is
+                // instant.  Also triggers Windows Defender's scan cache on the
+                // binary, eliminating the ~200-400ms first-run penalty.
+                let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                let warm_base = if let Some(ref l) = l_socket_name {
+                    format!("{}____warm__", l)
+                } else {
+                    "__warm__".to_string()
+                };
+                let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
+                // Check if warm server is already running
+                let already_running = if std::path::Path::new(&warm_port_path).exists() {
+                    if let Ok(port_str) = std::fs::read_to_string(&warm_port_path) {
+                        if let Ok(port) = port_str.trim().parse::<u16>() {
+                            std::net::TcpStream::connect_timeout(
+                                &format!("127.0.0.1:{}", port).parse().unwrap(),
+                                Duration::from_millis(100),
+                            ).is_ok()
+                        } else { false }
+                    } else { false }
+                } else { false };
+                if already_running {
+                    return Ok(());
+                }
+                // Clean up stale port file if any
+                let _ = std::fs::remove_file(&warm_port_path);
+                // Spawn the warm server
+                let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
+                let mut server_args: Vec<String> = vec!["server".into(), "-s".into(), "__warm__".into()];
+                if let Some(ref l) = l_socket_name {
+                    server_args.push("-L".into());
+                    server_args.push(l.clone());
+                }
+                // Detect terminal size for the warm server
+                if let Ok((tw, th)) = crossterm::terminal::size() {
+                    let h = th.saturating_sub(1);
+                    if tw > 0 && h > 0 {
+                        server_args.push("-x".into());
+                        server_args.push(tw.to_string());
+                        server_args.push("-y".into());
+                        server_args.push(h.to_string());
+                    }
+                }
+                #[cfg(windows)]
+                crate::platform::spawn_server_hidden(&exe, &server_args)?;
+                #[cfg(not(windows))]
+                {
+                    let mut cmd = std::process::Command::new(&exe);
+                    for a in &server_args { cmd.arg(a); }
+                    cmd.stdin(std::process::Stdio::null());
+                    cmd.stdout(std::process::Stdio::null());
+                    cmd.stderr(std::process::Stdio::null());
+                    let _child = cmd.spawn().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("failed to spawn warm server: {e}")))?;
+                }
                 return Ok(());
             }
             // confirm-before - Ask for confirmation before running a command
@@ -2552,21 +2605,30 @@ fn run_main() -> io::Result<()> {
     let mut stdout = crate::platform::create_writer();
     enable_virtual_terminal_processing();
     enable_raw_mode()?;
+
+    // Detect terminal type for input handling.
+    // Use VT input parsing for SSH sessions and terminals that send VT mouse
+    // sequences through ConPTY (e.g. JetBrains JediTerm).
+    let use_vt_input = crate::ssh_input::needs_vt_input();
+
+    // For standard terminals (not SSH), clear VTI flag from stdin if
+    // crossterm or another layer set it. Keeps normal ReadConsoleInputW
+    // behavior via proper INPUT_RECORDs.
+    if !use_vt_input {
+        crate::platform::disable_vti_on_stdin();
+    }
+
     execute!(stdout, EnterAlternateScreen, EnableBlinking, EnableMouseCapture, EnableBracketedPaste)?;
     apply_cursor_style(&mut stdout)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Set up input source — detects SSH and enables VT mouse parsing if needed.
-    let is_ssh = is_ssh_session();
-    let input = InputSource::new(is_ssh)?;
+    let input = InputSource::new(use_vt_input)?;
 
-    // Over SSH, explicitly (re-)send mouse-enable escape sequences.
-    // ConPTY may have consumed crossterm's EnableMouseCapture output
-    // without forwarding it to sshd → the remote terminal never got told
-    // to enable mouse reporting.  This sends it again via WriteFile and
-    // stdout write to maximize the chance it reaches the client.
-    if is_ssh {
+    // For VT input mode (SSH / JetBrains), explicitly (re-)send mouse-enable
+    // escape sequences.  ConPTY may have consumed crossterm's
+    // EnableMouseCapture output without forwarding it.
+    if use_vt_input {
         send_mouse_enable();
     }
 
