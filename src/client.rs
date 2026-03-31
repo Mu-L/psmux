@@ -2878,6 +2878,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             };
             // ── Build three separate span groups: left, tabs, right ──
             use unicode_width::UnicodeWidthStr;
+            // If status_format[0] is set, use it for line 0 instead of the default 3-part layout
+            let use_status_format_0 = status_format.len() > 0 && !status_format[0].is_empty();
             // Left portion: custom status_left or default [session] prefix
             let left_prefix = match custom_status_left {
                 Some(ref sl) => sl.clone(),
@@ -3019,7 +3021,21 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             f.render_widget(Clear, status_chunk);
             // Render the first status line (line 0)
             let line0_area = Rect { x: status_chunk.x, y: status_chunk.y, width: status_chunk.width, height: 1.min(status_chunk.height) };
-            f.render_widget(status_bar, line0_area);
+            if use_status_format_0 && state.status_message.is_none() {
+                // status-format[0] overrides the default left+tabs+right layout
+                let fmt0_spans = crate::rendering::parse_inline_styles(&status_format[0], sb_base);
+                let fmt0_w: usize = fmt0_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+                let mut final_spans = fmt0_spans;
+                if fmt0_w < total_width {
+                    final_spans.push(Span::styled(" ".repeat(total_width - fmt0_w), sb_base));
+                } else {
+                    crate::style::truncate_spans_to_width(&mut final_spans, total_width);
+                }
+                let fmt0_widget = Paragraph::new(Line::from(final_spans)).style(sb_base);
+                f.render_widget(fmt0_widget, line0_area);
+            } else {
+                f.render_widget(status_bar, line0_area);
+            }
             // Render additional status lines (index 1+) from status_format
             for line_idx in 1..status_lines {
                 let line_y = status_chunk.y + line_idx as u16;
@@ -3030,13 +3046,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 } else {
                     String::new()
                 };
-                // Pad to full width
-                let padded: String = if text.len() < line_area.width as usize {
-                    format!("{}{}", text, " ".repeat(line_area.width as usize - text.len()))
+                // Parse inline styles (#[fg=...], etc.) and pad to full width
+                let parsed_spans = crate::rendering::parse_inline_styles(&text, sb_base);
+                let visible_w: usize = parsed_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+                let mut line_spans = parsed_spans;
+                if visible_w < line_area.width as usize {
+                    line_spans.push(Span::styled(" ".repeat(line_area.width as usize - visible_w), sb_base));
                 } else {
-                    text.chars().take(line_area.width as usize).collect()
-                };
-                let line_widget = Paragraph::new(Line::from(Span::styled(padded, sb_base))).style(sb_base);
+                    crate::style::truncate_spans_to_width(&mut line_spans, line_area.width as usize);
+                }
+                let line_widget = Paragraph::new(Line::from(line_spans)).style(sb_base);
                 f.render_widget(line_widget, line_area);
             }
             if renaming {
