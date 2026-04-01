@@ -738,7 +738,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
-                    if let Some(n) = name { app.windows.last_mut().map(|w| w.name = n); }
+                    if let Some(n) = name { app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
                     if detached { app.active_idx = prev_idx; }
                     // Replenish warm pane pool for next new-window
                     if app.warm_pane.is_none() {
@@ -761,7 +761,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
-                    if let Some(n) = name { app.windows.last_mut().map(|w| w.name = n); }
+                    if let Some(n) = name { app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
                     // Use full format engine for -P output (tmux compatible)
                     let new_win_idx = app.windows.len() - 1;
                     let fmt = format_str.as_deref().unwrap_or("#{session_name}:#{window_index}");
@@ -3807,3 +3807,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 #[cfg(test)]
 #[path = "../../tests-rs/test_server.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue169_manual_rename.rs"]
+mod test_issue169;
