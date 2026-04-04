@@ -1248,10 +1248,7 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
     // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
     // (especially important when using -L socket namespaces like in tppanel preview).
     let target_session = app.port_file_base();
-    let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
-    let mut cmd = std::process::Command::new(&shell_prog);
-    for a in &shell_args { cmd.arg(a); }
-    cmd.arg(&shell_cmd);
+    let mut cmd = crate::commands::build_run_shell_command(&shell_cmd);
     if !target_session.is_empty() {
         cmd.env("PSMUX_TARGET_SESSION", &target_session);
     }

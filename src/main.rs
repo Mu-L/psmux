@@ -1467,17 +1467,12 @@ fn run_main() -> io::Result<()> {
                     std::process::exit(1);
                 }
                 let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd_str);
-                let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
                 // Run the command using the resolved shell
                 if background {
-                    let mut c = std::process::Command::new(&shell_prog);
-                    for a in &shell_args { c.arg(a); }
-                    c.arg(&shell_cmd);
+                    let mut c = crate::commands::build_run_shell_command(&shell_cmd);
                     let _ = c.spawn();
                 } else {
-                    let mut c = std::process::Command::new(&shell_prog);
-                    for a in &shell_args { c.arg(a); }
-                    c.arg(&shell_cmd);
+                    let mut c = crate::commands::build_run_shell_command(&shell_cmd);
                     let output = c.output()?;
                     io::stdout().write_all(&output.stdout)?;
                     io::stderr().write_all(&output.stderr)?;

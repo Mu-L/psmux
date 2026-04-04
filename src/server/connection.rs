@@ -1584,16 +1584,11 @@ match cmd {
                 let _ = write_stream.flush();
             }
         } else {
-            let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
             if background {
-                let mut c = std::process::Command::new(&shell_prog);
-                for a in &shell_args { c.arg(a); }
-                c.arg(&shell_cmd);
+                let mut c = crate::commands::build_run_shell_command(&shell_cmd);
                 let _ = c.spawn();
             } else {
-                let mut c = std::process::Command::new(&shell_prog);
-                for a in &shell_args { c.arg(a); }
-                c.arg(&shell_cmd);
+                let mut c = crate::commands::build_run_shell_command(&shell_cmd);
                 let result = c.output();
                 match result {
                     Ok(out) => {

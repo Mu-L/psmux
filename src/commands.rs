@@ -49,6 +49,62 @@ pub fn resolve_run_shell() -> (String, Vec<String>) {
     }
 }
 
+/// Build a `std::process::Command` for a run-shell invocation.
+///
+/// Avoids double-wrapping when the command already starts with a shell binary
+/// (e.g., `pwsh -NoProfile -File script.ps1`). Also detects bare `.ps1` file
+/// paths and uses `-File` instead of `-Command` for reliable path handling.
+pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let lower = shell_cmd.trim_start().to_lowercase();
+
+        // Case 1: Command already starts with a shell binary (pwsh, powershell, cmd).
+        // Run it directly to avoid nesting `pwsh -Command "pwsh -File ..."`.
+        if lower.starts_with("pwsh ") || lower.starts_with("pwsh.exe ")
+            || lower.starts_with("powershell ") || lower.starts_with("powershell.exe ")
+            || lower.starts_with("cmd ") || lower.starts_with("cmd.exe ")
+        {
+            let parts = parse_command_line(shell_cmd);
+            if parts.len() >= 2 {
+                let mut c = std::process::Command::new(&parts[0]);
+                for p in &parts[1..] { c.arg(p); }
+                return c;
+            }
+        }
+
+        // Case 2: Bare .ps1 file path (possibly with arguments after the path).
+        // Use `-File` which handles paths with spaces correctly.
+        let trimmed = shell_cmd.trim();
+        let first_token = trimmed.split_whitespace().next().unwrap_or("");
+        let first_unquoted = first_token.trim_matches('"').trim_matches('\'');
+        if first_unquoted.ends_with(".ps1") && std::path::Path::new(first_unquoted).exists() {
+            let shell = if which::which("pwsh").is_ok() { "pwsh" } else { "powershell" };
+            let mut c = std::process::Command::new(shell);
+            c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+            // Split remaining args so the .ps1 path and its arguments are separate args
+            let parts = parse_command_line(trimmed);
+            for p in &parts { c.arg(p); }
+            return c;
+        }
+
+        // Case 3: Regular command string. Wrap in shell.
+        let (shell_prog, shell_args) = resolve_run_shell();
+        let mut c = std::process::Command::new(&shell_prog);
+        for a in &shell_args { c.arg(a); }
+        c.arg(shell_cmd);
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let (shell_prog, shell_args) = resolve_run_shell();
+        let mut c = std::process::Command::new(&shell_prog);
+        for a in &shell_args { c.arg(a); }
+        c.arg(shell_cmd);
+        c
+    }
+}
+
 /// Show text output in a popup overlay (used by list-* commands inside a session).
 fn show_output_popup(app: &mut AppState, title: &str, output: String) {
     let lines: Vec<&str> = output.lines().collect();
@@ -1480,13 +1536,10 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
                 // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
                 let target_session = app.port_file_base();
-                let (shell_prog, shell_args) = resolve_run_shell();
 
                 if background {
                     // -b flag: fire and forget, no output capture
-                    let mut c = std::process::Command::new(&shell_prog);
-                    for a in &shell_args { c.arg(a); }
-                    c.arg(&shell_cmd);
+                    let mut c = build_run_shell_command(&shell_cmd);
                     if !target_session.is_empty() {
                         c.env("PSMUX_TARGET_SESSION", &target_session);
                     }
@@ -1502,15 +1555,11 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                         app.run_shell_rx = Some(rx);
                     }
                     let tx = app.run_shell_tx.as_ref().unwrap().clone();
-                    let shell_prog = shell_prog.clone();
-                    let shell_args = shell_args.clone();
                     let shell_cmd = shell_cmd.clone();
                     let shell_cmd_display = shell_cmd.clone();
                     let target_session = target_session.clone();
                     std::thread::spawn(move || {
-                        let mut c = std::process::Command::new(&shell_prog);
-                        for a in &shell_args { c.arg(a); }
-                        c.arg(&shell_cmd);
+                        let mut c = build_run_shell_command(&shell_cmd);
                         if !target_session.is_empty() {
                             c.env("PSMUX_TARGET_SESSION", &target_session);
                         }
