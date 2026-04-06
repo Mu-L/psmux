@@ -502,13 +502,16 @@ match cmd {
         let print_info = args.iter().any(|a| *a == "-P");
         let format_str: Option<String> = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
         let start_dir: Option<String> = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
-        // -p N = percentage, -l N = cell count (tmux semantics)
+        // -p N = percentage, -l N = cell count, -l N% = percentage (tmux semantics)
         let split_size: Option<(u16, bool)> = args.windows(2).find(|w| w[0] == "-p")
             .and_then(|w| w[1].trim_matches('%').parse::<u16>().ok())
             .map(|v| (v, true))
             .or_else(|| args.windows(2).find(|w| w[0] == "-l")
-                .and_then(|w| w[1].trim_end_matches('%').parse::<u16>().ok())
-                .map(|v| (v, false)));
+                .and_then(|w| {
+                    let raw = &w[1];
+                    let is_pct = raw.ends_with('%');
+                    raw.trim_end_matches('%').parse::<u16>().ok().map(|v| (v, is_pct))
+                }));
         let cmd_str: Option<String> = args.iter()
             .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)))
             .map(|s| s.trim_matches('"').to_string());
@@ -1915,13 +1918,16 @@ fn dispatch_control_command(
             let detached = args.iter().any(|a| *a == "-d");
             let print_info = args.iter().any(|a| *a == "-P");
             let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
-            // -p N = percentage, -l N = cell count (tmux semantics)
+            // -p N = percentage, -l N = cell count, -l N% = percentage (tmux semantics)
             let split_size: Option<(u16, bool)> = args.windows(2).find(|w| w[0] == "-p")
                 .and_then(|w| w[1].trim_end_matches('%').parse::<u16>().ok())
                 .map(|v| (v, true))
                 .or_else(|| args.windows(2).find(|w| w[0] == "-l")
-                    .and_then(|w| w[1].trim_end_matches('%').parse::<u16>().ok())
-                    .map(|v| (v, false)));
+                    .and_then(|w| {
+                        let raw = &w[1];
+                        let is_pct = raw.ends_with('%');
+                        raw.trim_end_matches('%').parse::<u16>().ok().map(|v| (v, is_pct))
+                    }));
             let (rtx, rrx) = mpsc::channel::<String>();
             if print_info {
                 let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx));

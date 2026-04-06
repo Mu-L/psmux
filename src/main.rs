@@ -828,7 +828,7 @@ fn run_main() -> io::Result<()> {
                             "-F" => { i += 1; if i < cmd_args.len() { format_str = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-c" => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-p" => { i += 1; if i < cmd_args.len() { size_pct = Some(cmd_args[i].to_string()); size_cells = None; } }
-                            "-l" => { i += 1; if i < cmd_args.len() { size_cells = Some(cmd_args[i].to_string()); size_pct = None; } }
+                            "-l" => { i += 1; if i < cmd_args.len() { let v = cmd_args[i].to_string(); if v.ends_with('%') { size_pct = Some(v); size_cells = None; } else { size_cells = Some(v); size_pct = None; } } }
                             "-t" | "-e" => { i += 1; /* skip value */ }
                             "-h" => { flag = "-h"; }
                             "-v" => { flag = "-v"; }
