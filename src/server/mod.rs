@@ -3917,3 +3917,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     #[allow(unreachable_code)]
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_server.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue169_manual_rename.rs"]
+mod test_issue169;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_pane_title.rs"]
+mod test_pane_title;

@@ -3102,3 +3102,6 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "../tests-rs/test_input.rs"]
+mod tests;

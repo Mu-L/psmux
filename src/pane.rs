@@ -1041,6 +1041,17 @@ pub fn spawn_reader_thread(
     });
 }
 
+#[cfg(test)]
+#[path = "../tests-rs/test_issue151_strict_mode.rs"]
+mod test_issue151_strict_mode;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue155_output_rendering.rs"]
+mod test_issue155_output_rendering;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue165_prediction_view_style.rs"]
+mod test_issue165_prediction_view_style;
 
 #[cfg(test)]
 mod test_parser_audible_bell {

@@ -1253,3 +1253,6 @@ fn parse_layout_children(s: &str, closing: char) -> Option<(Vec<LayoutNode>, usi
     Some((children, pos))
 }
 
+#[cfg(test)]
+#[path = "../tests-rs/test_layout.rs"]
+mod test_layout;

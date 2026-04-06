@@ -1640,3 +1640,22 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "../tests-rs/test_commands.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_commands_new.rs"]
+mod tests_new_commands;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_commands_audit.rs"]
+mod tests_commands_audit;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_parity.rs"]
+mod tests_parity;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue179_bind_key_uppercase.rs"]
+mod tests_issue179_bind_key_uppercase;

@@ -1229,3 +1229,6 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "../tests-rs/test_issue81_resize_direction.rs"]
+mod test_issue81_resize_direction;

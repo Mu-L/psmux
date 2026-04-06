@@ -1001,11 +1001,6 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         && matches!(key.code, KeyCode::Enter)
                         && modified_enter_press_handled =>
                     {
-                        if input_log_enabled() {
-                            input_log("enter-diag", &format!(
-                                "PHANTOM RELEASE SUPPRESSED: code={:?} mods={:?} kind={:?}",
-                                key.code, key.modifiers, key.kind));
-                        }
                         // drop the phantom Release
                     }
                     // On Windows, Windows Terminal intercepts Ctrl+V Press,
@@ -1035,11 +1030,6 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         && matches!(key.code, KeyCode::Enter)
                         && !key.modifiers.is_empty() =>
                     {
-                        if input_log_enabled() {
-                            input_log("enter-diag", &format!(
-                                "WEZTERM RELEASE PROMOTED: code={:?} mods={:?} kind={:?}",
-                                key.code, key.modifiers, key.kind));
-                        }
                         key.kind = KeyEventKind::Press;
                         crate::platform::augment_enter_shift(&mut key);
                         modified_enter_press_handled = true;
@@ -1061,19 +1051,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         // crossterm reports Alt+Enter.  Poll the physical
                         // keyboard to detect the real modifier.
                         #[cfg(windows)]
-                        {
-                            let raw_mods = key.modifiers;
-                            crate::platform::augment_enter_shift(&mut key);
-                            if matches!(key.code, KeyCode::Enter) && (raw_mods != key.modifiers || !key.modifiers.is_empty()) {
-                                if input_log_enabled() {
-                                    input_log("enter-diag", &format!(
-                                        "PRESS augment: raw_mods={:?} => final_mods={:?} kind={:?}",
-                                        raw_mods, key.modifiers, key.kind));
-                                }
-                            }
-                        }
-                        #[cfg(not(windows))]
-                        { let _ = &key; }
+                        crate::platform::augment_enter_shift(&mut key);
                         // Clear the WezTerm dedup flag on any non-Enter key; set
                         // it when a modified Enter Press is being processed.
                         #[cfg(windows)]
@@ -3957,3 +3935,6 @@ fn paste_buffer_has_non_ascii(buf: &str) -> bool {
     buf.chars().any(|c| !c.is_ascii())
 }
 
+#[cfg(test)]
+#[path = "../tests-rs/test_client.rs"]
+mod tests;

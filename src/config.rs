@@ -1514,3 +1514,14 @@ fn parse_if_shell(app: &mut AppState, line: &str) {
     }
 }
 
+#[cfg(test)]
+#[path = "../tests-rs/test_config_plugin_paths.rs"]
+mod tests_plugin_paths;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue137_env_leak.rs"]
+mod tests_issue137_env_leak;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue157_bind_key_case.rs"]
+mod tests_issue157_bind_key_case;

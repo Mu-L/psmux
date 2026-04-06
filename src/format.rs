@@ -1739,3 +1739,6 @@ fn collect_pane_ids(node: &Node, ids: &mut Vec<usize>) {
     }
 }
 
+#[cfg(test)]
+#[path = "../tests-rs/test_format.rs"]
+mod tests;
