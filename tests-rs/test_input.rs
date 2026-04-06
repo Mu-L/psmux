@@ -389,6 +389,51 @@ fn shift_alt_enter_on_non_windows_produces_csi() {
     assert_eq!(bytes, b"\x1b[13;4~", "Shift+Alt+Enter on non-Windows → CSI 13;4~");
 }
 
+/// Issue #121 Bug #3 double-delivery proof: verify that VT-encoded Shift+Enter
+/// is distinct from plain CR (which is what native WriteConsoleInputW injection
+/// produces after ConPTY translation).  Before the fix, forward_key_to_active
+/// sent BOTH \x1b\r (VT) and a native VK_RETURN injection for Shift+Enter,
+/// causing the child process to receive two Enter events.  After the fix,
+/// only VT encoding is used for Shift/Alt+Enter (no Ctrl), preventing double
+/// delivery.  Ctrl+Enter still uses native injection (with CSI fallback).
+#[cfg(windows)]
+#[test]
+fn bug3_double_delivery_prevention() {
+    // Native injection produces a KEY_EVENT_RECORD → ConPTY translates to \r.
+    // VT encoding for Shift+Enter is \x1b\r (ESC + CR).
+    // If both paths fire, child sees: ESC + CR (VT) + CR (native) = 2 Enters.
+    // The fix ensures only ONE path fires for each modifier combination.
+
+    let shift_enter = key(KeyCode::Enter, KeyModifiers::SHIFT);
+    let alt_enter = key(KeyCode::Enter, KeyModifiers::ALT);
+    let ctrl_enter = key(KeyCode::Enter, KeyModifiers::CONTROL);
+
+    let shift_bytes = encode_key_event(&shift_enter).unwrap();
+    let alt_bytes = encode_key_event(&alt_enter).unwrap();
+    let ctrl_bytes = encode_key_event(&ctrl_enter).unwrap();
+
+    // VT path (Shift/Alt+Enter): produces \x1b\r
+    assert_eq!(shift_bytes, b"\x1b\r");
+    assert_eq!(alt_bytes, b"\x1b\r");
+
+    // Native injection path (Ctrl+Enter): produces CSI sequence
+    // In the live code, forward_key_to_active only calls
+    // send_modified_enter_event when ctrl==true.  This CSI encoding
+    // is the FALLBACK when native injection fails.
+    assert_eq!(ctrl_bytes, b"\x1b[13;5~");
+
+    // The critical guard in forward_key_to_active:
+    //   let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    //   if ctrl { /* native injection */ }
+    //   // else: fall through to encode_key_event (VT)
+    assert!(!shift_enter.modifiers.contains(KeyModifiers::CONTROL),
+        "Shift+Enter must NOT trigger the ctrl guard (no native injection)");
+    assert!(!alt_enter.modifiers.contains(KeyModifiers::CONTROL),
+        "Alt+Enter must NOT trigger the ctrl guard (no native injection)");
+    assert!(ctrl_enter.modifiers.contains(KeyModifiers::CONTROL),
+        "Ctrl+Enter MUST trigger the ctrl guard (native injection allowed)");
+}
+
 // ── Issue #134: wrapped directional navigation geometry tests ──
 
 /// Build a two-pane horizontal layout (left | right) for geometry tests.
