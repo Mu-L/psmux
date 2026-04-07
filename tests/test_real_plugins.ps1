@@ -38,7 +38,7 @@ function Start-FreshSession {
     Start-Sleep -Seconds 2
     Remove-Item "$env:USERPROFILE\.psmux\*.port" -Force -ErrorAction SilentlyContinue
     Remove-Item "$env:USERPROFILE\.psmux\*.key" -Force -ErrorAction SilentlyContinue
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -s $S -d" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "new-session -s $S -d -x 120 -y 30" -WindowStyle Hidden
     Start-Sleep -Seconds 3
     & $PSMUX has-session -t $S 2>$null
     return ($LASTEXITCODE -eq 0)
