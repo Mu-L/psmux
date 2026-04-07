@@ -29,7 +29,7 @@ Remove-Item "$env:USERPROFILE\.psmux\*.key" -Force -ErrorAction SilentlyContinue
 
 # Create test session
 Write-Info "Creating test session 'plugtest'..."
-Start-Process -FilePath $PSMUX -ArgumentList "new-session -s plugtest -d -x 120 -y 30" -WindowStyle Hidden
+Start-Process -FilePath $PSMUX -ArgumentList "new-session -s plugtest -d" -WindowStyle Hidden
 Start-Sleep -Seconds 3
 & $PSMUX has-session -t plugtest 2>$null
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: Cannot create test session" -ForegroundColor Red; exit 1 }

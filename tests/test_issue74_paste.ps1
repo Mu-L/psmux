@@ -37,7 +37,7 @@ Remove-Item "$env:USERPROFILE\.psmux\*.key" -Force -ErrorAction SilentlyContinue
 
 # Create test session
 Write-Info "Creating test session 'paste74'..."
-Start-Process -FilePath $PSMUX -ArgumentList "new-session -s paste74 -d -x 120 -y 30" -WindowStyle Hidden
+Start-Process -FilePath $PSMUX -ArgumentList "new-session -s paste74 -d" -WindowStyle Hidden
 Start-Sleep -Seconds 4
 & $PSMUX has-session -t paste74 2>$null
 if ($LASTEXITCODE -ne 0) { Write-Host "FATAL: Cannot create test session" -ForegroundColor Red; exit 1 }
@@ -93,7 +93,7 @@ Write-Test "2.1 Multi-line indented paste delivered"
 Psmux send-keys -t paste74 "clear" Enter 2>$null | Out-Null
 Start-Sleep -Milliseconds 500
 Psmux send-paste -t paste74 $enc2 2>$null | Out-Null
-Start-Sleep -Milliseconds 3000
+Start-Sleep -Milliseconds 1500
 
 # Capture pane content and check for the paste text
 $cap2 = (Psmux capture-pane -t paste74 -p 2>$null | Out-String)
@@ -152,7 +152,7 @@ Write-Host ("=" * 60)
 & $PSMUX has-session -t paste74 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "Session died between tests - recreating"
-    Start-Process -FilePath $PSMUX -ArgumentList "new-session -s paste74 -d -x 120 -y 30" -WindowStyle Hidden
+    Start-Process -FilePath $PSMUX -ArgumentList "new-session -s paste74 -d" -WindowStyle Hidden
     Start-Sleep -Seconds 4
 }
 
