@@ -801,9 +801,14 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
         }
     } else if up {
         // Shell prompt — auto-enter copy mode and scroll up (tmux parity)
-        mouse_log("  -> entering copy mode (shell scroll-up)");
-        enter_copy_mode(app);
-        scroll_copy_up(app, 3);
+        // Respect scroll-enter-copy-mode option (#193)
+        if app.scroll_enter_copy_mode {
+            mouse_log("  -> entering copy mode (shell scroll-up)");
+            enter_copy_mode(app);
+            scroll_copy_up(app, 3);
+        } else {
+            mouse_log("  -> scroll-enter-copy-mode off, ignoring scroll-up at shell");
+        }
     } else {
         mouse_log("  -> scroll-down at shell (no-op)");
     }
@@ -940,8 +945,11 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool) {
         }
     } else if up {
         // Shell prompt — enter copy mode and scroll
-        enter_copy_mode(app);
-        scroll_copy_up(app, 3);
+        // Respect scroll-enter-copy-mode option (#193)
+        if app.scroll_enter_copy_mode {
+            enter_copy_mode(app);
+            scroll_copy_up(app, 3);
+        }
     }
 }
 

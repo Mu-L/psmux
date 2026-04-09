@@ -2427,6 +2427,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "status-left" => { app.status_left = "psmux:#I".to_string(); }
                             "status-right" => { app.status_right = "#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}\"#{=21:pane_title}\" %H:%M %d-%b-%y".to_string(); }
                             "mouse" => { app.mouse_enabled = true; }
+                            "scroll-enter-copy-mode" => { app.scroll_enter_copy_mode = true; }
                             "escape-time" => { app.escape_time_ms = 500; }
                             "history-limit" => { app.history_limit = 2000; }
                             "display-time" => { app.display_time_ms = 750; }
@@ -2480,6 +2481,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     output.push_str(&format!("pane-base-index {}\n", app.pane_base_index));
                     output.push_str(&format!("escape-time {}\n", app.escape_time_ms));
                     output.push_str(&format!("mouse {}\n", if app.mouse_enabled { "on" } else { "off" }));
+                    output.push_str(&format!("scroll-enter-copy-mode {}\n", if app.scroll_enter_copy_mode { "on" } else { "off" }));
                     output.push_str(&format!("status {}\n", if app.status_visible { "on" } else { "off" }));
                     output.push_str(&format!("status-position {}\n", app.status_position));
                     output.push_str(&format!("status-left \"{}\"\n", app.status_left));

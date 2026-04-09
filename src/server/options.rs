@@ -30,6 +30,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "pane-base-index" => app.pane_base_index.to_string(),
         "escape-time" => app.escape_time_ms.to_string(),
         "mouse" => if app.mouse_enabled { "on".into() } else { "off".into() },
+        "scroll-enter-copy-mode" => if app.scroll_enter_copy_mode { "on".into() } else { "off".into() },
         "status" => {
             if !app.status_visible { "off".into() }
             else if app.status_lines >= 2 { app.status_lines.to_string() }

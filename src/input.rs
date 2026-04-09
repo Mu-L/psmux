@@ -2355,8 +2355,11 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 }
             } else {
                 // Shell prompt — auto-enter copy mode and scroll (tmux parity)
-                enter_copy_mode(app);
-                scroll_copy_up(app, 3);
+                // Respect scroll-enter-copy-mode option (#193)
+                if app.scroll_enter_copy_mode {
+                    enter_copy_mode(app);
+                    scroll_copy_up(app, 3);
+                }
                 return Ok(());
             }
         }
