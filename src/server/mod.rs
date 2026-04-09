@@ -2376,9 +2376,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                     state_dirty = true;
                 }
-                CtrlReq::UnbindAll => {
-                    app.key_tables.clear();
-                    app.defaults_suppressed = true;
+                CtrlReq::UnbindAllInTable(table_name) => {
+                    app.key_tables.remove(&table_name);
+                    if table_name == "prefix" {
+                        app.defaults_suppressed = true;
+                    }
                     meta_dirty = true;
                     state_dirty = true;
                 }

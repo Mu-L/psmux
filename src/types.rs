@@ -925,7 +925,7 @@ pub enum CtrlReq {
     RespawnPane,
     BindKey(String, String, String, bool),  // table, key, command, repeat
     UnbindKey(String),
-    UnbindAll,
+    UnbindAllInTable(String),  // table name to clear with -a
     ListKeys(mpsc::Sender<String>),
     SetOption(String, String),
     SetOptionQuiet(String, String, bool),  // set-option with quiet flag
