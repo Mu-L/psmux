@@ -267,6 +267,7 @@ fn drain_plugin_req(
             }
         }
         CtrlReq::SourceFile(path) => {
+            app.defaults_suppressed = false;
             crate::config::source_file(app, &path);
         }
         // Ignore other request types during plugin drain
@@ -2590,6 +2591,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(output);
                 }
                 CtrlReq::SourceFile(path) => {
+                    // Reset defaults_suppressed before re-parsing so the flag
+                    // reflects the CURRENT config. If the config still has
+                    // unbind-key -a, parsing will set it back to true.
+                    app.defaults_suppressed = false;
                     // Use config helper for standard source-file behavior (-F support,
                     // nested parse context). Keep direct glob handling for wildcard sources.
                     let is_format_expand = path.starts_with("-F ") || path.starts_with("-F\t");

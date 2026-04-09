@@ -312,6 +312,83 @@ if ($keys -match "x.*split-window") {
 }
 
 # ============================================================
+# SCENARIO 5: SOURCE-FILE RELOAD (unbind then remove unbind)
+# ============================================================
+Write-Host ""
+Write-Host ("=" * 60)
+Write-Host "SCENARIO 5: Source-file reload toggling unbind-key -a"
+Write-Host ("=" * 60)
+
+Cleanup
+
+# Start with full unbind config
+@"
+unbind-key -a
+set -g prefix C-a
+unbind-key C-b
+bind-key C-a send-prefix
+bind-key C-r source-file ~/.tmux.conf
+"@ | Set-Content -Path "$env:USERPROFILE\.tmux.conf" -Force
+
+Write-Info "Starting session with unbind-key -a..."
+Start-Process -FilePath $PSMUX -ArgumentList "new-session -d" -WindowStyle Hidden
+Start-Sleep -Seconds 3
+
+Write-Test "Initial: defaults suppressed after unbind-key -a"
+$c1 = (& $PSMUX list-keys 2>&1 | Measure-Object -Line).Lines
+if ($c1 -eq 2) {
+    Write-Pass "Initial: $c1 bindings (only user)"
+} else {
+    Write-Fail "Initial: expected 2 bindings, got $c1"
+}
+
+# Change config to remove unbind-key -a and reload
+@"
+#unbind-key -a
+set -g prefix C-a
+unbind-key C-b
+bind-key C-a send-prefix
+bind-key C-r source-file ~/.tmux.conf
+"@ | Set-Content -Path "$env:USERPROFILE\.tmux.conf" -Force
+& $PSMUX source-file "$env:USERPROFILE\.tmux.conf"
+Start-Sleep -Milliseconds 500
+
+Write-Test "After source-file reload without unbind: defaults return"
+$c2 = (& $PSMUX list-keys 2>&1 | Measure-Object -Line).Lines
+if ($c2 -gt 40) {
+    Write-Pass "After reload: $c2 bindings (defaults returned)"
+} else {
+    Write-Fail "After reload: expected 40+ bindings, got $c2"
+}
+
+Write-Test "defaults_suppressed reset to false after reload"
+$val = Get-DumpStateField "defaults_suppressed"
+if ($val -eq "false") {
+    Write-Pass "defaults_suppressed = false after reload"
+} else {
+    Write-Fail "defaults_suppressed = '$val' (expected false)"
+}
+
+# Reload with unbind-key -a again to verify it re-suppresses
+@"
+unbind-key -a
+set -g prefix C-a
+unbind-key C-b
+bind-key C-a send-prefix
+bind-key C-r source-file ~/.tmux.conf
+"@ | Set-Content -Path "$env:USERPROFILE\.tmux.conf" -Force
+& $PSMUX source-file "$env:USERPROFILE\.tmux.conf"
+Start-Sleep -Milliseconds 500
+
+Write-Test "Re-suppressed after reload WITH unbind-key -a"
+$c3 = (& $PSMUX list-keys 2>&1 | Measure-Object -Line).Lines
+if ($c3 -eq 2) {
+    Write-Pass "Re-suppressed: $c3 bindings"
+} else {
+    Write-Fail "Re-suppressed: expected 2 bindings, got $c3"
+}
+
+# ============================================================
 # CLEANUP
 # ============================================================
 Write-Host ""
