@@ -218,7 +218,7 @@ if control_echo || control_noecho {
         let _ = write_stream.flush();
 
         // Dispatch the command
-        let parsed = parse_command_line(trimmed);
+        let parsed = crate::cli::normalize_flag_equals(parse_command_line(trimmed));
         let raw_cmd = parsed.first().map(|s| s.as_str()).unwrap_or("");
 
         if raw_cmd.is_empty() {
@@ -396,7 +396,7 @@ loop {
     }
     
     // Use quote-aware parser to preserve arguments with spaces
-    let parsed = parse_command_line(&line);
+    let parsed = crate::cli::normalize_flag_equals(parse_command_line(&line));
     let raw_cmd = parsed.get(0).map(|s| s.as_str()).unwrap_or("");
     // Check command aliases before normal dispatch
     let alias_expanded = if let Ok(map) = aliases.read() {

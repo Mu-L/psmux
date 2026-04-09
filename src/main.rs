@@ -41,7 +41,7 @@ use crossterm::event::{EnableMouseCapture, DisableMouseCapture, EnableBracketedP
 use crate::platform::enable_virtual_terminal_processing;
 use crate::cli::{print_help, print_version, print_commands};
 use crate::session::{cleanup_stale_port_files, read_session_key, send_control,
-    send_control_with_response, resolve_last_session_name, resolve_default_session_name,
+    send_control_with_response, resolve_default_session_name,
     kill_remaining_server_processes};
 use crate::rendering::apply_cursor_style;
 use crate::server::run_server;
@@ -59,7 +59,7 @@ fn main() {
 }
 
 fn run_main() -> io::Result<()> {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = crate::cli::normalize_flag_equals(env::args().collect());
     
     // Clean up any stale port files at startup
     cleanup_stale_port_files();
@@ -168,8 +168,9 @@ fn run_main() -> io::Result<()> {
     }
     // Fallback: if no -t flag and session still not resolved (e.g. TMUX pointed
     // to a warm session, or no TMUX at all), pick the most recent real session.
+    // When -L namespace is active, only resolve within that namespace.
     if env::var("PSMUX_TARGET_SESSION").is_err() {
-        if let Some(name) = crate::session::resolve_last_session_name() {
+        if let Some(name) = crate::session::resolve_last_session_name_ns(l_socket_name.as_deref()) {
             env::set_var("PSMUX_TARGET_SESSION", &name);
         }
     }
@@ -355,8 +356,14 @@ fn run_main() -> io::Result<()> {
                                                 }
                                                 if !line.trim().is_empty() && line.trim() != "ERROR: Authentication required" { 
                                                     println!("{}", line.trim_end()); 
-                                                } else { 
-                                                    println!("{}", base); 
+                                                } else {
+                                                    // Strip namespace prefix for display (e.g. "foo__dev" -> "dev")
+                                                    let display_name = if let Some(ref pfx) = ns_prefix {
+                                                        base.strip_prefix(pfx.as_str()).unwrap_or(base)
+                                                    } else {
+                                                        base
+                                                    };
+                                                    println!("{}", display_name); 
                                                 }
                                             } else {
                                                 // stale port file - remove it along with matching key
@@ -378,10 +385,23 @@ fn run_main() -> io::Result<()> {
                     .iter()
                     .position(|a| a == "-t")
                     .and_then(|i| args.get(i + 1))
-                    .map(|s| s.clone())
+                    .map(|s| {
+                        // Apply -L namespace prefix when -t is specified
+                        if let Some(ref l) = l_socket_name {
+                            format!("{}__{}", l, s)
+                        } else {
+                            s.clone()
+                        }
+                    })
                     .or_else(resolve_default_session_name)
-                    .or_else(resolve_last_session_name)
-                    .unwrap_or_else(|| "0".to_string());
+                    .or_else(|| crate::session::resolve_last_session_name_ns(l_socket_name.as_deref()))
+                    .unwrap_or_else(|| {
+                        if let Some(ref l) = l_socket_name {
+                            format!("{}__0", l)
+                        } else {
+                            "0".to_string()
+                        }
+                    });
                 env::set_var("PSMUX_SESSION_NAME", name);
                 env::set_var("PSMUX_REMOTE_ATTACH", "1");
             }
