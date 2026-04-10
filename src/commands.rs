@@ -1312,11 +1312,20 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         app.hooks.remove(*name);
                     }
                 } else if non_flag.len() >= 2 {
-                    let hook_cmd = non_flag[1..].join(" ");
-                    if has_append {
-                        app.hooks.entry(non_flag[0].to_string()).or_default().push(hook_cmd);
+                    // Extract hook command from the raw cmd string to preserve quoting.
+                    // non_flag[0] is the hook name; everything after it in the raw
+                    // string is the command (may contain quoted paths with spaces).
+                    let hook_name = non_flag[0];
+                    let hook_cmd = if let Some(pos) = cmd.find(hook_name) {
+                        let after_name = pos + hook_name.len();
+                        cmd[after_name..].trim().to_string()
                     } else {
-                        app.hooks.insert(non_flag[0].to_string(), vec![hook_cmd]);
+                        non_flag[1..].join(" ")
+                    };
+                    if has_append {
+                        app.hooks.entry(hook_name.to_string()).or_default().push(hook_cmd);
+                    } else {
+                        app.hooks.insert(hook_name.to_string(), vec![hook_cmd]);
                     }
                 }
             }
