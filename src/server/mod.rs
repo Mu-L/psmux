@@ -531,19 +531,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     }
     // Fire client-attached hooks once at startup so plugins populate initial
     // data (e.g. CPU/battery) even for detached sessions (tppanel previews).
-    {
-        let cmds: Vec<String> = app.hooks.get("client-attached").cloned().unwrap_or_default();
-        for cmd in cmds {
-            let _ = execute_command_string(&mut app, &cmd);
-        }
-    }
+    crate::commands::fire_hooks(&mut app, "client-attached");
     // Fire session-created hook at startup
-    {
-        let cmds: Vec<String> = app.hooks.get("session-created").cloned().unwrap_or_default();
-        for cmd in cmds {
-            let _ = execute_command_string(&mut app, &cmd);
-        }
-    }
+    crate::commands::fire_hooks(&mut app, "session-created");
     // Spawn a warm server for the NEXT new-session when the current session
     // is allowed to keep background state alive.
     if should_spawn_warm_server(&app) {
@@ -3713,7 +3703,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             // Check bell/activity state for the pushed frame
             let push_alert_hooks = helpers::check_window_activity(&mut app);
             for event in &push_alert_hooks {
-                if let Some(cmds) = app.hooks.get(*event) { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                crate::commands::fire_hooks(&mut app, event);
             }
             // Rebuild metadata cache if structural changes happened.
             if meta_dirty {
@@ -3829,7 +3819,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 let _pre_status_idx = app.active_idx;
                 let cmds: Vec<String> = app.hooks.get("status-interval").cloned().unwrap_or_default();
                 for cmd in cmds {
-                    let _ = execute_command_string(&mut app, &cmd);
+                    let bg_cmd = crate::commands::ensure_background(&cmd);
+                    let _ = execute_command_string(&mut app, &bg_cmd);
                 }
                 if app.active_idx != _pre_status_idx && crate::debug_log::server_log_enabled() {
                     crate::debug_log::server_log("switch", &format!(
