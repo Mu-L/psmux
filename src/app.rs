@@ -57,9 +57,9 @@ mod bracket_paste_detect {
         /// Matching characters of the open sequence at index `idx`.
         MatchOpen { idx: usize, pending: Vec<KeyEvent>, started: Instant },
         /// Accumulating paste content between open and close sequences.
-        Pasting { buf: String },
+        Pasting { buf: String, started: Instant },
         /// Inside paste, matching characters of the close sequence.
-        MatchClose { idx: usize, buf: String },
+        MatchClose { idx: usize, buf: String, started: Instant },
     }
 
     pub enum Action {
@@ -80,6 +80,8 @@ mod bracket_paste_detect {
         None,
         /// Buffered keys should be replayed through handle_key.
         Replay(Vec<KeyEvent>),
+        /// Paste state timed out: flush accumulated text as a paste.
+        FlushPaste(String),
     }
 
     impl State {
@@ -91,6 +93,11 @@ mod bracket_paste_detect {
     /// If so, flush the pending events.  This prevents Ctrl+[ (ESC)
     /// from being swallowed indefinitely while the detector waits
     /// for a `[` that never arrives.
+    /// Maximum time (2 seconds) to stay in Pasting state before
+    /// force-flushing.  Prevents terminal hang if `\x1b[201~` is lost
+    /// (issue #197).
+    const PASTE_TIMEOUT_MS: u128 = 2_000;
+
     pub fn flush_timeout(state: &mut State) -> TimeoutAction {
         // Check if we're in MatchOpen and the timeout expired WITHOUT
         // moving the state (avoids borrow issues).
@@ -99,6 +106,27 @@ mod bracket_paste_detect {
             let old = std::mem::replace(state, State::Idle);
             if let State::MatchOpen { pending, .. } = old {
                 return TimeoutAction::Replay(pending);
+            }
+        }
+        // Check for stale paste: if we have been accumulating paste content
+        // for longer than PASTE_TIMEOUT_MS, force-flush it as a Paste event
+        // so the terminal does not hang forever.
+        let paste_expired = match state {
+            State::Pasting { started, .. } | State::MatchClose { started, .. } => {
+                started.elapsed().as_millis() >= PASTE_TIMEOUT_MS
+            }
+            _ => false,
+        };
+        if paste_expired {
+            let old = std::mem::replace(state, State::Idle);
+            match old {
+                State::Pasting { buf, .. } if !buf.is_empty() => {
+                    return TimeoutAction::FlushPaste(buf);
+                }
+                State::MatchClose { buf, .. } if !buf.is_empty() => {
+                    return TimeoutAction::FlushPaste(buf);
+                }
+                _ => {}
             }
         }
         TimeoutAction::None
@@ -138,7 +166,7 @@ mod bracket_paste_detect {
                         let next = idx + 1;
                         if next >= OPEN.len() {
                             // Full open sequence matched!
-                            *state = State::Pasting { buf: String::new() };
+                            *state = State::Pasting { buf: String::new(), started: Instant::now() };
                             return Action::Consumed;
                         }
                         *state = State::MatchOpen { idx: next, pending, started: Instant::now() };
@@ -149,26 +177,28 @@ mod bracket_paste_detect {
                 *state = State::Idle;
                 Action::Replay(pending, key)
             }
-            State::Pasting { mut buf } => {
+            State::Pasting { mut buf, started } => {
                 if let Some(b) = key_byte(&key) {
                     if b == CLOSE[0] {
                         // Potential close sequence start.
-                        *state = State::MatchClose { idx: 1, buf };
+                        *state = State::MatchClose { idx: 1, buf, started };
                         return Action::Consumed;
                     }
                 }
-                // Regular paste content.
-                match key.code {
-                    KeyCode::Char(c) => buf.push(c),
-                    KeyCode::Enter   => buf.push('\r'),
-                    KeyCode::Tab     => buf.push('\t'),
-                    KeyCode::Esc     => buf.push('\x1b'),
-                    _ => {} // ignore non-text keys during paste
+                // Regular paste content (cap at 1MB).
+                if buf.len() < 1_048_576 {
+                    match key.code {
+                        KeyCode::Char(c) => buf.push(c),
+                        KeyCode::Enter   => buf.push('\r'),
+                        KeyCode::Tab     => buf.push('\t'),
+                        KeyCode::Esc     => buf.push('\x1b'),
+                        _ => {} // ignore non-text keys during paste
+                    }
                 }
-                *state = State::Pasting { buf };
+                *state = State::Pasting { buf, started };
                 Action::Consumed
             }
-            State::MatchClose { idx, mut buf } => {
+            State::MatchClose { idx, mut buf, started } => {
                 if let Some(b) = key_byte(&key) {
                     if b == CLOSE[idx] {
                         let next = idx + 1;
@@ -177,7 +207,7 @@ mod bracket_paste_detect {
                             *state = State::Idle;
                             return Action::Paste(buf);
                         }
-                        *state = State::MatchClose { idx: next, buf };
+                        *state = State::MatchClose { idx: next, buf, started };
                         return Action::Consumed;
                     }
                 }
@@ -186,7 +216,7 @@ mod bracket_paste_detect {
                     buf.push(CLOSE[i] as char);
                 }
                 // Re-check current key: it might start a new close sequence.
-                *state = State::Pasting { buf };
+                *state = State::Pasting { buf, started };
                 return feed(state, key);
             }
         }
@@ -995,6 +1025,11 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     for pk in pending {
                         if handle_key(&mut app, pk)? { quit = true; break; }
                     }
+                }
+                bracket_paste_detect::TimeoutAction::FlushPaste(text) => {
+                    crate::debug_log::input_log("paste", &format!(
+                        "bracket_paste_detect: stale paste flush, len={}", text.len()));
+                    send_paste_to_active(&mut app, &text)?;
                 }
                 bracket_paste_detect::TimeoutAction::None => {}
             }
