@@ -7,7 +7,7 @@
 - 🎨 **tmux theme support** : 16 named colors + 256 indexed + 24-bit true color (`#RRGGBB`), 14 style options
 - 📋 **Reads your `.tmux.conf`** : drop-in config compatibility, zero learning curve
 - ⚡ **Blazing fast startup** : sub-100ms session creation, near-zero overhead over shell startup
-- 🔌 **76 tmux-compatible commands** : `bind-key`, `set-option`, `if-shell`, `run-shell`, hooks, and more
+- 🔌 **92 tmux-compatible commands** : `bind-key`, `set-option`, `if-shell`, `run-shell`, `display-popup`, `display-menu`, hooks, and more
 - 🪟 **Windows-native** : ConPTY, Win32 API, works with PowerShell, cmd, bash, WSL, nushell
 - 📦 **Single binary, no dependencies** : install via `cargo`, `winget`, `scoop`, or `choco`
 
@@ -32,7 +32,7 @@
 
 ## tmux Theme & Style Support
 
-- **14 customizable style options** : status bar, pane borders, messages, copy-mode highlights, popups
+- **14 customizable style options** : status bar, pane borders, messages, copy-mode highlights, popups, menus
 - **Full color spectrum** : 16 named colors, 256 indexed (`colour0`–`colour255`), 24-bit true color (`#RRGGBB`)
 - **Text attributes** : bold, dim, italic, underline, blink, reverse, strikethrough, and more
 - **Status bar** : fully customizable left/right content with format variables
@@ -60,11 +60,14 @@ See [keybindings.md](keybindings.md) for the full copy mode key reference.
 
 ## Scripting & Automation
 
-- **76 tmux-compatible commands** : everything you need for automation
+- **92 tmux-compatible commands** : everything you need for automation
 - `send-keys`, `capture-pane`, `pipe-pane` for CI/CD and DevOps workflows
+- `display-popup` for floating popup windows with custom commands
+- `display-menu` for interactive context menus
 - `if-shell` and `run-shell` for conditional config logic
 - **15+ event hooks** : `after-new-window`, `after-split-window`, `client-attached`, etc.
 - Paste buffers, named registers, `display-message` with format variables
+- Server namespaces via `-L` for running isolated psmux instances
 
 See [scripting.md](scripting.md) for full command reference and examples.
 

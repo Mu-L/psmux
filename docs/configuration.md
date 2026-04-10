@@ -154,8 +154,8 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `mode-style` | Str | `bg=yellow,fg=black` | Copy-mode highlight |
 | `pane-border-style` | Str | | Inactive border style |
 | `pane-active-border-style` | Str | `fg=green` | Active border style |
-| `pane-border-format` | Str | | Pane border format string |
-| `pane-border-status` | Str | | Pane border status position (`top`/`bottom`) |
+| `pane-border-format` | Str | | Pane border format string (e.g. `#{pane_index}: #{pane_title}`) |
+| `pane-border-status` | Str | | Pane border status position (`top`/`bottom`/`off`) |
 | `window-status-format` | Str | `#I:#W#F` | Inactive tab format |
 | `window-status-current-format` | Str | `#I:#W#F` | Active tab format |
 | `window-status-separator` | Str | `" "` | Tab separator |
@@ -164,6 +164,38 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `window-status-activity-style` | Str | `reverse` | Activity tab style |
 | `window-status-bell-style` | Str | `reverse` | Bell tab style |
 | `window-status-last-style` | Str | | Last-active tab style |
+
+### Multi-line Status Bar (`status-format[]`)
+
+psmux supports a multi-line status bar using the `status-format[]` array. Set the `status` option to a number to control how many lines the status bar displays:
+
+```tmux
+# Enable a 2-line status bar
+set -g status 2
+
+# Configure each line (0-indexed)
+set -g status-format[0] "#[align=left]#S #[align=right]%H:%M"
+set -g status-format[1] "#[align=left]#{W:#I:#W }"
+```
+
+The first line (`status-format[0]`) replaces the default status bar content. Additional lines stack below (or above, depending on `status-position`).
+
+### Pane Border Labels
+
+Show pane information on the border between panes:
+
+```tmux
+# Enable pane border labels at the top of each pane
+set -g pane-border-status top
+
+# Customize what the label shows
+set -g pane-border-format " #{pane_index}: #{pane_title} [#{pane_current_command}] "
+
+# Disable pane border labels
+set -g pane-border-status off
+```
+
+Use `select-pane -T "title"` to set a pane title that appears in the border label.
 
 ### Bell
 

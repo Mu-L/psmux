@@ -39,6 +39,15 @@ psmux send-keys "ls -la" Enter
 # Send keys literally (no parsing)
 psmux send-keys -l "literal text"
 
+# Paste mode (legacy compatibility)
+psmux send-keys -p
+
+# Repeat a key N times
+psmux send-keys -N 5 Up
+
+# Send copy mode command
+psmux send-keys -X copy-mode-up
+
 # Special keys supported:
 # Enter, Tab, Escape, Space, Backspace
 # Up, Down, Left, Right, Home, End
@@ -79,6 +88,12 @@ psmux show-buffer
 
 # Delete buffer
 psmux delete-buffer
+
+# Interactive buffer chooser (enter=paste, d=delete, esc=close)
+psmux choose-buffer
+
+# Clear command prompt history
+psmux clear-prompt-history
 ```
 
 ## Pane Layout
@@ -99,6 +114,65 @@ psmux rotate-window
 
 # Toggle pane zoom
 psmux zoom-pane
+```
+
+## Pane Titles
+
+```powershell
+# Set a title on the active pane
+psmux select-pane -T "my build pane"
+
+# Set pane title on a specific pane
+psmux select-pane -t %3 -T "logs"
+
+# Set per-pane style (foreground/background color override)
+psmux select-pane -P "bg=default,fg=blue"
+
+# Display pane title using format variables
+psmux display-message "#{pane_title}"
+```
+
+Enable `pane-border-format` and `pane-border-status` in your config to see titles on pane borders:
+
+```tmux
+set -g pane-border-status top
+set -g pane-border-format " #{pane_index}: #{pane_title} "
+```
+
+## Popups
+
+```powershell
+# Open a popup running a command
+psmux display-popup "Get-Process"
+
+# Set width and height (absolute or percentage)
+psmux display-popup -w 80% -h 50% "htop"
+
+# Set the starting directory
+psmux display-popup -d "C:\Projects" -w 100 -h 30
+
+# Close popup on command exit (default behavior, -E inverts it)
+psmux display-popup -E "git log --oneline -20"
+
+# Keep popup open after command finishes
+psmux display-popup -K "echo done"
+```
+
+## Menus
+
+```powershell
+# Display an interactive menu
+# Format: display-menu [-x x] [-y y] [-T title] name key command ...
+psmux display-menu -T "Actions" \
+  "New Window" n "new-window" \
+  "Split Horizontal" h "split-window -h" \
+  "Split Vertical" v "split-window -v" \
+  "Close Pane" x "kill-pane"
+
+# Position the menu at specific coordinates
+psmux display-menu -x 10 -y 5 -T "Quick" \
+  "Zoom" z "resize-pane -Z" \
+  "Rename" r "command-prompt -I '#W' 'rename-window %%'"
 ```
 
 ## Session Management
@@ -168,7 +242,12 @@ psmux pipe-pane -o "cat > pane.log"
 
 # Hooks
 psmux set-hook -g after-new-window "display-message created"
+psmux set-hook -gu after-new-window     # Unset (remove) a hook
 psmux show-hooks
+
+# Run shell commands (always non-blocking)
+psmux run-shell "echo hello"           # Async, output shown in status
+psmux run-shell -b "long-running.ps1"  # Fire-and-forget (detached stdin)
 ```
 
 ## Target Syntax (`-t`)
@@ -187,4 +266,35 @@ psmux send-keys -t %3 "pwd" Enter
 
 # window by window id
 psmux select-window -t @4
+```
+
+## Server Namespaces (`-L`)
+
+Use `-L` to run multiple isolated psmux servers on the same machine:
+
+```powershell
+# Start a session in a named server namespace
+psmux -L work new-session -s dev
+
+# Attach to a session in that namespace
+psmux -L work attach -t dev
+
+# Each namespace gets its own server, sessions, and socket
+psmux -L personal new-session -s play
+```
+
+## Key Binding Management
+
+```powershell
+# Bind a key in the default prefix table
+psmux bind-key h split-window -h
+
+# Unbind a single key
+psmux unbind-key h
+
+# Unbind ALL keys (reset to clean slate)
+psmux unbind-key -a
+
+# Unbind all keys in a specific key table only
+psmux unbind-key -a -T copy-mode-vi
 ```

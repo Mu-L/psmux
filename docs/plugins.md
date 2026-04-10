@@ -12,16 +12,33 @@ psmux has a full plugin ecosystem — ports of the most popular tmux plugins, re
 
 | Plugin | Description |
 |--------|-------------|
+| [ppm](https://github.com/psmux/psmux-plugins/tree/main/ppm) | Plugin manager (like tpm) |
 | [psmux-sensible](https://github.com/psmux/psmux-plugins/tree/main/psmux-sensible) | Sensible defaults for psmux |
 | [psmux-yank](https://github.com/psmux/psmux-plugins/tree/main/psmux-yank) | Windows clipboard integration |
 | [psmux-resurrect](https://github.com/psmux/psmux-plugins/tree/main/psmux-resurrect) | Save/restore sessions |
+| [psmux-continuum](https://github.com/psmux/psmux-plugins/tree/main/psmux-continuum) | Auto save/restore sessions (works with resurrect) |
 | [psmux-pain-control](https://github.com/psmux/psmux-plugins/tree/main/psmux-pain-control) | Better pane navigation |
 | [psmux-prefix-highlight](https://github.com/psmux/psmux-plugins/tree/main/psmux-prefix-highlight) | Prefix key indicator |
-| [ppm](https://github.com/psmux/psmux-plugins/tree/main/ppm) | Plugin manager (like tpm) |
+| [psmux-battery](https://github.com/psmux/psmux-plugins/tree/main/psmux-battery) | Battery status in status bar |
+| [psmux-cpu](https://github.com/psmux/psmux-plugins/tree/main/psmux-cpu) | CPU usage in status bar |
+| [psmux-net-speed](https://github.com/psmux/psmux-plugins/tree/main/psmux-net-speed) | Network speed in status bar |
+| [psmux-git-status](https://github.com/psmux/psmux-plugins/tree/main/psmux-git-status) | Git branch and status in status bar |
+| [psmux-sidebar](https://github.com/psmux/psmux-plugins/tree/main/psmux-sidebar) | File tree sidebar |
+| [psmux-logging](https://github.com/psmux/psmux-plugins/tree/main/psmux-logging) | Log pane output to files |
 
 ## Themes
 
-Catppuccin · Dracula · Nord · Tokyo Night · Gruvbox
+| Theme | Description |
+|-------|-------------|
+| [Catppuccin](https://github.com/psmux/psmux-plugins/tree/main/psmux-theme-catppuccin) | Soothing pastel theme (Latte, Frappe, Macchiato, Mocha) |
+| [Dracula](https://github.com/psmux/psmux-plugins/tree/main/psmux-theme-dracula) | Dark theme with vibrant colors |
+| [Nord](https://github.com/psmux/psmux-plugins/tree/main/psmux-theme-nord) | Arctic, north bluish color palette |
+| [Tokyo Night](https://github.com/psmux/psmux-plugins/tree/main/psmux-theme-tokyonight) | Clean dark theme inspired by Tokyo at night |
+| [Gruvbox](https://github.com/psmux/psmux-plugins/tree/main/psmux-theme-gruvbox) | Retro groove color scheme |
+| [Everforest](https://github.com/psmux/psmux-plugins/tree/main/psmux-theme-everforest) | Comfortable green based color scheme |
+| [Kanagawa](https://github.com/psmux/psmux-plugins/tree/main/psmux-theme-kanagawa) | Dark theme inspired by Katsushika Hokusai |
+| [One Dark](https://github.com/psmux/psmux-plugins/tree/main/psmux-theme-onedark) | Atom One Dark inspired theme |
+| [Rose Pine](https://github.com/psmux/psmux-plugins/tree/main/psmux-theme-rosepine) | Soho vibes for the terminal |
 
 ## Quick Start
 
