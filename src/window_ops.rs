@@ -495,11 +495,9 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
     }
 
     if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        app.copy_anchor = None;
         if let Some(area) = active_area {
             let (row, col) = copy_cell_for_area(area, x, y);
-            // Single click positions cursor, clears selection (tmux parity).
-            // Selection only starts on drag.
-            app.copy_anchor = None;
             app.copy_pos = Some((row, col));
         }
         return;
@@ -549,7 +547,12 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
             win.active_path = path.clone();
             let (row, col) = copy_cell_for_area(*area, x, y);
             if app.copy_anchor.is_none() {
-                app.copy_anchor = Some((row, col));
+                // Only start selection when mouse moves to a different cell
+                // than the click position. Prevents micro-drag jitter (#199).
+                if app.copy_pos == Some((row, col)) {
+                    return;
+                }
+                app.copy_anchor = Some(app.copy_pos.unwrap_or((row, col)));
                 app.copy_anchor_scroll_offset = app.copy_scroll_offset;
                 app.copy_selection_mode = crate::types::SelectionMode::Char;
             }
@@ -585,16 +588,14 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         if let Some((path, area)) = rects.iter().find(|(_, area)| area.contains(ratatui::layout::Position { x, y })) {
             win.active_path = path.clone();
             let (row, col) = copy_cell_for_area(*area, x, y);
-            if app.copy_anchor.is_none() {
-                app.copy_anchor = Some((row, col));
-                app.copy_anchor_scroll_offset = app.copy_scroll_offset;
-            }
             app.copy_pos = Some((row, col));
         }
-        // Auto-yank if selection exists (anchor != pos)
+        // Auto-yank if selection exists (anchor != pos), else clear stale anchor
         if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
             if a != p {
                 let _ = yank_selection(app);
+            } else {
+                app.copy_anchor = None;
             }
         }
         return;
