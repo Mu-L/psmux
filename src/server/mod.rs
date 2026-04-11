@@ -269,6 +269,7 @@ fn drain_plugin_req(
         CtrlReq::SourceFile(path) => {
             app.defaults_suppressed = false;
             app.key_tables.clear();
+            crate::config::populate_default_bindings(app);
             crate::config::source_file(app, &path);
         }
         CtrlReq::UnbindAll => {
@@ -280,11 +281,12 @@ fn drain_plugin_req(
                 binds.clear();
             }
         }
-        CtrlReq::UnbindKey(key) => {
+        CtrlReq::UnbindKey(key, table) => {
             if let Some(kc) = parse_key_string(&key) {
                 let kc = normalize_key_for_binding(kc);
-                for t in app.key_tables.values_mut() {
-                    t.retain(|b| b.key != kc);
+                let target = table.unwrap_or_else(|| "prefix".to_string());
+                if let Some(binds) = app.key_tables.get_mut(&target) {
+                    binds.retain(|b| b.key != kc);
                 }
             }
         }
@@ -410,6 +412,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
     } else { None };
 
+    crate::config::populate_default_bindings(&mut app);
     load_config(&mut app);
 
     // Execute queued plugin .ps1 scripts (e.g. theme plugins that use
@@ -2168,6 +2171,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // its own startup, but the user may have changed their
                     // config since then (or the warm server was spawned by a
                     // different session with a different PSMUX_CONFIG_FILE).
+                    app.key_tables.clear();
+                    app.defaults_suppressed = false;
+                    crate::config::populate_default_bindings(&mut app);
                     load_config(&mut app);
                     // Update shared aliases after config reload
                     if let Ok(mut w) = shared_aliases_main.write() {
@@ -2376,11 +2382,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                     state_dirty = true;
                 }
-                CtrlReq::UnbindKey(key) => {
+                CtrlReq::UnbindKey(key, table) => {
                     if let Some(kc) = parse_key_string(&key) {
                         let kc = normalize_key_for_binding(kc);
-                        for table in app.key_tables.values_mut() {
-                            table.retain(|b| b.key != kc);
+                        let target = table.unwrap_or_else(|| "prefix".to_string());
+                        if let Some(binds) = app.key_tables.get_mut(&target) {
+                            binds.retain(|b| b.key != kc);
                         }
                     }
                     meta_dirty = true;
@@ -2609,6 +2616,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // If the config has unbind-key -a, it will re-set the flag.
                     app.defaults_suppressed = false;
                     app.key_tables.clear();
+                    crate::config::populate_default_bindings(&mut app);
                     // Use config helper for standard source-file behavior (-F support,
                     // nested parse context). Keep direct glob handling for wildcard sources.
                     let is_format_expand = path.starts_with("-F ") || path.starts_with("-F\t");

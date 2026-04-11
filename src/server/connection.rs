@@ -1139,9 +1139,25 @@ match cmd {
                 let _ = tx.send(CtrlReq::UnbindAll);
             }
         } else {
-            let non_flag_args: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
-            if let Some(key) = non_flag_args.first() {
-                let _ = tx.send(CtrlReq::UnbindKey(key.to_string()));
+            // Parse -n / -T flags for table-specific individual unbind
+            let mut table: Option<String> = None;
+            let mut t_value_idx: Option<usize> = None;
+            for (j, a) in args.iter().enumerate() {
+                if *a == "-T" {
+                    if let Some(t) = args.get(j + 1) {
+                        table = Some(t.to_string());
+                        t_value_idx = Some(j + 1);
+                    }
+                }
+                if *a == "-n" { table = Some("root".to_string()); }
+            }
+            // Find the key argument: first non-flag arg that isn't the -T table value
+            let key_arg = args.iter().enumerate()
+                .filter(|(i, a)| !a.starts_with('-') && Some(*i) != t_value_idx)
+                .map(|(_, a)| *a)
+                .next();
+            if let Some(key) = key_arg {
+                let _ = tx.send(CtrlReq::UnbindKey(key.to_string(), table));
             }
         }
     }
@@ -2271,8 +2287,26 @@ fn dispatch_control_command(
                 } else {
                     let _ = tx.send(CtrlReq::UnbindAll);
                 }
-            } else if let Some(key) = args.iter().find(|a| !a.starts_with('-')) {
-                let _ = tx.send(CtrlReq::UnbindKey(key.to_string()));
+            } else {
+                // Parse -n / -T flags for table-specific individual unbind
+                let mut table: Option<String> = None;
+                let mut t_value_idx: Option<usize> = None;
+                for (j, a) in args.iter().enumerate() {
+                    if *a == "-T" {
+                        if let Some(t) = args.get(j + 1) {
+                            table = Some(t.to_string());
+                            t_value_idx = Some(j + 1);
+                        }
+                    }
+                    if *a == "-n" { table = Some("root".to_string()); }
+                }
+                let key_arg = args.iter().enumerate()
+                    .filter(|(i, a)| !a.starts_with('-') && Some(*i) != t_value_idx)
+                    .map(|(_, a)| *a)
+                    .next();
+                if let Some(key) = key_arg {
+                    let _ = tx.send(CtrlReq::UnbindKey(key.to_string(), table));
+                }
             }
             let _ = resp_tx.send(String::new());
             true

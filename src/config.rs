@@ -64,6 +64,26 @@ pub fn is_warm_disabled_by_config() -> bool {
     false
 }
 
+/// Populate key_tables with PREFIX_DEFAULTS from help.rs.
+/// This ensures default bindings live in key_tables (like tmux)
+/// so that unbind-key <key> can actually remove them.
+/// Must be called BEFORE load_config / source_file.
+pub fn populate_default_bindings(app: &mut AppState) {
+    let defaults = crate::help::PREFIX_DEFAULTS;
+    let table = app.key_tables.entry("prefix".to_string()).or_default();
+    for (key_str, cmd_str) in defaults {
+        if let Some(key) = parse_key_name(key_str) {
+            let key = normalize_key_for_binding(key);
+            if let Some(action) = parse_command_to_action(cmd_str) {
+                // Only add if not already present (user config may have overridden)
+                if !table.iter().any(|b| b.key == key) {
+                    table.push(Bind { key, action, repeat: false });
+                }
+            }
+        }
+    }
+}
+
 pub fn load_config(app: &mut AppState) {
     // If -f flag was used, load that specific config file instead of default search
     if let Ok(config_file) = env::var("PSMUX_CONFIG_FILE") {
@@ -921,9 +941,11 @@ pub fn parse_unbind_key(app: &mut AppState, line: &str) {
     if i < parts.len() {
         if let Some(key) = parse_key_name(parts[i]) {
             let key = normalize_key_for_binding(key);
-            // Remove from all tables
-            for table in app.key_tables.values_mut() {
-                table.retain(|b| b.key != key);
+            // Remove from the targeted table only (tmux behavior).
+            // Default is "prefix" when no -n or -T is specified.
+            let target = table.unwrap_or_else(|| "prefix".to_string());
+            if let Some(binds) = app.key_tables.get_mut(&target) {
+                binds.retain(|b| b.key != key);
             }
         }
     }
@@ -1552,3 +1574,7 @@ mod tests_issue145_source_file;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue193_scroll_enter_copy_mode.rs"]
 mod tests_issue193_scroll_enter_copy_mode;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue198_unbind_individual.rs"]
+mod tests_issue198_unbind_individual;

@@ -483,32 +483,32 @@ pub fn mouse_lines() -> Vec<String> {
 /// binding in the prefix table are automatically excluded.
 pub fn build_overlay_lines(
     user_bindings: &[(bool, String, String, String)],
-    defaults_suppressed: bool,
+    _defaults_suppressed: bool,
 ) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
-    // Collect user-overridden keys for prefix table
-    let overridden: std::collections::HashSet<&str> = user_bindings
-        .iter()
-        .filter(|(_, t, _, _)| t == "prefix")
-        .map(|(_, _, k, _)| k.as_str())
-        .collect();
+    // Since defaults are now populated in key_tables and synced as bindings,
+    // all prefix bindings (defaults + user) come through user_bindings.
+    // No need to separately iterate PREFIX_DEFAULTS.
 
-    // ── 1. Prefix defaults (excluding overridden, skip if suppressed) ──
+    // ── 1. Prefix bindings ──
     lines.push("── prefix table (C-b + key) ───────────────────────────────".into());
-    if !defaults_suppressed {
-        for (k, cmd) in PREFIX_DEFAULTS {
-            if !overridden.contains(k) {
-                lines.push(format!("bind-key -T prefix {} {}", k, cmd));
-            }
-        }
+    let prefix_bindings: Vec<_> = user_bindings.iter()
+        .filter(|(_, t, _, _)| t == "prefix")
+        .collect();
+    for (repeat, table, key, cmd) in &prefix_bindings {
+        let r = if *repeat { " -r" } else { "" };
+        lines.push(format!("bind-key{} -T {} {} {}", r, table, key, cmd));
     }
 
-    // ── 2. User bindings (all tables) ──
-    if !user_bindings.is_empty() {
+    // ── 2. Non-prefix user bindings ──
+    let non_prefix: Vec<_> = user_bindings.iter()
+        .filter(|(_, t, _, _)| t != "prefix")
+        .collect();
+    if !non_prefix.is_empty() {
         lines.push(String::new());
-        lines.push("── user / config bindings ─────────────────────────────────".into());
-        for (repeat, table, key, cmd) in user_bindings {
+        lines.push("── other table bindings ───────────────────────────────────".into());
+        for (repeat, table, key, cmd) in &non_prefix {
             let r = if *repeat { " -r" } else { "" };
             lines.push(format!("bind-key{} -T {} {} {}", r, table, key, cmd));
         }
@@ -533,29 +533,15 @@ pub fn build_overlay_lines(
 /// `defaults_suppressed` — when true, skip PREFIX_DEFAULTS (set by unbind-key -a).
 pub fn build_list_keys_output<'a>(
     user_tables: impl Iterator<Item = (&'a str, String, String, bool)>,
-    defaults_suppressed: bool,
+    _defaults_suppressed: bool,
 ) -> String {
     let mut output = String::new();
-    let mut overridden: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Peek at prefix-table user bindings first to know what's overridden
+    // Since defaults are now populated in key_tables (via populate_default_bindings),
+    // all bindings (defaults + user overrides) come through user_tables.
+    // No need to separately prepend PREFIX_DEFAULTS.
     let user_entries: Vec<(&str, String, String, bool)> = user_tables.collect();
-    for (table, key, _, _) in &user_entries {
-        if *table == "prefix" {
-            overridden.insert(key.clone());
-        }
-    }
 
-    // Defaults (skip if suppressed by unbind-key -a)
-    if !defaults_suppressed {
-        for (k, cmd) in PREFIX_DEFAULTS {
-            if !overridden.contains(*k) {
-                output.push_str(&format!("bind-key -T prefix {} {}\n", k, cmd));
-            }
-        }
-    }
-
-    // User bindings
     for (table, key, action, repeat) in &user_entries {
         let r = if *repeat { " -r" } else { "" };
         output.push_str(&format!("bind-key{} -T {} {} {}\n", r, table, key, action));

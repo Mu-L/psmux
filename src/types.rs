@@ -924,7 +924,7 @@ pub enum CtrlReq {
     JoinPane(usize),
     RespawnPane,
     BindKey(String, String, String, bool),  // table, key, command, repeat
-    UnbindKey(String),
+    UnbindKey(String, Option<String>),  // key, optional table (None = prefix)
     UnbindAll,
     UnbindAllInTable(String),
     ListKeys(mpsc::Sender<String>),
