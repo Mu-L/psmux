@@ -2194,6 +2194,10 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                         let _ = yank_selection(app);
                         // tmux parity #62: auto-exit copy mode after mouse yank
                         exit_copy_mode(app);
+                    } else {
+                        // Click without real drag: clear stale anchor so scrolling
+                        // does not produce a phantom selection (#199).
+                        app.copy_anchor = None;
                     }
                 }
                 return Ok(());
