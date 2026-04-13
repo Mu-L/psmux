@@ -2352,6 +2352,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     }
                                     rsel_start = None;
                                     rsel_end = None;
+                                    rsel_pane_rect = None;
+                                    rsel_block = false;
                                     rsel_dragged = false;
                                     selection_changed = true;
                                     // Suppress text key events that VS Code's ConPTY
