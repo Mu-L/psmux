@@ -297,11 +297,22 @@ fn drain_plugin_req(
 
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>) -> io::Result<()> {
     // Write crash info to a log file when stderr is unavailable (detached server)
-    std::panic::set_hook(Box::new(|info| {
+    // and clean up port/key files so stale entries do not linger (issue #204).
+    let panic_session_name = session_name.clone();
+    let panic_socket_name = socket_name.clone();
+    std::panic::set_hook(Box::new(move |info| {
         let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
         let path = format!("{}\\.psmux\\crash.log", home);
         let bt = std::backtrace::Backtrace::force_capture();
         let _ = std::fs::write(&path, format!("{info}\n\nBacktrace:\n{bt}"));
+        // Remove port/key files to prevent stale entries after a panic
+        let base = if let Some(ref sn) = panic_socket_name {
+            format!("{}__{}", sn, panic_session_name)
+        } else {
+            panic_session_name.clone()
+        };
+        let _ = std::fs::remove_file(format!("{}\\.psmux\\{}.port", home, base));
+        let _ = std::fs::remove_file(format!("{}\\.psmux\\{}.key", home, base));
     }));
     // Install console control handler to prevent termination on client detach
     install_console_ctrl_handler();
@@ -516,10 +527,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // create_window's fast path transplants it instantly.
     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
     if let Some(ref dir) = start_dir { env::set_current_dir(dir).ok(); }
-    if let Some(ref raw_args) = raw_command {
-        create_window_raw(&*pty_system, &mut app, raw_args)?;
+    let create_result = if let Some(ref raw_args) = raw_command {
+        create_window_raw(&*pty_system, &mut app, raw_args)
     } else {
-        create_window(&*pty_system, &mut app, initial_command.as_deref(), None)?;
+        create_window(&*pty_system, &mut app, initial_command.as_deref(), None)
+    };
+    if let Err(e) = create_result {
+        // Clean up port and key files so stale entries are not left
+        // behind when the pane command fails to spawn (issue #204).
+        let _ = std::fs::remove_file(&regpath);
+        let _ = std::fs::remove_file(&keypath);
+        // Kill warm pane if one was pre-spawned
+        if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
+        return Err(e);
     }
     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
     // Apply window name if specified via -n
