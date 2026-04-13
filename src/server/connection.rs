@@ -1262,7 +1262,7 @@ match cmd {
             .filter(|a| !a.starts_with('-'))
             .copied()
             .last();
-        if has_v || (opt_name.is_some() && !has_q) {
+        if has_v && opt_name.is_some() || (opt_name.is_some() && !has_q) {
             // Single-option query: show-options -v <name> or show <name>
             if let Some(name) = opt_name {
                 let (rtx, rrx) = mpsc::channel::<String>();
@@ -1292,6 +1292,37 @@ match cmd {
                             let _ = write_stream.flush();
                         }
                     }
+                }
+            }
+        } else if has_v && opt_name.is_none() {
+            // -v without option name: list all options, values only
+            let (rtx, rrx) = mpsc::channel::<String>();
+            if window_scope {
+                let _ = tx.send(CtrlReq::ShowWindowOptions(rtx));
+            } else {
+                let _ = tx.send(CtrlReq::ShowOptions(rtx));
+            }
+            if let Ok(text) = rrx.recv() {
+                // Extract values only (each line is "option_name value")
+                let values_only: String = text.lines()
+                    .filter_map(|line| {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() { return None; }
+                        // Split at first space: name value
+                        if let Some(pos) = trimmed.find(' ') {
+                            Some(&trimmed[pos + 1..])
+                        } else {
+                            Some(trimmed) // option with no value
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let output = if values_only.is_empty() { String::new() } else { format!("{}\n", values_only) };
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), output));
+                } else {
+                    let _ = write_stream.write_all(output.as_bytes());
+                    let _ = write_stream.flush();
                 }
             }
         } else {
@@ -2297,23 +2328,51 @@ fn dispatch_control_command(
         }
         "show-options" | "show" | "show-window-options" | "showw" => {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let value_only = args.windows(2).find(|w| w[0] == "-v").is_some();
+            let combined_has2 = |ch: char| -> bool {
+                args.iter().any(|a| {
+                    if *a == format!("-{}", ch) { return true; }
+                    a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains(ch)
+                })
+            };
+            let value_only = combined_has2('v');
+            let window_scope2 = matches!(cmd, "show-window-options" | "showw") || combined_has2('w');
             let opt_name = args.iter().filter(|a| !a.starts_with('-')).next().map(|s| s.to_string());
+            let has_opt_name = opt_name.is_some();
             if let Some(name) = opt_name {
                 if value_only {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
-                } else if cmd.starts_with("show-window") || cmd == "showw" {
+                } else if window_scope2 {
                     let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name));
                 } else {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
                 }
-            } else if cmd.starts_with("show-window") || cmd == "showw" {
+            } else if value_only {
+                // -v/-gv without option name: list all, values only
+                if window_scope2 {
+                    let _ = tx.send(CtrlReq::ShowWindowOptions(rtx));
+                } else {
+                    let _ = tx.send(CtrlReq::ShowOptions(rtx));
+                }
+            } else if window_scope2 {
                 let _ = tx.send(CtrlReq::ShowWindowOptions(rtx));
             } else {
                 let _ = tx.send(CtrlReq::ShowOptions(rtx));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
-                let _ = resp_tx.send(text);
+                if value_only && !has_opt_name {
+                    // Strip option names, keep values only
+                    let values_only: String = text.lines()
+                        .filter_map(|line| {
+                            let t = line.trim();
+                            if t.is_empty() { return None; }
+                            if let Some(pos) = t.find(' ') { Some(&t[pos + 1..]) } else { Some(t) }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let _ = resp_tx.send(values_only);
+                } else {
+                    let _ = resp_tx.send(text);
+                }
             }
             true
         }
