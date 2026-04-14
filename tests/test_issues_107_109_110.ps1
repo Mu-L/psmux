@@ -571,8 +571,13 @@ try {
     Start-Sleep -Seconds 8
 
     & $PSMUX send-keys -t $SCOMPAT "echo WSL_ALIVE" Enter
-    Start-Sleep -Seconds 3
-    $cap = Capture-Pane $SCOMPAT
+    $swWsl = [System.Diagnostics.Stopwatch]::StartNew()
+    $cap = ""
+    while ($swWsl.ElapsedMilliseconds -lt 10000) {
+        $cap = Capture-Pane $SCOMPAT
+        if ($cap -match "WSL_ALIVE") { break }
+        Start-Sleep -Milliseconds 500
+    }
     if ($cap -match "WSL_ALIVE") {
         Write-Pass "COMPAT.3: WSL pane works"
     } else {

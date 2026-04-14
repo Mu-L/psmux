@@ -918,17 +918,15 @@ pub fn search_prev(app: &mut AppState) {
     app.copy_pos = Some((r, c));
 }
 
-pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i32>) -> io::Result<Option<String>> {
-    let win = &mut app.windows[app.active_idx];
-    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
-    let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
-    let screen = parser.screen();
-    // Tmux semantics (from cmd-capture-pane.c):
-    //   Negative -S means "N scrollback lines above visible". Since psmux only
-    //   exposes visible rows here, any negative start clamps to 0 (top of visible),
-    //   matching tmux behavior when no scrollback history is available.
-    //   Negative -E likewise clamps to 0.
-    let last_row = p.last_rows.saturating_sub(1);
+/// Compute the (start, end) row range for capture-pane given optional -S/-E
+/// values and the last visible row index.
+///
+/// Tmux semantics (from cmd-capture-pane.c):
+///   Negative -S means "N scrollback lines above visible". Since psmux only
+///   exposes visible rows here, any negative start clamps to 0 (top of visible),
+///   matching tmux behavior when no scrollback history is available.
+///   Negative -E likewise clamps to 0.
+pub fn compute_capture_range(s: Option<i32>, e: Option<i32>, last_row: u16) -> (u16, u16) {
     let start = match s {
         Some(v) if v < 0 => 0u16,
         Some(v) => (v as u16).min(last_row),
@@ -939,6 +937,16 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
         Some(v) => (v as u16).min(last_row),
         None => last_row,
     };
+    (start, end)
+}
+
+pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i32>) -> io::Result<Option<String>> {
+    let win = &mut app.windows[app.active_idx];
+    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
+    let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
+    let screen = parser.screen();
+    let last_row = p.last_rows.saturating_sub(1);
+    let (start, end) = compute_capture_range(s, e, last_row);
     let mut text = String::new();
     for r in start..=end {
         let mut row = String::new();
@@ -957,16 +965,7 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
     let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
     let screen = parser.screen();
     let last_row = p.last_rows.saturating_sub(1);
-    let start_row = match s {
-        Some(v) if v < 0 => 0u16,
-        Some(v) => (v as u16).min(last_row),
-        None => 0,
-    };
-    let end_row = match e {
-        Some(v) if v < 0 => 0u16,
-        Some(v) => (v as u16).min(last_row),
-        None => last_row,
-    };
+    let (start_row, end_row) = compute_capture_range(s, e, last_row);
     let mut text = String::new();
     let mut prev_fg: Option<vt100::Color> = None;
     let mut prev_bg: Option<vt100::Color> = None;

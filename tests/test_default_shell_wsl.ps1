@@ -97,8 +97,13 @@ if ($cmd -match "wsl|bash|zsh|conhost") {
 
 # Send a command and verify it works (WSL runs Linux shell)
 & $PSMUX send-keys -t $session 'echo WSL_TEST_WORKS' Enter 2>&1 | Out-Null
-Start-Sleep -Seconds 2
-$output = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$output = ""
+while ($sw.ElapsedMilliseconds -lt 10000) {
+    $output = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+    if ($output -match "WSL_TEST_WORKS") { break }
+    Start-Sleep -Milliseconds 500
+}
 if ($output -match "WSL_TEST_WORKS") {
     Write-Pass "WSL pane executes commands correctly"
 } else {

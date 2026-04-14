@@ -643,7 +643,21 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
         Mode::RenamePrompt { .. } => {
             match key.code {
                 KeyCode::Esc => { app.mode = Mode::Passthrough; }
-                KeyCode::Enter => { if let Mode::RenamePrompt { input } = &mut app.mode { app.windows[app.active_idx].name = input.clone(); app.mode = Mode::Passthrough; } }
+                KeyCode::Enter => {
+                    if let Mode::RenamePrompt { input } = &mut app.mode {
+                        let name = input.clone();
+                        app.mode = Mode::Passthrough;
+                        // Update local state with bounds check
+                        if app.active_idx < app.windows.len() {
+                            app.windows[app.active_idx].name = name.clone();
+                            app.windows[app.active_idx].manual_rename = true;
+                        }
+                        // Forward to server so external queries see the new name
+                        if let Some(port) = app.control_port {
+                            let _ = crate::session::send_control_to_port(port, &format!("rename-window {}\n", crate::util::quote_arg(&name)), &app.session_key);
+                        }
+                    }
+                }
                 KeyCode::Backspace => { if let Mode::RenamePrompt { input } = &mut app.mode { let _ = input.pop(); } }
                 KeyCode::Char(c) => { if let Mode::RenamePrompt { input } = &mut app.mode { input.push(c); } }
                 _ => {}
@@ -655,8 +669,14 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Esc => { app.mode = Mode::Passthrough; }
                 KeyCode::Enter => {
                     if let Mode::RenameSessionPrompt { input } = &mut app.mode {
-                        app.session_name = input.clone();
+                        let name = input.clone();
                         app.mode = Mode::Passthrough;
+                        // Update local state
+                        app.session_name = name.clone();
+                        // Forward to server so external queries see the new name
+                        if let Some(port) = app.control_port {
+                            let _ = crate::session::send_control_to_port(port, &format!("rename-session {}\n", crate::util::quote_arg(&name)), &app.session_key);
+                        }
                     }
                 }
                 KeyCode::Backspace => { if let Mode::RenameSessionPrompt { input } = &mut app.mode { let _ = input.pop(); } }

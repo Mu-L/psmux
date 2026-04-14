@@ -226,8 +226,25 @@ function Run-TestFile {
     Write-Host "$('=' * 60)" -ForegroundColor DarkGray
 
     try {
-        $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File $FilePath 2>&1 | Out-String
-        $exitCode = $LASTEXITCODE
+        # Run test with a 10-minute max timeout to prevent infinite hangs
+        $testJob = Start-Job -ScriptBlock {
+            param($f)
+            $o = & pwsh -NoProfile -ExecutionPolicy Bypass -File $f 2>&1 | Out-String
+            @{ Output = $o; ExitCode = $LASTEXITCODE }
+        } -ArgumentList $FilePath
+
+        $done = Wait-Job $testJob -Timeout 600  # 10 minutes max per test
+        if ($done) {
+            $r = Receive-Job $testJob
+            $output = $r.Output
+            $exitCode = $r.ExitCode
+        } else {
+            Stop-Job $testJob
+            $output = "[TIMEOUT] Test $baseName exceeded 600 seconds and was killed`n"
+            $exitCode = -2
+            Write-Host "  [TIMEOUT] Test killed after 600s" -ForegroundColor Red
+        }
+        Remove-Job $testJob -Force
         $sw.Stop()
 
         # Write full output to per-suite log file

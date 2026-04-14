@@ -148,10 +148,16 @@ if ($portFile -and $keyFile) {
 
         if ($authResp -match "OK") {
             $writer.WriteLine("dump")
-            Start-Sleep -Milliseconds 500
+            # Use reader.Peek() instead of stream.DataAvailable to avoid StreamReader buffering issues
+            $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
             $dumpData = ""
-            while ($stream.DataAvailable) {
-                $dumpData += $reader.ReadLine()
+            while ($sw2.ElapsedMilliseconds -lt 3000) {
+                if ($reader.Peek() -ge 0) {
+                    $dumpData += $reader.ReadLine()
+                } else {
+                    Start-Sleep -Milliseconds 50
+                }
+                if ($dumpData -match '\{' -and $dumpData -match '\}') { break }
             }
 
             if ($dumpData -match '"pwsh_mouse_selection"\s*:\s*true') {

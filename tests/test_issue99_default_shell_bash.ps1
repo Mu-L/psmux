@@ -184,8 +184,13 @@ if ($cmd.Trim() -match "bash") {
 } else {
     # ConPTY may report "conhost" as host wrapper; verify by running a bash command
     & $PSMUX send-keys -t $session 'echo BASH_CHECK_$BASH_VERSION' Enter 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
-    $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+    $sw99 = [System.Diagnostics.Stopwatch]::StartNew()
+    $capOut = ""
+    while ($sw99.ElapsedMilliseconds -lt 10000) {
+        $capOut = (& $PSMUX capture-pane -t $session -p 2>&1) | Out-String
+        if ($capOut -match "BASH_CHECK_\d") { break }
+        Start-Sleep -Milliseconds 500
+    }
     if ($capOut -match "BASH_CHECK_\d") {
         Write-Pass "New window runs bash (verified via BASH_VERSION, pane_current_command=$($cmd.Trim()))"
     } else {

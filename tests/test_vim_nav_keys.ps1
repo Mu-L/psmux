@@ -118,7 +118,8 @@ Write-Host "UNBIND AND REBIND"
 Write-Host ("=" * 60)
 
 Write-Test "unbind C-h, then verify removed"
-Psmux unbind-key -t $SESSION C-h
+# C-h is bound in the ROOT table (-n), so unbind must also use -n (or -T root)
+Psmux unbind-key -t $SESSION -n C-h
 $keys = Psmux list-keys -t $SESSION | Out-String
 if ("$keys" -notmatch "root.*C-h.*select-pane") {
     Write-Pass "C-h successfully unbound"

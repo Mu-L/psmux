@@ -34,6 +34,14 @@ try {
             exit 1
         }
         Write-Host "[build] cargo install succeeded" -ForegroundColor Green
+
+        # ── Pre-spawn warm server ─────────────────────────────────────────
+        # build.ps1 kills all psmux processes at the top, which destroys the
+        # background __warm__ server.  Call warmup now so the next `psmux`
+        # invocation claims the pre-warmed server instead of cold-starting.
+        Write-Host "[build] Pre-spawning warm server (psmux warmup)..." -ForegroundColor Cyan
+        & psmux warmup 2>$null
+        Write-Host "[build] Warm server pre-spawned" -ForegroundColor Green
     }
 
     # ── NSIS installer ────────────────────────────────────────────────

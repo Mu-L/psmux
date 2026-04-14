@@ -1,13 +1,19 @@
 // Regression tests for issue #209: tmux command flags compatibility gaps
 //
-// Tests that all CLI flag parsing matches tmux semantics:
-// 1. display-message -d is consumed (not leaked into message text)
-// 2. send-keys -X is parsed as a flag (not literal key)
-// 3. respawn-pane -c forwards workdir
-// 4. show-options combined flags like -gv work
-// 5. resize-window forwards to server
-// 6. list-panes -s is session-scoped (not identical to -a)
-// 7. list-keys -T filters by table
+// PRODUCTION CODE TESTS (call execute_command_string / production functions):
+//   - display-message -d/-I/-t flags consumed correctly
+//   - show-options local popup output
+//   - display-message duration storage and expiry semantics
+//   - list-keys popup bindings (PREFIX_DEFAULTS + key_tables)
+//
+// CONTRACT TESTS (mirror server-side parsing in src/server/connection.rs):
+//   - send-keys -X flag parsing (server: line ~792)
+//   - respawn-pane -c workdir forwarding (server: line ~1096)
+//   - show-options -gv combined flag parsing (server: line ~1257)
+//   - resize-window -x/-y forwarding (server: line ~2069)
+//   - list-panes -s/-a distinction (server: line ~876)
+//   - list-keys -T table filtering (server-side)
+//   - list-sessions -F/-f flag parsing (server: line ~1865)
 
 #[allow(unused_imports)]
 use super::*;
@@ -46,68 +52,45 @@ fn mock_app_with_window() -> AppState {
 
 // ========================================================================
 // Gap 6: display-message -d should be consumed, not leaked into message
+// These tests call the REAL production code via execute_command_string()
+// Production code: src/commands.rs display-message local handler
 // ========================================================================
 
 #[test]
 fn display_message_d_flag_not_in_message() {
-    // Simulate CLI-side parsing of: display-message -p -d 5000 "hello world"
-    // The -d flag and its value (5000) should be skipped, not included in message
-    let cmd_args = vec![
-        "display-message".to_string(),
-        "-p".to_string(),
-        "-d".to_string(),
-        "5000".to_string(),
-        "hello world".to_string(),
-    ];
-
-    let mut message: Vec<String> = Vec::new();
-    let mut print_to_stdout = false;
-    let mut i = 1;
-    while i < cmd_args.len() {
-        match cmd_args[i].as_str() {
-            "-t" => {
-                i += 1; // skip target value
-            }
-            "-p" => { print_to_stdout = true; }
-            "-d" | "-I" => { i += 1; } // consume -d <ms> and -I <input>, skip value
-            s => { message.push(s.to_string()); }
-        }
-        i += 1;
-    }
-    let msg = message.join(" ");
-
-    assert!(print_to_stdout, "-p should set print_to_stdout");
-    assert_eq!(msg, "hello world", "message should not contain -d or 5000, got: {}", msg);
-    assert!(!msg.contains("-d"), "message must not contain the -d flag");
-    assert!(!msg.contains("5000"), "message must not contain the -d value");
+    // Call PRODUCTION code: execute_command_string dispatches to the local
+    // display-message handler which parses -d, -p, -I, -t flags.
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display-message -p -d 5000 hello world");
+    assert!(app.status_message.is_some(), "status_message should be set");
+    let (msg, _, duration) = app.status_message.as_ref().unwrap();
+    // -d 5000 must be consumed as duration, not leaked into the message text
+    assert!(!msg.contains("-d"), "message must not contain the -d flag, got: {}", msg);
+    assert!(!msg.contains("5000"), "message must not contain the -d value, got: {}", msg);
+    assert!(msg.contains("hello"), "message should contain 'hello', got: {}", msg);
+    assert_eq!(*duration, Some(5000), "duration override should be 5000ms");
 }
 
 #[test]
 fn display_message_I_flag_not_in_message() {
-    let cmd_args = vec![
-        "display-message".to_string(),
-        "-I".to_string(),
-        "input_data".to_string(),
-        "the message".to_string(),
-    ];
-
-    let mut message: Vec<String> = Vec::new();
-    let mut i = 1;
-    while i < cmd_args.len() {
-        match cmd_args[i].as_str() {
-            "-t" => { i += 1; }
-            "-p" => {}
-            "-d" | "-I" => { i += 1; }
-            s => { message.push(s.to_string()); }
-        }
-        i += 1;
-    }
-    let msg = message.join(" ");
-    assert_eq!(msg, "the message", "-I and its arg should be consumed, got: {}", msg);
+    // Call PRODUCTION code: -I flag and its value must be consumed, not in message
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display-message -I input_data the_message");
+    assert!(app.status_message.is_some(), "status_message should be set");
+    let (msg, _, _) = app.status_message.as_ref().unwrap();
+    assert!(!msg.contains("-I"), "message must not contain -I flag, got: {}", msg);
+    assert!(!msg.contains("input_data"), "message must not contain -I value, got: {}", msg);
+    assert!(msg.contains("the_message"), "message should contain 'the_message', got: {}", msg);
 }
 
 // ========================================================================
 // Gap 7: send-keys -X should be parsed as a flag
+// CONTRACT TESTS: The -X flag parsing happens server-side in
+// src/server/connection.rs (send-keys handler, line ~792).
+// The local execute_command_string handler just forwards to server.
+// These verify the expected parsing contract that the server implements.
 // ========================================================================
 
 #[test]
@@ -183,6 +166,9 @@ fn send_keys_x_not_treated_as_literal_key() {
 
 // ========================================================================
 // Gap 8: respawn-pane -c should forward workdir
+// CONTRACT TESTS: The -c flag is parsed server-side in
+// src/server/connection.rs respawn-pane handler (line ~1096).
+// These verify the expected parsing contract.
 // ========================================================================
 
 #[test]
@@ -253,6 +239,11 @@ fn respawn_pane_without_c_flag_still_works() {
 
 // ========================================================================
 // Gap 9: show-options combined flags like -gv
+// CONTRACT TESTS: Combined flag parsing (e.g. -gv, -wv) is handled
+// server-side in src/server/connection.rs show-options handler (line ~1257).
+// The local path (execute_command_string) calls generate_show_options()
+// without flag parsing. These verify the combined_has parsing logic
+// that the server implements.
 // ========================================================================
 
 #[test]
@@ -299,6 +290,9 @@ fn show_options_wv_combined_flag() {
 
 // ========================================================================
 // Gap 3: resize-window should forward to server (not be a no-op)
+// CONTRACT TESTS: resize-window is server-only in
+// src/server/connection.rs (line ~2069). The local handler
+// just forwards via send_control_to_port.
 // ========================================================================
 
 #[test]
@@ -362,6 +356,9 @@ fn resize_window_y_flag() {
 
 // ========================================================================
 // Gap 4: list-panes -s should be session-scoped
+// CONTRACT TESTS: -s/-a flag distinction is server-side in
+// src/server/connection.rs list-panes handler (line ~876).
+// The local path just calls generate_list_panes() for the active window.
 // ========================================================================
 
 #[test]
@@ -385,6 +382,9 @@ fn list_panes_s_not_same_as_a_in_server_parsing() {
 
 // ========================================================================
 // Gap 5: list-keys -T should filter by table
+// CONTRACT TESTS: -T filtering is server-side. The local handler
+// generates all tables (src/commands.rs line ~1294). The good
+// production-code tests are below (list_keys_command_produces_popup_*).
 // ========================================================================
 
 #[test]
@@ -448,6 +448,8 @@ fn list_keys_server_filters_by_table() {
 
 // ========================================================================
 // Gap 1: list-sessions -F should forward format to server
+// CONTRACT TESTS: -F/-f flag parsing is handled by main.rs CLI
+// and server-side in src/server/connection.rs (line ~1865).
 // ========================================================================
 
 #[test]
@@ -607,4 +609,61 @@ fn status_message_expiry_without_override_uses_global() {
     assert_eq!(msg, "global_test");
     let effective = dur.unwrap_or(app.display_time_ms);
     assert_eq!(effective, 750, "without -d, should use global display_time_ms (750)");
+}
+
+// ========================================================================
+// PRODUCTION CODE TESTS: show-options local path
+// Calls execute_command_string() which dispatches to generate_show_options()
+// Production code: src/commands.rs show-options handler (line ~1307)
+// ========================================================================
+
+#[test]
+fn show_options_local_produces_popup() {
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    execute_command_string(&mut app, "show-options").unwrap();
+    match &app.mode {
+        Mode::PopupMode { command, output, .. } => {
+            assert_eq!(command, "show-options");
+            // The output should contain known option names
+            assert!(
+                output.contains("status-") || output.contains("display-time") || output.contains("base-index"),
+                "show-options popup should contain known option names, got:\n{}",
+                &output[..output.len().min(500)]
+            );
+        }
+        other => panic!("expected PopupMode for show-options, got {:?}", std::mem::discriminant(other)),
+    }
+}
+
+// ========================================================================
+// PRODUCTION CODE TESTS: display-message flag combinations
+// Additional edge cases calling real production code
+// ========================================================================
+
+#[test]
+fn display_message_d_and_I_combined() {
+    // Both -d and -I should be consumed, only the message text remains
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display-message -d 2000 -I ignored combined_test");
+    assert!(app.status_message.is_some());
+    let (msg, _, duration) = app.status_message.as_ref().unwrap();
+    assert!(msg.contains("combined_test"), "message should contain 'combined_test', got: {}", msg);
+    assert!(!msg.contains("-d"), "message should not contain -d flag");
+    assert!(!msg.contains("-I"), "message should not contain -I flag");
+    assert!(!msg.contains("ignored"), "message should not contain -I value 'ignored'");
+    assert_eq!(*duration, Some(2000), "duration should be 2000ms");
+}
+
+#[test]
+fn display_message_t_flag_consumed() {
+    // -t target should be consumed (ignored locally), not leaked into message
+    let mut app = mock_app_with_window();
+    app.control_port = None;
+    let _ = execute_command_string(&mut app, "display-message -t mysession target_test");
+    assert!(app.status_message.is_some());
+    let (msg, _, _) = app.status_message.as_ref().unwrap();
+    assert!(msg.contains("target_test"), "message should contain 'target_test', got: {}", msg);
+    assert!(!msg.contains("mysession"), "message should not contain -t target value, got: {}", msg);
 }

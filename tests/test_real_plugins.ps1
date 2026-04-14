@@ -39,9 +39,25 @@ function Start-FreshSession {
     Remove-Item "$env:USERPROFILE\.psmux\*.port" -Force -ErrorAction SilentlyContinue
     Remove-Item "$env:USERPROFILE\.psmux\*.key" -Force -ErrorAction SilentlyContinue
     Start-Process -FilePath $PSMUX -ArgumentList "new-session -s $S -d" -WindowStyle Hidden
-    Start-Sleep -Seconds 3
-    & $PSMUX has-session -t $S 2>$null
-    return ($LASTEXITCODE -eq 0)
+    # Poll for TCP readiness instead of fixed sleep, up to 15 seconds
+    $portFile = "$env:USERPROFILE\.psmux\$S.port"
+    $keyFile  = "$env:USERPROFILE\.psmux\$S.key"
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt 15000) {
+        if ((Test-Path $portFile) -and (Test-Path $keyFile)) {
+            $port = [int](Get-Content $portFile -Raw -EA SilentlyContinue).Trim()
+            if ($port -gt 0) {
+                try {
+                    $t = [System.Net.Sockets.TcpClient]::new("127.0.0.1", $port)
+                    $t.Close()
+                    Start-Sleep -Milliseconds 300
+                    return $true
+                } catch {}
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    return $false
 }
 
 # Ensure psmux is in PATH for plugin discovery

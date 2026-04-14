@@ -38,8 +38,8 @@ $PSMUX = (Resolve-Path $PSMUX).Path
 
 # ── Counters ─────────────────────────────────────────────────────────
 $PASS = 0; $FAIL = 0; $TOTAL_TESTS = 0
-function Write-Pass { param([string]$msg) $script:PASS++; $script:TOTAL_TESTS++; Write-Host "  PASS: $msg" -ForegroundColor Green }
-function Write-Fail { param([string]$msg) $script:FAIL++; $script:TOTAL_TESTS++; Write-Host "  FAIL: $msg" -ForegroundColor Red }
+function Write-Pass { param([string]$msg) $script:PASS++; $script:TOTAL_TESTS++; Write-Host "  [PASS] $msg" -ForegroundColor Green }
+function Write-Fail { param([string]$msg) $script:FAIL++; $script:TOTAL_TESTS++; Write-Host "  [FAIL] $msg" -ForegroundColor Red }
 function Write-Info { param([string]$msg) Write-Host "  INFO: $msg" -ForegroundColor Gray }
 function Write-Metric { param([string]$label, [double]$ms)
     $color = if ($ms -lt 300) { "Green" } elseif ($ms -lt 2000) { "Yellow" } else { "Red" }

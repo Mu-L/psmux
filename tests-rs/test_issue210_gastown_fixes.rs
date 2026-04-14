@@ -1,13 +1,14 @@
 // Discussion #210: Rust unit tests for the three gastown integration fixes.
 //
-// These run through commands.rs / help.rs / format paths directly
-// with a mock AppState so no real sessions or TCP sockets are needed.
+// PRODUCTION CODE TESTS (call real production functions):
+//   - Filter evaluation: calls crate::format::expand_format() with mock AppState
+//     to test #{==:#{session_name},NAME} evaluation (the REAL format engine)
+//   - list-keys: calls execute_command_string() to verify PopupMode output
+//   - PREFIX_DEFAULTS: reads crate::help::PREFIX_DEFAULTS directly
 //
-// Bug 1 (duplicate session): tested via the error message string contract.
-// Bug 2 (list-sessions -f filter): tests the #{==:#{session_name},NAME}
-//        evaluation logic in isolation (pure string parsing).
-// Bug 3 (list-keys offline): tests that PREFIX_DEFAULTS covers gastown's keys
-//        and that the CLI fallback format is correct.
+// CONTRACT TESTS:
+//   - Duplicate session error format: mirrors main.rs eprintln! (line ~657)
+//     because the error is emitted by main() directly, not a callable function
 
 use super::*;
 
@@ -47,35 +48,18 @@ fn mock_app_with_window() -> AppState {
     app
 }
 
-// ─── helpers that mirror the CLI logic verbatim so we can unit-test them ─────
-
-/// Evaluate a -f filter expression against a session name.
-/// Mirrors what main.rs does for list-sessions filtering.
-fn eval_session_filter(filter: &str, session_name: &str) -> bool {
-    if let Some(target) = filter
-        .strip_prefix("#{==:#{session_name},")
-        .and_then(|s| s.strip_suffix('}'))
-    {
-        session_name == target
-    } else {
-        // fallback: substring
-        session_name.contains(filter)
-    }
-}
-
-/// Build the expected "duplicate session" error line that psmux must emit.
-fn duplicate_session_error(name: &str) -> String {
-    format!("duplicate session: {}", name)
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // BUG 1: duplicate session error message contract
-// gastown's wrapError() looks for "duplicate session" in stderr
+// CONTRACT TEST: The error is emitted by main.rs (line ~657) as:
+//   eprintln!("duplicate session: {}", name)
+// Not callable as a function, so we verify the expected format.
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn dup_error_contains_phrase_duplicate_session() {
-    let msg = duplicate_session_error("myapp");
+    // The production code in main.rs emits: eprintln!("duplicate session: {}", name)
+    // gastown's wrapError() looks for "duplicate session" in stderr
+    let msg = format!("duplicate session: {}", "myapp");
     assert!(
         msg.contains("duplicate session"),
         "error must contain 'duplicate session' for gastown wrapError: {}", msg
@@ -85,7 +69,7 @@ fn dup_error_contains_phrase_duplicate_session() {
 #[test]
 fn dup_error_contains_session_name() {
     let name = "fancy-dev-session";
-    let msg = duplicate_session_error(name);
+    let msg = format!("duplicate session: {}", name);
     assert!(
         msg.contains(name),
         "error must contain the session name '{}': {}", name, msg
@@ -95,7 +79,7 @@ fn dup_error_contains_session_name() {
 #[test]
 fn dup_error_does_not_use_old_format() {
     let name = "test";
-    let msg = duplicate_session_error(name);
+    let msg = format!("duplicate session: {}", name);
     // Old broken format that gastown's wrapError couldn't parse
     assert!(
         !msg.contains("already exists"),
@@ -110,70 +94,67 @@ fn dup_error_does_not_use_old_format() {
 #[test]
 fn dup_error_exact_format() {
     assert_eq!(
-        duplicate_session_error("myses"),
+        format!("duplicate session: {}", "myses"),
         "duplicate session: myses"
     );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// BUG 2: list-sessions -f filter evaluation
-// #{==:#{session_name},NAME} must match only exact session name
+// BUG 2: list-sessions -f filter evaluation via PRODUCTION expand_format()
+// These call crate::format::expand_format() with a mock AppState to test
+// the real #{==:#{session_name},NAME} evaluation engine.
+// Production code: src/format.rs expand_format() -> expand_expression() -> try_comparison_op()
 // ════════════════════════════════════════════════════════════════════════════
+
+/// Helper: evaluate a filter expression using the REAL production format engine.
+/// Creates a mock AppState with the given session_name and expands the filter.
+/// Returns true if the expanded result is "1" (match), false if "0" (no match).
+fn eval_filter_via_production(filter: &str, session_name: &str) -> bool {
+    let mut app = AppState::new(session_name.to_string());
+    app.window_base_index = 0;
+    app.pane_base_index = 0;
+    app.windows.push(make_window("shell", 0));
+    let result = crate::format::expand_format(filter, &app);
+    result == "1"
+}
 
 #[test]
 fn filter_exact_match_returns_true() {
-    assert!(eval_session_filter("#{==:#{session_name},myapp}", "myapp"));
+    assert!(eval_filter_via_production("#{==:#{session_name},myapp}", "myapp"));
 }
 
 #[test]
 fn filter_exact_match_different_name_returns_false() {
-    assert!(!eval_session_filter("#{==:#{session_name},myapp}", "myapp2"));
-    assert!(!eval_session_filter("#{==:#{session_name},myapp}", "notmyapp"));
-    assert!(!eval_session_filter("#{==:#{session_name},myapp}", ""));
+    assert!(!eval_filter_via_production("#{==:#{session_name},myapp}", "myapp2"));
+    assert!(!eval_filter_via_production("#{==:#{session_name},myapp}", "notmyapp"));
+    assert!(!eval_filter_via_production("#{==:#{session_name},myapp}", ""));
 }
 
 #[test]
 fn filter_exact_match_prefix_not_enough() {
-    // "myapp" must not match when comparing session "myapp-extra"
-    assert!(!eval_session_filter("#{==:#{session_name},myapp}", "myapp-extra"));
+    assert!(!eval_filter_via_production("#{==:#{session_name},myapp}", "myapp-extra"));
 }
 
 #[test]
 fn filter_exact_match_suffix_not_enough() {
-    // "myapp" must not match "prefix-myapp"
-    assert!(!eval_session_filter("#{==:#{session_name},myapp}", "prefix-myapp"));
-}
-
-#[test]
-fn filter_blank_filter_no_crash() {
-    // Empty string filter: substring match of "" is always true
-    assert!(eval_session_filter("", "anyname"));
+    assert!(!eval_filter_via_production("#{==:#{session_name},myapp}", "prefix-myapp"));
 }
 
 #[test]
 fn filter_gastown_pattern_verbatim() {
     // Exact pattern gastown generates for GetSessionInfo
     let filter = "#{==:#{session_name},dev}";
-    assert!( eval_session_filter(filter, "dev"));
-    assert!(!eval_session_filter(filter, "dev2"));
-    assert!(!eval_session_filter(filter, "staging"));
+    assert!( eval_filter_via_production(filter, "dev"));
+    assert!(!eval_filter_via_production(filter, "dev2"));
+    assert!(!eval_filter_via_production(filter, "staging"));
 }
 
 #[test]
 fn filter_hyphenated_session_name() {
     let filter = "#{==:#{session_name},my-dev-session}";
-    assert!( eval_session_filter(filter, "my-dev-session"));
-    assert!(!eval_session_filter(filter, "my-dev-session-extra"));
-    assert!(!eval_session_filter(filter, "my-dev"));
-}
-
-#[test]
-fn filter_fallback_substring_for_unknown_format() {
-    // Non-#{==:...} expressions fall through to substring match
-    let filter = "myapp";
-    assert!( eval_session_filter(filter, "myapp"));
-    assert!( eval_session_filter(filter, "prefix-myapp"));     // substring matches
-    assert!(!eval_session_filter(filter, "other"));
+    assert!( eval_filter_via_production(filter, "my-dev-session"));
+    assert!(!eval_filter_via_production(filter, "my-dev-session-extra"));
+    assert!(!eval_filter_via_production(filter, "my-dev"));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
