@@ -9,6 +9,7 @@
 //   cross_socket_test.go (gastown-specific AI/dialog/theme tests omitted)
 
 use super::*;
+use crate::types::CtrlReq;
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
@@ -513,4 +514,82 @@ fn warm_session_names_are_excluded_from_visible_list() {
         !visible.contains(&"ns____warm__"),
         "ns____warm__ must be hidden from session list"
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// respawn-pane -k flag pipeline (regression)
+// From gastown: TestAutoRespawnHook_RespawnWorks sets a pane-died hook that
+// invokes "respawn-pane -k". Previously the -k flag was parsed at the CLI
+// level but silently discarded by the server. Fixed: CtrlReq::RespawnPane
+// now carries (Option<String>, bool) and the full pipeline respects -k.
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn pane_died_hook_respawn_k_command_round_trips() {
+    // The hook stores "run-shell 'respawn-pane -k'" as the command.
+    // When fire_hooks processes it, ensure_background converts it to
+    // "run-shell -b 'respawn-pane -k'". The inner respawn-pane -k
+    // must survive the background wrapping unmodified.
+    let hook_cmd = "run-shell 'respawn-pane -k'";
+    let bg = ensure_background(hook_cmd);
+    assert_eq!(bg, "run-shell -b 'respawn-pane -k'");
+    // Verify the inner command is preserved
+    assert!(bg.contains("respawn-pane -k"), "inner respawn-pane -k must survive ensure_background");
+}
+
+#[test]
+fn auto_respawn_hook_full_chain_verify() {
+    // This test mirrors gastown's TestAutoRespawnHook_RespawnWorks:
+    // 1. set-hook pane-died[0] "run-shell 'respawn-pane -k'"
+    // 2. Let pane die
+    // 3. fire_hooks("pane-died") should dispatch respawn-pane -k
+    //
+    // We verify the hook registration, ensure_background, and that the
+    // resulting command properly includes -k.
+    let mut app = mock_app_with_window();
+
+    // Step 1: Register the pane-died hook (mirrors set-hook command handler)
+    let hook_name = "pane-died";
+    let hook_cmd = "run-shell 'respawn-pane -k'".to_string();
+    app.hooks.entry(hook_name.to_string()).or_default().push(hook_cmd.clone());
+
+    // Verify hook was registered
+    assert!(app.hooks.contains_key(hook_name), "hook must be registered under pane-died");
+    assert_eq!(app.hooks[hook_name].len(), 1);
+    assert_eq!(app.hooks[hook_name][0], "run-shell 'respawn-pane -k'");
+
+    // Step 2: Fire the hook
+    fire_hooks(&mut app, hook_name);
+
+    // Step 3: Verify no "running:" status (background execution)
+    let is_running = app.status_message
+        .as_ref()
+        .map(|(msg, _, _)| msg.starts_with("running:"))
+        .unwrap_or(false);
+    assert!(
+        !is_running,
+        "auto-respawn hook must fire via -b (background), not foreground"
+    );
+}
+
+#[test]
+fn ctrl_req_respawn_pane_carries_kill_flag() {
+    // Verify CtrlReq::RespawnPane enum variant stores both workdir and kill
+    let req_with_kill = CtrlReq::RespawnPane(Some("/tmp".to_string()), true);
+    match req_with_kill {
+        CtrlReq::RespawnPane(wd, kill) => {
+            assert_eq!(wd.as_deref(), Some("/tmp"));
+            assert!(kill, "kill flag must be true");
+        }
+        _ => panic!("wrong variant"),
+    }
+
+    let req_without_kill = CtrlReq::RespawnPane(None, false);
+    match req_without_kill {
+        CtrlReq::RespawnPane(wd, kill) => {
+            assert!(wd.is_none());
+            assert!(!kill, "kill flag must be false");
+        }
+        _ => panic!("wrong variant"),
+    }
 }

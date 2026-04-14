@@ -932,7 +932,7 @@ pub enum CtrlReq {
     DisplayPaneSelect(usize),
     BreakPane,
     JoinPane(usize),
-    RespawnPane(Option<String>),  // optional workdir (-c)
+    RespawnPane(Option<String>, bool),  // optional workdir (-c), kill flag (-k)
     BindKey(String, String, String, bool),  // table, key, command, repeat
     UnbindKey(String, Option<String>),  // key, optional table (None = prefix)
     UnbindAll,

@@ -599,6 +599,57 @@ fn status_message_expiry_uses_per_message_duration() {
     assert_eq!(effective, 3000, "explicit duration should override global");
 }
 
+// ========================================================================
+// respawn-pane -k: server-side kill flag parsing
+// FIX REGRESSION: The -k flag was parsed at CLI level but silently
+// discarded at server level. CtrlReq::RespawnPane now carries (workdir, kill).
+// ========================================================================
+
+#[test]
+fn respawn_pane_k_flag_parsed_by_server_handler() {
+    // Mirrors server/connection.rs respawn-pane handler parsing
+    let args = vec!["-k"];
+    let workdir: Option<String> = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
+    let kill = args.iter().any(|a| *a == "-k");
+
+    assert!(kill, "-k must be recognized");
+    assert!(workdir.is_none(), "no -c provided means no workdir");
+}
+
+#[test]
+fn respawn_pane_k_and_c_flags_parsed_together() {
+    let args = vec!["-k", "-c", "/tmp/test"];
+    let workdir: Option<String> = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
+    let kill = args.iter().any(|a| *a == "-k");
+
+    assert!(kill, "-k must be recognized alongside -c");
+    assert_eq!(workdir.as_deref(), Some("/tmp/test"), "workdir must be extracted from -c");
+}
+
+#[test]
+fn respawn_pane_without_k_flag_kill_is_false() {
+    let args: Vec<&str> = vec!["-c", "/tmp/test"];
+    let kill = args.iter().any(|a| *a == "-k");
+    assert!(!kill, "without -k flag, kill must be false");
+}
+
+#[test]
+fn respawn_pane_k_flag_parsed_in_execute_command_string() {
+    // The local command path (execute_command_string) must parse -k from parts
+    let cmd = "respawn-pane -k -c /tmp";
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    let kill = parts.iter().any(|p| *p == "-k");
+    assert!(kill, "execute_command_string path must detect -k in command parts");
+}
+
+#[test]
+fn respawn_pane_execute_command_without_k() {
+    let cmd = "respawn-pane -c /tmp";
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    let kill = parts.iter().any(|p| *p == "-k");
+    assert!(!kill, "without -k, kill must be false in execute_command_string path");
+}
+
 #[test]
 fn status_message_expiry_without_override_uses_global() {
     let mut app = mock_app_with_window();

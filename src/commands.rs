@@ -1099,9 +1099,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         }
         "respawn-pane" | "respawnp" => {
             if let Some(port) = app.control_port {
-                let _ = send_control_to_port(port, "respawn-pane\n", &app.session_key);
+                let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                crate::window_ops::respawn_active_pane(app, None, None)?;
+                let kill = parts.iter().any(|p| *p == "-k");
+                crate::window_ops::respawn_active_pane(app, None, None, kill)?;
             }
         }
         "toggle-sync" => {

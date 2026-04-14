@@ -2384,8 +2384,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::RespawnPane(workdir) => {
-                    respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref())?;
+                CtrlReq::RespawnPane(workdir, kill) => {
+                    respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), kill)?;
                     hook_event = Some("after-respawn-pane");
                 }
                 CtrlReq::BindKey(table_name, key, command, repeat) => {
@@ -3367,7 +3367,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::RespawnWindow => {
                     // Kill all panes in the active window and respawn	
-                    respawn_active_pane(&mut app, Some(&*pty_system), None)?;
+                    respawn_active_pane(&mut app, Some(&*pty_system), None, true)?;
                     state_dirty = true;
                 }
                 CtrlReq::PopupInput(data) => {

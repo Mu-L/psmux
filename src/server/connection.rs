@@ -1095,7 +1095,8 @@ match cmd {
     }
     "respawn-pane" | "respawnp" => {
         let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
-        let _ = tx.send(CtrlReq::RespawnPane(workdir));
+        let kill = args.iter().any(|a| *a == "-k");
+        let _ = tx.send(CtrlReq::RespawnPane(workdir, kill));
     }
     "session-info" => {
         let (rtx, rrx) = mpsc::channel::<String>();
@@ -2696,7 +2697,8 @@ fn dispatch_control_command(
         }
         "respawn-pane" | "respawnp" => {
             let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
-            let _ = tx.send(CtrlReq::RespawnPane(workdir));
+            let kill = args.iter().any(|a| *a == "-k");
+            let _ = tx.send(CtrlReq::RespawnPane(workdir, kill));
             let _ = resp_tx.send(String::new());
             true
         }
