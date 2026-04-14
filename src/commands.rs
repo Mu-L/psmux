@@ -1991,3 +1991,7 @@ mod tests_gastown_scenarios;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue210_gastown_fixes.rs"]
 mod tests_issue210_gastown_fixes;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue210_gastown_captures.rs"]
+mod tests_issue210_gastown_captures;

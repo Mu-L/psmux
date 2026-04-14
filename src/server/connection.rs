@@ -1160,6 +1160,7 @@ match cmd {
             // Parse -n / -T flags for table-specific individual unbind
             let mut table: Option<String> = None;
             let mut t_value_idx: Option<usize> = None;
+            let mut target_session_idx: Option<usize> = None;
             for (j, a) in args.iter().enumerate() {
                 if *a == "-T" {
                     if let Some(t) = args.get(j + 1) {
@@ -1168,10 +1169,13 @@ match cmd {
                     }
                 }
                 if *a == "-n" { table = Some("root".to_string()); }
+                // -t <session> is the target flag; skip its value
+                if *a == "-t" { target_session_idx = Some(j + 1); }
             }
             // Find the key argument: first non-flag arg that isn't the -T table value
+            // or the -t session target value
             let key_arg = args.iter().enumerate()
-                .filter(|(i, a)| !a.starts_with('-') && Some(*i) != t_value_idx)
+                .filter(|(i, a)| !a.starts_with('-') && Some(*i) != t_value_idx && Some(*i) != target_session_idx)
                 .map(|(_, a)| *a)
                 .next();
             if let Some(key) = key_arg {
@@ -1894,6 +1898,8 @@ match cmd {
             let mut detached = false;
             let mut window_name: Option<String> = None;
             let mut start_dir: Option<String> = None;
+            let mut init_width: Option<String> = None;
+            let mut init_height: Option<String> = None;
             let mut env_vars: Vec<(String, String)> = Vec::new();
             let mut env_parse_err: Option<String> = None;
             {
@@ -1903,6 +1909,8 @@ match cmd {
                         "-s" => { i += 1; if i < args.len() { sess_name = Some(args[i].trim_matches('"').to_string()); } }
                         "-n" => { i += 1; if i < args.len() { window_name = Some(args[i].trim_matches('"').to_string()); } }
                         "-c" => { i += 1; if i < args.len() { start_dir = Some(args[i].trim_matches('"').to_string()); } }
+                        "-x" => { i += 1; if i < args.len() { init_width = Some(args[i].to_string()); } }
+                        "-y" => { i += 1; if i < args.len() { init_height = Some(args[i].to_string()); } }
                         "-e" => {
                             i += 1;
                             match crate::util::parse_new_session_e_value_token(args.get(i).copied()) {
@@ -1915,7 +1923,7 @@ match cmd {
                         }
                         "-d" => { detached = true; }
                         "-t" => { i += 1; /* already handled above */ }
-                        "-F" | "-f" | "-x" | "-y" => { i += 1; /* skip value */ }
+                        "-F" | "-f" => { i += 1; /* skip value */ }
                         _ => {}
                     }
                     i += 1;
@@ -1971,6 +1979,15 @@ match cmd {
                 if let Some(ref wn) = window_name {
                     server_args.push("-n".into());
                     server_args.push(wn.clone());
+                }
+                // Pass -x/-y initial dimensions to server
+                if let Some(ref w) = init_width {
+                    server_args.push("-x".into());
+                    server_args.push(w.clone());
+                }
+                if let Some(ref h) = init_height {
+                    server_args.push("-y".into());
+                    server_args.push(h.clone());
                 }
                 // Pass -e environment variables to server
                 for (k, v) in &env_vars {
@@ -2541,6 +2558,7 @@ fn dispatch_control_command(
                 // Parse -n / -T flags for table-specific individual unbind
                 let mut table: Option<String> = None;
                 let mut t_value_idx: Option<usize> = None;
+                let mut target_session_idx: Option<usize> = None;
                 for (j, a) in args.iter().enumerate() {
                     if *a == "-T" {
                         if let Some(t) = args.get(j + 1) {
@@ -2549,9 +2567,13 @@ fn dispatch_control_command(
                         }
                     }
                     if *a == "-n" { table = Some("root".to_string()); }
+                    // -t <session> is the target flag; skip its value
+                    if *a == "-t" { target_session_idx = Some(j + 1); }
                 }
+                // Find the key argument: first non-flag arg that isn't the -T table value
+                // or the -t session target value
                 let key_arg = args.iter().enumerate()
-                    .filter(|(i, a)| !a.starts_with('-') && Some(*i) != t_value_idx)
+                    .filter(|(i, a)| !a.starts_with('-') && Some(*i) != t_value_idx && Some(*i) != target_session_idx)
                     .map(|(_, a)| *a)
                     .next();
                 if let Some(key) = key_arg {
