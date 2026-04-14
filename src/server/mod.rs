@@ -235,6 +235,17 @@ fn drain_plugin_req(
                 app.user_options.remove(&option);
             }
         }
+        CtrlReq::SetOptionOnlyIfUnset(option, value) => {
+            let current = get_option_value(app, &option);
+            if current.is_empty() {
+                apply_set_option(app, &option, &value, false);
+                if option == "command-alias" {
+                    if let Ok(mut map) = shared_aliases.write() {
+                        *map = app.command_aliases.clone();
+                    }
+                }
+            }
+        }
         CtrlReq::ShowOptionValue(resp, name) => {
             let val = get_option_value(app, &name);
             let _ = resp.send(val);
@@ -449,6 +460,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             }
             cmd.stdout(std::process::Stdio::null());
             cmd.stderr(std::process::Stdio::null());
+            { use crate::platform::HideWindowCommandExt; cmd.hide_window(); }
             if let Ok(child) = cmd.spawn() {
                 children.push(child);
             }
@@ -1697,12 +1709,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             if !pipe_cmd.is_empty() {
                                 if let Some(text) = app.paste_buffers.first().cloned() {
                                     // Pipe yanked text to the command's stdin
-                                    if let Ok(mut child) = std::process::Command::new(if cfg!(windows) { "pwsh" } else { "sh" })
-                                        .args(if cfg!(windows) { vec!["-NoProfile", "-Command", pipe_cmd] } else { vec!["-c", pipe_cmd] })
+                                    let mut copy_pipe_cmd = std::process::Command::new(if cfg!(windows) { "pwsh" } else { "sh" });
+                                    copy_pipe_cmd.args(if cfg!(windows) { vec!["-NoProfile", "-Command", pipe_cmd] } else { vec!["-c", pipe_cmd] })
                                         .stdin(std::process::Stdio::piped())
                                         .stdout(std::process::Stdio::null())
-                                        .stderr(std::process::Stdio::null())
-                                        .spawn() {
+                                        .stderr(std::process::Stdio::null());
+                                    { use crate::platform::HideWindowCommandExt; copy_pipe_cmd.hide_window(); }
+                                    if let Ok(mut child) = copy_pipe_cmd.spawn() {
                                         if let Some(mut stdin) = child.stdin.take() {
                                             use std::io::Write;
                                             let _ = stdin.write_all(text.as_bytes());
@@ -2527,6 +2540,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
+                CtrlReq::SetOptionOnlyIfUnset(option, value) => {
+                    let current = get_option_value(&app, &option);
+                    if current.is_empty() {
+                        apply_set_option(&mut app, &option, &value, false);
+                        if option == "command-alias" {
+                            if let Ok(mut map) = shared_aliases_main.write() {
+                                *map = app.command_aliases.clone();
+                            }
+                        }
+                        meta_dirty = true;
+                        state_dirty = true;
+                    }
+                }
                 CtrlReq::ShowOptions(resp) => {
                     let mut output = String::new();
                     output.push_str(&format!("prefix {}\n", format_key_binding(&app.prefix_key)));
@@ -2819,6 +2845,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             c.stdin(if stdout { std::process::Stdio::piped() } else { std::process::Stdio::null() });
                             c.stdout(if stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() });
                             c.stderr(std::process::Stdio::null());
+                            { use crate::platform::HideWindowCommandExt; c.hide_window(); }
                             c.spawn().ok()
                         };
                         

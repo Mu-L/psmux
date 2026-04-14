@@ -231,8 +231,9 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
 /// avoid repeated subprocess spawning on every refresh.
 fn run_shell_command(cmd: &str) -> String {
     use std::process::Command;
+    use crate::platform::HideWindowCommandExt;
     let output = if cfg!(windows) {
-        Command::new("cmd").args(["/C", cmd]).output()
+        Command::new("cmd").args(["/C", cmd]).hide_window().output()
     } else {
         Command::new("sh").args(["-c", cmd]).output()
     };

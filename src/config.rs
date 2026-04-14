@@ -1546,6 +1546,7 @@ fn parse_if_shell(app: &mut AppState, line: &str) {
         let mut c = std::process::Command::new(&shell_prog);
         for a in &shell_args { c.arg(a); }
         c.arg(condition);
+        { use crate::platform::HideWindowCommandExt; c.hide_window(); }
         c.status().map(|s| s.success()).unwrap_or(false)
     };
 
@@ -1579,3 +1580,7 @@ mod tests_issue193_scroll_enter_copy_mode;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue198_unbind_individual.rs"]
 mod tests_issue198_unbind_individual;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_config_exhaustive.rs"]
+mod tests_config_exhaustive;

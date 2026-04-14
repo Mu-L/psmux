@@ -1235,9 +1235,17 @@ match cmd {
         if !persistent { break; }
     }
     "set-option" | "set" | "set-window-option" | "setw" => {
-        let has_u = args.iter().any(|a| *a == "-u");
-        let has_a = args.iter().any(|a| *a == "-a");
-        let has_q = args.iter().any(|a| *a == "-q");
+        // Support combined flag tokens like -ga, -gu, -gq (tmux compat)
+        let combined_has_set = |ch: char| -> bool {
+            args.iter().any(|a| {
+                if *a == format!("-{}", ch) { return true; }
+                a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains(ch)
+            })
+        };
+        let has_u = combined_has_set('u');
+        let has_a = combined_has_set('a');
+        let has_q = combined_has_set('q');
+        let has_o = combined_has_set('o');
         let non_flag_args: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
         if has_u {
             if let Some(option) = non_flag_args.first() {
@@ -1248,6 +1256,8 @@ match cmd {
             let value = non_flag_args[1..].join(" ");
             if has_a {
                 let _ = tx.send(CtrlReq::SetOptionAppend(option, value));
+            } else if has_o {
+                let _ = tx.send(CtrlReq::SetOptionOnlyIfUnset(option, value));
             } else {
                 let _ = tx.send(CtrlReq::SetOptionQuiet(option, value, has_q));
             }
@@ -1510,7 +1520,10 @@ match cmd {
         let _ = tx.send(CtrlReq::LoadBuffer(path));
     }
     "set-environment" | "setenv" => {
-        let has_u = args.iter().any(|a| *a == "-u");
+        let has_u = args.iter().any(|a| {
+            if *a == "-u" { return true; }
+            a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains('u')
+        });
         let non_flag: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
         if has_u {
             if let Some(key) = non_flag.first() {
@@ -1850,6 +1863,7 @@ match cmd {
                 c.arg(condition);
                 c.stdout(std::process::Stdio::null());
                 c.stderr(std::process::Stdio::null());
+                { use crate::platform::HideWindowCommandExt; c.hide_window(); }
                 c.status().map(|s| s.success()).unwrap_or(false)
             };
             let cmd_to_run = if success { Some(true_cmd) } else { false_cmd };
@@ -2328,10 +2342,18 @@ fn dispatch_control_command(
             true
         }
         "set-option" | "set" | "set-window-option" | "setw" => {
-            let quiet = args.iter().any(|a| *a == "-q");
-            let unset = args.iter().any(|a| *a == "-u");
-            let append = args.iter().any(|a| *a == "-a");
-            let global = args.iter().any(|a| *a == "-g");
+            // Support combined flag tokens like -ga, -gu, -gq (tmux compat)
+            let combined_has_set2 = |ch: char| -> bool {
+                args.iter().any(|a| {
+                    if *a == format!("-{}", ch) { return true; }
+                    a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains(ch)
+                })
+            };
+            let quiet = combined_has_set2('q');
+            let unset = combined_has_set2('u');
+            let append = combined_has_set2('a');
+            let global = combined_has_set2('g');
+            let only_if_unset = combined_has_set2('o');
             let positional: Vec<&str> = args.iter()
                 .filter(|a| !a.starts_with('-') || a.starts_with('@'))
                 .copied().collect();
@@ -2342,6 +2364,8 @@ fn dispatch_control_command(
                 let val = positional[1].trim_matches('"').to_string();
                 if append {
                     let _ = tx.send(CtrlReq::SetOptionAppend(key, val));
+                } else if only_if_unset {
+                    let _ = tx.send(CtrlReq::SetOptionOnlyIfUnset(key, val));
                 } else if quiet || global {
                     let _ = tx.send(CtrlReq::SetOptionQuiet(key, val, quiet));
                 } else {
@@ -2592,7 +2616,10 @@ fn dispatch_control_command(
             true
         }
         "set-environment" | "setenv" => {
-            let unset = args.iter().any(|a| *a == "-u");
+            let unset = args.iter().any(|a| {
+                if *a == "-u" { return true; }
+                a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains('u')
+            });
             let positional: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
             if unset && !positional.is_empty() {
                 let _ = tx.send(CtrlReq::UnsetEnvironment(positional[0].to_string()));
@@ -2618,7 +2645,11 @@ fn dispatch_control_command(
                 let command = positional[1..].iter().map(|s| {
                     if s.contains(' ') { format!("'{}'", s) } else { s.to_string() }
                 }).collect::<Vec<_>>().join(" ");
-                if args.iter().any(|a| *a == "-a") {
+                let has_append = args.iter().any(|a| {
+                    if *a == "-a" { return true; }
+                    a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains('a')
+                });
+                if has_append {
                     let _ = tx.send(CtrlReq::AppendHook(name, command));
                 } else {
                     let _ = tx.send(CtrlReq::SetHook(name, command));

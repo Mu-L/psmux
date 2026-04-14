@@ -1932,6 +1932,7 @@ fn run_main() -> io::Result<()> {
                                 c.arg(&cond);
                                 c.stdout(std::process::Stdio::null());
                                 c.stderr(std::process::Stdio::null());
+                                { use crate::platform::HideWindowCommandExt; c.hide_window(); }
                                 c.status().map(|s| s.success()).unwrap_or(false)
                             };
                             let cmd_to_run = if success { Some(true_cmd) } else { cmd_false_bg };
@@ -1963,6 +1964,7 @@ fn run_main() -> io::Result<()> {
                             c.arg(&cond);
                             c.stdout(std::process::Stdio::null());
                             c.stderr(std::process::Stdio::null());
+                            { use crate::platform::HideWindowCommandExt; c.hide_window(); }
                             c.status().map(|s| s.success()).unwrap_or(false)
                         }
                     };

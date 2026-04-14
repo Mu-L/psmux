@@ -942,6 +942,7 @@ pub enum CtrlReq {
     SetOptionQuiet(String, String, bool),  // set-option with quiet flag
     SetOptionUnset(String),  // set-option -u
     SetOptionAppend(String, String),  // set-option -a
+    SetOptionOnlyIfUnset(String, String),  // set-option -o
     ShowOptions(mpsc::Sender<String>),
     ShowWindowOptions(mpsc::Sender<String>),
     SourceFile(String),

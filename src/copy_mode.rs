@@ -616,12 +616,15 @@ fn pipe_text_to_command(text: &str, cmd: &str) {
     } else {
         vec!["-c", cmd]
     };
-    if let Ok(mut child) = std::process::Command::new(shell)
-        .args(&args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+    if let Ok(mut child) = {
+        let mut cmd = std::process::Command::new(shell);
+        cmd.args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        { use crate::platform::HideWindowCommandExt; cmd.hide_window(); }
+        cmd.spawn()
+    }
     {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());

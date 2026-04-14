@@ -110,6 +110,7 @@ fn resolve_shell_binary(name: &str) -> String {
 pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
     #[cfg(windows)]
     {
+        use crate::platform::HideWindowCommandExt;
         let lower = shell_cmd.trim_start().to_lowercase();
 
         // Case 1: Command already starts with a shell binary (pwsh, powershell, cmd).
@@ -126,6 +127,7 @@ pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
                 let prog = resolve_shell_binary(&parts[0]);
                 let mut c = std::process::Command::new(&prog);
                 for p in &parts[1..] { c.arg(p); }
+                c.hide_window();
                 return c;
             }
         }
@@ -142,6 +144,7 @@ pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
             // Split remaining args so the .ps1 path and its arguments are separate args
             let parts = parse_command_line(trimmed);
             for p in &parts { c.arg(p); }
+            c.hide_window();
             return c;
         }
 
@@ -150,6 +153,7 @@ pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
         let mut c = std::process::Command::new(&shell_prog);
         for a in &shell_args { c.arg(a); }
         c.arg(shell_cmd);
+        c.hide_window();
         c
     }
     #[cfg(not(windows))]
@@ -1473,11 +1477,13 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         {
                             let (shell_prog, mut shell_args) = resolve_run_shell();
                             shell_args.push(condition.to_string());
-                            std::process::Command::new(&shell_prog)
-                            .args(shell_args)
+                            let mut cmd = std::process::Command::new(&shell_prog);
+                            cmd.args(shell_args)
                             .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status()
+                            .stderr(std::process::Stdio::null());
+                            #[cfg(windows)]
+                            { use crate::platform::HideWindowCommandExt; cmd.hide_window(); }
+                            cmd.status()
                             .map(|s| s.success()).unwrap_or(false)
                         }
                     };
@@ -1982,6 +1988,10 @@ mod tests_issue200_new_session;
 mod tests_run_shell_resolve;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_hide_window.rs"]
+mod tests_hide_window;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_issue209_tmux_compat.rs"]
 mod tests_issue209_tmux_compat;
 
@@ -1996,3 +2006,15 @@ mod tests_issue210_gastown_fixes;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue210_gastown_captures.rs"]
 mod tests_issue210_gastown_captures;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue215_session_persistence.rs"]
+mod tests_issue215_session_persistence;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_mega_unit_coverage.rs"]
+mod tests_mega_unit_coverage;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_flag_parity.rs"]
+mod tests_flag_parity;

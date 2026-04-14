@@ -1,3 +1,57 @@
+// ---------------------------------------------------------------------------
+// CREATE_NO_WINDOW for background subprocesses
+// ---------------------------------------------------------------------------
+
+/// Windows `CREATE_NO_WINDOW` flag (0x08000000).
+///
+/// When set on `CreateProcess`, the child process does not get a console
+/// window allocated by conhost.  This is the correct flag for *helper*
+/// subprocesses (format `#()` expansion, `run-shell`, `if-shell`, clipboard
+/// pipes, plugin scripts) that only need stdin/stdout/stderr pipes.
+///
+/// **Important:** PTY/ConPTY child processes and psmux server processes must
+/// NOT use this flag because they need a real console session.  Those use
+/// `spawn_server_hidden()` (with `CREATE_NEW_CONSOLE` + `SW_HIDE`) instead.
+///
+/// On non-Windows platforms this is a no-op.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Extension trait that adds `.hide_window()` to `std::process::Command`.
+///
+/// Call this on any `Command` that spawns a background helper process.
+/// On Windows it sets `CREATE_NO_WINDOW` so no cmd.exe / conhost.exe
+/// window flashes on screen.  On other platforms it does nothing.
+///
+/// # Example
+/// ```ignore
+/// use crate::platform::HideWindowCommandExt;
+/// std::process::Command::new("cmd")
+///     .args(["/C", "echo hello"])
+///     .hide_window()
+///     .output();
+/// ```
+pub trait HideWindowCommandExt {
+    fn hide_window(&mut self) -> &mut Self;
+}
+
+#[cfg(windows)]
+impl HideWindowCommandExt for std::process::Command {
+    fn hide_window(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt;
+        self.creation_flags(CREATE_NO_WINDOW)
+    }
+}
+
+#[cfg(not(windows))]
+impl HideWindowCommandExt for std::process::Command {
+    fn hide_window(&mut self) -> &mut Self {
+        self // no-op
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 /// Spawn a server process with a hidden console window on Windows.
 ///
 /// Uses raw `CreateProcessW` with `STARTF_USESHOWWINDOW` + `SW_HIDE` and
