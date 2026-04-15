@@ -883,7 +883,7 @@ match cmd {
         let session_scope = args.iter().any(|a| *a == "-s");
         let (rtx, rrx) = mpsc::channel::<String>();
         if let Some(fmt_str) = fmt {
-            if all {
+            if all || session_scope {
                 let _ = tx.send(CtrlReq::ListAllPanesFormat(rtx, fmt_str));
             } else {
                 let _ = tx.send(CtrlReq::ListPanesFormat(rtx, fmt_str));
@@ -2180,9 +2180,10 @@ fn dispatch_control_command(
         }
         "list-panes" | "lsp" => {
             let all = args.iter().any(|a| *a == "-a");
+            let session_scope = args.iter().any(|a| *a == "-s");
             let format_str = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
             let (rtx, rrx) = mpsc::channel::<String>();
-            if all {
+            if all || session_scope {
                 if let Some(fmt) = format_str {
                     let _ = tx.send(CtrlReq::ListAllPanesFormat(rtx, fmt));
                 } else {
