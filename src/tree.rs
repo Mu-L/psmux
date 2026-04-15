@@ -363,33 +363,40 @@ pub fn get_split_mut<'a>(node: &'a mut Node, path: &Vec<usize>) -> Option<&'a mu
     Some(cur)
 }
 
-pub fn prune_exited(n: Node, remain_on_exit: bool) -> Option<Node> {
+/// Prune exited panes from the tree.  Returns `(Option<Node>, newly_dead_count)`:
+/// - `newly_dead_count` tracks panes that transitioned alive→dead in this call
+///   (remain-on-exit case), so callers can fire hooks even when the tree shape
+///   doesn't change.
+pub fn prune_exited(n: Node, remain_on_exit: bool) -> (Option<Node>, usize) {
     match n {
         Node::Leaf(mut p) => {
-            if p.dead { return Some(Node::Leaf(p)); }
+            if p.dead { return (Some(Node::Leaf(p)), 0); }
             match p.child.try_wait() {
                 Ok(Some(_)) => {
                     if remain_on_exit {
                         p.dead = true;
-                        Some(Node::Leaf(p))
+                        (Some(Node::Leaf(p)), 1)
                     } else {
-                        None
+                        (None, 0)
                     }
                 }
-                _ => Some(Node::Leaf(p)),
+                _ => (Some(Node::Leaf(p)), 0),
             }
         }
         Node::Split { kind, sizes, children } => {
             let mut new_children: Vec<Node> = Vec::new();
             let mut new_sizes: Vec<u16> = Vec::new();
+            let mut newly_dead = 0;
             for (i, child) in children.into_iter().enumerate() {
-                if let Some(c) = prune_exited(child, remain_on_exit) {
+                let (pruned, dead_count) = prune_exited(child, remain_on_exit);
+                newly_dead += dead_count;
+                if let Some(c) = pruned {
                     new_children.push(c);
                     new_sizes.push(sizes.get(i).copied().unwrap_or(0));
                 }
             }
-            if new_children.is_empty() { None }
-            else if new_children.len() == 1 { Some(new_children.remove(0)) }
+            if new_children.is_empty() { (None, newly_dead) }
+            else if new_children.len() == 1 { (Some(new_children.remove(0)), newly_dead) }
             else {
                 // Redistribute removed pane's percentage proportionally among survivors
                 let total: u16 = new_sizes.iter().sum();
@@ -407,7 +414,7 @@ pub fn prune_exited(n: Node, remain_on_exit: bool) -> Option<Node> {
                     if let Some(last) = scaled.last_mut() { *last += rem; }
                     new_sizes = scaled;
                 }
-                Some(Node::Split { kind, sizes: new_sizes, children: new_children })
+                (Some(Node::Split { kind, sizes: new_sizes, children: new_children }), newly_dead)
             }
         }
     }
@@ -679,7 +686,14 @@ pub fn pane_index_in_window(node: &Node, path: &[usize]) -> Option<usize> {
     if walk(node, target_id, &mut idx) { Some(idx) } else { None }
 }
 
-/// Reap exited children from the app. Returns (all_empty, any_pruned).
+/// Reap exited children from the app.
+/// Returns `(all_empty, any_pruned, any_newly_dead)`:
+/// - `any_pruned`: at least one pane was removed from the tree (remain-on-exit off)
+/// - `any_newly_dead`: at least one pane transitioned alive→dead (remain-on-exit on)
+///
+/// Callers should fire pane-died/pane-exited hooks when either flag is true,
+/// and only resize the layout when `any_pruned` is true.
+///
 /// Fast check: does any pane in this node tree have an exited child?
 /// Uses try_wait() but avoids the full tree rebuild if nothing has exited.
 fn has_any_exited(node: &mut Node) -> bool {
@@ -694,9 +708,10 @@ fn has_any_exited(node: &mut Node) -> bool {
     }
 }
 
-pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool)> {
+pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
     let remain = app.remain_on_exit;
     let mut any_pruned = false;
+    let mut any_newly_dead = false;
     for i in (0..app.windows.len()).rev() {
         // Fast path: skip full tree rebuild if no panes have exited
         if !has_any_exited(&mut app.windows[i].root) {
@@ -705,7 +720,11 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool)> {
         let leaves_before = count_panes(&app.windows[i].root);
         let active_pane_id = get_active_pane_id(&app.windows[i].root, &app.windows[i].active_path);
         let root = std::mem::replace(&mut app.windows[i].root, Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
-        match prune_exited(root, remain) {
+        let (pruned_result, newly_dead_count) = prune_exited(root, remain);
+        if newly_dead_count > 0 {
+            any_newly_dead = true;
+        }
+        match pruned_result {
             Some(new_root) => {
                 let leaves_after = count_panes(&new_root);
                 if leaves_after < leaves_before {
@@ -749,7 +768,7 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool)> {
             }
         }
     }
-    Ok((app.windows.is_empty(), any_pruned))
+    Ok((app.windows.is_empty(), any_pruned, any_newly_dead))
 }
 
 /// Collect all leaf (Pane) nodes from the tree, consuming it.
