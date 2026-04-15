@@ -4023,15 +4023,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // Check if all windows/panes have exited (throttled to every 250ms)
         if last_reap.elapsed() >= Duration::from_millis(100) {
             last_reap = Instant::now();
-            let (all_empty, any_pruned) = tree::reap_children(&mut app)?;
+            let (all_empty, any_pruned, any_newly_dead) = tree::reap_children(&mut app)?;
             if any_pruned {
-                // A pane exited naturally - resize remaining panes to fill the space
+                // A pane was removed from the tree - resize remaining panes to fill the space
                 resize_all_panes(&mut app);
+            }
+            if any_pruned || any_newly_dead {
+                // A pane exited — fire hooks whether it was removed (remain-on-exit off)
+                // or just marked dead (remain-on-exit on).  Fixes #227.
                 state_dirty = true;
                 meta_dirty = true;
-                // Fire pane-died / pane-exited hooks
-                if let Some(cmds) = app.hooks.get("pane-died") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
-                if let Some(cmds) = app.hooks.get("pane-exited") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                crate::commands::fire_hooks(&mut app, "pane-died");
+                crate::commands::fire_hooks(&mut app, "pane-exited");
             }
             if app.exit_empty && all_empty {
                 let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
