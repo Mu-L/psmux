@@ -95,18 +95,20 @@ if line.trim() == "PERSISTENT" {
     let mut ws_bg = write_stream.try_clone().unwrap();
     let (resp_tx, resp_rx) = mpsc::channel::<mpsc::Receiver<String>>();
 
-    // Register a frame slot for server-pushed frames (event-driven rendering).
-    // The slot holds at most ONE pending frame — push_frame() overwrites any
-    // unconsumed frame, bounding memory to O(1) per client instead of O(frames).
-    let frame_slot = crate::types::register_frame_slot(client_id);
+    // Register a bounded frame channel for server-pushed frames (event-driven
+    // rendering).  The channel queues up to FRAME_CHANNEL_CAPACITY frames,
+    // allowing short bursts (e.g. fast typing) to be delivered without dropping
+    // intermediate states, while still bounding memory for sustained throughput
+    // scenarios (e.g. rapid scroll in copy mode).
+    let frame_chan = crate::types::register_frame_channel(client_id);
 
     // Register a directive channel for queued directives (e.g. SWITCH).
-    // Directives use a separate mpsc channel so they cannot be overwritten
-    // by frame pushes (which always replace the previous pending frame).
+    // Directives use a separate mpsc channel so they are never affected
+    // by frame channel backpressure.
     let directive_rx = crate::types::register_directive_channel(client_id);
 
     std::thread::spawn(move || {
-        let (frame_lock, _frame_cvar) = &*frame_slot;
+        let frame_rx = frame_chan.rx.lock().unwrap();
         loop {
             // 0. Check for queued directives (non-blocking) — these take priority
             while let Ok(directive) = directive_rx.try_recv() {
@@ -131,11 +133,10 @@ if line.trim() == "PERSISTENT" {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            // 2. Check the frame slot — take the latest pushed frame
-            let frame = frame_lock.lock().ok().and_then(|mut slot| slot.take());
-            if let Some(text) = frame {
-                if write!(ws_bg, "{}\n", text).is_err() { break; }
-                if ws_bg.flush().is_err() { break; }
+            // 2. Drain all queued frames from the bounded channel
+            while let Ok(text) = frame_rx.try_recv() {
+                if write!(ws_bg, "{}\n", text).is_err() { return; }
+                if ws_bg.flush().is_err() { return; }
             }
         }
     });
