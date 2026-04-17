@@ -167,10 +167,10 @@ Send-Keys ':END" Enter' 800
 $cap = (Capture-Pane) -join "`n"
 Report "Echo pipe individually"  ($cap -match 'PIPE:\|:END')  "got: $(($cap -split "`n" | Select-String 'PIPE:') -join '')"
 
-# Test tilde
-Send-Keys 'Write-Host "TILDE:' 100
-Send-Keys-Literal '~' 100
-Send-Keys ':END" Enter' 800
+# Test tilde - send the entire command as literal to avoid shell tilde expansion
+Send-Keys 'clear Enter' 500
+Send-Keys-Literal 'Write-Host "TILDE:~:END"' 100
+Send-Keys 'Enter' 800
 
 $cap = (Capture-Pane) -join "`n"
 Report "Echo tilde individually"  ($cap -match 'TILDE:~:END')  "got: $(($cap -split "`n" | Select-String 'TILDE:') -join '')"

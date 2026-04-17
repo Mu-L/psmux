@@ -49,8 +49,16 @@ function Send-TcpCommand {
         [int]$TimeoutMs = 5000
     )
     try {
-        $port = (Get-Content "$PSMUX_DIR\$Session.port" -Raw).Trim()
-        $key  = (Get-Content "$PSMUX_DIR\$Session.key" -Raw).Trim()
+        $portFile = "$PSMUX_DIR\$Session.port"
+        $keyFile  = "$PSMUX_DIR\$Session.key"
+        if (-not (Test-Path $portFile)) { return @{ ok=$false; err="NO_PORT_FILE" } }
+        if (-not (Test-Path $keyFile))  { return @{ ok=$false; err="NO_KEY_FILE" } }
+        $rawPort = Get-Content $portFile -Raw
+        $rawKey  = Get-Content $keyFile -Raw
+        if (-not $rawPort) { return @{ ok=$false; err="EMPTY_PORT_FILE" } }
+        if (-not $rawKey)  { return @{ ok=$false; err="EMPTY_KEY_FILE" } }
+        $port = $rawPort.Trim()
+        $key  = $rawKey.Trim()
         $tcp = New-Object System.Net.Sockets.TcpClient
         $tcp.NoDelay = $true
         $tcp.Connect("127.0.0.1", [int]$port)
@@ -120,8 +128,14 @@ function Send-TcpRaw {
 
 function Connect-Persistent {
     param([string]$Session)
-    $port = (Get-Content "$PSMUX_DIR\$Session.port" -Raw).Trim()
-    $key  = (Get-Content "$PSMUX_DIR\$Session.key" -Raw).Trim()
+    $portFile = "$PSMUX_DIR\$Session.port"
+    $keyFile  = "$PSMUX_DIR\$Session.key"
+    if (-not (Test-Path $portFile) -or -not (Test-Path $keyFile)) { return $null }
+    $rawPort = Get-Content $portFile -Raw
+    $rawKey  = Get-Content $keyFile -Raw
+    if (-not $rawPort -or -not $rawKey) { return $null }
+    $port = $rawPort.Trim()
+    $key  = $rawKey.Trim()
     $tcp = New-Object System.Net.Sockets.TcpClient
     $tcp.NoDelay = $true
     $tcp.Connect("127.0.0.1", [int]$port)
@@ -214,7 +228,9 @@ else { Write-Fail "#136 Valid AUTH failed: $($r.err)" }
 
 # --- Issue #136/#206: Wrong key rejected ---
 Write-Test "#136/#206: Invalid AUTH rejected"
-$port = (Get-Content "$PSMUX_DIR\$SESSION.port" -Raw).Trim()
+$rawPort = Get-Content "$PSMUX_DIR\$SESSION.port" -Raw
+if (-not $rawPort) { Write-Fail "#136/#206 No port file"; } else {
+$port = $rawPort.Trim()
 $badResult = Send-TcpRaw -Port ([int]$port) -Payload "AUTH bad_key_12345`n"
 if ($badResult.resp -match "FAIL|ERR|denied|invalid" -or -not $badResult.ok) {
     Write-Pass "#136/#206 Invalid AUTH correctly rejected"
@@ -241,6 +257,7 @@ if ($noAuthResult.resp -notmatch "^OK$" -and $noAuthResult.resp -notmatch "sessi
 } else {
     Write-Fail "#206 SECURITY: Command executed without AUTH"
 }
+} # end of port-file-exists block
 
 # ════════════════════════════════════════════════════════════════════
 # SECTION 2: SESSION MANAGEMENT (Issues #33, #200, #205)

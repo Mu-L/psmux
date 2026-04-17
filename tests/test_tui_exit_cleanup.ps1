@@ -35,7 +35,7 @@ Write-Host -NoNewline "$esc[2 q"
 Write-Host -NoNewline "$esc[1;1H$esc[44m$esc[37m=== FAKE TUI APP ===$esc[0m"
 Write-Host -NoNewline "$esc[2;1H$esc[42mProcess list here...$esc[0m"
 Write-Host -NoNewline "$esc[3;1H$esc[41mCPU: 100%$esc[0m"
-Start-Sleep -Seconds 2
+Start-Sleep -Seconds 1
 Write-Host -NoNewline "$esc[?1003l$esc[?1006l"
 Write-Host -NoNewline "$esc[?1l"
 Write-Host -NoNewline "$esc[?2004l"
@@ -53,7 +53,7 @@ Write-Host -NoNewline "$esc[?2004h"
 Write-Host -NoNewline "$esc[2 q"
 Write-Host -NoNewline "$esc[1;1H$esc[44m$esc[37m=== CRASH TUI ===$esc[0m"
 Write-Host -NoNewline "$esc[2;1H$esc[41mAbout to crash...$esc[0m"
-Start-Sleep -Seconds 2
+Start-Sleep -Seconds 1
 '@
 
 $cleanScript = "$env:TEMP\fake_tui_clean.ps1"
@@ -72,10 +72,10 @@ Start-Sleep -Seconds 1
 # =====================================================================
 Write-Host "--- Group 1: Clean TUI exit ---"
 psmux new-session -d -s tui_clean -x 120 -y 30 2>$null
-Start-Sleep -Seconds 3
+Start-Sleep -Milliseconds 750
 
 psmux send-keys -t tui_clean "pwsh -NoProfile -File `"$cleanScript`"" Enter
-Start-Sleep -Seconds 5
+Start-Sleep -Seconds 4
 
 $cap = psmux capture-pane -t tui_clean -p 2>&1 | Out-String
 $hasEscGarbage = $cap -match '\[[\d;]+[Mm]' -and $cap -match '555|1003|1006'
@@ -111,13 +111,13 @@ Start-Sleep -Seconds 1
 # =====================================================================
 Write-Host "`n--- Group 2: TUI crash (no cleanup) ---"
 psmux new-session -d -s tui_crash -x 120 -y 30 2>$null
-Start-Sleep -Seconds 3
+Start-Sleep -Milliseconds 750
 
 psmux send-keys -t tui_crash "pwsh -NoProfile -File `"$crashScript`"" Enter
-Start-Sleep -Seconds 5
+Start-Sleep -Seconds 1
 
 psmux send-keys -t tui_crash C-c
-Start-Sleep -Seconds 3
+Start-Sleep -Milliseconds 750
 
 $cap4 = psmux capture-pane -t tui_crash -p 2>&1 | Out-String
 $hasEscGarbage2 = $cap4 -match '\[\d{2,};[\d;]+[Mm]'
@@ -162,13 +162,13 @@ $pstopPath = Get-Command pstop.exe -ErrorAction SilentlyContinue
 if ($pstopPath) {
     Write-Host "`n--- Group 3: pstop.exe (clean 'q' exit) ---"
     psmux new-session -d -s tui_pstop -x 120 -y 30 2>$null
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 750
     
     psmux send-keys -t tui_pstop "pstop.exe" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 1
     
     psmux send-keys -t tui_pstop "q"
-    Start-Sleep -Seconds 6
+    Start-Sleep -Seconds 1
     
     $capP = psmux capture-pane -t tui_pstop -p 2>&1 | Out-String
     
@@ -203,10 +203,10 @@ if ($pstopPath) {
     # --- pstop crash case: Ctrl+C then force-kill (no RMCUP) ---
     Write-Host "`n--- Group 3b: pstop force-kill crash (no RMCUP) ---"
     psmux new-session -d -s tui_pstop_fk -x 120 -y 30 2>$null
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 1
     
     psmux send-keys -t tui_pstop_fk "pstop.exe" Enter
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 1
     
     # Ctrl+C (sets ctrl_c_at) then immediately force-kill
     psmux send-keys -t tui_pstop_fk C-c
@@ -214,7 +214,7 @@ if ($pstopPath) {
     Get-Process -Name "pstop" -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
     
     # Wait for 2s timeout + buffer
-    Start-Sleep -Seconds 8
+    Start-Sleep -Milliseconds 750
     
     $capFK = psmux capture-pane -t tui_pstop_fk -p 2>&1 | Out-String
     # On ConPTY (Windows), a force-killed TUI that never sent RMCUP will leave
@@ -240,13 +240,13 @@ $opencodePath = Get-Command opencode -ErrorAction SilentlyContinue
 if ($opencodePath) {
     Write-Host "`n--- Group 4: opencode (Ctrl+C exit) ---"
     psmux new-session -d -s tui_oc -x 120 -y 30 2>$null
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 750
     
     psmux send-keys -t tui_oc "cd c:\cctest && opencode" Enter
-    Start-Sleep -Seconds 8
+    Start-Sleep -Milliseconds 750
     
     psmux send-keys -t tui_oc C-c
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 1
     
     $capOC = psmux capture-pane -t tui_oc -p 2>&1 | Out-String
     
@@ -283,11 +283,11 @@ if ($opencodePath) {
 # =====================================================================
 Write-Host "`n--- Group 5: Multiple TUI launches ---"
 psmux new-session -d -s tui_multi -x 120 -y 30 2>$null
-Start-Sleep -Seconds 3
+Start-Sleep -Milliseconds 750
 
 for ($i = 1; $i -le 3; $i++) {
     psmux send-keys -t tui_multi "pwsh -NoProfile -File `"$cleanScript`"" Enter
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 1
 }
 
 psmux send-keys -t tui_multi "echo multi_test_ok" Enter
@@ -318,17 +318,17 @@ Start-Sleep -Seconds 1
 if ($pstopPath -and $opencodePath) {
     Write-Host "`n--- Group 6: pstop then opencode back-to-back ---"
     psmux new-session -d -s tui_combo -x 120 -y 30 2>$null
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 750
     
     psmux send-keys -t tui_combo "pstop.exe" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 1
     psmux send-keys -t tui_combo C-c
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 1
     
     psmux send-keys -t tui_combo "cd c:\cctest && opencode" Enter
-    Start-Sleep -Seconds 8
+    Start-Sleep -Milliseconds 750
     psmux send-keys -t tui_combo C-c
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 1
     
     psmux send-keys -t tui_combo "echo combo_test_ok" Enter
     Start-Sleep -Seconds 1
@@ -360,10 +360,10 @@ if ($pstopPath -and $opencodePath) {
 # =====================================================================
 Write-Host "`n--- Group 7: Screen cleanliness ---"
 psmux new-session -d -s tui_clean_chk -x 120 -y 30 2>$null
-Start-Sleep -Seconds 3
+Start-Sleep -Milliseconds 750
 
 psmux send-keys -t tui_clean_chk "pwsh -NoProfile -File `"$cleanScript`"" Enter
-Start-Sleep -Seconds 5
+Start-Sleep -Seconds 1
 
 for ($i = 1; $i -le 5; $i++) {
     psmux send-keys -t tui_clean_chk "echo line_$i" Enter
@@ -390,13 +390,13 @@ Write-Host "`n--- Group 8: TUI exit in split panes ---"
 if ($pstopPath) {
     # Vertical split
     psmux new-session -d -s tui_split -x 120 -y 30 2>$null
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     psmux split-window -t tui_split -v
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     psmux send-keys -t tui_split "pstop.exe" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 1
     psmux send-keys -t tui_split "q"
-    Start-Sleep -Seconds 6
+    Start-Sleep -Seconds 1
     $capSV = psmux capture-pane -t tui_split -p 2>&1 | Out-String
     $hasSV = $capSV -match 'CPU%|F1Help|PID\s+PPID'
     Add-Result "Split-V: no pstop remnants" (-not $hasSV)
@@ -409,13 +409,13 @@ if ($pstopPath) {
 
     # Horizontal split
     psmux new-session -d -s tui_splith -x 120 -y 30 2>$null
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     psmux split-window -t tui_splith -h
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     psmux send-keys -t tui_splith "pstop.exe" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 1
     psmux send-keys -t tui_splith "q"
-    Start-Sleep -Seconds 6
+    Start-Sleep -Seconds 1
     $capSH = psmux capture-pane -t tui_splith -p 2>&1 | Out-String
     $hasSH = $capSH -match 'CPU%|F1Help|PID\s+PPID'
     Add-Result "Split-H: no pstop remnants" (-not $hasSH)
@@ -428,18 +428,18 @@ if ($pstopPath) {
 
     # Both panes in a split running pstop simultaneously
     psmux new-session -d -s tui_multi -x 120 -y 30 2>$null
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     psmux split-window -t tui_multi -v
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     psmux send-keys -t "tui_multi:0.1" "pstop.exe" Enter
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     psmux select-pane -t "tui_multi:0.0"
     Start-Sleep -Milliseconds 500
     psmux send-keys -t "tui_multi:0.0" "pstop.exe" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 1
     psmux send-keys -t "tui_multi:0.0" "q"
     psmux send-keys -t "tui_multi:0.1" "q"
-    Start-Sleep -Seconds 6
+    Start-Sleep -Seconds 1
     $capM0 = psmux capture-pane -t "tui_multi:0.0" -p 2>&1 | Out-String
     $capM1 = psmux capture-pane -t "tui_multi:0.1" -p 2>&1 | Out-String
     $hm0 = $capM0 -match 'CPU%|F1Help|PID\s+PPID'
@@ -458,13 +458,13 @@ if ($pstopPath) {
 Write-Host "`n--- Group 9: TUI exit in new window ---"
 if ($pstopPath) {
     psmux new-session -d -s tui_newwin -x 120 -y 30 2>$null
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     psmux new-window -t tui_newwin
     Start-Sleep -Milliseconds 500
     psmux send-keys -t tui_newwin "pstop.exe" Enter
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 750
     psmux send-keys -t tui_newwin "q"
-    Start-Sleep -Seconds 6
+    Start-Sleep -Seconds 1
     $capNW = psmux capture-pane -t tui_newwin -p 2>&1 | Out-String
     $hasNW = $capNW -match 'CPU%|F1Help|PID\s+PPID'
     Add-Result "New-window: no pstop remnants" (-not $hasNW)
@@ -477,15 +477,15 @@ if ($pstopPath) {
 
     # New window with split inside
     psmux new-session -d -s tui_nwsplit -x 120 -y 30 2>$null
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     psmux new-window -t tui_nwsplit
     Start-Sleep -Milliseconds 300
     psmux split-window -t tui_nwsplit -v
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 1
     psmux send-keys -t tui_nwsplit "pstop.exe" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 1
     psmux send-keys -t tui_nwsplit "q"
-    Start-Sleep -Seconds 6
+    Start-Sleep -Seconds 1
     $capNWS = psmux capture-pane -t tui_nwsplit -p 2>&1 | Out-String
     $hasNWS = $capNWS -match 'CPU%|F1Help|PID\s+PPID'
     Add-Result "New-win+split: no pstop remnants" (-not $hasNWS)

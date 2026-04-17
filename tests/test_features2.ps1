@@ -197,6 +197,9 @@ $msg = Psmux display-message -t feat2 -p '#{pane_in_mode}'
 if ("$msg".Trim() -eq "1") { Write-Pass "pane_in_mode=1 in copy-mode" }
 else { Write-Fail "pane_in_mode expected 1, got: $msg" }
 
+# Exit copy-mode so subsequent send-keys go to the shell
+Psmux send-keys -t feat2 q 2>$null | Out-Null
+Start-Sleep -Milliseconds 300
 # Note: send-keys goes to PTY, not mode handler; copy-mode exit requires attached client.
 # Reset mode by setting it directly (enter/exit is client-side)
 $msg2 = Psmux display-message -t feat2 -p '#{pane_in_mode}'

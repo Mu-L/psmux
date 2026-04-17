@@ -13,7 +13,7 @@
 
 <p align="center">
   <strong>The native Windows tmux. Born in PowerShell, made in Rust.</strong><br/>
-  Full mouse support · tmux themes · tmux config · 76 commands · blazing fast
+  Full mouse support · tmux themes · tmux config · 83 commands · blazing fast
 </p>
 
 <p align="center">
@@ -117,7 +117,7 @@ See [docker/README.md](docker/README.md) for full details.
 
 ## Why psmux?
 
-If you've used tmux on Linux/macOS and wished you had something like it on Windows, **this is it**. Split panes, multiple windows, session persistence, full mouse support, tmux themes, 76 commands, 126+ format variables, 53 vim copy-mode keys. Your existing `.tmux.conf` works. Full details: **[docs/features.md](docs/features.md)** · **[docs/compatibility.md](docs/compatibility.md)**
+If you've used tmux on Linux/macOS and wished you had something like it on Windows, **this is it**. Split panes, multiple windows, session persistence, full mouse support, tmux themes, 83 commands, 140+ format variables, 53 vim copy-mode keys. Your existing `.tmux.conf` works. Full details: **[docs/features.md](docs/features.md)** · **[docs/compatibility.md](docs/compatibility.md)**
 
 ## Usage
 
@@ -150,7 +150,7 @@ No extra configuration needed. Full guide: **[docs/claude-code.md](docs/claude-c
 | **[Compatibility](docs/compatibility.md)** | tmux command/config compatibility matrix |
 | **[Performance](docs/performance.md)** | Benchmarks and optimization details |
 | **[Key Bindings](docs/keybindings.md)** | Default keys and customization |
-| **[Scripting](docs/scripting.md)** | 76 commands, hooks, targets, pipe-pane |
+| **[Scripting](docs/scripting.md)** | 83 commands, hooks, targets, pipe-pane |
 | **[Configuration](docs/configuration.md)** | Config files, options, environment variables |
 | **[Plugins & Themes](docs/plugins.md)** | Plugin ecosystem — Catppuccin, Dracula, Nord, and more |
 | **[Mouse Over SSH](docs/mouse-ssh.md)** | SSH mouse support and Windows version requirements |

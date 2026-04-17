@@ -18,6 +18,9 @@
 use crate::types::AppState;
 use crate::config::{parse_config_content, parse_config_line};
 use crate::commands::execute_command_string;
+use std::sync::Mutex;
+
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 fn mock_app() -> AppState {
     AppState::new("config-test".to_string())
@@ -2293,6 +2296,7 @@ fn config_multiple_command_aliases() {
 
 #[test]
 fn config_cursor_style_sets_env() {
+    let _lock = ENV_MUTEX.lock().unwrap();
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g cursor-style block\n");
     assert_eq!(std::env::var("PSMUX_CURSOR_STYLE").unwrap(), "block");
@@ -2302,6 +2306,7 @@ fn config_cursor_style_sets_env() {
 
 #[test]
 fn config_cursor_blink_on() {
+    let _lock = ENV_MUTEX.lock().unwrap();
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g cursor-blink on\n");
     assert_eq!(std::env::var("PSMUX_CURSOR_BLINK").unwrap(), "1");
@@ -2310,6 +2315,7 @@ fn config_cursor_blink_on() {
 
 #[test]
 fn config_cursor_blink_off() {
+    let _lock = ENV_MUTEX.lock().unwrap();
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g cursor-blink off\n");
     assert_eq!(std::env::var("PSMUX_CURSOR_BLINK").unwrap(), "0");

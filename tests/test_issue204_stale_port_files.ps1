@@ -23,6 +23,14 @@ function Cleanup {
 
 Write-Host "`n=== Issue #204 Tests: Stale Port File Cleanup ===" -ForegroundColor Cyan
 
+function Start-Process-Timeout {
+    param([string]$FilePath, [string[]]$ArgumentList, [int]$TimeoutSec = 10)
+    $proc = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru
+    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+        try { $proc.Kill() } catch {}
+    }
+}
+
 # === TEST 1: Nonexistent binary leaves no stale port file ===
 Write-Host "`n[Test 1] Nonexistent binary: no stale port file after server exits" -ForegroundColor Yellow
 $SESSION1 = "stale_test_204_1"
@@ -30,7 +38,7 @@ Cleanup @($SESSION1)
 Start-Sleep -Milliseconds 500
 
 # Launch with a nonexistent binary
-Start-Process -FilePath $PSMUX -ArgumentList "new-session","-d","-s",$SESSION1,"C:\nonexistent_path_204\binary.exe" -WindowStyle Hidden -Wait
+Start-Process-Timeout -FilePath $PSMUX -ArgumentList "new-session","-d","-s",$SESSION1,"C:\nonexistent_path_204\binary.exe" -TimeoutSec 10
 Start-Sleep -Seconds 3
 
 # Check WITHOUT running any other psmux command (to avoid cleanup_stale_port_files)
@@ -60,7 +68,7 @@ $SESSION2 = "stale_test_204_2"
 Cleanup @($SESSION2)
 Start-Sleep -Milliseconds 500
 
-Start-Process -FilePath $PSMUX -ArgumentList "new-session","-d","-s",$SESSION2,"C:\nonexistent_path_204\ghost.exe" -WindowStyle Hidden -Wait
+Start-Process-Timeout -FilePath $PSMUX -ArgumentList "new-session","-d","-s",$SESSION2,"C:\nonexistent_path_204\ghost.exe" -TimeoutSec 10
 Start-Sleep -Seconds 3
 
 $lsOutput = & $PSMUX ls 2>&1 | Out-String
@@ -74,7 +82,7 @@ $SESSION3 = "stale_test_204_3"
 Cleanup @($SESSION3)
 Start-Sleep -Milliseconds 500
 
-Start-Process -FilePath $PSMUX -ArgumentList "new-session","-d","-s",$SESSION3,"C:\nonexistent_path_204\check.exe" -WindowStyle Hidden -Wait
+Start-Process-Timeout -FilePath $PSMUX -ArgumentList "new-session","-d","-s",$SESSION3,"C:\nonexistent_path_204\check.exe" -TimeoutSec 10
 Start-Sleep -Seconds 3
 
 & $PSMUX has-session -t $SESSION3 2>$null
@@ -116,7 +124,7 @@ $SESSION5 = "stale_test_204_5"
 Cleanup @($SESSION5)
 Start-Sleep -Milliseconds 500
 
-Start-Process -FilePath $PSMUX -ArgumentList "new-session","-d","-s",$SESSION5,"C:\nonexistent_path_204\consist.exe" -WindowStyle Hidden -Wait
+Start-Process-Timeout -FilePath $PSMUX -ArgumentList "new-session","-d","-s",$SESSION5,"C:\nonexistent_path_204\consist.exe" -TimeoutSec 10
 Start-Sleep -Seconds 3
 
 $lsOutput5 = & $PSMUX ls 2>&1 | Out-String

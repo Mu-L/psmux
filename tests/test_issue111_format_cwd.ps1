@@ -24,7 +24,7 @@ Write-Info "Using: $PSMUX"
 # Clean slate
 Write-Info "Cleaning up existing sessions..."
 & $PSMUX kill-server 2>$null
-Start-Sleep -Seconds 3
+Start-Sleep -Milliseconds 1500
 Remove-Item "$env:USERPROFILE\.psmux\*.port" -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:USERPROFILE\.psmux\*.key" -Force -ErrorAction SilentlyContinue
 
@@ -59,7 +59,7 @@ function New-TestSession {
         Write-Fail "Could not create session $name"
         return $false
     }
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 1500
     return $true
 }
 
@@ -88,7 +88,7 @@ try {
 
     # Split with #{pane_current_path}
     & $PSMUX split-window -h -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
     # Check CWD in the new pane
     & $PSMUX send-keys -t $SESSION 'Write-Output "NEWPANE_CWD=$($PWD.Path)"' Enter
@@ -121,7 +121,7 @@ try {
     Start-Sleep -Seconds 2
 
     & $PSMUX split-window -v -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
     & $PSMUX send-keys -t $SESSION 'Write-Output "VPANE=$($PWD.Path)"' Enter
     Start-Sleep -Seconds 2
@@ -153,7 +153,7 @@ try {
     Start-Sleep -Seconds 2
 
     & $PSMUX new-window -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
     & $PSMUX send-keys -t $SESSION 'Write-Output "NWPANE=$($PWD.Path)"' Enter
     Start-Sleep -Seconds 2
@@ -196,7 +196,7 @@ try {
 
     # Use the bound key directly via command (simulates pressing prefix+V)
     & $PSMUX split-window -v -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
     & $PSMUX send-keys -t $SESSION 'Write-Output "BINDPANE=$($PWD.Path)"' Enter
     Start-Sleep -Seconds 2
@@ -226,7 +226,7 @@ try {
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
 
     & $PSMUX split-window -h -c $testDir -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
     & $PSMUX send-keys -t $SESSION 'Write-Output "LITPANE=$($PWD.Path)"' Enter
     Start-Sleep -Seconds 2
@@ -290,7 +290,7 @@ try {
 
     # Open a cmd.exe pane
     & $PSMUX split-window -h -t $SESSION "cmd.exe" 2>&1 | Out-Null
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 1500
 
     # cd in cmd.exe
     & $PSMUX send-keys -t $SESSION "cd /d `"$testDir`"" Enter
@@ -322,13 +322,13 @@ try {
 
     # Open cmd.exe pane and cd
     & $PSMUX split-window -h -t $SESSION "cmd.exe" 2>&1 | Out-Null
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 1500
     & $PSMUX send-keys -t $SESSION "cd /d `"$testDir`"" Enter
     Start-Sleep -Seconds 2
 
     # Split from that pane using #{pane_current_path}
     & $PSMUX split-window -v -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
     # The new pane (pwsh default) should be in testDir
     & $PSMUX send-keys -t $SESSION 'Write-Output "CMDSPLIT=$($PWD.Path)"' Enter
@@ -372,7 +372,7 @@ try {
 
     # Open bash pane
     & $PSMUX split-window -h -t $SESSION "$gitBash" 2>&1 | Out-Null
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 1500
 
     # cd in bash
     & $PSMUX send-keys -t $SESSION "cd '$bashDir'" Enter
@@ -406,13 +406,13 @@ try {
     $bashDir = $testDir -replace '\\', '/'
 
     & $PSMUX split-window -h -t $SESSION "$gitBash" 2>&1 | Out-Null
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 1500
     & $PSMUX send-keys -t $SESSION "cd '$bashDir'" Enter
     Start-Sleep -Seconds 2
 
     # Split from bash pane using #{pane_current_path}
     & $PSMUX split-window -v -c '#{pane_current_path}' -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
     # New pane should be in testDir
     & $PSMUX send-keys -t $SESSION 'Write-Output "BASHSPLIT=$($PWD.Path)"' Enter

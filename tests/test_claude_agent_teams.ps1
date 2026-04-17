@@ -60,7 +60,7 @@ function Start-Session {
     Remove-Item "$env:USERPROFILE\.psmux\$Name.key" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 300
     & $PSMUX new-session -s $Name -d 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 2500
+    Start-Sleep -Milliseconds 1000
     & $PSMUX has-session -t $Name 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Failed to start session '$Name'" }
 }
@@ -93,7 +93,7 @@ try {
     $probeContent = 'Write-Host "' + $m + ':$($env:MY_URL)"'
     Set-Content -Path $probe -Value $probeContent -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env MY_URL=https\://api.example.com/v1 pwsh -NoProfile -File '$probe'" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:https://api\.example\.com/v1") { Write-Pass "\: stripped → https://..." }
     elseif ($cap -match $m) { Write-Fail "\: NOT stripped. Cap: $($cap.Substring(0,[Math]::Min(300,$cap.Length)))" }
@@ -110,7 +110,7 @@ try {
     $probeContent = 'Write-Host "' + $m + ':$($env:EMAIL)"'
     Set-Content -Path $probe -Value $probeContent -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env EMAIL=user\@host.com pwsh -NoProfile -File '$probe'" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:user@host\.com") { Write-Pass "\@ stripped → user@host.com" }
     elseif ($cap -match $m) { Write-Fail "\@ NOT stripped" }
@@ -127,7 +127,7 @@ try {
     $probeContent = 'Write-Host "' + $m + ':$($env:MY_PATH)"'
     Set-Content -Path $probe -Value $probeContent -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env MY_PATH=C:\Users\test pwsh -NoProfile -File '$probe'" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:C:\\Users\\test") { Write-Pass "Windows backslashes preserved" }
     elseif ($cap -match $m) { Write-Fail "Backslashes mangled. Cap: $($cap.Substring(0,[Math]::Min(300,$cap.Length)))" }
@@ -145,7 +145,7 @@ try {
     $testScript = Join-Path $TESTDIR "test_cmd.ps1"
     Set-Content -Path $testScript -Value "Write-Host '${m}:CMD_EXECUTED'" -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env DUMMY=1 pwsh -NoProfile -File '$testScript'" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:CMD_EXECUTED") { Write-Pass "Command path works through env shim" }
     elseif ($cap -match $m) { Write-Fail "Command execution failed" }
@@ -162,7 +162,7 @@ try {
     $probeContent = 'Write-Host "' + $m + ':URL=$($env:URL)+EMAIL=$($env:EMAIL)"'
     Set-Content -Path $probe -Value $probeContent -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env URL=https\://api.test.com EMAIL=admin\@test.com pwsh -NoProfile -File '$probe'" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:URL=https://api\.test\.com\+EMAIL=admin@test\.com") { Write-Pass "Mixed escapes stripped correctly" }
     elseif ($cap -match $m) { Write-Fail "Some escapes not stripped. Cap: $($cap.Substring(0,[Math]::Min(400,$cap.Length)))" }
@@ -182,7 +182,7 @@ try {
     $jsFile = Join-Path $TESTDIR "agent_test.js"
     Set-Content -Path $jsFile -Value "console.log('${m}:JS_NODE_OK');" -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env CLAUDECODE=1 '$jsFile'" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:JS_NODE_OK") { Write-Pass ".js file executed via node successfully" }
     elseif ($cap -match "WScript|WSH|ActiveX") { Write-Fail ".js file ran via WScript instead of node!" }
@@ -199,7 +199,7 @@ try {
     $mjsFile = Join-Path $TESTDIR "agent_test.mjs"
     Set-Content -Path $mjsFile -Value "console.log('${m}:MJS_NODE_OK');" -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env CLAUDECODE=1 '$mjsFile'" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:MJS_NODE_OK") { Write-Pass ".mjs file executed via node" }
     else { Write-Skip ".mjs test inconclusive (node ESM support varies)" }
@@ -219,7 +219,7 @@ console.log('${m}:ARGS=' + process.argv.slice(2).join(','));
 "@
     Set-Content -Path $jsFile -Value $jsContent -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env CLAUDECODE=1 ANTHROPIC_BASE_URL=https\://api.minimax.io/anthropic '$jsFile' --agent-id test1 --agent-name Agent1" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     $ccOk = $cap -match "${m}:CC=1"
     $urlOk = $cap -match "${m}:URL=https://api\.minimax\.io/anthropic"
@@ -236,7 +236,7 @@ try {
     Start-Session
     $m = "T24_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "env TEST=1 Write-Host '${m}:NORMAL_CMD_OK'" Enter
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 1500
     $cap = Capture-Pane
     if ($cap -match "${m}:NORMAL_CMD_OK") { Write-Pass "Non-.js commands work normally" }
     elseif ($cap -match $m) { Write-Fail "Non-.js command had issues" }
@@ -257,7 +257,7 @@ try {
     Set-Content -Path $jsFile -Value "#!/usr/bin/env node`nconsole.log('${m}:SCOPED_PKG_OK');" -Encoding UTF8
     # Run using the full Windows path (C:\...\@test-scope\test-pkg\index.js)
     & $PSMUX send-keys -t $SESSION "env CLAUDECODE=1 '$jsFile'" Enter
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:SCOPED_PKG_OK") { Write-Pass "Windows path \\@scope preserved correctly" }
     elseif ($cap -match "Cannot find module") { Write-Fail "\\@ in path was stripped (the node_modules\@scope bug)" }
@@ -273,7 +273,7 @@ try {
     $jsFile = Join-Path $TESTDIR "arg_test_26.js"
     Set-Content -Path $jsFile -Value "#!/usr/bin/env node`nconsole.log('${m}:'+process.argv.slice(2).join(','));" -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env DUMMY=1 '$jsFile' --agent-id test\@enhancement" Enter
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:--agent-id,test@enhancement") { Write-Pass "\\@ in arg stripped to @" }
     elseif ($cap -match "${m}:--agent-id,test\\@enhancement") { Write-Fail "\\@ in arg NOT stripped" }
@@ -291,7 +291,7 @@ try {
     $jsContent = "#!/usr/bin/env node`nconsole.log('${m}:SHEBANG_NODE');"
     Set-Content -Path $jsFile -Value $jsContent -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env DUMMY=1 '$jsFile'" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:SHEBANG_NODE") { Write-Pass "Shebang #!/usr/bin/env node detected" }
     else { Write-Skip "No output captured" }
@@ -306,7 +306,7 @@ try {
     $jsFile = Join-Path $TESTDIR "no_shebang_test.js"
     Set-Content -Path $jsFile -Value "console.log('${m}:FALLBACK_NODE');" -Encoding UTF8
     & $PSMUX send-keys -t $SESSION "env DUMMY=1 '$jsFile'" Enter
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $cap = Capture-Pane
     if ($cap -match "${m}:FALLBACK_NODE") { Write-Pass "No-shebang .js fell back to node correctly" }
     else { Write-Skip "No output captured" }
@@ -618,12 +618,12 @@ console.log('${m}:ID=' + process.argv.slice(2).filter((_,i,a) => a[i-1]==='--age
     
     # Step 1: Create agent pane (like Claude Code does)
     $paneId = (& $PSMUX split-window -t $SESSION -h -P -F "#{pane_id}" 2>&1 | Out-String).Trim()
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 1500
     
     # Step 2: Send the exact command pattern Claude Code uses
     $agentCmd = "cd '$TESTDIR' && env CLAUDECODE=1 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 ANTHROPIC_BASE_URL=https\://api.minimax.io/anthropic '$jsFile' --agent-id agent001 --agent-name Agent1"
     & $PSMUX send-keys -t $SESSION "$agentCmd" Enter
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 2
     
     # Step 3: Capture and verify
     $cap = Capture-Pane
@@ -710,7 +710,7 @@ try {
     Start-Session
     $m = "T94_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "cd '$TESTDIR' && Write-Host '${m}:CHAIN_OK'" Enter
-    Start-Sleep -Seconds 3
+    Start-Sleep -Milliseconds 1500
     $cap = Capture-Pane
     if ($cap -match "${m}:CHAIN_OK") { Write-Pass "&& chaining works in psmux pane" }
     else { Write-Fail "&& chaining failed" }

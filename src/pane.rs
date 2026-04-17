@@ -284,7 +284,7 @@ pub const MIN_PANE_DIM: u16 = 2;
 
 /// Minimum rows for a split to be allowed — each resulting pane needs at
 /// least this many rows to run a shell prompt.
-const MIN_SPLIT_ROWS: u16 = 4;
+const MIN_SPLIT_ROWS: u16 = 2;
 /// Minimum cols for a split to be allowed.
 const MIN_SPLIT_COLS: u16 = 10;
 

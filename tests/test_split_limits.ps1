@@ -47,12 +47,16 @@ function Get-PaneCount {
 }
 
 function Wait-Prompt {
-    param([string]$Target, [int]$Timeout = 15000)
+    param([string]$Target, [int]$Timeout = 15000, [switch]$Relaxed)
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $Timeout) {
         try {
             $cap = & $PSMUX capture-pane -t $Target -p 2>&1 | Out-String
             if ($cap -match "PS [A-Z]:\\") {
+                return @{ Found = $true; ElapsedMs = $sw.ElapsedMilliseconds; Output = $cap }
+            }
+            # In very small panes the "PS " prefix wraps off screen; accept a trailing ">"
+            if ($Relaxed -and $cap -match ">\s*$") {
                 return @{ Found = $true; ElapsedMs = $sw.ElapsedMilliseconds; Output = $cap }
             }
         } catch {}
@@ -287,7 +291,11 @@ for ($i = 1; $i -le 20; $i++) {
     $successfulSplits++
     $newPaneIdx = $panesAfter - 1
 
-    $r = Wait-Prompt "split3:0.$newPaneIdx"
+    # Later panes are very small; give extra time for shell startup
+    # Panes at index >= 5 are tiny (< 15 cols); "PS " wraps off screen so use relaxed matching
+    $promptTimeout = if ($newPaneIdx -ge 5) { 25000 } else { 15000 }
+    $useRelaxed = $newPaneIdx -ge 5
+    $r = Wait-Prompt "split3:0.$newPaneIdx" $promptTimeout -Relaxed:$useRelaxed
     if ($r.Found) {
         Pass "AltSplit $i ($dirName) new pane prompt" "pane $newPaneIdx in $($r.ElapsedMs)ms (panes=$panesAfter)"
     } else {

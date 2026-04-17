@@ -2,6 +2,17 @@
 
 Default prefix: `Ctrl+b` (same as tmux). Change with `set -g prefix C-a`.
 
+Supported prefix keys include `C-a` through `C-z`, `C-Space`, and any printable character.
+
+## Case Sensitivity
+
+Key bindings are **case-sensitive**, matching tmux behavior:
+
+- `bind-key t` binds to lowercase `t` (just press `t`)
+- `bind-key T` binds to uppercase `T` (`Shift+t`)
+
+This is essential for plugins like PPM (`Prefix+I`/`Prefix+U`) and psmux-sensible (`Prefix+R`).
+
 ## Prefix Keys
 
 ### Window Management
@@ -12,7 +23,7 @@ Default prefix: `Ctrl+b` (same as tmux). Change with `set -g prefix C-a`.
 | `Prefix + n` | Next window |
 | `Prefix + p` | Previous window |
 | `Prefix + l` | Last (previously active) window |
-| `Prefix + w` | Interactive session/window/pane chooser |
+| `Prefix + w` | Interactive session/window/pane chooser (`choose-tree`) |
 | `Prefix + &` | Kill current window (with confirmation) |
 | `Prefix + ,` | Rename current window |
 | `Prefix + '` | Prompt for window index (jump to any window) |
@@ -29,10 +40,10 @@ Default prefix: `Ctrl+b` (same as tmux). Change with `set -g prefix C-a`.
 
 | Key | Action |
 |-----|--------|
-| `Prefix + Arrow` | Navigate between panes (Up/Down/Left/Right) |
+| `Prefix + Arrow` | Navigate between panes (Up/Down/Left/Right), wraps at edges |
 | `Prefix + o` | Select next pane (rotate) |
 | `Prefix + ;` | Last (previously active) pane |
-| `Prefix + q` | Display pane numbers (type number to switch) |
+| `Prefix + q` | Display pane numbers (type number to switch, auto-dismisses) |
 
 ### Pane Management
 
@@ -68,7 +79,9 @@ Default prefix: `Ctrl+b` (same as tmux). Change with `set -g prefix C-a`.
 |-----|--------|
 | `Prefix + d` | Detach from session |
 | `Prefix + $` | Rename session |
-| `Prefix + s` | Session chooser/switcher |
+| `Prefix + s` | Session chooser/switcher (`choose-tree -s`) |
+| `Prefix + (` | Switch to previous session |
+| `Prefix + )` | Switch to next session |
 
 ### Copy / Paste
 
@@ -82,14 +95,21 @@ Default prefix: `Ctrl+b` (same as tmux). Change with `set -g prefix C-a`.
 
 | Key | Action |
 |-----|--------|
-| `Prefix + :` | Command prompt |
+| `Prefix + :` | Command prompt (with cursor, arrow key navigation, and history) |
 | `Prefix + ?` | List keybindings (help overlay) |
 | `Prefix + i` | Display window/pane info |
 | `Prefix + t` | Clock mode |
+| `Prefix + !` | Break pane out to new window |
+
+### Repeat Bindings
+
+Navigation and resize bindings support **repeat mode**: after pressing the prefix key once, successive keypresses within the `repeat-time` window (default 500ms) trigger the action without needing to re-enter the prefix. This applies to arrow-based pane navigation and resize bindings by default.
 
 ## Copy/Scroll Mode (Vi)
 
-Enter copy mode with `Prefix + [` to scroll through terminal history with vim-style keybindings:
+Enter copy mode with `Prefix + [` to scroll through terminal history with vim-style keybindings.
+
+Mouse scroll wheel also enters copy mode by default. To disable this, set `scroll-enter-copy-mode off` in your config.
 
 ### Cursor Movement
 
@@ -248,6 +268,22 @@ When `mouse on` (default):
 | Scroll up/down | Scroll pane (or enter copy mode at prompt) |
 | Mouse drag in copy mode | Select text → auto-copy on release |
 | Right-click | Paste clipboard |
+
+## Supported Key Names
+
+Key names for `bind-key` and `send-keys`:
+
+| Key | Name |
+|-----|------|
+| Arrow keys | `Up`, `Down`, `Left`, `Right` |
+| Function keys | `F1` through `F12` |
+| Special keys | `Enter`, `Tab`, `Escape`, `Space`, `Backspace` |
+| Navigation | `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete` |
+| Ctrl modifier | `C-a` through `C-z`, `C-Space` |
+| Alt modifier | `M-a` through `M-z`, `M-Left`, `M-Right`, etc. |
+| Shift+key | Use uppercase letter: `T` for `Shift+t` |
+| Shift+Enter | `S-Enter` (sends proper escape sequence) |
+| Shift+Tab | `BTab` (sends `ESC [ Z`) |
 
 ## Custom Key Bindings
 

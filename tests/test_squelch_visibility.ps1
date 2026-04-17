@@ -293,7 +293,7 @@ foreach ($td in $testDirs) {
     }
 
     # Wait for warm server readiness
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $warmReady = Wait-PortFile -SessionName "__warm__" -TimeoutMs 10000
     if ($null -eq $warmReady) {
         Write-Fail "$label warm server not ready"
@@ -366,7 +366,7 @@ $env:PSMUX_CONFIG_FILE = $null
 
 $alive = Wait-SessionAlive -SessionName "sqv_same_base" -TimeoutMs 15000
 if ($null -ne $alive) {
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $warmReady = Wait-PortFile -SessionName "__warm__" -TimeoutMs 10000
     if ($null -ne $warmReady) {
         # Claim from the same directory (no CWD change)
@@ -418,7 +418,7 @@ $env:PSMUX_CONFIG_FILE = $null
 
 $alive = Wait-SessionAlive -SessionName "sqv_rapid_base" -TimeoutMs 15000
 if ($null -ne $alive) {
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
     $rapidDirs = @($env:TEMP, "C:\", $HOME_DIR)
     $rapidLeaks = 0
@@ -430,7 +430,7 @@ if ($null -ne $alive) {
         $warmReady = Wait-PortFile -SessionName "__warm__" -TimeoutMs 10000
         if ($null -eq $warmReady) {
             Write-Info "C: Warm not ready for rapid claim #$($r+1), waiting..."
-            Start-Sleep -Seconds 3
+            Start-Sleep -Seconds 2
             $warmReady = Wait-PortFile -SessionName "__warm__" -TimeoutMs 10000
             if ($null -eq $warmReady) {
                 Write-Skip "C: Warm server not available for rapid claim #$($r+1)"
@@ -459,7 +459,7 @@ if ($null -ne $alive) {
         }
 
         # Short wait before next claim (stress the replenishment)
-        Start-Sleep -Seconds 3
+        Start-Sleep -Seconds 2
     }
 
     if ($rapidLeaks -eq 0) {
@@ -487,7 +487,7 @@ $env:PSMUX_CONFIG_FILE = $null
 
 $alive = Wait-SessionAlive -SessionName "sqv_poll_base" -TimeoutMs 15000
 if ($null -ne $alive) {
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $warmReady = Wait-PortFile -SessionName "__warm__" -TimeoutMs 10000
     if ($null -ne $warmReady) {
         Push-Location $env:TEMP
@@ -564,7 +564,7 @@ $env:PSMUX_CONFIG_FILE = $null
 
 $alive = Wait-SessionAlive -SessionName "sqv_multi_base" -TimeoutMs 15000
 if ($null -ne $alive) {
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
     # Session 1: from TEMP
     $warmReady = Wait-PortFile -SessionName "__warm__" -TimeoutMs 10000
@@ -587,7 +587,7 @@ if ($null -ne $alive) {
     }
 
     # Wait for warm replenishment
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
 
     # Session 2: from user profile
     $warmReady2 = Wait-PortFile -SessionName "__warm__" -TimeoutMs 10000
@@ -629,7 +629,7 @@ $env:PSMUX_CONFIG_FILE = $null
 
 $alive = Wait-SessionAlive -SessionName "sqv_int_base" -TimeoutMs 15000
 if ($null -ne $alive) {
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $warmReady = Wait-PortFile -SessionName "__warm__" -TimeoutMs 10000
     if ($null -ne $warmReady) {
         Push-Location $env:TEMP
@@ -682,7 +682,7 @@ $env:PSMUX_CONFIG_FILE = $null
 
 $alive = Wait-SessionAlive -SessionName "sqv_time_base" -TimeoutMs 15000
 if ($null -ne $alive) {
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $warmReady = Wait-PortFile -SessionName "__warm__" -TimeoutMs 10000
     if ($null -ne $warmReady) {
         Push-Location $env:TEMP
@@ -742,7 +742,7 @@ $env:PSMUX_CONFIG_FILE = $null
 
 $alive = Wait-SessionAlive -SessionName "sqv_cont_base" -TimeoutMs 15000
 if ($null -ne $alive) {
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 2
     $warmReady = Wait-PortFile -SessionName "__warm__" -TimeoutMs 10000
     if ($null -ne $warmReady) {
         Push-Location $env:TEMP

@@ -20,7 +20,7 @@ if (-not (Test-Path $PSMUX)) {
     exit 1
 }
 
-function Psmux { & $PSMUX @args 2>&1; Start-Sleep -Milliseconds 300 }
+function Psmux { & $PSMUX @args 2>&1; Start-Sleep -Milliseconds 100 }
 
 $SESSION = "nav_test_$(Get-Random)"
 Write-Info "Using psmux binary: $PSMUX"
@@ -59,7 +59,7 @@ function Get-AllPaneIds {
 function Navigate {
     param($Session, $Dir)
     Psmux select-pane -t $Session "-$Dir" | Out-Null
-    Start-Sleep -Milliseconds 200
+    Start-Sleep -Milliseconds 50
 }
 
 # Check if all panes are reachable by cycling through directions
@@ -85,7 +85,7 @@ function Test-AllPanesReachable {
         $current = $queue.Dequeue()
         # Select this pane by ID (include session name for correct routing)
         Psmux select-pane -t "${Session}:${current}" | Out-Null
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Milliseconds 50
         foreach ($dir in @("U", "D", "L", "R")) {
             # Navigate in direction
             Navigate -Session $Session -Dir $dir
@@ -97,7 +97,7 @@ function Test-AllPanesReachable {
             }
             # Return to current pane for next direction
             Psmux select-pane -t "${Session}:${current}" | Out-Null
-            Start-Sleep -Milliseconds 200
+            Start-Sleep -Milliseconds 50
         }
     }
     
@@ -123,7 +123,7 @@ Write-Host ("=" * 60)
 # ─── Start session ────────────────────────────────────────────
 Write-Info "Starting test session: $SESSION"
 Start-Process -FilePath $PSMUX -ArgumentList "new-session", "-d", "-s", $SESSION -WindowStyle Hidden | Out-Null
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 2
 
 $sessions = (& $PSMUX ls 2>&1) -join "`n"
 if ($sessions -notmatch [regex]::Escape($SESSION)) {
@@ -137,7 +137,7 @@ Write-Host ""
 Write-Host "--- Layout 1: 2 panes (vertical split) ---"
 # Already have 1 pane, split once
 Psmux split-window -v -t $SESSION | Out-Null
-Start-Sleep -Seconds 2
+Start-Sleep -Milliseconds 1000
 
 Write-Test "2-pane vertical: all panes reachable"
 Test-AllPanesReachable -Session $SESSION -Label "2-pane vertical" -PaneCount 2
@@ -146,7 +146,7 @@ Test-AllPanesReachable -Session $SESSION -Label "2-pane vertical" -PaneCount 2
 Write-Host ""
 Write-Host "--- Layout 2: 3 panes (V + H) ---"
 Psmux split-window -h -t $SESSION | Out-Null
-Start-Sleep -Seconds 2
+Start-Sleep -Milliseconds 1000
 
 Write-Test "3-pane V+H: all panes reachable"
 Test-AllPanesReachable -Session $SESSION -Label "3-pane V+H" -PaneCount 3
@@ -158,7 +158,7 @@ Write-Host "--- Layout 3: 4 panes (asymmetric grid) ---"
 Psmux select-pane -t $SESSION -U | Out-Null
 Start-Sleep -Milliseconds 500
 Psmux split-window -h -t $SESSION | Out-Null
-Start-Sleep -Seconds 2
+Start-Sleep -Milliseconds 1000
 
 Write-Test "4-pane asymmetric: all panes reachable"
 Test-AllPanesReachable -Session $SESSION -Label "4-pane asymmetric" -PaneCount 4
@@ -167,7 +167,7 @@ Test-AllPanesReachable -Session $SESSION -Label "4-pane asymmetric" -PaneCount 4
 Write-Host ""
 Write-Host "--- Layout 4: 5 panes ---"
 Psmux split-window -v -t $SESSION | Out-Null
-Start-Sleep -Seconds 2
+Start-Sleep -Milliseconds 1000
 
 Write-Test "5-pane: all panes reachable"
 Test-AllPanesReachable -Session $SESSION -Label "5-pane" -PaneCount 5
@@ -176,7 +176,7 @@ Test-AllPanesReachable -Session $SESSION -Label "5-pane" -PaneCount 5
 Write-Host ""
 Write-Host "--- Layout 5: 6 panes (complex) ---"
 Psmux split-window -h -t $SESSION | Out-Null
-Start-Sleep -Seconds 2
+Start-Sleep -Milliseconds 1000
 
 Write-Test "6-pane complex: all panes reachable"
 Test-AllPanesReachable -Session $SESSION -Label "6-pane complex" -PaneCount 6
@@ -185,7 +185,7 @@ Test-AllPanesReachable -Session $SESSION -Label "6-pane complex" -PaneCount 6
 Write-Host ""
 Write-Host "--- Layout 6: New window, 2x2 grid ---"
 Psmux new-window -t $SESSION | Out-Null
-Start-Sleep -Seconds 2
+Start-Sleep -Milliseconds 1000
 # Create a 2x2 grid: split v, go up, split h, go down, split h
 Psmux split-window -v -t $SESSION | Out-Null
 Start-Sleep -Seconds 1
@@ -196,7 +196,7 @@ Start-Sleep -Seconds 1
 Psmux select-pane -t $SESSION -D | Out-Null
 Start-Sleep -Milliseconds 300
 Psmux split-window -h -t $SESSION | Out-Null
-Start-Sleep -Seconds 2
+Start-Sleep -Milliseconds 1000
 
 Write-Test "2x2 grid: all panes reachable"
 Test-AllPanesReachable -Session $SESSION -Label "2x2 grid" -PaneCount 4
@@ -278,7 +278,7 @@ $TUI_SESSION_NAV = "nav_tui_proof"
 
 $tuiOk = Launch-PsmuxWindow -Session $TUI_SESSION_NAV
 if ($tuiOk) {
-    Start-Sleep -Seconds 2
+    Start-Sleep -Milliseconds 1000
 
     # Create a 2-pane layout for navigation testing
     & $script:TUI_PSMUX split-window -h -t $TUI_SESSION_NAV 2>&1 | Out-Null
@@ -332,7 +332,7 @@ if ($tuiOk) {
 Write-Host ""
 Write-Info "Cleaning up..."
 Psmux kill-session -t $SESSION | Out-Null
-Start-Sleep -Seconds 2
+Start-Sleep -Milliseconds 1000
 
 Write-Host ""
 Write-Host ("=" * 60)

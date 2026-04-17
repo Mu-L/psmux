@@ -62,8 +62,16 @@ function Wait-SessionReady {
 function Send-TcpCommand {
     param([string]$Session, [string]$Command, [int]$TimeoutMs = 5000)
     try {
-        $port = (Get-Content "$PSMUX_DIR\$Session.port" -Raw).Trim()
-        $key  = (Get-Content "$PSMUX_DIR\$Session.key" -Raw).Trim()
+        $portFile = "$PSMUX_DIR\$Session.port"
+        $keyFile  = "$PSMUX_DIR\$Session.key"
+        if (-not (Test-Path $portFile)) { return @{ ok=$false; err="NO_PORT_FILE" } }
+        if (-not (Test-Path $keyFile))  { return @{ ok=$false; err="NO_KEY_FILE" } }
+        $rawPort = Get-Content $portFile -Raw
+        $rawKey  = Get-Content $keyFile -Raw
+        if (-not $rawPort) { return @{ ok=$false; err="EMPTY_PORT_FILE" } }
+        if (-not $rawKey)  { return @{ ok=$false; err="EMPTY_KEY_FILE" } }
+        $port = $rawPort.Trim()
+        $key  = $rawKey.Trim()
         $tcp = New-Object System.Net.Sockets.TcpClient
         $tcp.NoDelay = $true
         $tcp.Connect("127.0.0.1", [int]$port)

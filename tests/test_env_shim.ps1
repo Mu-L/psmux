@@ -58,7 +58,7 @@ function Start-TestSession {
     }
 
     $proc = Start-Process -FilePath $PSMUX -ArgumentList $args_ -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 3000
+    Start-Sleep -Milliseconds 1000
 
     & $PSMUX has-session -t $Name 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -154,12 +154,12 @@ try {
 
     # Create a new pane (split) — it should inherit the env var
     & $PSMUX split-window -t $SESSION -h 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 2000
+    Start-Sleep -Milliseconds 1000
 
     # Send a command to echo the env var via the new pane
     $marker = "ENVCHECK_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "Write-Host '${marker}:' `$env:PSMUX_INHERIT_TEST" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Start-Sleep -Milliseconds 1000
 
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:\s*inherited_ok") {
@@ -186,7 +186,7 @@ set-environment -g PSMUX_CFG_INHERIT from_config
 
     $marker = "CFGINH_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "Write-Host '${marker}:' `$env:PSMUX_CFG_INHERIT" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Start-Sleep -Milliseconds 1000
 
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:\s*from_config") {
@@ -216,7 +216,7 @@ try {
     Start-Sleep -Milliseconds 1000
     $marker = "ENVDEF_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "if(Get-Command env -EA 0){Write-Host '${marker}:defined'}else{Write-Host '${marker}:missing'}" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:defined") {
         Write-Pass "env shim function is defined in pane"
@@ -238,7 +238,7 @@ try {
     Start-Sleep -Milliseconds 1000
     $marker = "ENVSET_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "env MY_TEST_VAR=hello_from_env; Write-Host '${marker}:' `$env:MY_TEST_VAR" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:\s*hello_from_env") {
         Write-Pass "env VAR=val correctly set the variable in process"
@@ -260,7 +260,7 @@ try {
     Start-Sleep -Milliseconds 1000
     $marker = "ENVCMD_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "env TESTVAR=abc123 pwsh -NoProfile -c 'Write-Host ${marker}:`$env:TESTVAR'" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 3000
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:abc123") {
         Write-Pass "env VAR=val command correctly passed env to child process"
@@ -282,7 +282,7 @@ try {
     Start-Sleep -Milliseconds 1000
     $marker = "ENVMULTI_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "env AA=one BB=two CC=three pwsh -NoProfile -c 'Write-Host ${marker}:AA=`$env:AA+BB=`$env:BB+CC=`$env:CC'" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 3000
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:AA=one\+BB=two\+CC=three") {
         Write-Pass "Multiple VAR=val pairs correctly passed to child"
@@ -305,7 +305,7 @@ try {
     $marker = "ENVESC_$(Get-Random)"
     # Claude Code sends URLs like: ANTHROPIC_BASE_URL=https\://api.example.com
     & $PSMUX send-keys -t $SESSION "env MY_URL='https\://api.example.com/v1' pwsh -NoProfile -c 'Write-Host ${marker}:`$env:MY_URL'" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 3000
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:https://api\.example\.com/v1") {
         Write-Pass "Backslash-escaped URL correctly unescaped"
@@ -327,7 +327,7 @@ try {
     Start-Sleep -Milliseconds 1000
     $marker = "ENVBARE_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "Write-Host '${marker}:start'; env | Select-Object -First 3; Write-Host '${marker}:end'" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 2000
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:start" -and $captured -match "${marker}:end" -and $captured -match "=") {
         Write-Pass "bare env listed environment variables"
@@ -350,7 +350,7 @@ try {
     $marker = "CLAUDE_$(Get-Random)"
     # Simulate the exact pattern Claude Code uses to spawn agents
     & $PSMUX send-keys -t $SESSION "env CLAUDECODE=1 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 ANTHROPIC_BASE_URL='https\://api.minimax.io/anthropic' pwsh -NoProfile -c 'Write-Host ${marker}:CC=`$env:CLAUDECODE+TEAMS=`$env:CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS+URL=`$env:ANTHROPIC_BASE_URL'" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 3000
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:CC=1\+TEAMS=1\+URL=https://api\.minimax\.io/anthropic") {
         Write-Pass "Full Claude Code agent spawn pattern works"
@@ -382,7 +382,7 @@ try {
     Start-Sleep -Milliseconds 1000
     $marker = "SHIMON_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "if(Get-Command env -EA 0){Write-Host '${marker}:yes'}else{Write-Host '${marker}:no'}" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:yes") {
         Write-Pass "env-shim on (default): env function available"
@@ -407,7 +407,7 @@ set -g env-shim off
     Start-Sleep -Milliseconds 1000
     $marker = "SHIMOFF_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "if(Get-Command env -EA 0 -Type Function){Write-Host '${marker}:func_exists'}else{Write-Host '${marker}:no_func'}" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:no_func") {
         Write-Pass "env-shim off: no env function defined"
@@ -432,7 +432,7 @@ set -g env-shim on
     Start-Sleep -Milliseconds 1000
     $marker = "SHIMEXP_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "if(Get-Command env -EA 0){Write-Host '${marker}:yes'}else{Write-Host '${marker}:no'}" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:yes") {
         Write-Pass "env-shim on explicit: env function available"
@@ -459,7 +459,7 @@ set-environment -g COMBINED_TEST it_works
     $marker = "COMBO_$(Get-Random)"
     # Use env shim to set an additional var, then check both
     & $PSMUX send-keys -t $SESSION "env EXTRA_VAR=bonus pwsh -NoProfile -c 'Write-Host ${marker}:COMBINED=`$env:COMBINED_TEST+EXTRA=`$env:EXTRA_VAR'" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 3000
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:COMBINED=it_works\+EXTRA=bonus") {
         Write-Pass "env-shim + set-environment work together perfectly"
@@ -490,7 +490,7 @@ try {
     Start-Sleep -Milliseconds 1000
     $marker = "ENVSP_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "env SPACE_VAR='hello world' pwsh -NoProfile -c 'Write-Host ${marker}:`$env:SPACE_VAR'" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 3000
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:hello world") {
         Write-Pass "env handles values with spaces"
@@ -510,10 +510,10 @@ Write-Test "4.2 env shim available after split-window"
 try {
     $proc = Start-TestSession
     & $PSMUX split-window -t $SESSION -h 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 2000
+    Start-Sleep -Milliseconds 1000
     $marker = "ENVSPLIT_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "if(Get-Command env -EA 0){Write-Host '${marker}:defined'}else{Write-Host '${marker}:missing'}" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:defined") {
         Write-Pass "env shim exists in split pane"
@@ -533,10 +533,10 @@ Write-Test "4.3 env shim available in new-window"
 try {
     $proc = Start-TestSession
     & $PSMUX new-window -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 2000
+    Start-Sleep -Milliseconds 1000
     $marker = "ENVNW_$(Get-Random)"
     & $PSMUX send-keys -t $SESSION "if(Get-Command env -EA 0){Write-Host '${marker}:defined'}else{Write-Host '${marker}:missing'}" Enter 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 1500
+    Start-Sleep -Milliseconds 1000
     $captured = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($captured -match "${marker}:defined") {
         Write-Pass "env shim exists in new window"

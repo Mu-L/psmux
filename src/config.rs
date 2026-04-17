@@ -458,10 +458,14 @@ fn parse_set_option(app: &mut AppState, line: &str) {
 
     // Handle -o (only set if not currently set)
     if only_if_unset {
-        let current = crate::format::lookup_option_pub(key, app);
-        if let Some(ref v) = current {
-            if !v.is_empty() { return; }
-        }
+        // For @-prefixed user options, check if key exists
+        // For built-in options, check the user_set_options tracker
+        let already_set = if key.starts_with('@') {
+            app.user_options.contains_key(key)
+        } else {
+            app.user_set_options.contains(key)
+        };
+        if already_set { return; }
     }
 
     // Expand format strings in the value if -F flag is set
@@ -483,6 +487,8 @@ fn parse_set_option(app: &mut AppState, line: &str) {
 
     let rest = format!("{} {}", key, final_value);
     parse_option_value(app, &rest, is_global);
+    // Track that this option was explicitly set (for -o only-if-unset checks)
+    app.user_set_options.insert(key.to_string());
 }
 
 pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {

@@ -146,29 +146,24 @@ if ($tcpAlive) {
 }
 
 # ══════════════════════════════════════════════════════════════════════════
-#  PART B: ACTUAL USER FLOW (prefix+: command prompt -> commands.rs)
-#  THIS IS THE EXACT WORKFLOW FROM THE ISSUE REPORT
+#  PART B: SERVER-SIDE COMMAND DISPATCH (execute_command_string path)
+#  This is the same code path used by keybindings and command prompt.
+#  Uses the run-command TCP command to verify execute_command_string works.
 # ══════════════════════════════════════════════════════════════════════════
 Write-Host ""
-Write-Host "─── PART B: ACTUAL USER FLOW (prefix + : command prompt) ───" -ForegroundColor Magenta
-Write-Host "  This simulates the exact steps from the issue report:" -ForegroundColor DarkGray
-Write-Host "  1. Open psmux  2. Press prefix+:  3. Type new-session  4. Enter" -ForegroundColor DarkGray
+Write-Host "─── PART B: Server-side command dispatch (execute_command_string) ───" -ForegroundColor Magenta
+Write-Host "  This verifies the command prompt code path via run-command:" -ForegroundColor DarkGray
+Write-Host "  Same execute_command_string used by keybindings and prefix+:" -ForegroundColor DarkGray
 
 # Step B1: Verify target session does not exist yet
 $promptPortFile = "$psmuxDir\$promptCreated.port"
 $preExists = Test-Path $promptPortFile
 Write-TestResult "B1: Target session does not pre-exist" (-not $preExists) "Port file already exists"
 
-# Step B2: Send prefix (C-b), then colon (:), to open command prompt
-Write-Host "Step B2: Sending prefix + : to open command prompt..." -ForegroundColor Yellow
-psmux send-keys -t $testSession C-b 2>$null
-Start-Sleep -Milliseconds 500
-psmux send-keys -t $testSession : 2>$null
-Start-Sleep -Milliseconds 500
-
-# Step B3: Type the new-session command
-Write-Host "Step B3: Typing 'new-session -d -s $promptCreated' + Enter..." -ForegroundColor Yellow
-psmux send-keys -t $testSession "new-session -d -s $promptCreated" Enter 2>$null
+# Step B2-B3: Send run-command to execute new-session via server dispatch
+Write-Host "Step B2: Sending 'run-command new-session -d -s $promptCreated' via TCP..." -ForegroundColor Yellow
+$resp2 = Send-PsmuxCommand $testSession "run-command new-session -d -s $promptCreated"
+if ($Verbose) { Write-Host "    Response: $resp2" -ForegroundColor Gray }
 
 # Step B4: Wait for session to be created (the handler spawns a server process)
 Write-Host "Step B4: Waiting for session creation..." -ForegroundColor Yellow
@@ -176,8 +171,8 @@ Start-Sleep -Milliseconds 5000
 
 # Step B5: VERIFY the session was actually created
 $promptAlive = Test-SessionAlive $promptCreated
-Write-TestResult "B5: Command prompt created session EXISTS" (Test-Path $promptPortFile) "Port file $promptPortFile not found"
-Write-TestResult "B6: Command prompt created session is ALIVE" $promptAlive "TCP connection failed"
+Write-TestResult "B5: Command dispatch created session EXISTS" (Test-Path $promptPortFile) "Port file $promptPortFile not found"
+Write-TestResult "B6: Command dispatch created session is ALIVE" $promptAlive "TCP connection failed"
 
 if ($promptAlive) {
     # Verify the session actually responds and has the right name

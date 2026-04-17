@@ -244,8 +244,10 @@ else { Write-Fail "#94 split-window -p 25 did NOT split" }
 
 # --- Issue #111: split-window -c working dir ---
 Write-Test "#111: split-window -c $env:TEMP via CLI"
-$pb = $pa
-& $PSMUX split-window -v -c $env:TEMP -t $SESSION 2>&1 | Out-Null
+# Select pane 0 (largest) to ensure enough room for the split
+& $PSMUX select-pane -t "${SESSION}.0" 2>&1 | Out-Null
+$pb = (& $PSMUX display-message -t $SESSION -p '#{window_panes}' 2>&1 | Out-String).Trim()
+& $PSMUX split-window -h -c $env:TEMP -t $SESSION 2>&1 | Out-Null
 Start-Sleep -Seconds 2
 $pa = (& $PSMUX display-message -t $SESSION -p '#{window_panes}' 2>&1 | Out-String).Trim()
 if ([int]$pa -gt [int]$pb) { Write-Pass "#111 split-window -c ($pb -> $pa panes)" }

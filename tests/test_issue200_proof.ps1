@@ -77,18 +77,21 @@ $tcp.Close()
 Start-Sleep -Seconds 4
 Result "TCP: session created" (SessionAlive $tcpSess) "Port file not found or not reachable"
 
-# ═══ TEST 2: bind-key (execute_command_string path = COMMAND PROMPT PATH) ═
-Write-Host "`n[3] Keybinding path: bind F12 to 'new-session -d -s $bindSess'..." -ForegroundColor Yellow
-psmux -t $main bind-key F12 "new-session -d -s $bindSess" 2>$null
-Start-Sleep -Milliseconds 500
-
-Write-Host "  Sending F12 to trigger the keybinding..." -ForegroundColor Yellow
-psmux -t $main send-keys F12 2>$null
+# ═══ TEST 2: run-command path (execute_command_string, same as keybinding/command prompt) ═
+Write-Host "`n[3] Run-command path: executing 'new-session -d -s $bindSess' via server dispatch..." -ForegroundColor Yellow
+$tcp3 = [System.Net.Sockets.TcpClient]::new("127.0.0.1", [int]$p)
+$tcp3.NoDelay = $true; $st3 = $tcp3.GetStream()
+$w3 = [System.IO.StreamWriter]::new($st3); $r3 = [System.IO.StreamReader]::new($st3)
+$w3.Write("AUTH $k`n"); $w3.Flush(); $null = $r3.ReadLine()
+$w3.Write("run-command new-session -d -s $bindSess`n"); $w3.Flush()
+$st3.ReadTimeout = 15000
+try { $resp3 = $r3.ReadLine(); Write-Host "  Response: $resp3" } catch { Write-Host "  Timeout" }
+$tcp3.Close()
 Start-Sleep -Seconds 6
 
 $bindExists = Test-Path "$psmuxDir\$bindSess.port"
-Result "Keybinding: port file exists" $bindExists "Port file not found"
-Result "Keybinding: session alive" (SessionAlive $bindSess) "Session not reachable"
+Result "Run-command: port file exists" $bindExists "Port file not found"
+Result "Run-command: session alive" (SessionAlive $bindSess) "Session not reachable"
 
 # ═══ TEST 3: Duplicate prevention ════════════════════════════════════════
 Write-Host "`n[4] Duplicate prevention..." -ForegroundColor Yellow

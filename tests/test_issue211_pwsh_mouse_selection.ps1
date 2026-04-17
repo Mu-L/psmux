@@ -127,13 +127,13 @@ Remove-Item $tmpConf -Force -ErrorAction SilentlyContinue
 # 5. JSON DUMP SERIALIZATION
 # ============================================================
 Write-Test "pwsh_mouse_selection appears in dump JSON"
-# Read port and key for TCP dump
-$portFile = Get-ChildItem "$env:USERPROFILE\.psmux\*.port" | Select-Object -First 1
-$keyFile = Get-ChildItem "$env:USERPROFILE\.psmux\*.key" | Select-Object -First 1
+# Read port and key for TCP dump using the specific session
+$portFile = "$env:USERPROFILE\.psmux\$SESSION.port"
+$keyFile  = "$env:USERPROFILE\.psmux\$SESSION.key"
 $dumpFound = $false
-if ($portFile -and $keyFile) {
-    $port = [int](Get-Content $portFile.FullName -Raw).Trim()
-    $key = (Get-Content $keyFile.FullName -Raw).Trim()
+if ((Test-Path $portFile) -and (Test-Path $keyFile)) {
+    $port = [int](Get-Content $portFile -Raw).Trim()
+    $key = (Get-Content $keyFile -Raw).Trim()
 
     try {
         $tcp = New-Object System.Net.Sockets.TcpClient("127.0.0.1", $port)
@@ -148,16 +148,19 @@ if ($portFile -and $keyFile) {
 
         if ($authResp -match "OK") {
             $writer.WriteLine("dump")
-            # Use reader.Peek() instead of stream.DataAvailable to avoid StreamReader buffering issues
-            $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
+            $stream.ReadTimeout = 5000
             $dumpData = ""
-            while ($sw2.ElapsedMilliseconds -lt 3000) {
-                if ($reader.Peek() -ge 0) {
-                    $dumpData += $reader.ReadLine()
-                } else {
-                    Start-Sleep -Milliseconds 50
+            # Read multiple lines (dump response may be preceded by frame data)
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                try {
+                    $line = $reader.ReadLine()
+                    if ($line -match 'pwsh_mouse_selection') {
+                        $dumpData = $line
+                        break
+                    }
+                } catch {
+                    break
                 }
-                if ($dumpData -match '\{' -and $dumpData -match '\}') { break }
             }
 
             if ($dumpData -match '"pwsh_mouse_selection"\s*:\s*true') {
