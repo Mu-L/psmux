@@ -1282,24 +1282,93 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 // Local: write key text directly to active pane
                 let literal = parts.iter().any(|p| *p == "-l");
                 let key_parts: Vec<&str> = parts[1..].iter().filter(|p| !p.starts_with('-')).copied().collect();
-                let text = key_parts.join(" ");
-                if !text.is_empty() {
-                    if let Some(win) = app.windows.get_mut(app.active_idx) {
-                        if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
-                            if literal {
+                if !key_parts.is_empty() {
+                    if literal {
+                        let text = key_parts.join(" ");
+                        if let Some(win) = app.windows.get_mut(app.active_idx) {
+                            if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
                                 let _ = p.writer.write_all(text.as_bytes());
                                 let _ = p.writer.flush();
-                            } else {
-                                let expanded = match text.to_uppercase().as_str() {
-                                    "ENTER" => "\r".to_string(),
-                                    "SPACE" => " ".to_string(),
-                                    "ESCAPE" | "ESC" => "\x1b".to_string(),
-                                    "TAB" => "\t".to_string(),
-                                    "BSPACE" | "BACKSPACE" => "\x7f".to_string(),
-                                    _ => text,
-                                };
-                                let _ = p.writer.write_all(expanded.as_bytes());
-                                let _ = p.writer.flush();
+                            }
+                        }
+                    } else {
+                        for key in &key_parts {
+                            let key_upper = key.to_uppercase();
+                            let expanded = match key_upper.as_str() {
+                                "ENTER" => "\r".to_string(),
+                                "TAB" => "\t".to_string(),
+                                "BTAB" | "BACKTAB" => "\x1b[Z".to_string(),
+                                "ESCAPE" | "ESC" => "\x1b".to_string(),
+                                "SPACE" => " ".to_string(),
+                                "BSPACE" | "BACKSPACE" => "\x7f".to_string(),
+                                "UP" => "\x1b[A".to_string(),
+                                "DOWN" => "\x1b[B".to_string(),
+                                "RIGHT" => "\x1b[C".to_string(),
+                                "LEFT" => "\x1b[D".to_string(),
+                                "HOME" => "\x1b[H".to_string(),
+                                "END" => "\x1b[F".to_string(),
+                                "PAGEUP" | "PPAGE" => "\x1b[5~".to_string(),
+                                "PAGEDOWN" | "NPAGE" => "\x1b[6~".to_string(),
+                                "DELETE" | "DC" => "\x1b[3~".to_string(),
+                                "INSERT" | "IC" => "\x1b[2~".to_string(),
+                                "F1" => "\x1bOP".to_string(),
+                                "F2" => "\x1bOQ".to_string(),
+                                "F3" => "\x1bOR".to_string(),
+                                "F4" => "\x1bOS".to_string(),
+                                "F5" => "\x1b[15~".to_string(),
+                                "F6" => "\x1b[17~".to_string(),
+                                "F7" => "\x1b[18~".to_string(),
+                                "F8" => "\x1b[19~".to_string(),
+                                "F9" => "\x1b[20~".to_string(),
+                                "F10" => "\x1b[21~".to_string(),
+                                "F11" => "\x1b[23~".to_string(),
+                                "F12" => "\x1b[24~".to_string(),
+                                s if crate::input::parse_modified_special_key(s).is_some() => {
+                                    crate::input::parse_modified_special_key(s).unwrap()
+                                }
+                                s if s.starts_with("C-M-") || s.starts_with("C-m-") => {
+                                    if let Some(c) = key.chars().nth(4) {
+                                        let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
+                                        format!("\x1b{}", ctrl as char)
+                                    } else {
+                                        key.to_string()
+                                    }
+                                }
+                                s if s.starts_with("C-") => {
+                                    if let Some(c) = s.chars().nth(2) {
+                                        let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
+                                        #[cfg(windows)]
+                                        if ctrl == 0x03 {
+                                            if let Some(win) = app.windows.get_mut(app.active_idx) {
+                                                if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                                                    if p.child_pid.is_none() {
+                                                        p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
+                                                    }
+                                                    if let Some(pid) = p.child_pid {
+                                                        crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        String::from(ctrl as char)
+                                    } else {
+                                        key.to_string()
+                                    }
+                                }
+                                s if s.starts_with("M-") => {
+                                    if let Some(c) = key.chars().nth(2) {
+                                        format!("\x1b{}", c)
+                                    } else {
+                                        key.to_string()
+                                    }
+                                }
+                                _ => key.to_string(),
+                            };
+                            if let Some(win) = app.windows.get_mut(app.active_idx) {
+                                if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                                    let _ = p.writer.write_all(expanded.as_bytes());
+                                    let _ = p.writer.flush();
+                                }
                             }
                         }
                     }
