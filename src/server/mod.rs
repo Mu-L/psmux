@@ -1186,12 +1186,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if let Some(cmds) = app.hooks.get(*event) { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     }
 
+                    // ── Propagate OSC 0/2 titles to pane.title ──
+                    if helpers::propagate_osc_titles(&mut app) {
+                        state_dirty = true;
+                    }
+
                     // ── Automatic rename / allow-rename: resolve window names ──
                     {
                         let in_copy = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
                         let auto_rename = app.automatic_rename;
                         let allow_rename = app.allow_rename;
-                        let allow_set_title = app.allow_set_title;
                         if (auto_rename || allow_rename) && !in_copy {
                             for win in app.windows.iter_mut() {
                                 if win.manual_rename { continue; }
@@ -1201,22 +1205,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     p.last_title_check = std::time::Instant::now();
                                     if p.child_pid.is_none() {
                                         p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
-                                    }
-                                    // ── Propagate OSC 0/2 title to pane.title ──
-                                    // tmux updates pane_title whenever the child sends
-                                    // an OSC 0 or OSC 2 escape sequence.
-                                    if allow_set_title && !p.title_locked {
-                                        if let Ok(parser) = p.term.lock() {
-                                            let osc = parser.screen().title();
-                                            if !osc.is_empty() {
-                                                let osc_owned = osc.to_string();
-                                                drop(parser);
-                                                if p.title != osc_owned {
-                                                    p.title = osc_owned;
-                                                    state_dirty = true;
-                                                }
-                                            }
-                                        }
                                     }
                                     let new_name = if auto_rename {
                                         // automatic-rename: use foreground process name
@@ -1496,9 +1484,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(cmds) = app.hooks.get("before-rename-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let win = &mut app.windows[app.active_idx]; win.name = name; win.manual_rename = true; meta_dirty = true; hook_event = Some("after-rename-window");
                 }
-                CtrlReq::ListWindows(resp) => { let json = list_windows_json(&app)?; let _ = resp.send(json); }
-                CtrlReq::ListWindowsTmux(resp) => { let text = list_windows_tmux(&app); let _ = resp.send(text); }
-                CtrlReq::ListWindowsFormat(resp, fmt) => { let text = format_list_windows(&app, &fmt); let _ = resp.send(text); }
+                CtrlReq::ListWindows(resp) => { helpers::propagate_osc_titles(&mut app); let json = list_windows_json(&app)?; let _ = resp.send(json); }
+                CtrlReq::ListWindowsTmux(resp) => { helpers::propagate_osc_titles(&mut app); let text = list_windows_tmux(&app); let _ = resp.send(text); }
+                CtrlReq::ListWindowsFormat(resp, fmt) => { helpers::propagate_osc_titles(&mut app); let text = format_list_windows(&app, &fmt); let _ = resp.send(text); }
                 CtrlReq::ListTree(resp) => { let json = list_tree_json(&app)?; let _ = resp.send(json); }
                 CtrlReq::ToggleSync => { app.sync_input = !app.sync_input; }
                 CtrlReq::SetPaneTitle(title) => {
@@ -2038,6 +2026,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("after-select-window");
                 }
                 CtrlReq::ListPanes(resp) => {
+                    helpers::propagate_osc_titles(&mut app);
                     let mut output = String::new();
                     let win = &app.windows[app.active_idx];
                     fn collect_panes(node: &Node, panes: &mut Vec<(usize, u16, u16, vt100::MouseProtocolMode, vt100::MouseProtocolEncoding, bool)>) {
@@ -2071,6 +2060,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(output);
                 }
                 CtrlReq::ListPanesFormat(resp, fmt) => {
+                    helpers::propagate_osc_titles(&mut app);
                     let text = format_list_panes(&app, &fmt, app.active_idx);
                     let _ = resp.send(text);
                 }
@@ -2304,6 +2294,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if !app.paste_buffers.is_empty() { app.paste_buffers.remove(0); }
                 }
                 CtrlReq::DisplayMessage(resp, fmt, target_pane_idx, set_status_bar, duration_ms) => {
+                    // Propagate OSC titles so #{pane_title} reflects latest state
+                    helpers::propagate_osc_titles(&mut app);
                     let result = if let Some(pane_idx) = target_pane_idx {
                         // -t targeting: evaluate format for the specific pane
                         // using PANE_POS_OVERRIDE so #{pane_active} reflects

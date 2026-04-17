@@ -222,6 +222,45 @@ pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
     triggered_hooks
 }
 
+/// Propagate OSC 0/2 titles from the vt100 parser to pane.title for all windows.
+/// tmux updates pane_title immediately when the child sends an OSC 0 or OSC 2
+/// escape sequence, gated by the allow-set-title option. In psmux, the vt100
+/// parser stores the title but we must explicitly copy it to pane.title.
+/// Returns true if any pane title changed (i.e. state is dirty).
+pub(crate) fn propagate_osc_titles(app: &mut AppState) -> bool {
+    let allow_set_title = app.allow_set_title;
+    if !allow_set_title { return false; }
+    let mut dirty = false;
+    for win in app.windows.iter_mut() {
+        propagate_osc_titles_in_tree(&mut win.root, &mut dirty);
+    }
+    dirty
+}
+
+fn propagate_osc_titles_in_tree(node: &mut Node, dirty: &mut bool) {
+    match node {
+        Node::Leaf(p) => {
+            if p.dead || p.title_locked { return; }
+            if let Ok(parser) = p.term.lock() {
+                let osc = parser.screen().title();
+                if !osc.is_empty() {
+                    let osc_owned = osc.to_string();
+                    drop(parser);
+                    if p.title != osc_owned {
+                        p.title = osc_owned;
+                        *dirty = true;
+                    }
+                }
+            }
+        }
+        Node::Split { children, .. } => {
+            for c in children {
+                propagate_osc_titles_in_tree(c, dirty);
+            }
+        }
+    }
+}
+
 /// Walk a pane tree and check/consume bell_pending flags.
 /// Returns true if any pane had a pending bell.
 fn check_pane_bells(node: &Node) -> bool {
