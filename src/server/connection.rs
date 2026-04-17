@@ -1163,6 +1163,102 @@ match cmd {
         let kill = args.iter().any(|a| *a == "-k");
         let _ = tx.send(CtrlReq::RespawnPane(workdir, kill));
     }
+    // ── Cross-session pane forwarding commands ──────────────────────
+    "pane-forward-extract" => {
+        // Usage: pane-forward-extract <win>.<pane>
+        let spec = args.first().copied().unwrap_or("0.0");
+        let pt = parse_target(spec);
+        let win = pt.window.unwrap_or(0);
+        let pane = pt.pane.unwrap_or(0);
+        let (rtx, rrx) = mpsc::channel::<String>();
+        let _ = tx.send(CtrlReq::PaneForwardExtract(win, pane, rtx));
+        if let Ok(resp) = rrx.recv_timeout(std::time::Duration::from_millis(5000)) {
+            let _ = write!(write_stream, "{}\n", resp);
+            let _ = write_stream.flush();
+        } else {
+            let _ = write!(write_stream, "ERR timeout\n");
+            let _ = write_stream.flush();
+        }
+        if !persistent { break; }
+    }
+    "pane-forward-inject" => {
+        // Usage: pane-forward-inject <src_session> <src_addr> <src_key> <fwd_id> <fwd_port>
+        //        <pid> <title> <rows> <cols> <screen_b64_len> [-h] [-t win.pane]
+        // Followed by optional screen base64 data on next line.
+        if args.len() >= 10 {
+            let source_session = args[0].to_string();
+            let source_addr = args[1].to_string();
+            let source_key = args[2].to_string();
+            let forward_id: u64 = args[3].parse().unwrap_or(0);
+            let fwd_port: u16 = args[4].parse().unwrap_or(0);
+            let pid: u32 = args[5].parse().unwrap_or(0);
+            let title = args[6].replace('\x01', " ");
+            let rows: u16 = args[7].parse().unwrap_or(24);
+            let cols: u16 = args[8].parse().unwrap_or(80);
+            let screen_b64_len: usize = args[9].parse().unwrap_or(0);
+            let horizontal = args.iter().any(|a| *a == "-h");
+            // Read screen base64 data from remaining args/payload
+            let screen_b64 = if screen_b64_len > 0 {
+                // The base64 data may be appended after the args as a separate read
+                let payload: String = args[10..].iter()
+                    .filter(|a| **a != "-h" && !a.starts_with("-t"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if payload.len() >= screen_b64_len {
+                    payload[..screen_b64_len].to_string()
+                } else {
+                    payload
+                }
+            } else {
+                String::new()
+            };
+            let _ = tx.send(CtrlReq::PaneForwardInject {
+                source_session, source_addr, source_key,
+                forward_id, fwd_port, pid, title, rows, cols, screen_b64,
+                target_win: target_win, target_pane: target_pane, horizontal,
+            });
+            let _ = write!(write_stream, "OK\n");
+            let _ = write_stream.flush();
+        } else {
+            let _ = write!(write_stream, "ERR not enough args\n");
+            let _ = write_stream.flush();
+        }
+        if !persistent { break; }
+    }
+    "pane-forward-resize" => {
+        // Usage: pane-forward-resize <forward_id> <rows> <cols>
+        if args.len() >= 3 {
+            let fwd_id: u64 = args[0].parse().unwrap_or(0);
+            let rows: u16 = args[1].parse().unwrap_or(24);
+            let cols: u16 = args[2].parse().unwrap_or(80);
+            let _ = tx.send(CtrlReq::PaneForwardResize(fwd_id, rows, cols));
+            let _ = write!(write_stream, "OK\n");
+        }
+        let _ = write_stream.flush();
+        if !persistent { break; }
+    }
+    "pane-forward-status" => {
+        // Usage: pane-forward-status <forward_id>
+        let fwd_id: u64 = args.first().and_then(|a| a.parse().ok()).unwrap_or(0);
+        let (rtx, rrx) = mpsc::channel::<String>();
+        let _ = tx.send(CtrlReq::PaneForwardStatus(fwd_id, rtx));
+        if let Ok(resp) = rrx.recv_timeout(std::time::Duration::from_millis(2000)) {
+            let _ = write!(write_stream, "{}\n", resp);
+        } else {
+            let _ = write!(write_stream, "exited\n");
+        }
+        let _ = write_stream.flush();
+        if !persistent { break; }
+    }
+    "pane-forward-kill" => {
+        // Usage: pane-forward-kill <forward_id>
+        let fwd_id: u64 = args.first().and_then(|a| a.parse().ok()).unwrap_or(0);
+        let _ = tx.send(CtrlReq::PaneForwardKill(fwd_id));
+        let _ = write!(write_stream, "OK\n");
+        let _ = write_stream.flush();
+        if !persistent { break; }
+    }
     "session-info" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::SessionInfo(rtx));

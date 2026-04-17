@@ -161,6 +161,20 @@ pub struct WarmPane {
     pub output_ring: Arc<Mutex<VecDeque<u8>>>,
 }
 
+/// A pane extracted from this session for cross-session forwarding.
+/// The real ConPTY stays alive here; I/O is tunneled over TCP to the target.
+pub struct ForwardedPane {
+    pub master: Box<dyn MasterPty>,
+    pub child: Box<dyn portable_pty::Child>,
+    pub listener_port: u16,
+    pub pid: Option<u32>,
+    pub title: String,
+    pub rows: u16,
+    pub cols: u16,
+    /// Handle to the forwarding threads (so we can abort on kill).
+    pub shutdown: Arc<std::sync::atomic::AtomicBool>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LayoutKind { Horizontal, Vertical }
 
@@ -616,6 +630,11 @@ pub struct AppState {
     pub session_group: Option<String>,
     /// When true, hardcoded default keybindings are suppressed (set by unbind-key -a).
     pub defaults_suppressed: bool,
+    /// Panes extracted for cross-session forwarding, keyed by forward_id.
+    /// The source server keeps these alive so the real ConPTY continues running.
+    pub forwarded_panes: HashMap<u64, ForwardedPane>,
+    /// Counter for generating unique forward IDs.
+    pub next_forward_id: u64,
 }
 
 impl AppState {
@@ -779,6 +798,8 @@ impl AppState {
             control_clients: HashMap::new(),
             session_group: None,
             defaults_suppressed: false,
+            forwarded_panes: HashMap::new(),
+            next_forward_id: 1,
         }
     }
 
@@ -979,6 +1000,34 @@ pub enum CtrlReq {
         target_pane: Option<usize>,
         horizontal: bool,
     },
+    /// Extract a pane and start I/O forwarding for cross-session transfer.
+    /// Fields: window index, pane index, response channel.
+    /// Response: "FORWARD <id> <port> <pid> <title> <rows> <cols> <screen_b64_len>\n<screen_b64>"
+    PaneForwardExtract(usize, usize, mpsc::Sender<String>),
+    /// Inject a proxy pane from a cross-session transfer.
+    /// Fields: source_session, source_addr, source_key, forward_id, fwd_port,
+    ///         pid, title, rows, cols, screen_b64, target_window, target_pane, horizontal
+    PaneForwardInject {
+        source_session: String,
+        source_addr: String,
+        source_key: String,
+        forward_id: u64,
+        fwd_port: u16,
+        pid: u32,
+        title: String,
+        rows: u16,
+        cols: u16,
+        screen_b64: String,
+        target_win: Option<usize>,
+        target_pane: Option<usize>,
+        horizontal: bool,
+    },
+    /// Resize a forwarded pane's real PTY. Fields: forward_id, rows, cols.
+    PaneForwardResize(u64, u16, u16),
+    /// Query child status of a forwarded pane. Fields: forward_id, response channel.
+    PaneForwardStatus(u64, mpsc::Sender<String>),
+    /// Kill a forwarded pane's child process. Fields: forward_id.
+    PaneForwardKill(u64),
     PipePane(String, bool, bool, bool),
     SelectLayout(String),
     NextLayout,

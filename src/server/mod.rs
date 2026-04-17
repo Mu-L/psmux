@@ -780,6 +780,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         CtrlReq::KillPaneById(_) => "KillPaneById",
                         CtrlReq::BreakPane => "BreakPane",
                         CtrlReq::JoinPane { .. } => "JoinPane",
+                        CtrlReq::MovePane { .. } => "MovePane",
+                        CtrlReq::PaneForwardExtract(..) => "PaneForwardExtract",
+                        CtrlReq::PaneForwardInject { .. } => "PaneForwardInject",
+                        CtrlReq::PaneForwardResize(..) => "PaneForwardResize",
+                        CtrlReq::PaneForwardStatus(..) => "PaneForwardStatus",
+                        CtrlReq::PaneForwardKill(..) => "PaneForwardKill",
                         CtrlReq::MoveWindow(..) => "MoveWindow",
                         CtrlReq::SwapWindow(_) => "SwapWindow",
                         _ => "",
@@ -2447,6 +2453,51 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 app.windows[src_idx].root = rem;
                             }
                         }
+                    }
+                }
+                // ── Cross-session pane forwarding ───────────────────────
+                CtrlReq::PaneForwardExtract(win_idx, pane_idx, resp) => {
+                    crate::cross_session_server::handle_pane_forward_extract(&mut app, win_idx, pane_idx, resp);
+                    resize_all_panes(&mut app);
+                    meta_dirty = true;
+                }
+                CtrlReq::PaneForwardInject {
+                    source_session, source_addr, source_key,
+                    forward_id, fwd_port, pid, title, rows, cols,
+                    screen_b64, target_win, target_pane, horizontal,
+                } => {
+                    crate::cross_session_server::handle_pane_forward_inject(
+                        &mut app, source_session, source_addr, source_key,
+                        forward_id, fwd_port, pid, title, rows, cols,
+                        screen_b64, target_win, target_pane, horizontal,
+                    );
+                    resize_all_panes(&mut app);
+                    meta_dirty = true;
+                    hook_event = Some("after-join-pane");
+                }
+                CtrlReq::PaneForwardResize(fwd_id, fwd_rows, fwd_cols) => {
+                    if let Some(fp) = app.forwarded_panes.get(&fwd_id) {
+                        let _ = fp.master.resize(portable_pty::PtySize {
+                            rows: fwd_rows, cols: fwd_cols, pixel_width: 0, pixel_height: 0,
+                        });
+                    }
+                }
+                CtrlReq::PaneForwardStatus(fwd_id, resp) => {
+                    let status = if let Some(fp) = app.forwarded_panes.get_mut(&fwd_id) {
+                        match fp.child.try_wait() {
+                            Ok(Some(_)) => "exited".to_string(),
+                            Ok(None) => "running".to_string(),
+                            Err(_) => "exited".to_string(),
+                        }
+                    } else {
+                        "exited".to_string()
+                    };
+                    let _ = resp.send(status);
+                }
+                CtrlReq::PaneForwardKill(fwd_id) => {
+                    if let Some(mut fp) = app.forwarded_panes.remove(&fwd_id) {
+                        fp.shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let _ = fp.child.kill();
                     }
                 }
                 CtrlReq::RespawnPane(workdir, kill) => {

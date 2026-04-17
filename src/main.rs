@@ -25,6 +25,9 @@ mod client;
 mod ssh_input;
 mod debug_log;
 mod control;
+mod proxy_pane;
+mod cross_session;
+mod cross_session_server;
 
 use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
 use std::time::Duration;
@@ -1736,24 +1739,22 @@ fn run_main() -> io::Result<()> {
                 send_control(cmd)?;
                 return Ok(());
             }
-            // join-pane - Join a pane to another window
-            "join-pane" | "joinp" => {
-                let mut cmd = "join-pane".to_string();
+            // join-pane - Join a pane to another window (or across sessions)
+            "join-pane" | "joinp" | "move-pane" | "movep" => {
+                // Parse args to detect cross-session scenario
+                // Note: -t is stripped from cmd_args by the global handler above,
+                // but preserved in PSMUX_TARGET_FULL env var.
+                let mut source_spec = String::new();
+                let mut horizontal = false;
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
-                        "-h" => { cmd.push_str(" -h"); }
-                        "-v" => { cmd.push_str(" -v"); }
-                        "-d" => { cmd.push_str(" -d"); }
+                        "-h" => horizontal = true,
+                        "-v" => {} // vertical is default
+                        "-d" => {} // detach (ignored at CLI level)
                         "-s" => {
                             if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -s {}", t));
-                                i += 1;
-                            }
-                        }
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
+                                source_spec = t.to_string();
                                 i += 1;
                             }
                         }
@@ -1761,37 +1762,63 @@ fn run_main() -> io::Result<()> {
                     }
                     i += 1;
                 }
-                cmd.push('\n');
-                send_control(cmd)?;
-                return Ok(());
-            }
-            // move-pane - alias for join-pane
-            "move-pane" | "movep" => {
-                let mut cmd = "join-pane".to_string();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-h" => { cmd.push_str(" -h"); }
-                        "-v" => { cmd.push_str(" -v"); }
-                        "-d" => { cmd.push_str(" -d"); }
-                        "-s" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -s {}", t));
-                                i += 1;
-                            }
-                        }
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
-                                i += 1;
-                            }
-                        }
-                        _ => {}
+                // Get -t from the saved env var (global handler stripped it from cmd_args)
+                let target_spec = std::env::var("PSMUX_TARGET_FULL").unwrap_or_default();
+                // Check if source and target reference different sessions
+                let src_session = if source_spec.contains(':') {
+                    source_spec.split(':').next().unwrap_or("").to_string()
+                } else {
+                    String::new()
+                };
+                let tgt_session = if target_spec.contains(':') {
+                    target_spec.split(':').next().unwrap_or("").to_string()
+                } else {
+                    String::new()
+                };
+                let current_session = std::env::var("PSMUX_TARGET_SESSION")
+                    .or_else(|_| std::env::var("PSMUX_SESSION"))
+                    .unwrap_or_default();
+                let effective_src = if src_session.is_empty() { current_session.clone() } else { src_session.clone() };
+                let effective_tgt = if tgt_session.is_empty() { current_session.clone() } else { tgt_session.clone() };
+                if !effective_src.is_empty() && !effective_tgt.is_empty() && effective_src != effective_tgt {
+                    // Cross-session join-pane: orchestrate via TCP
+                    let src_after_colon = if source_spec.contains(':') {
+                        source_spec.split(':').nth(1).unwrap_or("0.0")
+                    } else if !source_spec.is_empty() {
+                        &source_spec
+                    } else {
+                        "0.0"
+                    };
+                    let tgt_after_colon = if target_spec.contains(':') {
+                        target_spec.split(':').nth(1).unwrap_or("")
+                    } else if !target_spec.is_empty() {
+                        &target_spec
+                    } else {
+                        ""
+                    };
+                    let sp = crate::cli::parse_target(src_after_colon);
+                    let tp = crate::cli::parse_target(tgt_after_colon);
+                    match crate::cross_session::orchestrate_cross_session_join(
+                        &effective_src,
+                        sp.window.unwrap_or(0),
+                        sp.pane.unwrap_or(0),
+                        &effective_tgt,
+                        tp.window,
+                        tp.pane,
+                        horizontal,
+                    ) {
+                        Ok(()) => {}
+                        Err(e) => eprintln!("psmux: cross-session join-pane failed: {}", e),
                     }
-                    i += 1;
+                } else {
+                    // Same-session join-pane: forward to server as before
+                    let mut cmd = "join-pane".to_string();
+                    if horizontal { cmd.push_str(" -h"); }
+                    if !source_spec.is_empty() { cmd.push_str(&format!(" -s {}", source_spec)); }
+                    if !target_spec.is_empty() { cmd.push_str(&format!(" -t {}", target_spec)); }
+                    cmd.push('\n');
+                    send_control(cmd)?;
                 }
-                cmd.push('\n');
-                send_control(cmd)?;
                 return Ok(());
             }
             // rename-window - Rename current window

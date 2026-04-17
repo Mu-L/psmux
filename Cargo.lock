@@ -1343,6 +1343,8 @@ dependencies = [
 name = "psmux"
 version = "3.3.2"
 dependencies = [
+ "anyhow",
+ "base64",
  "chrono",
  "crossterm",
  "glob",
