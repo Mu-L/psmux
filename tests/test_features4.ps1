@@ -226,15 +226,29 @@ if ($LASTEXITCODE -ne 0) {
     Write-Info "Session lost, recreating for copy-mode tests..."
     New-PsmuxSession -Name "feat4"
     Start-Sleep -Seconds 2
+} else {
+    # Clean up extra panes from join-pane tests to get a single clean pane
+    $paneList = Psmux list-panes -t feat4 -F '#{pane_id}'
+    $paneIds = ($paneList -split "`n" | Where-Object { $_.Trim() -ne "" })
+    if ($paneIds.Count -gt 1) {
+        Write-Info "Cleaning up $($paneIds.Count) panes to single pane..."
+        for ($i = $paneIds.Count - 1; $i -ge 1; $i--) {
+            Psmux kill-pane -t "$($paneIds[$i])" 2>$null | Out-Null
+        }
+        Start-Sleep -Milliseconds 500
+    }
 }
 
 Write-Test "copy-mode V (line selection) key accepted"
-PsmuxQuick send-keys -t feat4 "echo line-test-data" Enter 2>$null | Out-Null
-Start-Sleep -Milliseconds 500
-Psmux copy-mode -t feat4 2>$null | Out-Null
-Start-Sleep -Milliseconds 500
-PsmuxQuick send-keys -t feat4 V 2>$null | Out-Null
+# First ensure we're NOT in copy-mode already
+PsmuxQuick send-keys -t feat4 q 2>$null | Out-Null
 Start-Sleep -Milliseconds 300
+PsmuxQuick send-keys -t feat4 "echo line-test-data" Enter 2>$null | Out-Null
+Start-Sleep -Milliseconds 800
+Psmux copy-mode -t feat4 2>$null | Out-Null
+Start-Sleep -Milliseconds 800
+PsmuxQuick send-keys -t feat4 V 2>$null | Out-Null
+Start-Sleep -Milliseconds 1000
 $sel = Psmux display-message -t feat4 '-p' '#{selection_present}'
 if ($sel -eq "1") { Write-Pass "V sets selection (selection_present=1)" }
 else { Write-Fail "V didn't set selection: selection_present=$sel" }
@@ -364,9 +378,25 @@ if ($LASTEXITCODE -ne 0) {
     Write-Info "Session lost, recreating for misc tests..."
     New-PsmuxSession -Name "feat4"
     Start-Sleep -Seconds 2
+} else {
+    # Clean up extra panes
+    $paneList = Psmux list-panes -t feat4 -F '#{pane_id}'
+    $paneIds = ($paneList -split "`n" | Where-Object { $_.Trim() -ne "" })
+    if ($paneIds.Count -gt 1) {
+        Write-Info "Cleaning up $($paneIds.Count) panes to single pane..."
+        for ($i = $paneIds.Count - 1; $i -ge 1; $i--) {
+            Psmux kill-pane -t "$($paneIds[$i])" 2>$null | Out-Null
+        }
+        Start-Sleep -Milliseconds 500
+    }
 }
 
 Write-Test "capture-pane -p still works"
+# Ensure not in copy-mode
+PsmuxQuick send-keys -t feat4 q 2>$null | Out-Null
+Start-Sleep -Milliseconds 300
+PsmuxQuick send-keys -t feat4 "echo capture-test-data" Enter 2>$null | Out-Null
+Start-Sleep -Milliseconds 1000
 $cap = Psmux capture-pane -t feat4 -p
 if ($cap.Length -gt 0) { Write-Pass "capture-pane -p has content (len=$($cap.Length))" }
 else { Write-Fail "capture-pane -p empty" }
