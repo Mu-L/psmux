@@ -482,6 +482,11 @@ fn collect_leaf_paths(node: &Node, path: &mut Vec<usize>, out: &mut Vec<(usize, 
     }
 }
 
+/// Public wrapper for collect_leaf_paths (used by join-pane to resolve pane index to path).
+pub fn collect_leaf_paths_pub(node: &Node, path: &mut Vec<usize>, out: &mut Vec<(usize, Vec<usize>)>) {
+    collect_leaf_paths(node, path, out);
+}
+
 /// Move `pane_id` to the front of the MRU list.
 /// If not present, inserts at front.
 pub fn touch_mru(mru: &mut Vec<usize>, pane_id: usize) {

@@ -491,6 +491,10 @@ pub struct AppState {
     /// Stored separately from `environment` so they are NOT passed as
     /// shell environment variables to child panes (#105).
     pub user_options: std::collections::HashMap<String, String>,
+    /// Tracks which options have been explicitly set by the user or config.
+    /// Used by set-option -o (only-if-unset) to distinguish defaults from
+    /// explicitly configured values.
+    pub user_set_options: std::collections::HashSet<String>,
     /// pane-border-style: style for inactive pane borders
     pub pane_border_style: String,
     /// pane-active-border-style: style for active pane borders
@@ -699,7 +703,7 @@ impl AppState {
             renumber_windows: false,
             automatic_rename: true,
             allow_rename: true,
-            allow_set_title: false,
+            allow_set_title: true,
             monitor_activity: false,
             visual_activity: false,
             activity_action: "other".to_string(),
@@ -722,6 +726,7 @@ impl AppState {
             ],
             environment: std::collections::HashMap::new(),
             user_options: std::collections::HashMap::new(),
+            user_set_options: std::collections::HashSet::new(),
             pane_border_style: String::new(),
             pane_active_border_style: "fg=green".to_string(),
             pane_border_hover_style: "fg=yellow".to_string(),
@@ -934,7 +939,16 @@ pub enum CtrlReq {
     DisplayPanes,
     DisplayPaneSelect(usize),
     BreakPane,
-    JoinPane(usize),
+    /// join-pane: move a pane from source window into target window as a split.
+    /// Fields: src_win (window index), src_pane (positional pane index), target_win,
+    /// target_pane, horizontal (true = -h side-by-side, false = -v stacked).
+    JoinPane {
+        src_win: Option<usize>,
+        src_pane: Option<usize>,
+        target_win: Option<usize>,
+        target_pane: Option<usize>,
+        horizontal: bool,
+    },
     RespawnPane(Option<String>, bool),  // optional workdir (-c), kill flag (-k)
     BindKey(String, String, String, bool),  // table, key, command, repeat
     UnbindKey(String, Option<String>),  // key, optional table (None = prefix)
@@ -957,7 +971,14 @@ pub enum CtrlReq {
     /// Set session group (used by new-session -t)
     SetSessionGroup(String),
     FindWindow(mpsc::Sender<String>, String),
-    MovePane(usize),
+    /// move-pane: alias for join-pane
+    MovePane {
+        src_win: Option<usize>,
+        src_pane: Option<usize>,
+        target_win: Option<usize>,
+        target_pane: Option<usize>,
+        horizontal: bool,
+    },
     PipePane(String, bool, bool, bool),
     SelectLayout(String),
     NextLayout,
@@ -1072,6 +1093,10 @@ pub enum CtrlReq {
     CustomizeResetDefault,
     /// Set filter string in customize-mode
     CustomizeFilter(String),
+    /// Run an arbitrary command through the server-side execute_command_string
+    /// path (same path as keybindings and command prompt).  Response channel
+    /// carries "OK" on success or an error string.
+    RunCommand(String, mpsc::Sender<String>),
 }
 
 /// Global flag set by PTY reader threads when new output arrives.

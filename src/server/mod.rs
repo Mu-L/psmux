@@ -203,6 +203,7 @@ fn drain_plugin_req(
     match req {
         CtrlReq::SetOption(option, value) => {
             apply_set_option(app, &option, &value, false);
+            app.user_set_options.insert(option.clone());
             if option == "command-alias" {
                 if let Ok(mut map) = shared_aliases.write() {
                     *map = app.command_aliases.clone();
@@ -211,6 +212,7 @@ fn drain_plugin_req(
         }
         CtrlReq::SetOptionQuiet(option, value, quiet) => {
             apply_set_option(app, &option, &value, quiet);
+            app.user_set_options.insert(option.clone());
             if option == "command-alias" {
                 if let Ok(mut map) = shared_aliases.write() {
                     *map = app.command_aliases.clone();
@@ -236,9 +238,17 @@ fn drain_plugin_req(
             }
         }
         CtrlReq::SetOptionOnlyIfUnset(option, value) => {
-            let current = get_option_value(app, &option);
-            if current.is_empty() {
+            // Only set if the option hasn't been explicitly set by user/config.
+            // For @-prefixed user options, check if the key exists.
+            // For built-in options, check the user_set_options tracker.
+            let already_set = if option.starts_with('@') {
+                app.user_options.contains_key(&option)
+            } else {
+                app.user_set_options.contains(&option)
+            };
+            if !already_set {
                 apply_set_option(app, &option, &value, false);
+                app.user_set_options.insert(option.clone());
                 if option == "command-alias" {
                     if let Ok(mut map) = shared_aliases.write() {
                         *map = app.command_aliases.clone();
@@ -769,7 +779,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         CtrlReq::KillPane => "KillPane",
                         CtrlReq::KillPaneById(_) => "KillPaneById",
                         CtrlReq::BreakPane => "BreakPane",
-                        CtrlReq::JoinPane(_) => "JoinPane",
+                        CtrlReq::JoinPane { .. } => "JoinPane",
                         CtrlReq::MoveWindow(..) => "MoveWindow",
                         CtrlReq::SwapWindow(_) => "SwapWindow",
                         _ => "",
@@ -2365,13 +2375,34 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("after-break-pane");
                     meta_dirty = true;
                 }
-                CtrlReq::JoinPane(target_win) => {
+                CtrlReq::JoinPane { src_win, src_pane, target_win, target_pane, horizontal }
+                | CtrlReq::MovePane { src_win, src_pane, target_win, target_pane, horizontal } => {
                     unzoom_if_zoomed(&mut app);
-                    // Real join-pane: extract active pane from current window and
-                    // graft it as a vertical split into the target window.
-                    let src_idx = app.active_idx;
-                    if target_win < app.windows.len() && target_win != src_idx {
-                        let src_path = app.windows[src_idx].active_path.clone();
+                    // Resolve source window index (default: active window)
+                    let src_idx = src_win.unwrap_or(app.active_idx);
+                    // Resolve target window index (default: active window, but must differ from source)
+                    let raw_target_win = target_win.unwrap_or(app.active_idx);
+                    if src_idx < app.windows.len() && raw_target_win < app.windows.len() && src_idx != raw_target_win {
+                        // Resolve source pane path within source window
+                        let src_path = if let Some(pidx) = src_pane {
+                            // Get Nth pane path in DFS order
+                            let mut leaves = Vec::new();
+                            tree::collect_leaf_paths_pub(&app.windows[src_idx].root, &mut Vec::new(), &mut leaves);
+                            if let Some((_, p)) = leaves.get(pidx) {
+                                p.clone()
+                            } else {
+                                app.windows[src_idx].active_path.clone()
+                            }
+                        } else {
+                            app.windows[src_idx].active_path.clone()
+                        };
+                        // Unzoom source window if needed
+                        if let Some(saved) = app.windows[src_idx].zoom_saved.take() {
+                            let win = &mut app.windows[src_idx];
+                            for (p, sz) in saved.into_iter() {
+                                if let Some(Node::Split { sizes, .. }) = crate::tree::get_split_mut(&mut win.root, &p) { *sizes = sz; }
+                            }
+                        }
                         let src_root = std::mem::replace(&mut app.windows[src_idx].root,
                             Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
                         let (remaining, extracted) = tree::extract_node(src_root, &src_path);
@@ -2381,8 +2412,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 app.windows[src_idx].root = rem;
                                 app.windows[src_idx].active_path = tree::first_leaf_path(&app.windows[src_idx].root);
                             }
-                            // Adjust target index if source window will be removed
-                            let tgt = if src_empty && target_win > src_idx { target_win - 1 } else { target_win };
+                            // Adjust target index if source window will be removed and target is after it
+                            let tgt = if src_empty && raw_target_win > src_idx { raw_target_win - 1 } else { raw_target_win };
                             if src_empty {
                                 app.windows.remove(src_idx);
                                 if app.active_idx >= app.windows.len() {
@@ -2391,8 +2422,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                             // Graft pane into target window
                             if tgt < app.windows.len() {
-                                let tgt_path = app.windows[tgt].active_path.clone();
-                                tree::replace_leaf_with_split(&mut app.windows[tgt].root, &tgt_path, LayoutKind::Vertical, pane_node);
+                                // Resolve target pane path
+                                let tgt_path = if let Some(tpidx) = target_pane {
+                                    let mut leaves = Vec::new();
+                                    tree::collect_leaf_paths_pub(&app.windows[tgt].root, &mut Vec::new(), &mut leaves);
+                                    if let Some((_, p)) = leaves.get(tpidx) {
+                                        p.clone()
+                                    } else {
+                                        app.windows[tgt].active_path.clone()
+                                    }
+                                } else {
+                                    app.windows[tgt].active_path.clone()
+                                };
+                                let split_kind = if horizontal { LayoutKind::Horizontal } else { LayoutKind::Vertical };
+                                tree::replace_leaf_with_split(&mut app.windows[tgt].root, &tgt_path, split_kind, pane_node);
                                 app.active_idx = tgt;
                             }
                             resize_all_panes(&mut app);
@@ -2467,6 +2510,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::SetOption(option, value) => {
                     apply_set_option(&mut app, &option, &value, false);
+                    app.user_set_options.insert(option.clone());
                     // Update shared aliases if command-alias changed
                     if option == "command-alias" {
                         if let Ok(mut map) = shared_aliases_main.write() {
@@ -2479,6 +2523,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SetOptionQuiet(option, value, quiet) => {
                     let old_shell = app.default_shell.clone();
                     apply_set_option(&mut app, &option, &value, quiet);
+                    app.user_set_options.insert(option.clone());
                     // If default-shell changed, kill the warm pane so the next
                     // new-window spawns the correct shell (fixes #99).
                     if app.default_shell != old_shell {
@@ -2550,9 +2595,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::SetOptionOnlyIfUnset(option, value) => {
-                    let current = get_option_value(&app, &option);
-                    if current.is_empty() {
+                    let already_set = if option.starts_with('@') {
+                        app.user_options.contains_key(&option)
+                    } else {
+                        app.user_set_options.contains(&option)
+                    };
+                    if !already_set {
                         apply_set_option(&mut app, &option, &value, false);
+                        app.user_set_options.insert(option.clone());
                         if option == "command-alias" {
                             if let Ok(mut map) = shared_aliases_main.write() {
                                 *map = app.command_aliases.clone();
@@ -2786,41 +2836,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     let _ = resp.send(output);
-                }
-                CtrlReq::MovePane(target_win) => {
-                    // move-pane is an alias for join-pane
-                    let src_idx = app.active_idx;
-                    if target_win < app.windows.len() && target_win != src_idx {
-                        let src_path = app.windows[src_idx].active_path.clone();
-                        let src_root = std::mem::replace(&mut app.windows[src_idx].root,
-                            Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
-                        let (remaining, extracted) = tree::extract_node(src_root, &src_path);
-                        if let Some(pane_node) = extracted {
-                            let src_empty = remaining.is_none();
-                            if let Some(rem) = remaining {
-                                app.windows[src_idx].root = rem;
-                                app.windows[src_idx].active_path = tree::first_leaf_path(&app.windows[src_idx].root);
-                            }
-                            let tgt = if src_empty && target_win > src_idx { target_win - 1 } else { target_win };
-                            if src_empty {
-                                app.windows.remove(src_idx);
-                                if app.active_idx >= app.windows.len() {
-                                    app.active_idx = app.windows.len().saturating_sub(1);
-                                }
-                            }
-                            if tgt < app.windows.len() {
-                                let tgt_path = app.windows[tgt].active_path.clone();
-                                tree::replace_leaf_with_split(&mut app.windows[tgt].root, &tgt_path, LayoutKind::Vertical, pane_node);
-                                app.active_idx = tgt;
-                            }
-                            resize_all_panes(&mut app);
-                            meta_dirty = true;
-                        } else {
-                            if let Some(rem) = remaining {
-                                app.windows[src_idx].root = rem;
-                            }
-                        }
-                    }
                 }
                 CtrlReq::PipePane(cmd, stdin, stdout, toggle) => {
                     let win = &app.windows[app.active_idx];
@@ -3711,6 +3726,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         *scroll_offset = 0;
                         state_dirty = true;
+                    }
+                }
+                CtrlReq::RunCommand(cmd, resp) => {
+                    let result = execute_command_string(&mut app, &cmd);
+                    match result {
+                        Ok(()) => { let _ = resp.send("OK".to_string()); }
+                        Err(e) => { let _ = resp.send(format!("error: {}", e)); }
                     }
                 }
             }

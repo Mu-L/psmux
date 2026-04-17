@@ -59,8 +59,9 @@ if provided_key != session_key {
 let _ = write_stream.write_all(b"OK\n");
 let _ = write_stream.flush();
 
-// Set short read timeout for batched command processing
-let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(10)));
+// Use a reasonable timeout for the first command after AUTH.
+// Clients may have a small delay between AUTH and the actual command.
+let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(2000)));
 
 // Check for PERSISTENT flag and optional TARGET line
 let mut persistent = false;
@@ -377,10 +378,17 @@ if line.trim().starts_with("TARGET ") {
     }
 }
 
+// Set short read timeout for batched command processing
+let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(10)));
+
 // Process commands in a loop to handle batching
 let mut attached_sent = false;
+let mut pending_chain: Vec<String> = Vec::new();
 loop {
-    if line.trim().is_empty() {
+    // Check pending chained commands before reading from socket
+    if !pending_chain.is_empty() {
+        line = pending_chain.remove(0);
+    } else if line.trim().is_empty() {
         // Try to read another command with timeout
         line.clear();
         match r.read_line(&mut line) {
@@ -407,7 +415,16 @@ loop {
     }
     
     // Use quote-aware parser to preserve arguments with spaces
-    let parsed = crate::cli::normalize_flag_equals(parse_command_line(&line));
+    // Handle command chaining (\; or ;) by splitting into sub-commands
+    let sub_cmds = crate::config::split_chained_commands_pub(line.trim());
+    let effective_line: String;
+    if sub_cmds.len() > 1 {
+        effective_line = sub_cmds[0].clone();
+        pending_chain.extend(sub_cmds.into_iter().skip(1));
+    } else {
+        effective_line = line.trim().to_string();
+    }
+    let parsed = crate::cli::normalize_flag_equals(parse_command_line(&effective_line));
     let raw_cmd = parsed.get(0).map(|s| s.as_str()).unwrap_or("");
     // Check command aliases before normal dispatch
     let alias_expanded = if let Ok(map) = aliases.read() {
@@ -465,16 +482,18 @@ let args: Vec<&str> = {
 };
 // Commands that should permanently change focus when used with -t
 let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp");
+// Commands that handle -t internally and should NOT get FocusWindowTemp
+let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "movep");
 if let Some(wid) = target_win {
     if is_focus_cmd {
         let _ = tx.send(CtrlReq::FocusWindow(wid));
-    } else {
+    } else if !skip_target_focus {
         let _ = tx.send(CtrlReq::FocusWindowTemp(wid));
     }
 } else if let Some(ref wname) = target_win_name {
     if is_focus_cmd {
         let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
-    } else {
+    } else if !skip_target_focus {
         let _ = tx.send(CtrlReq::FocusWindowByNameTemp(wname.clone()));
     }
 }
@@ -483,7 +502,7 @@ let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_i
 } else {
     None
 };
-let skip_pane_focus = matches!(cmd, "display-message" | "display");
+let skip_pane_focus = matches!(cmd, "display-message" | "display") || skip_target_focus;
 if !skip_pane_focus && targeted_kill_pane_id.is_none() {
     if let Some(pid) = target_pane {
         if is_focus_cmd {
@@ -625,7 +644,7 @@ match cmd {
         }
         if !persistent { break; }
     }
-    "dump-state" => {
+    "dump-state" | "dump" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::DumpState(rtx, persistent));
         if let Some(ref rtx_bg) = resp_tx_opt {
@@ -909,7 +928,21 @@ match cmd {
         if !persistent { break; }
     }
     "kill-window" | "killw" => { let _ = tx.send(CtrlReq::KillWindow); }
-    "kill-session" | "kill-ses" => { let _ = tx.send(CtrlReq::KillSession); }
+    "kill-session" | "kill-ses" => {
+        // If -t <target> is given, kill that session instead of self
+        if let Some(ref tgt) = raw_target {
+            let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+            let port_path = format!("{}\\.psmux\\{}.port", home, tgt);
+            if let Ok(port_str) = std::fs::read_to_string(&port_path) {
+                if let Ok(port) = port_str.trim().parse::<u16>() {
+                    let key = crate::session::read_session_key(tgt).unwrap_or_default();
+                    let _ = crate::session::send_control_to_port(port, "kill-session\n", &key);
+                }
+            }
+        } else {
+            let _ = tx.send(CtrlReq::KillSession);
+        }
+    }
     "has-session" => {
         let (rtx, rrx) = mpsc::channel::<bool>();
         let _ = tx.send(CtrlReq::HasSession(rtx));
@@ -1089,10 +1122,41 @@ match cmd {
     }
     "display-panes" | "displayp" => { let _ = tx.send(CtrlReq::DisplayPanes); }
     "break-pane" | "breakp" => { let _ = tx.send(CtrlReq::BreakPane); }
-    "join-pane" | "joinp" => {
-        if let Some(wid) = args.iter().find(|a| !a.starts_with('-')).and_then(|s| s.parse::<usize>().ok()) {
-            let _ = tx.send(CtrlReq::JoinPane(wid));
+    "join-pane" | "joinp" | "move-pane" | "movep" => {
+        // Parse -s source and -h/-v direction.
+        // -t target is already parsed by the global -t handler above into target_win / target_pane.
+        let horizontal = args.iter().any(|a| *a == "-h");
+        // Parse -s source (session:window.pane format)
+        let mut src_win: Option<usize> = None;
+        let mut src_pane: Option<usize> = None;
+        {
+            let mut si = 0;
+            while si < args.len() {
+                if args[si] == "-s" {
+                    if let Some(sv) = args.get(si + 1) {
+                        let pt = parse_target(sv);
+                        src_win = pt.window;
+                        src_pane = pt.pane;
+                    }
+                    si += 2; continue;
+                }
+                si += 1;
+            }
         }
+        // If no -s given, try bare integer as target window (legacy compat)
+        let tgt_win = target_win.or_else(|| {
+            args.iter()
+                .find(|a| a.parse::<usize>().is_ok())
+                .and_then(|s| s.parse::<usize>().ok())
+        });
+        // Always send the request (server will use defaults for None fields)
+        let _ = tx.send(CtrlReq::JoinPane {
+            src_win,
+            src_pane,
+            target_win: tgt_win,
+            target_pane: target_pane,
+            horizontal,
+        });
     }
     "respawn-pane" | "respawnp" => {
         let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
@@ -1247,7 +1311,13 @@ match cmd {
         let has_a = combined_has_set('a');
         let has_q = combined_has_set('q');
         let has_o = combined_has_set('o');
-        let non_flag_args: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        // Skip -t TARGET value (TARGET is not a positional option/value)
+        let t_targets: std::collections::HashSet<&str> = args.windows(2)
+            .filter(|w| w[0] == "-t" || w[0] == "-p" || w[0] == "-w")
+            .map(|w| w[1]).collect();
+        let non_flag_args: Vec<&str> = args.iter()
+            .filter(|a| (!a.starts_with('-') || a.starts_with('@')) && !t_targets.contains(*a))
+            .copied().collect();
         if has_u {
             if let Some(option) = non_flag_args.first() {
                 let _ = tx.send(CtrlReq::SetOptionUnset(option.to_string()));
@@ -1431,11 +1501,6 @@ match cmd {
             }
         }
         if !persistent { break; }
-    }
-    "move-pane" | "movep" => {
-        if let Some(target) = args.iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse().ok()) {
-            let _ = tx.send(CtrlReq::MovePane(target));
-        }
     }
     "pipe-pane" | "pipep" => {
         let stdin_flag = args.iter().any(|a| *a == "-I");
@@ -1982,6 +2047,7 @@ match cmd {
                 } else {
                     let _ = write!(write_stream, "session '{}' already exists\n", name);
                     let _ = write_stream.flush();
+                    break;
                 }
             } else {
                 // Spawn new server
@@ -2126,8 +2192,29 @@ match cmd {
     "server-access" => {
         // Multi-user server access — not applicable to psmux
     }
+    "run-command" | "runcmd" => {
+        // Route command through the server-side execute_command_string path
+        // (same code path as keybindings and command prompt).
+        let full_cmd = args.join(" ");
+        let (rtx, rrx) = mpsc::channel::<String>();
+        let _ = tx.send(CtrlReq::RunCommand(full_cmd, rtx));
+        if let Ok(resp) = rrx.recv_timeout(std::time::Duration::from_secs(15)) {
+            if persistent {
+                let _ = tx.send(CtrlReq::StatusMessage(resp));
+            } else {
+                let _ = write!(write_stream, "{}\n", resp);
+                let _ = write_stream.flush();
+            }
+        }
+        if !persistent { break; }
+    }
     _ => {}
 }
+    // Process pending chained commands before reading from socket
+    if !pending_chain.is_empty() {
+        line = pending_chain.remove(0);
+        continue;
+    }
     // Try to read next command for batching (with timeout)
     line.clear();
     match r.read_line(&mut line) {
@@ -2326,6 +2413,10 @@ fn dispatch_control_command(
             true
         }
         "select-pane" | "selectp" => {
+            // Handle -T title setting
+            if let Some(t) = args.windows(2).find(|w| w[0] == "-T").map(|w| w[1].trim_matches('"').to_string()) {
+                let _ = tx.send(CtrlReq::SetPaneTitle(t));
+            }
             let _ = resp_tx.send(String::new());
             true
         }
@@ -2356,8 +2447,12 @@ fn dispatch_control_command(
             let append = combined_has_set2('a');
             let global = combined_has_set2('g');
             let only_if_unset = combined_has_set2('o');
+            // Skip values that follow flag args (-t TARGET, -p PANE, -w WINDOW)
+            let t_vals2: std::collections::HashSet<&str> = args.windows(2)
+                .filter(|w| w[0] == "-t" || w[0] == "-p" || w[0] == "-w")
+                .map(|w| w[1]).collect();
             let positional: Vec<&str> = args.iter()
-                .filter(|a| !a.starts_with('-') || a.starts_with('@'))
+                .filter(|a| (!a.starts_with('-') || a.starts_with('@')) && !t_vals2.contains(*a))
                 .copied().collect();
             if unset && !positional.is_empty() {
                 let _ = tx.send(CtrlReq::SetOptionUnset(positional[0].to_string()));
@@ -2684,7 +2779,7 @@ fn dispatch_control_command(
             }
             true
         }
-        "dump-state" => {
+        "dump-state" | "dump" => {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::DumpState(rtx, false));
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
@@ -2824,6 +2919,17 @@ fn dispatch_control_command(
                 i += 1;
             }
             let _ = resp_tx.send(String::new());
+            true
+        }
+        "run-command" | "runcmd" => {
+            let full_cmd = args.join(" ");
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::RunCommand(full_cmd, rtx));
+            if let Ok(resp) = rrx.recv_timeout(Duration::from_secs(15)) {
+                let _ = resp_tx.send(resp);
+            } else {
+                let _ = resp_tx.send("timeout".to_string());
+            }
             true
         }
         _ => {

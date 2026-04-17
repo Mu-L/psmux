@@ -102,11 +102,43 @@ fn resolve_shell_binary(name: &str) -> String {
     name.to_string()
 }
 
+/// Try to locate an existing file at the start of a command string.
+/// Handles paths with spaces by progressively trying longer path prefixes
+/// against the filesystem (e.g. "C:\Program Files\App\run.ps1 arg1 arg2"
+/// tries "C:\Program", then "C:\Program Files\App\run.ps1", etc.).
+/// Returns `Some((file_path, remaining_args))` on success.
+#[cfg(windows)]
+fn find_file_in_command(cmd: &str) -> Option<(String, String)> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() { return None; }
+    let bytes = trimmed.as_bytes();
+    let mut end = 0;
+    loop {
+        // Advance to the next whitespace boundary
+        while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
+            end += 1;
+        }
+        let candidate = &trimmed[..end];
+        if std::path::Path::new(candidate).is_file() {
+            let rest = trimmed[end..].trim_start().to_string();
+            return Some((candidate.to_string(), rest));
+        }
+        if end >= bytes.len() { return None; }
+        // Skip whitespace to the next word
+        while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+            end += 1;
+        }
+        if end >= bytes.len() { return None; }
+    }
+}
+
 /// Build a `std::process::Command` for a run-shell invocation.
 ///
 /// Avoids double-wrapping when the command already starts with a shell binary
-/// (e.g., `pwsh -NoProfile -File script.ps1`). Also detects bare `.ps1` file
-/// paths and uses `-File` instead of `-Command` for reliable path handling.
+/// (e.g., `pwsh -NoProfile -File script.ps1`). Also detects file paths
+/// (including those with spaces) and uses the appropriate execution strategy:
+/// `-File` for `.ps1`, direct `Command::new` for `.exe`/`.cmd`/`.bat`,
+/// and PowerShell call operator `& 'path'` for other files with spaces.
 pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
     #[cfg(windows)]
     {
@@ -132,23 +164,98 @@ pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
             }
         }
 
-        // Case 2: Bare .ps1 file path (possibly with arguments after the path).
-        // Use `-File` which handles paths with spaces correctly.
+        // Case 2: File path detection (handles spaces in paths).
+        // Uses progressive path probing: for "C:\Program Files\App\run.ps1 arg1",
+        // tries "C:\Program" (not a file), then "C:\Program Files\App\run.ps1"
+        // (found!), returning the file path and remaining arguments separately.
         let trimmed = shell_cmd.trim();
-        let first_token = trimmed.split_whitespace().next().unwrap_or("");
-        let first_unquoted = first_token.trim_matches('"').trim_matches('\'');
-        if first_unquoted.ends_with(".ps1") && std::path::Path::new(first_unquoted).exists() {
-            let shell = if which::which("pwsh").is_ok() { "pwsh" } else { "powershell" };
-            let mut c = std::process::Command::new(shell);
-            c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
-            // Split remaining args so the .ps1 path and its arguments are separate args
-            let parts = parse_command_line(trimmed);
-            for p in &parts { c.arg(p); }
-            c.hide_window();
-            return c;
+        // Strip matching outer quotes (single or double) so file detection works
+        // for run-shell "'~/path/to/script.ps1'" syntax from config or CLI
+        let trimmed = if (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+                       || (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2) {
+            &trimmed[1..trimmed.len()-1]
+        } else {
+            trimmed
+        };
+        if let Some((file_path, rest_args)) = find_file_in_command(trimmed) {
+            let lower_path = file_path.to_lowercase();
+
+            // .ps1 scripts: use -File which never splits paths at whitespace
+            if lower_path.ends_with(".ps1") {
+                let shell = if which::which("pwsh").is_ok() { "pwsh" } else { "powershell" };
+                let mut c = std::process::Command::new(shell);
+                c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &file_path]);
+                if !rest_args.is_empty() {
+                    for a in &parse_command_line(&rest_args) { c.arg(a); }
+                }
+                c.hide_window();
+                return c;
+            }
+
+            // For other file types with spaces in the path, we must avoid
+            // the Case 3 shell wrapping which breaks on spaces.
+            if file_path.contains(' ') {
+                let ext = std::path::Path::new(&file_path).extension()
+                    .and_then(|e| e.to_str()).map(|e| e.to_lowercase());
+
+                match ext.as_deref() {
+                    // Native executables: Command::new handles path quoting via CreateProcess
+                    Some("exe") | Some("com") => {
+                        let mut c = std::process::Command::new(&file_path);
+                        if !rest_args.is_empty() {
+                            for a in &parse_command_line(&rest_args) { c.arg(a); }
+                        }
+                        c.hide_window();
+                        return c;
+                    }
+                    // Batch files: run via cmd.exe /c with the path as a separate arg
+                    // so CreateProcess quotes just the path, not path+args together
+                    Some("cmd") | Some("bat") => {
+                        let mut c = std::process::Command::new("cmd.exe");
+                        c.arg("/c");
+                        c.arg(&file_path);
+                        if !rest_args.is_empty() {
+                            for a in &parse_command_line(&rest_args) { c.arg(a); }
+                        }
+                        c.hide_window();
+                        return c;
+                    }
+                    // Unknown extension with spaces: use the resolved shell with
+                    // proper quoting. For PowerShell, use the call operator & 'path'
+                    // so the path is treated as a single literal string.
+                    _ => {
+                        let (shell_prog, shell_args) = resolve_run_shell();
+                        let lower_shell = shell_prog.to_lowercase();
+                        let is_powershell = lower_shell.contains("pwsh")
+                            || lower_shell.contains("powershell");
+                        let mut c = std::process::Command::new(&shell_prog);
+                        for a in &shell_args { c.arg(a); }
+                        if is_powershell {
+                            let escaped = file_path.replace('\'', "''");
+                            let wrapped = if rest_args.is_empty() {
+                                format!("& '{}'", escaped)
+                            } else {
+                                format!("& '{}' {}", escaped, rest_args)
+                            };
+                            c.arg(&wrapped);
+                        } else {
+                            // cmd.exe /c: pass path and args separately
+                            c.arg(&file_path);
+                            if !rest_args.is_empty() {
+                                for a in &parse_command_line(&rest_args) { c.arg(a); }
+                            }
+                        }
+                        c.hide_window();
+                        return c;
+                    }
+                }
+            }
+            // File found but path has no spaces: fall through to Case 3.
+            // The simple shell wrapping works fine without spaces.
         }
 
-        // Case 3: Regular command string. Wrap in shell.
+        // Case 3: Regular command string (no file path with spaces detected).
+        // Wrap in the resolved shell (pwsh -Command / cmd /c / sh -c).
         let (shell_prog, shell_args) = resolve_run_shell();
         let mut c = std::process::Command::new(&shell_prog);
         for a in &shell_args { c.arg(a); }
@@ -267,11 +374,24 @@ fn generate_show_options(app: &AppState) -> String {
     output
 }
 
-/// Local join-pane: extract active pane and graft into target window.
-fn join_pane_local(app: &mut AppState, target_win: usize) {
-    let src_idx = app.active_idx;
-    if target_win < app.windows.len() && target_win != src_idx {
-        let src_path = app.windows[src_idx].active_path.clone();
+/// Local join-pane: extract source pane and graft into target window.
+fn join_pane_local(app: &mut AppState, src_win: Option<usize>, src_pane: Option<usize>,
+                   target_win: Option<usize>, target_pane: Option<usize>, horizontal: bool) {
+    let src_idx = src_win.unwrap_or(app.active_idx);
+    let raw_target_win = target_win.unwrap_or(app.active_idx);
+    if src_idx < app.windows.len() && raw_target_win < app.windows.len() && src_idx != raw_target_win {
+        // Resolve source pane path
+        let src_path = if let Some(pidx) = src_pane {
+            let mut leaves = Vec::new();
+            crate::tree::collect_leaf_paths_pub(&app.windows[src_idx].root, &mut Vec::new(), &mut leaves);
+            if let Some((_, p)) = leaves.get(pidx) {
+                p.clone()
+            } else {
+                app.windows[src_idx].active_path.clone()
+            }
+        } else {
+            app.windows[src_idx].active_path.clone()
+        };
         let src_root = std::mem::replace(&mut app.windows[src_idx].root,
             Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
         let (remaining, extracted) = crate::tree::extract_node(src_root, &src_path);
@@ -281,7 +401,7 @@ fn join_pane_local(app: &mut AppState, target_win: usize) {
                 app.windows[src_idx].root = rem;
                 app.windows[src_idx].active_path = crate::tree::first_leaf_path(&app.windows[src_idx].root);
             }
-            let tgt = if src_empty && target_win > src_idx { target_win - 1 } else { target_win };
+            let tgt = if src_empty && raw_target_win > src_idx { raw_target_win - 1 } else { raw_target_win };
             if src_empty {
                 app.windows.remove(src_idx);
                 if app.active_idx >= app.windows.len() {
@@ -289,8 +409,20 @@ fn join_pane_local(app: &mut AppState, target_win: usize) {
                 }
             }
             if tgt < app.windows.len() {
-                let tgt_path = app.windows[tgt].active_path.clone();
-                crate::tree::replace_leaf_with_split(&mut app.windows[tgt].root, &tgt_path, LayoutKind::Vertical, pane_node);
+                // Resolve target pane path
+                let tgt_path = if let Some(tpidx) = target_pane {
+                    let mut leaves = Vec::new();
+                    crate::tree::collect_leaf_paths_pub(&app.windows[tgt].root, &mut Vec::new(), &mut leaves);
+                    if let Some((_, p)) = leaves.get(tpidx) {
+                        p.clone()
+                    } else {
+                        app.windows[tgt].active_path.clone()
+                    }
+                } else {
+                    app.windows[tgt].active_path.clone()
+                };
+                let split_kind = if horizontal { LayoutKind::Horizontal } else { LayoutKind::Vertical };
+                crate::tree::replace_leaf_with_split(&mut app.windows[tgt].root, &tgt_path, split_kind, pane_node);
                 app.active_idx = tgt;
             }
         } else {
@@ -1588,19 +1720,84 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                // move-pane -t <window> (alias for join-pane)
-                if let Some(target) = parts[1..].iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse::<usize>().ok()) {
-                    join_pane_local(app, target);
+                let horizontal = parts[1..].iter().any(|a| *a == "-h");
+                let mut src_win: Option<usize> = None;
+                let mut src_pane: Option<usize> = None;
+                let mut tgt_win: Option<usize> = None;
+                let mut tgt_pane: Option<usize> = None;
+                let mut pi = 1;
+                while pi < parts.len() {
+                    match parts[pi] {
+                        "-s" => {
+                            if let Some(sv) = parts.get(pi + 1) {
+                                let pt = crate::cli::parse_target(sv);
+                                src_win = pt.window;
+                                src_pane = pt.pane;
+                            }
+                            pi += 2; continue;
+                        }
+                        "-t" => {
+                            if let Some(tv) = parts.get(pi + 1) {
+                                let pt = crate::cli::parse_target(tv);
+                                tgt_win = pt.window;
+                                tgt_pane = pt.pane;
+                            }
+                            pi += 2; continue;
+                        }
+                        _ => {}
+                    }
+                    pi += 1;
                 }
+                // Legacy: bare integer as target window
+                if tgt_win.is_none() {
+                    tgt_win = parts[1..].iter()
+                        .filter(|a| !a.starts_with('-'))
+                        .find(|a| a.parse::<usize>().is_ok())
+                        .and_then(|s| s.parse::<usize>().ok());
+                }
+                join_pane_local(app, src_win, src_pane, tgt_win, tgt_pane, horizontal);
             }
         }
         "join-pane" | "joinp" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                if let Some(target) = parts[1..].iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse::<usize>().ok()) {
-                    join_pane_local(app, target);
+                let horizontal = parts[1..].iter().any(|a| *a == "-h");
+                let mut src_win: Option<usize> = None;
+                let mut src_pane: Option<usize> = None;
+                let mut tgt_win: Option<usize> = None;
+                let mut tgt_pane: Option<usize> = None;
+                let mut pi = 1;
+                while pi < parts.len() {
+                    match parts[pi] {
+                        "-s" => {
+                            if let Some(sv) = parts.get(pi + 1) {
+                                let pt = crate::cli::parse_target(sv);
+                                src_win = pt.window;
+                                src_pane = pt.pane;
+                            }
+                            pi += 2; continue;
+                        }
+                        "-t" => {
+                            if let Some(tv) = parts.get(pi + 1) {
+                                let pt = crate::cli::parse_target(tv);
+                                tgt_win = pt.window;
+                                tgt_pane = pt.pane;
+                            }
+                            pi += 2; continue;
+                        }
+                        _ => {}
+                    }
+                    pi += 1;
                 }
+                // Legacy: bare integer as target window
+                if tgt_win.is_none() {
+                    tgt_win = parts[1..].iter()
+                        .filter(|a| !a.starts_with('-'))
+                        .find(|a| a.parse::<usize>().is_ok())
+                        .and_then(|s| s.parse::<usize>().ok());
+                }
+                join_pane_local(app, src_win, src_pane, tgt_win, tgt_pane, horizontal);
             }
         }
         "resize-window" | "resizew" => {
@@ -2018,3 +2215,7 @@ mod tests_mega_unit_coverage;
 #[cfg(test)]
 #[path = "../tests-rs/test_flag_parity.rs"]
 mod tests_flag_parity;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue227_remain_on_exit_hooks.rs"]
+mod tests_issue227_remain_on_exit_hooks;

@@ -672,9 +672,12 @@ fn run_main() -> io::Result<()> {
                 // so claiming it avoids the full cold-start latency.
                 // Only eligible when no custom command/dir is requested.
                 // Skipped when PSMUX_NO_WARM=1 is set or config has 'set -g warm off'.
+                // Also skipped when a custom config file is specified (-f or PSMUX_CONFIG_FILE)
+                // because the warm server loaded the default config, not the custom one.
                 let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false)
                     || crate::config::is_warm_disabled_by_config();
-                let claimed_warm = if !warm_disabled && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() && env_vars.is_empty() {
+                let has_custom_config = f_config_file.is_some() || std::env::var("PSMUX_CONFIG_FILE").is_ok();
+                let claimed_warm = if !warm_disabled && !has_custom_config && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() && env_vars.is_empty() {
                     let warm_base = if let Some(ref l) = l_socket_name {
                         format!("{}____warm__", l)
                     } else {
@@ -1735,6 +1738,35 @@ fn run_main() -> io::Result<()> {
             }
             // join-pane - Join a pane to another window
             "join-pane" | "joinp" => {
+                let mut cmd = "join-pane".to_string();
+                let mut i = 1;
+                while i < cmd_args.len() {
+                    match cmd_args[i].as_str() {
+                        "-h" => { cmd.push_str(" -h"); }
+                        "-v" => { cmd.push_str(" -v"); }
+                        "-d" => { cmd.push_str(" -d"); }
+                        "-s" => {
+                            if let Some(t) = cmd_args.get(i + 1) {
+                                cmd.push_str(&format!(" -s {}", t));
+                                i += 1;
+                            }
+                        }
+                        "-t" => {
+                            if let Some(t) = cmd_args.get(i + 1) {
+                                cmd.push_str(&format!(" -t {}", t));
+                                i += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                cmd.push('\n');
+                send_control(cmd)?;
+                return Ok(());
+            }
+            // move-pane - alias for join-pane
+            "move-pane" | "movep" => {
                 let mut cmd = "join-pane".to_string();
                 let mut i = 1;
                 while i < cmd_args.len() {
