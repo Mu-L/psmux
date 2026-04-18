@@ -290,4 +290,10 @@ Write-Host "  5ms/0ms WILL trigger stage2 (3+ chars in 20ms)" -ForegroundColor W
 Write-Host "  Any suppressed chars = PROVEN BUG (typing dropped during paste suppress)" -ForegroundColor White
 Write-Host "  Stage2 triggers during typing = paste heuristic false positive" -ForegroundColor White
 Write-Host ""
+
+if ($script:TestsFailed -eq 0) {
+    Write-Host "[PASS] Sustained fast typing: All tests passed" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Sustained fast typing: $($script:TestsFailed) test(s) failed" -ForegroundColor Red
+}
 exit $script:TestsFailed

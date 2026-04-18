@@ -321,12 +321,20 @@ if ($vp.Count -gt 0 -and $vd.Count -gt 0) {
     Write-Host "`nVERDICT:" -ForegroundColor Cyan
     if ($pStalls -gt 0 -and $dStalls -eq 0) {
         Write-Host "  FREEZE CONFIRMED: psmux has $pStalls stall(s) that direct PowerShell does NOT." -ForegroundColor Red
-    } elseif ($pMax - $dMax -gt 100) {
-        Write-Host "  NOTICEABLE LAG: psmux worst gap is ${pMax}ms vs ${dMax}ms (+$($pMax - $dMax)ms)." -ForegroundColor Red
-    } elseif ($pP90 - $dP90 -gt 20) {
-        Write-Host "  PERCEPTIBLE OVERHEAD: psmux P90 is ${pP90}ms vs ${dP90}ms (+$($pP90 - $dP90)ms)." -ForegroundColor Yellow
-    } else {
-        Write-Host "  SMOOTH: psmux overhead is within acceptable range." -ForegroundColor Green
-    }
+    Write-Host "[FAIL] Long paragraph benchmark: Freezes detected" -ForegroundColor Red
+    exit 1
+} elseif ($pMax - $dMax -gt 100) {
+    Write-Host "  NOTICEABLE LAG: psmux worst gap is ${pMax}ms vs ${dMax}ms (+$($pMax - $dMax)ms)." -ForegroundColor Red
+    Write-Host "[FAIL] Long paragraph benchmark: Excessive latency gap" -ForegroundColor Red
+    exit 1
+} elseif ($pP90 - $dP90 -gt 20) {
+    Write-Host "  PERCEPTIBLE OVERHEAD: psmux P90 is ${pP90}ms vs ${dP90}ms (+$($pP90 - $dP90)ms)." -ForegroundColor Yellow
+    Write-Host "[PASS] Long paragraph benchmark: Acceptable overhead" -ForegroundColor Green
+} else {
+    Write-Host "  SMOOTH: psmux overhead is within acceptable range." -ForegroundColor Green
+    Write-Host "[PASS] Long paragraph benchmark: Minimal overhead" -ForegroundColor Green
+}
 }
 Write-Host ""
+Write-Host "[PASS] Long paragraph benchmark completed" -ForegroundColor Green
+exit 0

@@ -409,10 +409,15 @@ Write-Host "VERDICT:" -ForegroundColor Cyan
 if ($totalStalls -gt 0) {
     Write-Host "  FREEZE DETECTED: $totalStalls stall(s) where chars stopped appearing for >200ms" -ForegroundColor Red
     Write-Host "  This is the 'typing freeze' experience the user reported." -ForegroundColor Red
+    Write-Host "[FAIL] Typing render latency test" -ForegroundColor Red
+    exit 1
 } elseif ($totalBursts -gt 0) {
     Write-Host "  BUFFERING DETECTED: Chars appear in bursts rather than smoothly." -ForegroundColor Yellow
     Write-Host "  May feel sluggish compared to direct PowerShell." -ForegroundColor Yellow
+    Write-Host "[PASS] Typing render latency: No freezes, acceptable buffering" -ForegroundColor Green
 } else {
     Write-Host "  SMOOTH: Characters appear steadily with no significant stalls or bursts." -ForegroundColor Green
+    Write-Host "[PASS] Typing render latency test" -ForegroundColor Green
 }
 Write-Host ""
+exit 0

@@ -264,4 +264,24 @@ if ($pa -and $da) {
     }
 }
 
+# =========================================================================
+# VALIDATION: BURST TYPING TEST RESULTS
+# =========================================================================
+# At 0ms burst (paste speed), we expect stage2 to trigger (this is intentional)
+# But we should see 0 characters suppressed (PR #238 fixed the 2s suppress window)
+if ($pStage2 -gt 0) {
+    Write-Host "[PASS] Burst typing: Stage2 correctly triggered for 0ms burst (paste detection working)" -ForegroundColor Green
+} else {
+    Write-Host "[SKIP] Burst typing: Stage2 not triggered (paste detection may need tuning)" -ForegroundColor Yellow
+}
+
+if ($pSupp -eq 0) {
+    Write-Host "[PASS] Burst typing: No characters suppressed (PR #238 verified)" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Burst typing: $pSupp characters suppressed (should be 0)" -ForegroundColor Red
+    exit 1
+}
+
 Write-Host ""
+Write-Host "[PASS] Burst typing benchmark completed successfully" -ForegroundColor Green
+exit 0

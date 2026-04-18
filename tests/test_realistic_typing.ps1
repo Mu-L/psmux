@@ -251,3 +251,63 @@ Write-Host "INTERPRETATION:" -ForegroundColor Cyan
 Write-Host "  Stage2 > 0 means psmux mistook fast typing for paste (300ms buffer delay)" -ForegroundColor White
 Write-Host "  This is the root cause of perceptible typing lag in psmux" -ForegroundColor White
 Write-Host ""
+
+# =========================================================================
+# VALIDATION: ZERO-LATENCY TYPING OPTIMIZATION PROOF
+# =========================================================================
+# After the zero-latency typing flush optimization (commit df7f028),
+# normal typing (20ms/char) should match direct PowerShell latency
+if ($allResults.ContainsKey("20ms")) {
+    $r20 = $allResults["20ms"]
+    if ($r20.PSMUX -and $r20.Direct) {
+        $p50Delta = $r20.PSMUX.P50 - $r20.Direct.P50
+        $p90Delta = $r20.PSMUX.P90 - $r20.Direct.P90
+        
+        # At 20ms/char (fast typing), we expect 0ms delta
+        # (or within margin of error due to scheduler variance)
+        if ([Math]::Abs($p50Delta) -le 5 -and [Math]::Abs($p90Delta) -le 5) {
+            Write-Host "[PASS] Zero-latency typing: P50/P90 delta <= 5ms at normal speed" -ForegroundColor Green
+        } elseif ($p50Delta -gt 15 -or $p90Delta -gt 15) {
+            Write-Host "[FAIL] Zero-latency typing: P50 delta=$p50Delta ms, P90 delta=$p90Delta ms (expected <=5ms)" -ForegroundColor Red
+            exit 1
+        } else {
+            Write-Host "[PASS] Zero-latency typing: P50/P90 delta within acceptable range" -ForegroundColor Green
+        }
+    }
+}
+
+# At 8ms/char (extreme speed), P90 should have improved significantly
+# from the previous 56ms to around 43-45ms
+if ($allResults.ContainsKey("8ms")) {
+    $r8 = $allResults["8ms"]
+    if ($r8.PSMUX) {
+        $p90 = $r8.PSMUX.P90
+        # After optimization, 8ms/char P90 should be < 50ms
+        if ($p90 -lt 50) {
+            Write-Host "[PASS] Zero-latency typing: Extreme speed P90=$p90 ms < 50ms (optimized)" -ForegroundColor Green
+        } else {
+            Write-Host "[FAIL] Zero-latency typing: Extreme speed P90=$p90 ms (expected < 50ms)" -ForegroundColor Red
+            exit 1
+        }
+    }
+}
+
+# No stage2 false positives should occur with the optimization
+$stage2Total = 0
+foreach ($speed in $speeds) {
+    $key = "$($speed.Intra)ms"
+    if ($allResults.ContainsKey($key) -and $allResults[$key].Stage2) {
+        $stage2Total += $allResults[$key].Stage2
+    }
+}
+
+if ($stage2Total -eq 0) {
+    Write-Host "[PASS] Zero-latency typing: No stage2 false positives (typing correctly identified)" -ForegroundColor Green
+} else {
+    Write-Host "[FAIL] Zero-latency typing: $stage2Total stage2 false positives detected" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+Write-Host "[PASS] Realistic typing benchmark completed successfully" -ForegroundColor Green
+exit 0

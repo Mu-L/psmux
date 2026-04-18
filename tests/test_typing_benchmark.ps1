@@ -383,15 +383,20 @@ if ($validPsmux.Count -gt 0 -and $validDirect.Count -gt 0) {
     if ($pTotalStalls -gt 0 -and $dTotalStalls -eq 0) {
         Write-Host "`n    VERDICT: PSMUX has $pTotalStalls stall(s) that direct PowerShell does NOT have." -ForegroundColor Red
         Write-Host "    The user's reported 'freeze feeling' is measurably real." -ForegroundColor Red
+        Write-Host "[FAIL] Typing benchmark: Stalls detected" -ForegroundColor Red
+        exit 1
     } elseif ($pTotalStalls -eq 0 -and $dTotalStalls -eq 0) {
         Write-Host "`n    VERDICT: No stalls in either environment." -ForegroundColor Green
         if ($p90Overhead -gt 30) {
             Write-Host "    However, psmux P90 is ${p90Overhead}ms higher, which may feel sluggish." -ForegroundColor Yellow
+            Write-Host "[PASS] Typing benchmark: No stalls (acceptable overhead)" -ForegroundColor Green
         } else {
             Write-Host "    Psmux overhead is minimal and should not be perceptible." -ForegroundColor Green
+            Write-Host "[PASS] Typing benchmark: Minimal overhead" -ForegroundColor Green
         }
     } else {
         Write-Host "`n    VERDICT: Both environments show stalls (possible system load)." -ForegroundColor Yellow
+        Write-Host "[PASS] Typing benchmark: Equal stall profiles" -ForegroundColor Green
     }
 }
 
