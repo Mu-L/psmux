@@ -2584,6 +2584,46 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         }
         if quit { break; }
 
+        // ── Windows zero-latency typing flush (post-event) ─────────────
+        // After exhausting all available events, if paste_pend has 1-2
+        // chars and no paste sequence is in progress, flush immediately
+        // as send-text.  This eliminates the 20ms detection window delay
+        // for normal typing while preserving paste detection:
+        //   • ConPTY clipboard injection writes all chars atomically, so
+        //     paste_pend will already have 3+ chars after the event batch.
+        //   • 1-2 char clipboard pastes already flush as send-text in the
+        //     20ms path — early flush produces identical behaviour.
+        //   • Stage2 / paste_confirmed states block this path.
+        #[cfg(windows)]
+        {
+            if !paste_confirmed && !paste_stage2
+                && paste_pend.len() >= 1 && paste_pend.len() <= 2
+            {
+                if input_log_enabled() {
+                    input_log("paste", &format!(
+                        "zero-latency flush {} char(s) as typing",
+                        paste_pend.len()));
+                }
+                for c in paste_pend.chars() {
+                    match c {
+                        '\n' => { cmd_batch.push("send-key enter\n".into()); }
+                        '\t' => { cmd_batch.push("send-key tab\n".into()); }
+                        ' '  => { cmd_batch.push("send-key space\n".into()); }
+                        _ => {
+                            let escaped = match c {
+                                '"' => "\\\"".to_string(),
+                                '\\' => "\\\\".to_string(),
+                                _ => c.to_string(),
+                            };
+                            cmd_batch.push(format!("send-text \"{}\"\n", escaped));
+                        }
+                    }
+                }
+                paste_pend.clear();
+                paste_pend_start = None;
+            }
+        }
+
         // ── Windows paste buffer flush (post-event) ────────────────────
         // If Ctrl+V Release was seen in this iteration AND we have pending
         // chars, immediately send as send-paste (don't wait for top-of-loop).
