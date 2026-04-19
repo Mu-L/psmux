@@ -64,7 +64,7 @@ pub fn is_warm_disabled_by_config() -> bool {
     false
 }
 
-/// Populate key_tables with PREFIX_DEFAULTS from help.rs.
+/// Populate key_tables with PREFIX_DEFAULTS and ROOT_DEFAULTS from help.rs.
 /// This ensures default bindings live in key_tables (like tmux)
 /// so that unbind-key <key> can actually remove them.
 /// Must be called BEFORE load_config / source_file.
@@ -78,6 +78,20 @@ pub fn populate_default_bindings(app: &mut AppState) {
                 // Only add if not already present (user config may have overridden)
                 if !table.iter().any(|b| b.key == key) {
                     table.push(Bind { key, action, repeat: false });
+                }
+            }
+        }
+    }
+
+    // Root table defaults (e.g. PageUp -> copy-mode -u)
+    let root_defaults = crate::help::ROOT_DEFAULTS;
+    let root_table = app.key_tables.entry("root".to_string()).or_default();
+    for (key_str, cmd_str) in root_defaults {
+        if let Some(key) = parse_key_name(key_str) {
+            let key = normalize_key_for_binding(key);
+            if let Some(action) = parse_command_to_action(cmd_str) {
+                if !root_table.iter().any(|b| b.key == key) {
+                    root_table.push(Bind { key, action, repeat: false });
                 }
             }
         }

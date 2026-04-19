@@ -7,7 +7,7 @@ use std::io::Write;
 use crate::types::{AppState, Mode, Action, FocusDir, LayoutKind, MenuItem, Menu, Node};
 use crate::tree::{compute_rects, kill_all_children, get_active_pane_id};
 use crate::pane::{create_window, split_active, kill_active_pane};
-use crate::copy_mode::{enter_copy_mode, switch_with_copy_save, paste_latest,
+use crate::copy_mode::{enter_copy_mode, scroll_copy_up, switch_with_copy_save, paste_latest,
     capture_active_pane, save_latest_buffer};
 use crate::session::{send_control_to_port, list_all_sessions_tree};
 use crate::window_ops::toggle_zoom;
@@ -488,7 +488,13 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
         "kill-pane" | "killp" => Some(Action::KillPane),
         "next-window" | "next" => Some(Action::NextWindow),
         "previous-window" | "prev" => Some(Action::PrevWindow),
-        "copy-mode" => Some(Action::CopyMode),
+        "copy-mode" => {
+            if parts.iter().any(|p| *p == "-u") {
+                Some(Action::Command(cmd.to_string()))
+            } else {
+                Some(Action::CopyMode)
+            }
+        }
         "paste-buffer" | "pasteb" => Some(Action::Paste),
         "detach-client" | "detach" => Some(Action::Detach),
         "rename-window" | "renamew" => Some(Action::RenameWindow),
@@ -1107,6 +1113,12 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         }
         "copy-mode" => {
             enter_copy_mode(app);
+            if parts.iter().any(|a| *a == "-u") {
+                let half = app.windows.get(app.active_idx)
+                    .and_then(|w| crate::tree::active_pane(&w.root, &w.active_path))
+                    .map(|p| p.last_rows as usize).unwrap_or(20);
+                scroll_copy_up(app, half);
+            }
         }
         "display-panes" | "displayp" => {
             let win = &app.windows[app.active_idx];

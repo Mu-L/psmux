@@ -1905,12 +1905,21 @@ fn run_main() -> io::Result<()> {
                         // No running server — emit built-in defaults filtered by -T and key.
                         // Real tmux supports this without a server for the prefix table.
                         let table = table_filter.as_deref().unwrap_or("prefix");
-                        for (key, action) in crate::help::PREFIX_DEFAULTS {
-                            if table != "prefix" { break; }
-                            if let Some(ref kf) = key_filter {
-                                if *key != kf.as_str() { continue; }
+                        if table == "prefix" || table_filter.is_none() {
+                            for (key, action) in crate::help::PREFIX_DEFAULTS {
+                                if let Some(ref kf) = key_filter {
+                                    if *key != kf.as_str() { continue; }
+                                }
+                                println!("bind-key -T prefix {} {}", key, action);
                             }
-                            println!("bind-key -T {} {} {}", table, key, action);
+                        }
+                        if table == "root" || table_filter.is_none() {
+                            for (key, action) in crate::help::ROOT_DEFAULTS {
+                                if let Some(ref kf) = key_filter {
+                                    if *key != kf.as_str() { continue; }
+                                }
+                                println!("bind-key -T root {} {}", key, action);
+                            }
                         }
                     }
                 }

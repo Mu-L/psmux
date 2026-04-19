@@ -292,12 +292,15 @@ fn populate_default_bindings_adds_all_prefix_defaults() {
 }
 
 #[test]
-fn populate_default_bindings_does_not_add_root_bindings() {
+fn populate_default_bindings_adds_root_bindings() {
     let mut app = mock_app();
     populate_default_bindings(&mut app);
 
-    // Root table should not exist or be empty (no default root bindings in tmux)
+    // Root table should have default bindings (e.g. PageUp -> copy-mode -u, matching tmux)
     let root = app.key_tables.get("root");
-    assert!(root.is_none() || root.unwrap().is_empty(),
-        "root table should not have default bindings");
+    assert!(root.is_some() && !root.unwrap().is_empty(),
+        "root table should have default bindings (e.g. PageUp)");
+    let root_table = root.unwrap();
+    let has_pageup = root_table.iter().any(|b| b.key.0 == crossterm::event::KeyCode::PageUp);
+    assert!(has_pageup, "root table should have PageUp default binding");
 }

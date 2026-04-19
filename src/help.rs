@@ -4,6 +4,12 @@
 // bloat existing source files.
 // ─────────────────────────────────────────────────────────────────────
 
+/// Default root-table keybindings (no prefix required).
+/// These match tmux defaults for the root key table.
+pub const ROOT_DEFAULTS: &[(&str, &str)] = &[
+    ("PageUp",  "copy-mode -u"),
+];
+
 /// Default prefix-table keybindings.
 /// Each entry is `(key_string, command_string)`.
 /// The overlay and `list-keys` both use this as the canonical source
