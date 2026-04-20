@@ -946,30 +946,94 @@ pub fn compute_capture_range(s: Option<i32>, e: Option<i32>, last_row: u16) -> (
 pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i32>) -> io::Result<Option<String>> {
     let win = &mut app.windows[app.active_idx];
     let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
-    let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
-    let screen = parser.screen();
-    let last_row = p.last_rows.saturating_sub(1);
-    let (start, end) = compute_capture_range(s, e, last_row);
-    let mut text = String::new();
-    for r in start..=end {
-        let mut row = String::new();
-        for c in 0..p.last_cols { if let Some(cell) = screen.cell(r, c) { row.push_str(&cell.contents().to_string()); } else { row.push(' '); } }
-        text.push_str(row.trim_end());
-        text.push('\n');
+    let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
+    let rows = p.last_rows;
+    let cols = p.last_cols;
+    let last_row = rows.saturating_sub(1) as i32;
+
+    // If all args are non-negative (or None), use the fast visible-only path
+    let needs_scrollback = matches!(s, Some(v) if v < 0);
+    if !needs_scrollback {
+        let (start, end) = compute_capture_range(s, e, last_row as u16);
+        let screen = parser.screen();
+        let mut text = String::new();
+        for r in start..=end {
+            let mut row = String::new();
+            for c in 0..cols { if let Some(cell) = screen.cell(r, c) { row.push_str(&cell.contents().to_string()); } else { row.push(' '); } }
+            text.push_str(row.trim_end());
+            text.push('\n');
+        }
+        return Ok(Some(text));
     }
+
+    // Scrollback-aware capture path.
+    // Absolute line numbering: 0 = top of visible (at scrollback 0),
+    // negative = lines above visible top (into scrollback history).
+    // Determine actual retained scrollback depth.
+    let saved_sb = parser.screen().scrollback();
+    parser.screen_mut().set_scrollback(usize::MAX);
+    let max_sb = parser.screen().scrollback() as i64;
+    parser.screen_mut().set_scrollback(saved_sb);
+
+    // Resolve start: i32::MIN means "all history", other negatives are offsets
+    let start_abs: i64 = match s {
+        Some(v) if v == i32::MIN => -max_sb,
+        Some(v) => (v as i64).max(-max_sb),
+        None => 0,
+    };
+    // Resolve end: negative means N lines above visible top, None means last visible row
+    let end_abs: i64 = match e {
+        Some(v) if v < 0 => (v as i64).max(-max_sb),
+        Some(v) => (v as i64).min(last_row as i64),
+        None => last_row as i64,
+    };
+
+    if start_abs > end_abs { parser.screen_mut().set_scrollback(saved_sb); return Ok(Some(String::new())); }
+
+    // Walk scrollback in batches (same pattern as yank_selection).
+    // At scrollback offset S, screen row R shows absolute line (R - S).
+    // To read absolute line L, set scrollback so L maps to a visible row.
+    let mut text = String::new();
+    let mut next_abs = start_abs;
+    while next_abs <= end_abs {
+        let target_sb = (-next_abs).max(0) as usize;
+        parser.screen_mut().set_scrollback(target_sb);
+        let actual_sb = parser.screen().scrollback() as i64;
+        let vis_start_abs = -actual_sb;
+        let vis_end_abs = -actual_sb + rows as i64 - 1;
+        let read_start = next_abs.max(vis_start_abs);
+        let read_end = end_abs.min(vis_end_abs);
+        if read_start > read_end { break; }
+
+        for aline in read_start..=read_end {
+            let r = (aline + actual_sb) as u16;
+            let mut row = String::new();
+            for c in 0..cols {
+                if let Some(cell) = parser.screen().cell(r, c) { row.push_str(&cell.contents().to_string()); } else { row.push(' '); }
+            }
+            text.push_str(row.trim_end());
+            text.push('\n');
+        }
+        next_abs = read_end + 1;
+    }
+
+    // Restore original scrollback offset (no side effects on user view)
+    parser.screen_mut().set_scrollback(saved_sb);
     Ok(Some(text))
 }
 
 /// Capture the active pane's screen content with ANSI escape sequences preserved.
 /// This is the `-e` flag for capture-pane.  Supports optional start/end range.
+/// Negative -S values read from scrollback history; i32::MIN means all retained history.
 pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<i32>) -> io::Result<Option<String>> {
     let win = &mut app.windows[app.active_idx];
     let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
-    let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
-    let screen = parser.screen();
-    let last_row = p.last_rows.saturating_sub(1);
-    let (start_row, end_row) = compute_capture_range(s, e, last_row);
-    let mut text = String::new();
+    let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
+    let rows = p.last_rows;
+    let cols = p.last_cols;
+    let last_row = rows.saturating_sub(1) as i32;
+
+    // SGR delta tracker state (persists across scrollback batches)
     let mut prev_fg: Option<vt100::Color> = None;
     let mut prev_bg: Option<vt100::Color> = None;
     let mut prev_bold = false;
@@ -981,12 +1045,12 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
     let mut prev_hidden = false;
     let mut prev_strikethrough = false;
 
-    for r in start_row..=end_row {
-        // Build the row content, then trim trailing whitespace
+    // Helper closure: render one screen row with SGR tracking
+    let mut render_styled_row = |screen: &vt100::Screen, r: u16, text: &mut String| {
         let mut row_chars: Vec<String> = Vec::new();
         let mut row_sgr: Vec<Option<String>> = Vec::new();
         let mut any_style_active = false;
-        for c in 0..p.last_cols {
+        for c in 0..cols {
             if let Some(cell) = screen.cell(r, c) {
                 let fg = cell.fgcolor();
                 let bg = cell.bgcolor();
@@ -999,7 +1063,6 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                 let hidden = cell.hidden();
                 let strikethrough = cell.strikethrough();
 
-                // Emit SGR if attributes changed
                 let style_changed = Some(fg) != prev_fg || Some(bg) != prev_bg
                     || bold != prev_bold || dim != prev_dim
                     || italic != prev_italic
@@ -1009,7 +1072,7 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
 
                 let sgr = if style_changed {
                     let mut params = Vec::new();
-                    params.push("0".to_string()); // reset first
+                    params.push("0".to_string());
                     if bold { params.push("1".to_string()); }
                     if dim { params.push("2".to_string()); }
                     if italic { params.push("3".to_string()); }
@@ -1018,7 +1081,6 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                     if inverse { params.push("7".to_string()); }
                     if hidden { params.push("8".to_string()); }
                     if strikethrough { params.push("9".to_string()); }
-                    // Foreground
                     match fg {
                         vt100::Color::Default => {}
                         vt100::Color::Idx(n) => {
@@ -1028,7 +1090,6 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                         }
                         vt100::Color::Rgb(r, g, b) => { params.push(format!("38;2;{};{};{}", r, g, b)); }
                     }
-                    // Background
                     match bg {
                         vt100::Color::Default => {}
                         vt100::Color::Idx(n) => {
@@ -1060,12 +1121,8 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                 row_chars.push(" ".to_string());
             }
         }
-        // Find last non-whitespace cell to trim trailing spaces
         let last_non_ws = row_chars.iter().rposition(|s| !s.is_empty() && s.trim() != "");
-        let trim_end = match last_non_ws {
-            Some(pos) => pos + 1,
-            None => 0,  // entirely empty row
-        };
+        let trim_end = match last_non_ws { Some(pos) => pos + 1, None => 0 };
         for c in 0..trim_end {
             if let Some(ref sgr) = row_sgr[c] { text.push_str(sgr); }
             text.push_str(&row_chars[c]);
@@ -1083,7 +1140,60 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
             prev_hidden = false;
         }
         text.push('\n');
+    };
+
+    // Fast path: no scrollback needed
+    let needs_scrollback = matches!(s, Some(v) if v < 0);
+    if !needs_scrollback {
+        let (start_row, end_row) = compute_capture_range(s, e, last_row as u16);
+        let mut text = String::new();
+        for r in start_row..=end_row {
+            let screen = parser.screen();
+            render_styled_row(screen, r, &mut text);
+        }
+        return Ok(Some(text));
     }
+
+    // Scrollback-aware styled capture
+    let saved_sb = parser.screen().scrollback();
+    parser.screen_mut().set_scrollback(usize::MAX);
+    let max_sb = parser.screen().scrollback() as i64;
+    parser.screen_mut().set_scrollback(saved_sb);
+
+    let start_abs: i64 = match s {
+        Some(v) if v == i32::MIN => -max_sb,
+        Some(v) => (v as i64).max(-max_sb),
+        None => 0,
+    };
+    let end_abs: i64 = match e {
+        Some(v) if v < 0 => (v as i64).max(-max_sb),
+        Some(v) => (v as i64).min(last_row as i64),
+        None => last_row as i64,
+    };
+
+    if start_abs > end_abs { parser.screen_mut().set_scrollback(saved_sb); return Ok(Some(String::new())); }
+
+    let mut text = String::new();
+    let mut next_abs = start_abs;
+    while next_abs <= end_abs {
+        let target_sb = (-next_abs).max(0) as usize;
+        parser.screen_mut().set_scrollback(target_sb);
+        let actual_sb = parser.screen().scrollback() as i64;
+        let vis_start_abs = -actual_sb;
+        let vis_end_abs = -actual_sb + rows as i64 - 1;
+        let read_start = next_abs.max(vis_start_abs);
+        let read_end = end_abs.min(vis_end_abs);
+        if read_start > read_end { break; }
+
+        for aline in read_start..=read_end {
+            let r = (aline + actual_sb) as u16;
+            let screen = parser.screen();
+            render_styled_row(screen, r, &mut text);
+        }
+        next_abs = read_end + 1;
+    }
+
+    parser.screen_mut().set_scrollback(saved_sb);
     Ok(Some(text))
 }
 

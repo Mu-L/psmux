@@ -2316,3 +2316,7 @@ mod tests_issue227_remain_on_exit_hooks;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue235_display_panes_base_index.rs"]
 mod tests_issue235_display_panes_base_index;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue244_capture_scrollback.rs"]
+mod tests_issue244_capture_scrollback;

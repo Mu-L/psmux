@@ -595,7 +595,7 @@ match cmd {
         let s_arg = args.windows(2).find(|w| w[0] == "-S").map(|w| w[1]);
         let e_arg = args.windows(2).find(|w| w[0] == "-E").map(|w| w[1]);
         let start: Option<i32> = match s_arg {
-            Some("-") => Some(0), // entire scrollback start
+            Some("-") => Some(i32::MIN), // entire scrollback start
             Some(v) => v.parse::<i32>().ok(),
             None => None,
         };
@@ -2499,7 +2499,7 @@ fn dispatch_control_command(
             true
         }
         "capture-pane" | "capturep" => {
-            let start = args.windows(2).find(|w| w[0] == "-S").and_then(|w| w[1].parse::<i32>().ok());
+            let start = args.windows(2).find(|w| w[0] == "-S").and_then(|w| if w[1] == "-" { Some(i32::MIN) } else { w[1].parse::<i32>().ok() });
             let end = args.windows(2).find(|w| w[0] == "-E").and_then(|w| w[1].parse::<i32>().ok());
             let styled = args.iter().any(|a| *a == "-e");
             let (rtx, rrx) = mpsc::channel::<String>();
