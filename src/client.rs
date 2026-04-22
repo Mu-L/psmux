@@ -1689,24 +1689,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                                         if let Ok(p) = port_str.trim().parse::<u16>() {
                                                             let sess_addr = format!("127.0.0.1:{}", p);
                                                             let sess_key = read_session_key(base).unwrap_or_default();
-                                                            let info = if let Ok(mut ss) = std::net::TcpStream::connect_timeout(
-                                                                &sess_addr.parse().unwrap(), Duration::from_millis(25)
-                                                            ) {
-                                                                let _ = ss.set_read_timeout(Some(Duration::from_millis(25)));
-                                                                let _ = write!(ss, "AUTH {}\n", sess_key);
-                                                                let _ = ss.write_all(b"session-info\n");
-                                                                let mut br = BufReader::new(ss);
-                                                                let mut al = String::new();
-                                                                let _ = br.read_line(&mut al);
-                                                                let mut line = String::new();
-                                                                if br.read_line(&mut line).is_ok() && !line.trim().is_empty() {
-                                                                    line.trim().to_string()
-                                                                } else {
-                                                                    format!("{}: (no info)", base)
-                                                                }
-                                                            } else {
-                                                                format!("{}: (not responding)", base)
-                                                            };
+                                                            let info = crate::session::fetch_session_info(
+                                                                &sess_addr,
+                                                                &sess_key,
+                                                                Duration::from_millis(25),
+                                                                Duration::from_millis(150),
+                                                            )
+                                                            .unwrap_or_else(|| format!("{}: (not responding)", base));
                                                             session_entries.push((base.to_string(), info));
                                                         }
                                                     }

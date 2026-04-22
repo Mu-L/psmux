@@ -122,6 +122,50 @@ pub fn send_auth_cmd_response(addr: &str, key: &str, cmd: &[u8]) -> io::Result<S
     Ok(buf)
 }
 
+/// Fetch a one-line `session-info` response from a session server.
+///
+/// Connects to `addr`, authenticates with `key`, sends `session-info`, and
+/// returns the server's info line. Returns `None` if the connection fails,
+/// authentication is rejected, or the info line doesn't arrive in time.
+///
+/// The AUTH ack (`OK\n`) is filtered out explicitly rather than assumed to
+/// be the first line: when the AUTH reply is slow enough for the first
+/// `read_line` to time out, a naive two-read protocol picks up the late
+/// `OK` in the second read and mis-reports it as the session info. See
+/// issue #250.
+pub fn fetch_session_info(
+    addr: &str,
+    key: &str,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Option<String> {
+    let sock_addr: std::net::SocketAddr = addr.parse().ok()?;
+    let mut s = std::net::TcpStream::connect_timeout(&sock_addr, connect_timeout).ok()?;
+    s.set_read_timeout(Some(read_timeout)).ok()?;
+    let _ = s.set_nodelay(true);
+    write!(s, "AUTH {}\n", key).ok()?;
+    s.write_all(b"session-info\n").ok()?;
+    let _ = s.flush();
+
+    let mut br = std::io::BufReader::new(s);
+    let mut line = String::new();
+    if std::io::BufRead::read_line(&mut br, &mut line).ok()? == 0 {
+        return None;
+    }
+    if line.trim() == "OK" {
+        line.clear();
+        if std::io::BufRead::read_line(&mut br, &mut line).ok()? == 0 {
+            return None;
+        }
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed == "OK" || trimmed.starts_with("ERROR:") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 pub fn send_control(line: String) -> io::Result<()> {
     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
     let mut target = env::var("PSMUX_TARGET_SESSION").ok().unwrap_or_else(|| "default".to_string());
@@ -511,3 +555,7 @@ pub fn kill_remaining_server_processes() {
         .args(&["-f", "psmux|pmux"])
         .status();
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_session.rs"]
+mod tests;
