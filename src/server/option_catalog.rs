@@ -29,6 +29,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "mouse", scope: "session", option_type: "boolean", default: "off", description: "Enable mouse support" },
     OptionDef { name: "scroll-enter-copy-mode", scope: "session", option_type: "boolean", default: "on", description: "Enter copy mode on mouse scroll up at shell prompt" },
     OptionDef { name: "pwsh-mouse-selection", scope: "session", option_type: "boolean", default: "off", description: "Windows 11 PowerShell-style drag selection (pane-aware, right-click to copy, word/line multi-click)" },
+    OptionDef { name: "paste-detection", scope: "session", option_type: "boolean", default: "on", description: "Detect Ctrl+V paste from console host and send as bracketed paste (disable to let Ctrl+V reach child apps)" },
     OptionDef { name: "mode-keys", scope: "session", option_type: "choice", default: "emacs", description: "Key bindings in copy mode (vi/emacs)" },
     OptionDef { name: "status", scope: "session", option_type: "boolean", default: "on", description: "Show/hide the status bar" },
     OptionDef { name: "status-position", scope: "session", option_type: "choice", default: "bottom", description: "Status bar position (top/bottom)" },

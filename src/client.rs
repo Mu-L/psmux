@@ -497,6 +497,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Synced bindings from server (updated each frame from DumpState)
     let mut synced_bindings: Vec<BindingEntry> = Vec::new();
     let mut defaults_suppressed: bool = false;
+    // When false, Ctrl+V is forwarded to the child app instead of being
+    // intercepted for paste detection.
+    #[cfg(windows)]
+    let mut paste_detection_enabled: bool = true;
 
     // ── Windows paste detection state ──────────────────────────────────
     // On Windows, Ctrl+V paste injects individual Key events BEFORE the
@@ -603,6 +607,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     fn default_status_lines() -> usize { 1 }
     fn default_status_visible() -> bool { true }
     fn default_repeat_time() -> u64 { 500 }
+    fn default_paste_detection() -> bool { true }
 
     /// A single key binding synced from the server.
     #[derive(serde::Deserialize, Clone, Debug)]
@@ -702,6 +707,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// pwsh-mouse-selection option (mirror of server-side AppState field)
         #[serde(default)]
         pwsh_mouse_selection: bool,
+        /// paste-detection option (mirror of server-side AppState field)
+        #[serde(default = "default_paste_detection")]
+        paste_detection: bool,
         /// status-left-length (max display width for left status)
         #[serde(default = "default_status_left_length")]
         status_left_length: usize,
@@ -1120,10 +1128,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     // read the clipboard ourselves and forward the content
                     // as a bracketed-paste so child apps (Claude CLI, etc.)
                     // can distinguish paste from typed input.
+                    // Skipped when paste-detection is off.
                     #[cfg(windows)]
                     Event::Key(key) if key.kind == KeyEventKind::Release
                         && matches!(key.code, KeyCode::Char('v'))
-                        && key.modifiers == KeyModifiers::CONTROL =>
+                        && key.modifiers == KeyModifiers::CONTROL
+                        && paste_detection_enabled =>
                     {
                         if input_log_enabled() {
                             input_log("paste", &format!("Ctrl+V Release detected, paste_pend len={}", paste_pend.len()));
@@ -2237,12 +2247,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     rsel_dragged = false;
                                     selection_changed = true;
                                 }
-                                // On Windows, suppress Ctrl+V Press — the console host
-                                // already injected clipboard content as character events
-                                // and the paste mechanism handles them.  Forwarding C-v
-                                // to the PTY would cause PowerShell to paste a second time.
+                                // On Windows, suppress Ctrl+V Press when paste-detection
+                                // is enabled — the console host already injected clipboard
+                                // content as character events and the paste mechanism
+                                // handles them.  When paste-detection is off, forward C-v
+                                // to the child app (e.g. neovim visual block mode).
                                 #[cfg(windows)]
-                                KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {}
+                                KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL && paste_detection_enabled => {}
+                                #[cfg(windows)]
+                                KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL && !paste_detection_enabled => {
+                                    cmd_batch.push("send-key C-v\n".to_string());
+                                }
                                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     cmd_batch.push(format!("send-key C-{}\n", c.to_ascii_lowercase()));
                                 }
@@ -2947,6 +2962,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         client_base_index = base_index;
         client_copy_mode = active_pane_in_copy_mode(&root);
         client_pwsh_selection = state.pwsh_mouse_selection;
+        #[cfg(windows)]
+        { paste_detection_enabled = state.paste_detection; }
         client_zoomed = state.zoomed;
         let dim_preds = state.prediction_dimming;
         clock_active = state.clock_mode;

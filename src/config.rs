@@ -531,6 +531,7 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "mouse" => app.mouse_enabled = matches!(value, "on" | "true" | "1"),
         "scroll-enter-copy-mode" => app.scroll_enter_copy_mode = matches!(value, "on" | "true" | "1"),
         "pwsh-mouse-selection" => app.pwsh_mouse_selection = matches!(value, "on" | "true" | "1"),
+        "paste-detection" => app.paste_detection = matches!(value, "on" | "true" | "1"),
         "prefix" => {
             if let Some(key) = parse_key_name(value) {
                 app.prefix_key = key;
@@ -1603,6 +1604,10 @@ mod tests_issue193_scroll_enter_copy_mode;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue198_unbind_individual.rs"]
 mod tests_issue198_unbind_individual;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue198_cv_persist.rs"]
+mod tests_issue198_cv_persist;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_config_exhaustive.rs"]

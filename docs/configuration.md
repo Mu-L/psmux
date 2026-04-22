@@ -104,6 +104,7 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `mouse` | Bool | `on` | Mouse support |
 | `scroll-enter-copy-mode` | Bool | `on` | Enter copy mode on mouse scroll (set `off` to disable) |
 | `pwsh-mouse-selection` | Bool | `off` | Windows 11 PowerShell-style word/line selection (double/triple-click) |
+| `paste-detection` | Bool | `on` | Detect Ctrl+V paste from console host and send as bracketed paste (set `off` to let Ctrl+V reach child apps like neovim) |
 | `status` | Bool/Int | `on` | Show status bar (number = line count) |
 | `status-position` | Str | `bottom` | `top` or `bottom` |
 | `status-justify` | Str | `left` | `left`, `centre`, `right`, `absolute-centre` |
@@ -253,6 +254,26 @@ set -g pwsh-mouse-selection on
 
 When `scroll-enter-copy-mode` is `off`, scrolling in a pane does not enter copy mode and instead passes scroll events directly to the running application.
 
+### Paste Detection (Ctrl+V Passthrough)
+
+On Windows, the console host intercepts Ctrl+V, reads the clipboard, and injects the content as character events. psmux detects this pattern and reassembles it into a single bracketed paste for child applications. This is the `paste-detection` option and it is enabled by default.
+
+If you use TUI applications like **neovim** or **vim** where Ctrl+V has a different meaning (visual block mode), the paste detection will intercept the keypress before it reaches the application. To let Ctrl+V pass through to the child app:
+
+```tmux
+# Disable paste detection so Ctrl+V reaches child apps
+set -g paste-detection off
+```
+
+With paste detection off, you can still paste using:
+
+* **Ctrl+Shift+V** (Windows Terminal default paste shortcut)
+* **Right click** (paste in most terminals)
+* **Prefix + ]** (psmux paste from buffer)
+* **`psmux send-keys C-v`** from another terminal
+
+> **Note:** `unbind-key -n C-v` alone is not sufficient to stop Ctrl+V interception because the paste detection operates outside the key binding system. You must use `set -g paste-detection off`.
+
 ### Command Chaining
 
 psmux supports tmux-style command chaining with the `;` operator. Multiple commands on a single line are executed sequentially:
@@ -296,6 +317,7 @@ bind-key C-Space send-prefix
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `prediction-dimming` | Bool | `off` | Dim predictive/speculative text |
+| `paste-detection` | Bool | `on` | Detect Ctrl+V paste from console host (set `off` for neovim/vim Ctrl+V) |
 | `cursor-style` | Str | | Cursor shape: `block`, `underline`, or `bar` |
 | `cursor-blink` | Bool | `off` | Cursor blinking |
 | `env-shim` | Bool | `on` | Inject Unix-compatible `env` function in PowerShell panes |

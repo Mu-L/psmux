@@ -65,6 +65,7 @@ temp_cmd.txt
 *fix_results*.txt
 *_results.txt
 *test_*.txt
+*tmp_*.txt
 
 # Database files
 *.db
