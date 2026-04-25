@@ -915,10 +915,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut tree_entries: Vec<(bool, usize, usize, String, String)> = Vec::new();  // (is_win, id, sub_id, label, session_name)
     let mut tree_selected: usize = 0;
     let mut tree_scroll: usize = 0;
+    // Digit-jump buffer for the choose-tree / choose-window picker.
+    // Same UX as session_num_buffer: digits append, Enter jumps, Backspace
+    // edits, Esc clears. Numbered prefix is rendered next to each row so
+    // the digit-to-row mapping is visible.
+    let mut tree_num_buffer = String::new();
     let mut buffer_chooser = false;
     let mut buffer_entries: Vec<(usize, usize, String)> = Vec::new();  // (index, byte_len, preview)
     let mut buffer_selected: usize = 0;
     let mut buffer_scroll: usize = 0;
+    // Digit-jump buffer for the choose-buffer picker.
+    let mut buffer_num_buffer = String::new();
     let mut session_chooser = false;
     let mut session_entries: Vec<(String, String)> = Vec::new();
     let mut session_selected: usize = 0;
@@ -926,6 +933,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Digits typed while the picker is open accumulate here and are consumed
     // when the user presses Enter — "12" + Enter jumps to the 12th session.
     let mut session_num_buffer = String::new();
+    // Digit-jump buffer for the customize-mode picker. Customize lives on
+    // the server, so Enter computes a navigate delta and dispatches
+    // `customize-navigate <delta>` instead of mutating local state directly.
+    let mut customize_num_buffer = String::new();
     // Live preview cache for choose-tree / choose-session pickers (issue #257).
     // Keyed by "session\twin_id\tpane_id"; pane_id == usize::MAX => active pane.
     let mut preview_cache: crate::preview::PreviewCache = std::collections::HashMap::new();
@@ -1876,14 +1887,42 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                             } else {
                                 match key.code {
-                                    KeyCode::Esc | KeyCode::Char('q') => { cmd_batch.push("overlay-close\n".into()); }
+                                    KeyCode::Esc | KeyCode::Char('q') => {
+                                        customize_num_buffer.clear();
+                                        cmd_batch.push("overlay-close\n".into());
+                                    }
                                     KeyCode::Up | KeyCode::Char('k') => { cmd_batch.push("customize-navigate -1\n".into()); }
                                     KeyCode::Down | KeyCode::Char('j') => { cmd_batch.push("customize-navigate 1\n".into()); }
                                     KeyCode::PageUp => { cmd_batch.push("customize-navigate -20\n".into()); }
                                     KeyCode::PageDown => { cmd_batch.push("customize-navigate 20\n".into()); }
                                     KeyCode::Home | KeyCode::Char('g') => { cmd_batch.push("customize-navigate -9999\n".into()); }
                                     KeyCode::End | KeyCode::Char('G') => { cmd_batch.push("customize-navigate 9999\n".into()); }
-                                    KeyCode::Enter => { cmd_batch.push("customize-edit\n".into()); }
+                                    KeyCode::Backspace => { customize_num_buffer.pop(); }
+                                    KeyCode::Enter => {
+                                        // Digit-jump: number+Enter navigates to the Nth visible
+                                        // option (1-based). Empty buffer falls back to the
+                                        // existing edit-on-Enter behavior.
+                                        if customize_num_buffer.is_empty() {
+                                            cmd_batch.push("customize-edit\n".into());
+                                        } else {
+                                            let want_pos = customize_num_buffer.parse::<usize>().ok()
+                                                .filter(|n| *n >= 1 && *n <= srv_customize_options.len());
+                                            if let Some(pos) = want_pos {
+                                                // current_pos = index of the highlighted opt within the
+                                                // visible (filtered) option list.
+                                                let cur_pos = srv_customize_options.iter()
+                                                    .position(|o| o.i == srv_customize_selected)
+                                                    .unwrap_or(0);
+                                                let target_pos = pos - 1;
+                                                let delta = target_pos as i64 - cur_pos as i64;
+                                                if delta != 0 {
+                                                    cmd_batch.push(format!("customize-navigate {}\n", delta));
+                                                }
+                                                customize_num_buffer.clear();
+                                            }
+                                            // unparseable / out-of-range -> keep buffer
+                                        }
+                                    }
                                     KeyCode::Char('d') => { cmd_batch.push("customize-reset-default\n".into()); }
                                     KeyCode::Char('/') => {
                                         // Toggle filter: if filter active, clear it
@@ -1892,6 +1931,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         }
                                         // For entering a new filter, we would need a mini prompt.
                                         // For now, users type filter text via subsequent keystrokes.
+                                    }
+                                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                                        if customize_num_buffer.len() < 6 {
+                                            customize_num_buffer.push(c);
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -1907,6 +1951,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             session_chooser = false;
                             keys_viewer = false;
                             confirm_cmd = None;
+                            // Drop any pending digit-jump buffers when the
+                            // pickers are dismissed via Esc.
+                            tree_num_buffer.clear();
+                            buffer_num_buffer.clear();
+                            session_num_buffer.clear();
                             // Also clear any lingering selection
                             rsel_start = None;
                             rsel_end = None;
@@ -2089,6 +2138,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 tree_entries.clear();
                                 tree_selected = 0;
                                 tree_scroll = 0;
+                                tree_num_buffer.clear();
                                 popup_offset = (0, 0);
                                 popup_dragging = false;
                                 popup_rect_last = None;
@@ -2225,6 +2275,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 buffer_entries.clear();
                                 buffer_selected = 0;
                                 buffer_scroll = 0;
+                                buffer_num_buffer.clear();
                                 // Fetch buffer list from server via TCP
                                 let port_file = format!("{}\\.psmux\\{}.port", home, current_session);
                                 if let Ok(port_str) = std::fs::read_to_string(&port_file) {
@@ -2419,36 +2470,68 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Char(_) if session_chooser => {}
                                 KeyCode::Up if tree_chooser => { if tree_selected > 0 { tree_selected -= 1; } }
                                 KeyCode::Down if tree_chooser => { if tree_selected + 1 < tree_entries.len() { tree_selected += 1; } }
+                                KeyCode::PageUp if tree_chooser => { tree_selected = tree_selected.saturating_sub(10); }
+                                KeyCode::PageDown if tree_chooser => { tree_selected = (tree_selected + 10).min(tree_entries.len().saturating_sub(1)); }
+                                KeyCode::Home if tree_chooser => { tree_selected = 0; }
+                                KeyCode::End if tree_chooser => { tree_selected = tree_entries.len().saturating_sub(1); }
                                 KeyCode::Enter if tree_chooser => {
-                                    if let Some((is_win, wid, pid, _label, sess_name)) = tree_entries.get(tree_selected) {
-                                        if *wid == usize::MAX {
-                                            // Session header — switch to that session
-                                            if *sess_name != current_session {
+                                    // Digit-jump: if a number was typed, prefer it over the
+                                    // arrow cursor. Buffer is 1-based: "1" -> first row,
+                                    // "12" -> twelfth. Out-of-range or unparseable -> no-op
+                                    // (keep buffer so user can Backspace and fix).
+                                    let target_idx: Option<usize> = if tree_num_buffer.is_empty() {
+                                        Some(tree_selected)
+                                    } else {
+                                        match tree_num_buffer.parse::<usize>() {
+                                            Ok(n) if n >= 1 && n <= tree_entries.len() => Some(n - 1),
+                                            _ => None,
+                                        }
+                                    };
+                                    if let Some(sel_idx) = target_idx {
+                                        if let Some((is_win, wid, pid, _label, sess_name)) = tree_entries.get(sel_idx) {
+                                            if *wid == usize::MAX {
+                                                // Session header — switch to that session
+                                                if *sess_name != current_session {
+                                                    cmd_batch.push("client-detach\n".into());
+                                                    env::set_var("PSMUX_SWITCH_TO", sess_name);
+                                                    quit = true;
+                                                }
+                                                tree_chooser = false;
+                                                tree_num_buffer.clear();
+                                            } else if *sess_name != current_session {
+                                                // Window/pane in another session — switch to that session
                                                 cmd_batch.push("client-detach\n".into());
                                                 env::set_var("PSMUX_SWITCH_TO", sess_name);
                                                 quit = true;
+                                                tree_chooser = false;
+                                                tree_num_buffer.clear();
+                                            } else if *is_win {
+                                                cmd_batch.push(format!("focus-window {}\n", wid));
+                                                tree_chooser = false;
+                                                tree_num_buffer.clear();
+                                            } else {
+                                                cmd_batch.push(format!("focus-pane {}\n", pid));
+                                                tree_chooser = false;
+                                                tree_num_buffer.clear();
                                             }
-                                            tree_chooser = false;
-                                        } else if *sess_name != current_session {
-                                            // Window/pane in another session — switch to that session
-                                            cmd_batch.push("client-detach\n".into());
-                                            env::set_var("PSMUX_SWITCH_TO", sess_name);
-                                            quit = true;
-                                            tree_chooser = false;
-                                        } else if *is_win {
-                                            cmd_batch.push(format!("focus-window {}\n", wid));
-                                            tree_chooser = false;
-                                        } else {
-                                            cmd_batch.push(format!("focus-pane {}\n", pid));
-                                            tree_chooser = false;
                                         }
                                     }
                                 }
-                                KeyCode::Esc if tree_chooser => { tree_chooser = false; }
+                                KeyCode::Esc if tree_chooser => { tree_chooser = false; tree_num_buffer.clear(); }
+                                KeyCode::Backspace if tree_chooser => { tree_num_buffer.pop(); }
                                 // 'p' toggles the live preview pane in choose-tree
                                 KeyCode::Char('p') if tree_chooser => {
                                     preview_enabled = !preview_enabled;
                                 }
+                                KeyCode::Char(c) if tree_chooser && c.is_ascii_digit() => {
+                                    // Append to the digit-jump buffer; Enter consumes it.
+                                    if tree_num_buffer.len() < 6 {
+                                        tree_num_buffer.push(c);
+                                    }
+                                }
+                                // Absorb any other char while the tree picker is open so
+                                // it cannot leak through to the focused pane's PTY.
+                                KeyCode::Char(_) if tree_chooser => {}
                                 // --- buffer chooser (C-b =) ---
                                 KeyCode::Up | KeyCode::Char('k') if buffer_chooser => {
                                     if buffer_selected > 0 { buffer_selected -= 1; }
@@ -2456,13 +2539,29 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Down | KeyCode::Char('j') if buffer_chooser => {
                                     if buffer_selected + 1 < buffer_entries.len() { buffer_selected += 1; }
                                 }
+                                KeyCode::PageUp if buffer_chooser => { buffer_selected = buffer_selected.saturating_sub(10); }
+                                KeyCode::PageDown if buffer_chooser => { buffer_selected = (buffer_selected + 10).min(buffer_entries.len().saturating_sub(1)); }
+                                KeyCode::Home if buffer_chooser => { buffer_selected = 0; }
+                                KeyCode::End if buffer_chooser => { buffer_selected = buffer_entries.len().saturating_sub(1); }
                                 KeyCode::Enter if buffer_chooser => {
-                                    // Paste selected buffer into active pane
-                                    if buffer_selected < buffer_entries.len() {
-                                        let (idx, _, _) = &buffer_entries[buffer_selected];
-                                        cmd_batch.push(format!("paste-buffer-at {}\n", idx));
+                                    // Digit-jump: number+Enter selects the Nth visible buffer
+                                    // (1-based). Empty buffer falls back to arrow cursor.
+                                    let target_idx: Option<usize> = if buffer_num_buffer.is_empty() {
+                                        Some(buffer_selected)
+                                    } else {
+                                        match buffer_num_buffer.parse::<usize>() {
+                                            Ok(n) if n >= 1 && n <= buffer_entries.len() => Some(n - 1),
+                                            _ => None,
+                                        }
+                                    };
+                                    if let Some(sel) = target_idx {
+                                        if sel < buffer_entries.len() {
+                                            let (idx, _, _) = &buffer_entries[sel];
+                                            cmd_batch.push(format!("paste-buffer-at {}\n", idx));
+                                            buffer_chooser = false;
+                                            buffer_num_buffer.clear();
+                                        }
                                     }
-                                    buffer_chooser = false;
                                 }
                                 KeyCode::Char('d') | KeyCode::Delete if buffer_chooser => {
                                     // Delete selected buffer
@@ -2480,9 +2579,20 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         if buffer_entries.is_empty() {
                                             buffer_chooser = false;
                                         }
+                                        // Indexes shifted; drop any pending jump buffer.
+                                        buffer_num_buffer.clear();
                                     }
                                 }
-                                KeyCode::Esc | KeyCode::Char('q') if buffer_chooser => { buffer_chooser = false; }
+                                KeyCode::Esc | KeyCode::Char('q') if buffer_chooser => { buffer_chooser = false; buffer_num_buffer.clear(); }
+                                KeyCode::Backspace if buffer_chooser => { buffer_num_buffer.pop(); }
+                                KeyCode::Char(c) if buffer_chooser && c.is_ascii_digit() => {
+                                    if buffer_num_buffer.len() < 6 {
+                                        buffer_num_buffer.push(c);
+                                    }
+                                }
+                                // Absorb any other char while the buffer picker is open so
+                                // it cannot leak through to the focused pane's PTY.
+                                KeyCode::Char(_) if buffer_chooser => {}
                                 // --- list-keys viewer (C-b ?) ---
                                 KeyCode::Up if keys_viewer => { if keys_viewer_scroll > 0 { keys_viewer_scroll -= 1; } }
                                 KeyCode::Down if keys_viewer => { keys_viewer_scroll += 1; }
@@ -2540,6 +2650,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                             buffer_entries.clear();
                                             buffer_selected = 0;
                                             buffer_scroll = 0;
+                                            buffer_num_buffer.clear();
                                             let port_file = format!("{}\\.psmux\\{}.port", home, current_session);
                                             if let Ok(port_str) = std::fs::read_to_string(&port_file) {
                                                 if let Ok(p) = port_str.trim().parse::<u16>() {
@@ -3549,6 +3660,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         srv_customize_edit_buf = state.customize_edit_buf.unwrap_or_default();
         srv_customize_filter = state.customize_filter.unwrap_or_default();
         srv_customize_options = state.customize_options;
+        // Drop any pending digit-jump buffer when the picker is closed,
+        // or while the user is mid-edit on an option (digits there are
+        // edits to the value, not jumps to a row).
+        if !srv_customize_active || srv_customize_editing {
+            customize_num_buffer.clear();
+        }
 
         // ── Extract active pane's cursor state ──────────────────────
         // We collect cursor info here but DON'T use
@@ -4051,6 +4168,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 // Popup size: when preview is OFF use the original
                 // pre-#257 dynamic sizing (compact, list-only). When preview
                 // is ON expand to 85x75% so the right-side preview has room.
+                let buffer_rows: u16 = if tree_num_buffer.is_empty() { 0 } else { 2 };
                 let avail_w = content_chunk.width;
                 let avail_h = content_chunk.height;
                 let (popup_w, popup_h) = if preview_enabled {
@@ -4058,7 +4176,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     let want_h = ((avail_h as u32 * 75) / 100) as u16;
                     (want_w.max(40).min(avail_w), want_h.max(10).min(avail_h))
                 } else {
-                    let tree_h = ((tree_entries.len() as u16).saturating_add(2))
+                    let tree_h = ((tree_entries.len() as u16).saturating_add(2).saturating_add(buffer_rows))
                         .max(5)
                         .min(content_chunk.height.saturating_sub(2));
                     let pw = ((avail_w as u32 * 60) / 100) as u16;
@@ -4079,9 +4197,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 };
                 popup_rect_last = Some(oa);
                 let title = if preview_enabled {
-                    " choose-tree (Enter=switch  x=kill  p=preview  Esc=close  drag border to move) "
+                    " choose-tree (digits+enter=jump  Enter=switch  p=preview  Esc=close  drag border to move) "
                 } else {
-                    " choose-tree (Enter=switch  x=kill  p=preview  Esc=close) "
+                    " choose-tree (digits+enter=jump  Enter=switch  p=preview  Esc=close) "
                 };
                 let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
@@ -4107,24 +4225,35 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     })
                 } else { None };
 
-                let visible_h = list_area.height as usize;
+                let visible_h = (list_area.height as usize).saturating_sub(buffer_rows as usize);
                 if visible_h > 0 && tree_selected >= tree_scroll + visible_h {
                     tree_scroll = tree_selected.saturating_sub(visible_h - 1);
                 }
                 if tree_selected < tree_scroll {
                     tree_scroll = tree_selected;
                 }
+                let num_width = tree_entries.len().to_string().len();
                 let mut lines: Vec<Line> = Vec::new();
                 for (i, (is_win, wid, _pid, label, _sess)) in tree_entries.iter().enumerate().skip(tree_scroll).take(visible_h) {
+                    // Right-aligned 1-based row number so the digit-jump
+                    // mapping is visible without trial and error.
+                    let row = format!("{:>w$}. {}", i + 1, label, w = num_width);
                     let line = if i == tree_selected {
-                        Line::from(Span::styled(label.clone(), sel_style))
+                        Line::from(Span::styled(row, sel_style))
                     } else if *is_win && *wid == usize::MAX {
                         // Session header — bold
-                        Line::from(Span::styled(label.clone(), Style::default().add_modifier(Modifier::BOLD)))
+                        Line::from(Span::styled(row, Style::default().add_modifier(Modifier::BOLD)))
                     } else {
-                        Line::from(label.clone())
+                        Line::from(row)
                     };
                     lines.push(line);
+                }
+                if !tree_num_buffer.is_empty() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("go to {}", tree_num_buffer),
+                        sel_style,
+                    )));
                 }
                 let para = Paragraph::new(Text::from(lines));
                 f.render_widget(para, list_area);
@@ -4224,31 +4353,43 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             if buffer_chooser {
                 let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
                 let overlay = Block::default().borders(Borders::ALL)
-                    .title(" choose-buffer (Enter=paste, d=delete, q/Esc=close) ")
+                    .title(" choose-buffer (digits+enter=jump, Enter=paste, d=delete, q/Esc=close) ")
                     .border_style(sel_style);
-                let buf_h = ((buffer_entries.len() as u16).saturating_add(2))
+                let buffer_rows: u16 = if buffer_num_buffer.is_empty() { 0 } else { 2 };
+                let buf_h = ((buffer_entries.len() as u16).saturating_add(2).saturating_add(buffer_rows))
                     .max(5)
                     .min(content_chunk.height.saturating_sub(2));
                 let oa = centered_rect(70, buf_h, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let inner = overlay.inner(oa);
-                let visible_h = inner.height as usize;
-                if buffer_selected >= buffer_scroll + visible_h {
+                let visible_h = (inner.height as usize).saturating_sub(buffer_rows as usize);
+                if visible_h > 0 && buffer_selected >= buffer_scroll + visible_h {
                     buffer_scroll = buffer_selected.saturating_sub(visible_h - 1);
                 }
                 if buffer_selected < buffer_scroll {
                     buffer_scroll = buffer_selected;
                 }
+                let num_width = buffer_entries.len().to_string().len();
                 let mut lines: Vec<Line> = Vec::new();
                 for (i, (idx, byte_len, preview)) in buffer_entries.iter().enumerate().skip(buffer_scroll).take(visible_h) {
-                    let label = format!("buffer{}: {} bytes: \"{}\"", idx, byte_len, preview);
+                    // 1-based jump-row number on the left, then the existing
+                    // tmux-style "bufferN: M bytes: ..." label.
+                    let label = format!("{:>w$}. buffer{}: {} bytes: \"{}\"",
+                        i + 1, idx, byte_len, preview, w = num_width);
                     let line = if i == buffer_selected {
                         Line::from(Span::styled(label, sel_style))
                     } else {
                         Line::from(label)
                     };
                     lines.push(line);
+                }
+                if !buffer_num_buffer.is_empty() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("go to {}", buffer_num_buffer),
+                        sel_style,
+                    )));
                 }
                 let para = Paragraph::new(Text::from(lines));
                 f.render_widget(para, inner);
@@ -4703,9 +4844,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 f.render_widget(Clear, overlay);
                 let header_style = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
                 let header = if srv_customize_filter.is_empty() {
-                    " Customize Mode  [q:exit  /:filter  Enter:edit  d:reset default] "
+                    " Customize Mode  [q:exit  /:filter  digits+Enter:jump  Enter:edit  d:reset default] "
                 } else {
-                    " Customize Mode  [q:exit  /:clear filter  Enter:edit  d:reset] "
+                    " Customize Mode  [q:exit  /:clear filter  digits+Enter:jump  Enter:edit  d:reset] "
                 };
                 if overlay.height > 0 {
                     let header_area = Rect { x: overlay.x, y: overlay.y, width: overlay.width, height: 1 };
@@ -4744,6 +4885,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     .skip(srv_customize_scroll)
                     .take(rows_height)
                     .collect();
+                let total_opts = srv_customize_options.len();
+                let num_width = total_opts.to_string().len();
                 for (row_idx, opt) in visible_opts.iter().enumerate() {
                     if rows_start + row_idx as u16 >= overlay.y + overlay.height { break; }
                     let row_area = Rect {
@@ -4761,7 +4904,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         "pane" => "[p] ",
                         _ => "    ",
                     };
-                    let name_display = format!("{}{}", scope_prefix, opt.n);
+                    // 1-based jump-row number prefix so the digit-jump
+                    // mapping is visible.
+                    let visible_pos = srv_customize_scroll + row_idx + 1;
+                    let name_display = format!("{:>w$}. {}{}", visible_pos, scope_prefix, opt.n, w = num_width);
                     let value_display = if is_selected && srv_customize_editing {
                         let buf = &srv_customize_edit_buf;
                         format!("{}|", buf)
@@ -4781,6 +4927,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     f.render_widget(Paragraph::new(Line::from(Span::styled(
                         format!("{:<width$}", line_text, width = overlay.width as usize), style,
                     ))), row_area);
+                }
+                // Digit-jump buffer indicator at the bottom of the overlay.
+                if !customize_num_buffer.is_empty() && overlay.height >= 2 {
+                    let ind_y = overlay.y + overlay.height.saturating_sub(1);
+                    let ind_area = Rect { x: overlay.x, y: ind_y, width: overlay.width, height: 1 };
+                    let ind_text = format!(" go to {} ", customize_num_buffer);
+                    let ind_style = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
+                    f.render_widget(Paragraph::new(Line::from(Span::styled(
+                        format!("{:<width$}", ind_text, width = overlay.width as usize), ind_style,
+                    ))), ind_area);
                 }
             }
             if srv_display_panes {
