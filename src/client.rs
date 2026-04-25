@@ -962,7 +962,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut dump_cache: crate::preview::DumpCache = std::collections::HashMap::new();
     // Whether the right-side preview pane is shown. Toggled by `p`
     // while a chooser is open. Persisted across reopens.
-    let mut preview_enabled: bool = true;
+    let mut preview_enabled: bool = false;
     // Draggable popup state (shared across pickers). Offset is applied on top
     // of the centered rect; resets when no picker is open.
     let mut popup_offset: (i32, i32) = (0, 0);
@@ -3873,13 +3873,25 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
 
             if session_chooser {
                 let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
-                // Wider/taller popup with right-side live preview pane (issue #257).
+                // Popup size: when preview is OFF use the original
+                // pre-#257 dynamic sizing (compact, list-only). When preview
+                // is ON expand to 85x75% so the right-side preview has room.
+                let buffer_rows: u16 = if session_num_buffer.is_empty() { 0 } else { 2 };
                 let avail_w = content_chunk.width;
                 let avail_h = content_chunk.height;
-                let want_w = ((avail_w as u32 * 85) / 100) as u16;
-                let want_h = ((avail_h as u32 * 75) / 100) as u16;
-                let popup_w = want_w.max(40).min(avail_w);
-                let popup_h = want_h.max(10).min(avail_h);
+                let (popup_w, popup_h) = if preview_enabled {
+                    let want_w = ((avail_w as u32 * 85) / 100) as u16;
+                    let want_h = ((avail_h as u32 * 75) / 100) as u16;
+                    (want_w.max(40).min(avail_w), want_h.max(10).min(avail_h))
+                } else {
+                    let sess_h = (session_entries.len() as u16)
+                        .saturating_add(2)
+                        .saturating_add(buffer_rows)
+                        .max(5)
+                        .min(content_chunk.height.saturating_sub(2));
+                    let pw = ((avail_w as u32 * 70) / 100) as u16;
+                    (pw.max(20).min(avail_w), sess_h)
+                };
                 let base_x = content_chunk.x + (avail_w.saturating_sub(popup_w)) / 2;
                 let base_y = content_chunk.y + (avail_h.saturating_sub(popup_h)) / 2;
                 let max_dx = (avail_w.saturating_sub(popup_w)) as i32 / 2;
@@ -3893,7 +3905,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     height: popup_h,
                 };
                 popup_rect_last = Some(oa);
-                let title = " choose-session (digits+enter=jump, enter=switch, x=kill, p=preview, esc=close, drag border to move) ";
+                let title = if preview_enabled {
+                    " choose-session (digits+enter=jump, enter=switch, x=kill, p=preview, esc=close, drag border to move) "
+                } else {
+                    " choose-session (digits+enter=jump, enter=switch, x=kill, p=preview, esc=close) "
+                };
                 let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
@@ -3920,7 +3936,6 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 } else { None };
 
                 // Reserve the last two inner rows for the jump-buffer indicator
-                let buffer_rows: u16 = if session_num_buffer.is_empty() { 0 } else { 2 };
                 let reserved = buffer_rows as usize;
                 let visible_h = (list_area.height as usize).saturating_sub(reserved);
                 if visible_h > 0 && session_selected >= session_scroll + visible_h {
@@ -4047,13 +4062,22 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             }
             if tree_chooser {
                 let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
-                // Wider/taller popup with right-side live preview pane (issue #257).
+                // Popup size: when preview is OFF use the original
+                // pre-#257 dynamic sizing (compact, list-only). When preview
+                // is ON expand to 85x75% so the right-side preview has room.
                 let avail_w = content_chunk.width;
                 let avail_h = content_chunk.height;
-                let want_w = ((avail_w as u32 * 85) / 100) as u16;
-                let want_h = ((avail_h as u32 * 75) / 100) as u16;
-                let popup_w = want_w.max(40).min(avail_w);
-                let popup_h = want_h.max(10).min(avail_h);
+                let (popup_w, popup_h) = if preview_enabled {
+                    let want_w = ((avail_w as u32 * 85) / 100) as u16;
+                    let want_h = ((avail_h as u32 * 75) / 100) as u16;
+                    (want_w.max(40).min(avail_w), want_h.max(10).min(avail_h))
+                } else {
+                    let tree_h = ((tree_entries.len() as u16).saturating_add(2))
+                        .max(5)
+                        .min(content_chunk.height.saturating_sub(2));
+                    let pw = ((avail_w as u32 * 60) / 100) as u16;
+                    (pw.max(20).min(avail_w), tree_h)
+                };
                 let base_x = content_chunk.x + (avail_w.saturating_sub(popup_w)) / 2;
                 let base_y = content_chunk.y + (avail_h.saturating_sub(popup_h)) / 2;
                 // Apply drag offset, clamped so the popup stays fully on-screen.
@@ -4068,7 +4092,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     height: popup_h,
                 };
                 popup_rect_last = Some(oa);
-                let title = " choose-tree (Enter=switch  x=kill  p=preview  Esc=close  drag border to move) ";
+                let title = if preview_enabled {
+                    " choose-tree (Enter=switch  x=kill  p=preview  Esc=close  drag border to move) "
+                } else {
+                    " choose-tree (Enter=switch  x=kill  p=preview  Esc=close) "
+                };
                 let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
