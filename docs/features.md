@@ -29,6 +29,7 @@
 - **Drag-select** text to copy to clipboard
 - **Right-click** to paste or copy selection
 - **Windows 11 PowerShell selection** : word and line selection with double/triple-click (`pwsh-mouse-selection on`)
+- **Disable client-side selection** : let in-pane TUI apps (opencode, lazygit, etc.) handle their own mouse selection (`mouse-selection off`)
 - **VT mouse forwarding** : apps like vim, htop, and midnight commander get full mouse events
 - **3-layer mouse injection** : VT protocol, VT bridge (for WSL/SSH), and native Win32 MOUSE_EVENT
 - **Mouse over SSH** : works from any OS client when server runs Windows 11 build 22523+

@@ -102,6 +102,7 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `display-panes-time` | Int | `1000` | Pane overlay time (ms) |
 | `status-interval` | Int | `15` | Status refresh (seconds) |
 | `mouse` | Bool | `on` | Mouse support |
+| `mouse-selection` | Bool | `on` | psmux's client-side drag selection. Set `off` to let in-pane TUI apps (opencode, nvim, etc.) handle their own mouse selection without psmux drawing on top |
 | `scroll-enter-copy-mode` | Bool | `on` | Enter copy mode on mouse scroll (set `off` to disable) |
 | `pwsh-mouse-selection` | Bool | `off` | Windows 11 PowerShell-style word/line selection (double/triple-click) |
 | `paste-detection` | Bool | `on` | Detect Ctrl+V paste from console host and send as bracketed paste (set `off` to let Ctrl+V reach child apps like neovim) |
@@ -254,6 +255,49 @@ set -g pwsh-mouse-selection on
 ```
 
 When `scroll-enter-copy-mode` is `off`, scrolling in a pane does not enter copy mode and instead passes scroll events directly to the running application.
+
+#### Disabling psmux's drag selection (`mouse-selection`)
+
+Some TUI applications render their own internal layouts (multiple columns, sidebars, panels) inside a single psmux pane. Examples include `opencode`, `lazygit`, `nvim` with split windows, and similar dashboards.
+
+psmux's own client-side drag selection does not know about those internal layouts, so a left-click drag inside such an app draws a selection rectangle that crosses the app's internal columns instead of respecting them.
+
+If you would rather have the application handle mouse selection itself, disable psmux's drag selection:
+
+```tmux
+# Let the app inside the pane handle its own mouse selection.
+# psmux will no longer render its drag-selection rectangle.
+set -g mouse-selection off
+```
+
+What still works when `mouse-selection` is `off`:
+
+- Click on a pane to focus it
+- Click on a window tab in the status bar to switch to it
+- Mouse wheel scrolling and scroll-into-copy-mode
+- Pane border drag-to-resize
+- Mouse events being forwarded to applications that request mouse tracking (DECSET 1000/1002/1003), so `opencode`, `htop`, `nvim`, `claude`, etc. continue to receive their clicks and drags
+
+What changes when `mouse-selection` is `off`:
+
+- psmux no longer draws its own selection rectangle on left-click drag
+- Right-click clipboard copy via psmux's selection is no longer triggered (selection never starts)
+- The Windows 11 style word/line multi-click (`pwsh-mouse-selection`) is suppressed too while `mouse-selection off` is in effect
+
+To restore the default behaviour:
+
+```tmux
+set -g mouse-selection on
+```
+
+You can also toggle this at runtime without restarting:
+
+```
+psmux set-option -g mouse-selection off
+psmux set-option -g mouse-selection on
+```
+
+This option is independent of `mouse` (which controls whether mouse events are received at all) and `pwsh-mouse-selection` (which only affects the style of the drag selection when it is active).
 
 ### Paste Detection (Ctrl+V Passthrough)
 
