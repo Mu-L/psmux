@@ -824,6 +824,26 @@ match cmd {
         }
         if !persistent { break; }
     }
+    "window-dump" => {
+        // Issue #257: return full styled `LayoutJson` (with rows_v2 cell
+        // runs, titles, sizes) for a specific window id. The client uses
+        // this for cross-session previews so every pane is rendered with
+        // its own content via the same code path as the main viewport.
+        // Usage: window-dump <window_id>
+        let wid: Option<usize> = args.get(0).and_then(|a| a.trim_start_matches('@').parse::<usize>().ok());
+        if let Some(wid) = wid {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::WindowDump(wid, rtx));
+            if let Ok(text) = rrx.recv() {
+                let _ = write!(write_stream, "{}\n", text);
+                let _ = write_stream.flush();
+            }
+        } else {
+            let _ = write!(write_stream, "{{}}\n");
+            let _ = write_stream.flush();
+        }
+        if !persistent { break; }
+    }
     "toggle-sync" => { let _ = tx.send(CtrlReq::ToggleSync); }
     "set-pane-title" => { let title = args.join(" "); let _ = tx.send(CtrlReq::SetPaneTitle(title)); }
     "send-keys" => {

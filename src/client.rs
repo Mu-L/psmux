@@ -466,9 +466,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Live preview cache for choose-tree / choose-session pickers (issue #257).
     // Keyed by "session\twin_id\tpane_id"; pane_id == usize::MAX => active pane.
     let mut preview_cache: crate::preview::PreviewCache = std::collections::HashMap::new();
-    // Layout cache for the same pickers — fetched once per (sess, win)
-    // so we can render the actual split layout, not just one pane.
-    let mut layout_cache: crate::preview::LayoutCache = std::collections::HashMap::new();
+    // Full-styled dump cache: every pane in a window with its own
+    // `rows_v2` content, fetched in one round trip via `window-dump`.
+    // This is the primary preview source — it sidesteps the per-pane
+    // `capture-pane -t` round trips that mis-targeted the active pane,
+    // and lets the client reuse the same renderer the main view uses.
+    let mut dump_cache: crate::preview::DumpCache = std::collections::HashMap::new();
     // Whether the right-side preview pane is shown. Toggled by `p`
     // while a chooser is open. Persisted across reopens.
     let mut preview_enabled: bool = true;
@@ -3907,11 +3910,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         });
 
                         if let Some(wid) = win_id {
-                            if let Some(layout) = crate::preview::get_or_fetch_layout(
-                                &mut layout_cache, &home, sname, wid,
+                            if let Some(layout) = crate::preview::get_or_fetch_dump(
+                                &mut dump_cache, &home, sname, wid,
                             ) {
-                                let rects = crate::preview::flatten_layout_to_rects(&layout, parea);
-                                let seps = crate::preview::layout_separators(&layout, parea);
+                                let rects = crate::preview::flatten_dump_rects(&layout, parea);
+                                let seps = crate::preview::dump_separators(&layout, parea);
                                 for (rect, is_vert) in seps {
                                     let ch = if is_vert { "│" } else { "─" };
                                     let style = Style::default().fg(Color::DarkGray);
@@ -3925,27 +3928,33 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         f.render_widget(s, rect);
                                     }
                                 }
-                                for (lpid, lactive, larea) in rects {
+                                for (leaf_node, larea) in rects {
                                     if larea.width < 2 || larea.height < 2 { continue; }
-                                    let border_style = if lactive {
-                                        sel_style
-                                    } else {
-                                        Style::default().fg(Color::DarkGray)
-                                    };
-                                    let blk = Block::default()
-                                        .borders(Borders::ALL)
-                                        .border_style(border_style)
-                                        .title(format!(" %{} ", lpid));
-                                    let inside = blk.inner(larea);
-                                    f.render_widget(blk, larea);
-                                    let body = crate::preview::get_or_fetch(
-                                        &mut preview_cache, &home, sname, wid, lpid,
-                                    );
-                                    let pv: Vec<Line> = match body {
-                                        Some(t) => crate::preview::parse_ansi_lines(&t, inside.width, inside.height),
-                                        None => vec![Line::from("(no preview)")],
-                                    };
-                                    f.render_widget(Paragraph::new(Text::from(pv)), inside);
+                                    if let crate::layout::LayoutJson::Leaf {
+                                        id: lpid, active: lactive, rows_v2, title, ..
+                                    } = leaf_node {
+                                        let border_style = if *lactive {
+                                            sel_style
+                                        } else {
+                                            Style::default().fg(Color::DarkGray)
+                                        };
+                                        let label = match title {
+                                            Some(t) if !t.is_empty() => format!(" %{} {} ", lpid, t),
+                                            _ => format!(" %{} ", lpid),
+                                        };
+                                        let blk = Block::default()
+                                            .borders(Borders::ALL)
+                                            .border_style(border_style)
+                                            .title(label);
+                                        let inside = blk.inner(larea);
+                                        f.render_widget(blk, larea);
+                                        let mut pv: Vec<Line> = Vec::with_capacity(inside.height as usize);
+                                        for r in 0..inside.height as usize {
+                                            if r >= rows_v2.len() { break; }
+                                            pv.push(crate::preview::render_runs_line(&rows_v2[r].runs, inside.width));
+                                        }
+                                        f.render_widget(Paragraph::new(Text::from(pv)), inside);
+                                    }
                                 }
                                 rendered = true;
                             }
@@ -4096,11 +4105,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         };
 
                         if let Some(twid) = target_win {
-                            if let Some(layout) = crate::preview::get_or_fetch_layout(
-                                &mut layout_cache, &home, &sess, twid,
+                            if let Some(layout) = crate::preview::get_or_fetch_dump(
+                                &mut dump_cache, &home, &sess, twid,
                             ) {
-                                let rects = crate::preview::flatten_layout_to_rects(&layout, parea);
-                                let seps = crate::preview::layout_separators(&layout, parea);
+                                let rects = crate::preview::flatten_dump_rects(&layout, parea);
+                                let seps = crate::preview::dump_separators(&layout, parea);
 
                                 // Highlight which pane the user is hovering on
                                 // (for pane-level entries). Active pane gets a
@@ -4121,31 +4130,34 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     }
                                 }
 
-                                for (lpid, lactive, larea) in rects {
+                                for (leaf_node, larea) in rects {
                                     if larea.width < 2 || larea.height < 2 { continue; }
-                                    // Border around each pane. Active pane =
-                                    // accent style; hovered pane (when entry
-                                    // points at a specific pane) also accented.
-                                    let is_focus = lactive || highlight_pid == Some(lpid);
-                                    let border_style = if is_focus {
-                                        sel_style
-                                    } else {
-                                        Style::default().fg(Color::DarkGray)
-                                    };
-                                    let blk = Block::default()
-                                        .borders(Borders::ALL)
-                                        .border_style(border_style)
-                                        .title(format!(" %{} ", lpid));
-                                    let inside = blk.inner(larea);
-                                    f.render_widget(blk, larea);
-                                    let body = crate::preview::get_or_fetch(
-                                        &mut preview_cache, &home, &sess, twid, lpid,
-                                    );
-                                    let pv: Vec<Line> = match body {
-                                        Some(t) => crate::preview::parse_ansi_lines(&t, inside.width, inside.height),
-                                        None => vec![Line::from("(no preview)")],
-                                    };
-                                    f.render_widget(Paragraph::new(Text::from(pv)), inside);
+                                    if let crate::layout::LayoutJson::Leaf {
+                                        id: lpid, active: lactive, rows_v2, title, ..
+                                    } = leaf_node {
+                                        let is_focus = *lactive || highlight_pid == Some(*lpid);
+                                        let border_style = if is_focus {
+                                            sel_style
+                                        } else {
+                                            Style::default().fg(Color::DarkGray)
+                                        };
+                                        let label = match title {
+                                            Some(t) if !t.is_empty() => format!(" %{} {} ", lpid, t),
+                                            _ => format!(" %{} ", lpid),
+                                        };
+                                        let blk = Block::default()
+                                            .borders(Borders::ALL)
+                                            .border_style(border_style)
+                                            .title(label);
+                                        let inside = blk.inner(larea);
+                                        f.render_widget(blk, larea);
+                                        let mut pv: Vec<Line> = Vec::with_capacity(inside.height as usize);
+                                        for r in 0..inside.height as usize {
+                                            if r >= rows_v2.len() { break; }
+                                            pv.push(crate::preview::render_runs_line(&rows_v2[r].runs, inside.width));
+                                        }
+                                        f.render_widget(Paragraph::new(Text::from(pv)), inside);
+                                    }
                                 }
                                 rendered = true;
                             }

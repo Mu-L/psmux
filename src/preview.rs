@@ -440,6 +440,260 @@ pub fn layout_separators(
     out
 }
 
+// ---------------------------------------------------------------------
+// Full styled preview (issue #257 follow-up): reuse the same rich
+// `LayoutJson` (with `rows_v2` cell runs) the main viewport renders,
+// instead of replaying `capture-pane -e` per pane and parsing ANSI.
+// This fixes two problems at once:
+//   1. `capture-pane -t :@W.%P` resolved through transient -t focus and
+//      could return the active pane's content for every pane id, so all
+//      preview cells showed the same buffer.
+//   2. The hand-rolled ANSI pipeline duplicated rendering logic that
+//      already exists in the main viewport (border, color, attribute
+//      handling). Sharing the structured `LayoutJson` keeps previews
+//      visually identical to the real window.
+// ---------------------------------------------------------------------
+
+/// Cache for full layout dumps keyed by "sess\twin_id".
+pub type DumpCache = HashMap<String, (crate::layout::LayoutJson, Instant)>;
+
+pub const DUMP_TTL: Duration = Duration::from_millis(1500);
+
+/// Fetch the full styled layout (rows_v2) for a window in any session
+/// via TCP using the new `window-dump` command.
+pub fn fetch_window_dump(home: &str, sess: &str, win_id: usize) -> Option<crate::layout::LayoutJson> {
+    let port_path = format!("{}\\.psmux\\{}.port", home, sess);
+    let port: u16 = std::fs::read_to_string(&port_path).ok()?.trim().parse().ok()?;
+    let key = read_session_key(sess).ok()?;
+    let cmd = format!("window-dump {}\n", win_id);
+    let resp = fetch_authed_response_multi(
+        &format!("127.0.0.1:{}", port),
+        &key,
+        cmd.as_bytes(),
+        CONNECT_TIMEOUT,
+        READ_TIMEOUT,
+    )?;
+    let trimmed = resp.trim();
+    if trimmed.is_empty() || trimmed == "{}" {
+        return None;
+    }
+    serde_json::from_str::<crate::layout::LayoutJson>(trimmed).ok()
+}
+
+pub fn get_or_fetch_dump(
+    cache: &mut DumpCache,
+    home: &str,
+    sess: &str,
+    win_id: usize,
+) -> Option<crate::layout::LayoutJson> {
+    let key = format!("{}\t{}", sess, win_id);
+    if let Some((layout, ts)) = cache.get(&key) {
+        if ts.elapsed() < DUMP_TTL {
+            // Cheap clone: clone the entire tree. LayoutJson is Clone-able
+            // via Serialize+Deserialize round-trip — but it doesn't derive
+            // Clone, so we serialize+deserialize. That's still cheaper than
+            // a TCP round trip and only happens during fast key repeats.
+            if let Ok(s) = serde_json::to_string(layout) {
+                if let Ok(c) = serde_json::from_str::<crate::layout::LayoutJson>(&s) {
+                    return Some(c);
+                }
+            }
+        }
+    }
+    let layout = fetch_window_dump(home, sess, win_id)?;
+    // Stash a serialized copy for the cache and return the original.
+    if let Ok(s) = serde_json::to_string(&layout) {
+        if let Ok(c) = serde_json::from_str::<crate::layout::LayoutJson>(&s) {
+            cache.insert(key, (c, Instant::now()));
+        }
+    }
+    Some(layout)
+}
+
+/// Map a vt100-style color name (as emitted by `crate::util::color_to_name`)
+/// plus a `flags` bitfield into a ratatui Style. Mirrors the inline match
+/// in the main viewport's render path so previews look identical.
+fn run_style(fg: &str, bg: &str, flags: u8) -> Style {
+    let mut style = Style::default()
+        .fg(crate::style::map_color(fg))
+        .bg(crate::style::map_color(bg));
+    if flags & 1 != 0 { style = style.add_modifier(Modifier::DIM); }
+    if flags & 2 != 0 { style = style.add_modifier(Modifier::BOLD); }
+    if flags & 4 != 0 { style = style.add_modifier(Modifier::ITALIC); }
+    if flags & 8 != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+    if flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
+    if flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
+    if flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
+    style
+}
+
+/// Convert one row's run list into ratatui Spans, clipping to `width`.
+/// Pads the tail with a space-styled span so the line fills the inside
+/// rect (matches the main renderer behavior).
+pub fn render_runs_line(
+    runs: &[crate::layout::CellRunJson],
+    width: u16,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut c: u16 = 0;
+    let mut last_bg = Color::Reset;
+    for run in runs {
+        if c >= width { break; }
+        let style = run_style(&run.fg, &run.bg, run.flags);
+        last_bg = style.bg.unwrap_or(Color::Reset);
+        // Hidden cells render as spaces to match the main view's behavior.
+        let text: &str = if run.flags & 64 != 0 {
+            " "
+        } else if run.text.is_empty() {
+            " "
+        } else {
+            &run.text
+        };
+        let run_w = run.width.max(1);
+        if c + run_w > width {
+            // Truncate to the available width.
+            let avail = (width - c) as usize;
+            let mut truncated = String::new();
+            let mut used = 0usize;
+            for ch in text.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                if used + cw > avail { break; }
+                used += cw;
+                truncated.push(ch);
+            }
+            if !truncated.is_empty() {
+                spans.push(Span::styled(truncated, style));
+                c += avail as u16;
+            }
+            break;
+        } else {
+            spans.push(Span::styled(text.to_string(), style));
+            c += run_w;
+        }
+    }
+    if c < width {
+        let pad = " ".repeat((width - c) as usize);
+        spans.push(Span::styled(pad, Style::default().bg(last_bg)));
+    }
+    Line::from(spans)
+}
+
+/// Walk a `LayoutJson` tree and produce per-leaf rectangles (same
+/// algorithm as `flatten_layout_to_rects` but for the rich tree).
+pub fn flatten_dump_rects<'a>(
+    layout: &'a crate::layout::LayoutJson,
+    area: ratatui::layout::Rect,
+) -> Vec<(&'a crate::layout::LayoutJson, ratatui::layout::Rect)> {
+    use ratatui::layout::Rect;
+    let mut out: Vec<(&crate::layout::LayoutJson, Rect)> = Vec::new();
+    fn rec<'b>(
+        node: &'b crate::layout::LayoutJson,
+        area: Rect,
+        out: &mut Vec<(&'b crate::layout::LayoutJson, Rect)>,
+    ) {
+        match node {
+            crate::layout::LayoutJson::Leaf { .. } => {
+                if area.width > 0 && area.height > 0 {
+                    out.push((node, area));
+                }
+            }
+            crate::layout::LayoutJson::Split { kind, sizes, children } => {
+                if children.is_empty() { return; }
+                let total: u32 = sizes.iter().map(|s| *s as u32).sum::<u32>().max(1);
+                let is_horiz = kind == "Horizontal";
+                let span = if is_horiz { area.width as u32 } else { area.height as u32 };
+                let sep_count = children.len().saturating_sub(1) as u32;
+                let usable = span.saturating_sub(sep_count);
+                let n = children.len();
+                let mut alloc: Vec<u32> = sizes.iter().take(n)
+                    .map(|s| (*s as u32 * usable) / total)
+                    .collect();
+                while alloc.len() < n { alloc.push(0); }
+                let used: u32 = alloc.iter().sum();
+                let mut leftover = usable.saturating_sub(used);
+                let alen = alloc.len();
+                let mut idx = 0;
+                while leftover > 0 && alen > 0 {
+                    alloc[idx % alen] += 1;
+                    idx += 1;
+                    leftover -= 1;
+                }
+                let mut cursor: u32 = 0;
+                for (i, child) in children.iter().enumerate() {
+                    let size = alloc[i] as u16;
+                    let sub = if is_horiz {
+                        Rect { x: area.x + cursor as u16, y: area.y, width: size, height: area.height }
+                    } else {
+                        Rect { x: area.x, y: area.y + cursor as u16, width: area.width, height: size }
+                    };
+                    rec(child, sub, out);
+                    cursor += size as u32;
+                    if i + 1 < children.len() {
+                        cursor += 1;
+                    }
+                }
+            }
+        }
+    }
+    rec(layout, area, &mut out);
+    out
+}
+
+/// Compute separator segments for a rich `LayoutJson` tree (identical
+/// algorithm to `layout_separators` but for the dump tree).
+pub fn dump_separators(
+    layout: &crate::layout::LayoutJson,
+    area: ratatui::layout::Rect,
+) -> Vec<(ratatui::layout::Rect, bool)> {
+    use ratatui::layout::Rect;
+    let mut out: Vec<(Rect, bool)> = Vec::new();
+    fn rec(node: &crate::layout::LayoutJson, area: Rect, out: &mut Vec<(Rect, bool)>) {
+        if let crate::layout::LayoutJson::Split { kind, sizes, children } = node {
+            if children.is_empty() { return; }
+            let total: u32 = sizes.iter().map(|s| *s as u32).sum::<u32>().max(1);
+            let is_horiz = kind == "Horizontal";
+            let span = if is_horiz { area.width as u32 } else { area.height as u32 };
+            let sep_count = children.len().saturating_sub(1) as u32;
+            let usable = span.saturating_sub(sep_count);
+            let n = children.len();
+            let mut alloc: Vec<u32> = sizes.iter().take(n)
+                .map(|s| (*s as u32 * usable) / total)
+                .collect();
+            while alloc.len() < n { alloc.push(0); }
+            let used: u32 = alloc.iter().sum();
+            let mut leftover = usable.saturating_sub(used);
+            let alen = alloc.len();
+            let mut idx = 0;
+            while leftover > 0 && alen > 0 {
+                alloc[idx % alen] += 1;
+                idx += 1;
+                leftover -= 1;
+            }
+            let mut cursor: u32 = 0;
+            for (i, child) in children.iter().enumerate() {
+                let size = alloc[i] as u16;
+                let sub = if is_horiz {
+                    Rect { x: area.x + cursor as u16, y: area.y, width: size, height: area.height }
+                } else {
+                    Rect { x: area.x, y: area.y + cursor as u16, width: area.width, height: size }
+                };
+                rec(child, sub, out);
+                cursor += size as u32;
+                if i + 1 < children.len() {
+                    if is_horiz {
+                        out.push((Rect { x: area.x + cursor as u16, y: area.y, width: 1, height: area.height }, true));
+                    } else {
+                        out.push((Rect { x: area.x, y: area.y + cursor as u16, width: area.width, height: 1 }, false));
+                    }
+                    cursor += 1;
+                }
+            }
+        }
+    }
+    rec(layout, area, &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests_ansi {
     use super::*;

@@ -274,3 +274,95 @@ if (Test-Path $injectorExe) {
 } else {
     Write-Fail "Injector not available"
 }
+
+# === TEST 8 (follow-up): window-dump returns DIFFERENT content per pane ===
+# This is the regression test for the "preview shows pstop everywhere" bug:
+# capture-pane -t :@WID.%PID was misrouting through transient -t focus and
+# returning the active pane's content for every queried pane. The new
+# `window-dump` endpoint sidesteps that path entirely by walking the window
+# tree on the server and emitting each pane's own rows_v2, so previews are
+# guaranteed to be per-pane correct.
+Write-Host "`n[Test 8] window-dump returns distinct content per pane" -ForegroundColor Yellow
+
+$SESSION_DUMP = "issue257_dump"
+& $PSMUX kill-session -t $SESSION_DUMP 2>&1 | Out-Null
+Start-Sleep -Milliseconds 500
+Remove-Item "$psmuxDir\$SESSION_DUMP.*" -Force -EA SilentlyContinue
+
+& $PSMUX new-session -d -s $SESSION_DUMP
+Start-Sleep -Seconds 2
+& $PSMUX split-window -h -t $SESSION_DUMP 2>&1 | Out-Null
+Start-Sleep -Milliseconds 500
+& $PSMUX split-window -v -t $SESSION_DUMP 2>&1 | Out-Null
+Start-Sleep -Milliseconds 500
+
+# Get the 3 pane ids in order.
+$paneIds = (& $PSMUX list-panes -t $SESSION_DUMP -F '#{pane_id}' 2>&1 | Where-Object { $_ -match '^%\d+$' }) -split "`r`n"
+$paneIds = @($paneIds | Where-Object { $_ -match '^%\d+$' })
+if ($paneIds.Count -ne 3) {
+    Write-Fail "Expected 3 panes in dump session, got $($paneIds.Count)"
+} else {
+    # Write a unique marker into each pane's stdout.
+    & $PSMUX send-keys -t "${SESSION_DUMP}:0.$($paneIds[0])" "Write-Host 'DUMPMARK_AAA'" Enter
+    & $PSMUX send-keys -t "${SESSION_DUMP}:0.$($paneIds[1])" "Write-Host 'DUMPMARK_BBB'" Enter
+    & $PSMUX send-keys -t "${SESSION_DUMP}:0.$($paneIds[2])" "Write-Host 'DUMPMARK_CCC'" Enter
+    Start-Sleep -Seconds 3
+
+    $wid = (& $PSMUX display-message -t $SESSION_DUMP -p '#{window_id}' 2>&1).Trim().TrimStart('@')
+    $portPath = "$psmuxDir\$SESSION_DUMP.port"
+    $keyPath  = "$psmuxDir\$SESSION_DUMP.key"
+    $port = [int](Get-Content $portPath -Raw).Trim()
+    $key  = (Get-Content $keyPath -Raw).Trim()
+
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new('127.0.0.1', $port)
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = 3000
+        $writer = [System.IO.StreamWriter]::new($stream)
+        $writer.NewLine = "`n"
+        $writer.AutoFlush = $true
+        $reader = [System.IO.StreamReader]::new($stream)
+        $writer.WriteLine("AUTH $key")
+        $null = $reader.ReadLine()
+        $writer.WriteLine("window-dump $wid")
+        Start-Sleep -Milliseconds 800
+        $resp = ""
+        while ($stream.DataAvailable) { $resp += [char]$stream.ReadByte() }
+        $client.Close()
+
+        # Assertions: response should contain ALL THREE markers, and each
+        # marker should appear in a different leaf section. We check the
+        # distinct-presence side first (the duplication bug would have
+        # returned the same active-pane buffer in every leaf, so only the
+        # most-recently-active pane's marker would show up).
+        $hasA = $resp -match 'DUMPMARK_AAA'
+        $hasB = $resp -match 'DUMPMARK_BBB'
+        $hasC = $resp -match 'DUMPMARK_CCC'
+        if ($hasA -and $hasB -and $hasC) {
+            Write-Pass "window-dump JSON contains all three distinct pane markers"
+        } else {
+            Write-Fail "Missing markers in window-dump (A=$hasA B=$hasB C=$hasC). Resp length=$($resp.Length)"
+        }
+
+        # Stronger assertion: count occurrences of each marker. With the
+        # bug each marker would either appear 0 times or 3 times (active
+        # pane echoed everywhere). With the fix each appears exactly once.
+        $countA = ([regex]::Matches($resp, 'DUMPMARK_AAA')).Count
+        $countB = ([regex]::Matches($resp, 'DUMPMARK_BBB')).Count
+        $countC = ([regex]::Matches($resp, 'DUMPMARK_CCC')).Count
+        Write-Host "  Marker counts: AAA=$countA BBB=$countB CCC=$countC" -ForegroundColor DarkGray
+        if ($countA -eq 1 -and $countB -eq 1 -and $countC -eq 1) {
+            Write-Pass "Each marker appears exactly once (per-pane targeting works)"
+        } else {
+            Write-Fail "Expected each marker exactly once, got A=$countA B=$countB C=$countC"
+        }
+    } catch {
+        Write-Fail "TCP request to window-dump failed: $_"
+    }
+}
+
+& $PSMUX kill-session -t $SESSION_DUMP 2>&1 | Out-Null
+Remove-Item "$psmuxDir\$SESSION_DUMP.*" -Force -EA SilentlyContinue
+
+Write-Host "`n=== Issue #257 results: $script:TestsPassed passed, $script:TestsFailed failed ===" -ForegroundColor Cyan
+if ($script:TestsFailed -gt 0) { exit 1 }

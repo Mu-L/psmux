@@ -157,6 +157,20 @@ pub enum LayoutJson {
 }
 
 pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
+    dump_layout_json_inner(app, None)
+}
+
+/// Same as `dump_layout_json` but for a specific window id, regardless of
+/// which window is currently active. Used by cross-session previews so
+/// every pane in the target window is captured with its own `rows_v2`,
+/// avoiding the ambiguity of `capture-pane -t :@W.%P` (which depends on
+/// transient focus and was returning the active pane's content for every
+/// requested pane id).
+pub fn dump_window_layout_json(app: &mut AppState, win_id: usize) -> io::Result<String> {
+    dump_layout_json_inner(app, Some(win_id))
+}
+
+fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::Result<String> {
     let in_copy_mode = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
     let scroll_offset = app.copy_scroll_offset;
     
@@ -399,7 +413,14 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
             }
         }
     }
-    let win = &mut app.windows[app.active_idx];
+    let win_idx = match win_id_override {
+        Some(wid) => match app.windows.iter().position(|w| w.id == wid) {
+            Some(i) => i,
+            None => return Err(io::Error::new(io::ErrorKind::NotFound, format!("window @{} not found", wid))),
+        },
+        None => app.active_idx,
+    };
+    let win = &mut app.windows[win_idx];
     let mut path = Vec::new();
     let mut root = build(&mut win.root, &mut path, &win.active_path, in_copy_mode);
     // Mark the active pane and set copy mode info
@@ -472,10 +493,10 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
         &mut root,
         &win.active_path,
         0,
-        in_copy_mode,
+        in_copy_mode && win_id_override.is_none(),
         scroll_offset,
-        app.copy_anchor,
-        app.copy_pos,
+        if win_id_override.is_none() { app.copy_anchor } else { None },
+        if win_id_override.is_none() { app.copy_pos } else { None },
     );
     let s = serde_json::to_string(&root).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("json error: {e}")))?;
     Ok(s)

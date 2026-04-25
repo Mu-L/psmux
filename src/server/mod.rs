@@ -736,6 +736,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 pending.sort_by_key(|r| match r {
                     CtrlReq::DumpState(..) => 1,
                     CtrlReq::DumpLayout(_) => 1,
+                    CtrlReq::WindowDump(..) => 1,
                     _ => 0,
                 });
                 // Track temporary -t focus: save (active_idx, pane_id) when
@@ -753,6 +754,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         | CtrlReq::SendText(_)
                         | CtrlReq::SendKey(_)
                         | CtrlReq::SendPaste(_)
+                        | CtrlReq::WindowDump(..)
+                        | CtrlReq::WindowLayout(..)
                     );
                     let is_temp_focus = matches!(&req,
                         CtrlReq::FocusWindowTemp(_) | CtrlReq::FocusWindowByNameTemp(_) | CtrlReq::FocusPaneTemp(_) | CtrlReq::FocusPaneByIndexTemp(_));
@@ -1500,6 +1503,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ListTree(resp) => { let json = list_tree_json(&app)?; let _ = resp.send(json); }
                 CtrlReq::WindowLayout(wid, resp) => {
                     let json = crate::util::window_layout_json(&app, wid)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let _ = resp.send(json);
+                }
+                CtrlReq::WindowDump(wid, resp) => {
+                    let json = crate::layout::dump_window_layout_json(&mut app, wid)
                         .unwrap_or_else(|_| "{}".to_string());
                     let _ = resp.send(json);
                 }

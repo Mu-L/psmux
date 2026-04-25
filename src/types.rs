@@ -936,6 +936,11 @@ pub enum CtrlReq {
     /// Issue #257: simplified layout (split kind/sizes + pane ids)
     /// for a specific window, used for choose-tree preview rendering.
     WindowLayout(usize, mpsc::Sender<String>),
+    /// Issue #257: full styled `LayoutJson` (rows_v2 cell runs, titles,
+    /// etc.) for a specific window. Lets cross-session previews reuse the
+    /// exact same renderer the main viewport uses, instead of replaying
+    /// `capture-pane -e` per pane and parsing ANSI by hand.
+    WindowDump(usize, mpsc::Sender<String>),
     ToggleSync,
     SetPaneTitle(String),
     SetPaneStyle(String),
