@@ -21,6 +21,7 @@ mod util;
 mod format;
 mod help;
 mod server;
+mod preview;
 mod client;
 mod ssh_input;
 mod debug_log;

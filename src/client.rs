@@ -463,6 +463,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Digits typed while the picker is open accumulate here and are consumed
     // when the user presses Enter — "12" + Enter jumps to the 12th session.
     let mut session_num_buffer = String::new();
+    // Live preview cache for choose-tree / choose-session pickers (issue #257).
+    // Keyed by "session\twin_id\tpane_id"; pane_id == usize::MAX => active pane.
+    let mut preview_cache: crate::preview::PreviewCache = std::collections::HashMap::new();
+    // Draggable popup state (shared across pickers). Offset is applied on top
+    // of the centered rect; resets when no picker is open.
+    let mut popup_offset: (i32, i32) = (0, 0);
+    let mut popup_dragging: bool = false;
+    let mut popup_drag_anchor: (u16, u16) = (0, 0);
+    let mut popup_initial_offset: (i32, i32) = (0, 0);
+    let mut popup_rect_last: Option<Rect> = None;
     let mut confirm_cmd: Option<String> = None;  // pending kill confirmation
     let current_session = name.clone();
     let mut last_sent_size: (u16, u16) = (0, 0);
@@ -1599,6 +1609,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 tree_entries.clear();
                                 tree_selected = 0;
                                 tree_scroll = 0;
+                                popup_offset = (0, 0);
+                                popup_dragging = false;
+                                popup_rect_last = None;
                                 // Query ALL sessions (like tmux choose-tree)
                                 let dir = format!("{}\\.psmux", home);
                                 if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -1684,6 +1697,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 session_selected = 0;
                                 session_scroll = 0;
                                 session_num_buffer.clear();
+                                popup_offset = (0, 0);
+                                popup_dragging = false;
+                                popup_rect_last = None;
                                 let dir = format!("{}\\.psmux", home);
                                 // Collect (label, addr, key) for every reachable port file first,
                                 // then fan out the per-session AUTH+session-info fetches in parallel.
@@ -2355,6 +2371,50 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     }
                     Event::Mouse(me) => {
                         use crossterm::event::{MouseEventKind, MouseButton};
+                        // Intercept mouse events while a draggable picker is open
+                        // so the user can move the popup by dragging its border
+                        // and so clicks behind the popup don't leak through to
+                        // the underlying panes (issue #257).
+                        if tree_chooser || session_chooser {
+                            let on_top_border = popup_rect_last.map_or(false, |r| {
+                                me.row == r.y && me.column >= r.x && me.column < r.x + r.width
+                            });
+                            match me.kind {
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    if on_top_border {
+                                        popup_dragging = true;
+                                        popup_drag_anchor = (me.column, me.row);
+                                        popup_initial_offset = popup_offset;
+                                    }
+                                }
+                                MouseEventKind::Drag(MouseButton::Left) => {
+                                    if popup_dragging {
+                                        let dx = me.column as i32 - popup_drag_anchor.0 as i32;
+                                        let dy = me.row as i32 - popup_drag_anchor.1 as i32;
+                                        popup_offset = (
+                                            popup_initial_offset.0 + dx,
+                                            popup_initial_offset.1 + dy,
+                                        );
+                                    }
+                                }
+                                MouseEventKind::Up(MouseButton::Left) => {
+                                    popup_dragging = false;
+                                }
+                                MouseEventKind::ScrollUp => {
+                                    if tree_chooser && tree_selected > 0 { tree_selected -= 1; }
+                                    if session_chooser && session_selected > 0 { session_selected -= 1; }
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    if tree_chooser && tree_selected + 1 < tree_entries.len() { tree_selected += 1; }
+                                    if session_chooser && session_selected + 1 < session_entries.len() { session_selected += 1; }
+                                }
+                                _ => {}
+                            }
+                            // Advance to the next pending event without falling
+                            // through to the underlying-pane mouse handler.
+                            _pending_evt = input.try_read()?;
+                            continue;
+                        }
                         match me.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
                                 // Status bar tab click
@@ -3720,32 +3780,58 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
 
             if session_chooser {
                 let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
-                let overlay = Block::default().borders(Borders::ALL).title("choose-session (digits+enter=jump, enter=switch, x=kill, esc=close)").border_style(sel_style);
-                // Dynamic height: content lines + 2 (borders), plus a blank
-                // line and a "go to N" line while the jump buffer is open.
-                let buffer_rows: u16 = if session_num_buffer.is_empty() { 0 } else { 2 };
-                let sess_h = (session_entries.len() as u16)
-                    .saturating_add(2)
-                    .saturating_add(buffer_rows)
-                    .max(5)
-                    .min(content_chunk.height.saturating_sub(2));
-                let oa = centered_rect(70, sess_h, content_chunk);
+                // Wider/taller popup with right-side live preview pane (issue #257).
+                let avail_w = content_chunk.width;
+                let avail_h = content_chunk.height;
+                let want_w = ((avail_w as u32 * 85) / 100) as u16;
+                let want_h = ((avail_h as u32 * 75) / 100) as u16;
+                let popup_w = want_w.max(40).min(avail_w);
+                let popup_h = want_h.max(10).min(avail_h);
+                let base_x = content_chunk.x + (avail_w.saturating_sub(popup_w)) / 2;
+                let base_y = content_chunk.y + (avail_h.saturating_sub(popup_h)) / 2;
+                let max_dx = (avail_w.saturating_sub(popup_w)) as i32 / 2;
+                let max_dy = (avail_h.saturating_sub(popup_h)) as i32 / 2;
+                let dx = popup_offset.0.clamp(-max_dx, max_dx);
+                let dy = popup_offset.1.clamp(-max_dy, max_dy);
+                let oa = Rect {
+                    x: ((base_x as i32) + dx).max(content_chunk.x as i32) as u16,
+                    y: ((base_y as i32) + dy).max(content_chunk.y as i32) as u16,
+                    width: popup_w,
+                    height: popup_h,
+                };
+                popup_rect_last = Some(oa);
+                let title = " choose-session (digits+enter=jump, enter=switch, x=kill, esc=close, drag border to move) ";
+                let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let inner = overlay.inner(oa);
+
+                // Split inner area: list on the left, preview on the right.
+                let list_w = if inner.width >= 60 {
+                    (inner.width * 40 / 100).max(30).min(inner.width.saturating_sub(30))
+                } else {
+                    inner.width
+                };
+                let list_area = Rect { x: inner.x, y: inner.y, width: list_w, height: inner.height };
+                let preview_area = if inner.width > list_w + 1 {
+                    Some(Rect {
+                        x: inner.x + list_w + 1,
+                        y: inner.y,
+                        width: inner.width - list_w - 1,
+                        height: inner.height,
+                    })
+                } else { None };
+
                 // Reserve the last two inner rows for the jump-buffer indicator
-                // when active; the entry list scrolls within the remaining rows.
+                let buffer_rows: u16 = if session_num_buffer.is_empty() { 0 } else { 2 };
                 let reserved = buffer_rows as usize;
-                let visible_h = (inner.height as usize).saturating_sub(reserved);
-                // Keep session_selected in view
+                let visible_h = (list_area.height as usize).saturating_sub(reserved);
                 if visible_h > 0 && session_selected >= session_scroll + visible_h {
                     session_scroll = session_selected.saturating_sub(visible_h - 1);
                 }
                 if session_selected < session_scroll {
                     session_scroll = session_selected;
                 }
-                // Width of the row-number column — grows with session count so
-                // entries stay aligned past 9, 99, 999.
                 let num_width = session_entries.len().to_string().len();
                 let mut lines: Vec<Line> = Vec::new();
                 for (i, (sname, info)) in session_entries.iter().enumerate().skip(session_scroll).take(visible_h) {
@@ -3766,7 +3852,53 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     )));
                 }
                 let para = Paragraph::new(Text::from(lines));
-                f.render_widget(para, inner);
+                f.render_widget(para, list_area);
+
+                if let Some(parea) = preview_area {
+                    let sep_x = inner.x + list_w;
+                    for yy in inner.y..(inner.y + inner.height) {
+                        let sep = Paragraph::new(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                        f.render_widget(sep, Rect { x: sep_x, y: yy, width: 1, height: 1 });
+                    }
+                    // Look up first window of the highlighted session by querying list-tree.
+                    // We cache by session+win=usize::MAX, fetching list-tree once per session.
+                    let preview_text: Option<String> = session_entries.get(session_selected)
+                        .and_then(|(sname, _info)| {
+                            // Get first window id via cached list-tree fetch.
+                            let lt_key = format!("__lt__\t{}", sname);
+                            let win_id = if let Some((cached, ts)) = preview_cache.get(&lt_key) {
+                                if ts.elapsed() < crate::preview::PREVIEW_TTL {
+                                    cached.parse::<usize>().ok()
+                                } else { None }
+                            } else { None };
+                            let win_id = win_id.or_else(|| {
+                                // Fetch list-tree for this session
+                                let port_path = format!("{}\\.psmux\\{}.port", home, sname);
+                                let port: u16 = std::fs::read_to_string(&port_path).ok()?.trim().parse().ok()?;
+                                let key = crate::session::read_session_key(sname).ok()?;
+                                let resp = crate::session::fetch_authed_response_multi(
+                                    &format!("127.0.0.1:{}", port),
+                                    &key,
+                                    b"list-tree\n",
+                                    Duration::from_millis(150),
+                                    Duration::from_millis(300),
+                                )?;
+                                let wins: Vec<WinTree> = serde_json::from_str(resp.trim()).ok()?;
+                                let first = wins.first()?;
+                                preview_cache.insert(lt_key, (first.id.to_string(), Instant::now()));
+                                Some(first.id)
+                            });
+                            let wid = win_id?;
+                            crate::preview::get_or_fetch(&mut preview_cache, &home, sname, wid, usize::MAX)
+                        });
+                    let preview_lines = match preview_text {
+                        Some(t) => crate::preview::clip_lines(&t, parea.width, parea.height),
+                        None => vec!["(no preview available)".to_string()],
+                    };
+                    let pv: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
+                    let pv_para = Paragraph::new(Text::from(pv));
+                    f.render_widget(pv_para, parea);
+                }
                 // Scroll position indicator (when content overflows)
                 if session_entries.len() > visible_h {
                     let max_scroll = session_entries.len().saturating_sub(visible_h);
@@ -3790,19 +3922,52 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             }
             if tree_chooser {
                 let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
-                let overlay = Block::default().borders(Borders::ALL).title("choose-tree").border_style(sel_style);
-                // Use dynamic height: content lines + 2 (borders), capped to
-                // available space so the overlay never exceeds the terminal.
-                let tree_h = ((tree_entries.len() as u16).saturating_add(2))
-                    .max(5)
-                    .min(content_chunk.height.saturating_sub(2));
-                let oa = centered_rect(60, tree_h, content_chunk);
+                // Wider/taller popup with right-side live preview pane (issue #257).
+                let avail_w = content_chunk.width;
+                let avail_h = content_chunk.height;
+                let want_w = ((avail_w as u32 * 85) / 100) as u16;
+                let want_h = ((avail_h as u32 * 75) / 100) as u16;
+                let popup_w = want_w.max(40).min(avail_w);
+                let popup_h = want_h.max(10).min(avail_h);
+                let base_x = content_chunk.x + (avail_w.saturating_sub(popup_w)) / 2;
+                let base_y = content_chunk.y + (avail_h.saturating_sub(popup_h)) / 2;
+                // Apply drag offset, clamped so the popup stays fully on-screen.
+                let max_dx = (avail_w.saturating_sub(popup_w)) as i32 / 2;
+                let max_dy = (avail_h.saturating_sub(popup_h)) as i32 / 2;
+                let dx = popup_offset.0.clamp(-max_dx, max_dx);
+                let dy = popup_offset.1.clamp(-max_dy, max_dy);
+                let oa = Rect {
+                    x: ((base_x as i32) + dx).max(content_chunk.x as i32) as u16,
+                    y: ((base_y as i32) + dy).max(content_chunk.y as i32) as u16,
+                    width: popup_w,
+                    height: popup_h,
+                };
+                popup_rect_last = Some(oa);
+                let title = " choose-tree (Enter=switch  x=kill  Esc=close  drag border to move) ";
+                let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let inner = overlay.inner(oa);
-                let visible_h = inner.height as usize;
-                // Keep tree_selected in view
-                if tree_selected >= tree_scroll + visible_h {
+
+                // Split inner area: list on the left, preview on the right.
+                // Reserve at least 40 cols for the preview when there's room.
+                let list_w = if inner.width >= 60 {
+                    (inner.width * 40 / 100).max(28).min(inner.width.saturating_sub(30))
+                } else {
+                    inner.width
+                };
+                let list_area = Rect { x: inner.x, y: inner.y, width: list_w, height: inner.height };
+                let preview_area = if inner.width > list_w + 1 {
+                    Some(Rect {
+                        x: inner.x + list_w + 1,
+                        y: inner.y,
+                        width: inner.width - list_w - 1,
+                        height: inner.height,
+                    })
+                } else { None };
+
+                let visible_h = list_area.height as usize;
+                if visible_h > 0 && tree_selected >= tree_scroll + visible_h {
                     tree_scroll = tree_selected.saturating_sub(visible_h - 1);
                 }
                 if tree_selected < tree_scroll {
@@ -3821,7 +3986,39 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     lines.push(line);
                 }
                 let para = Paragraph::new(Text::from(lines));
-                f.render_widget(para, inner);
+                f.render_widget(para, list_area);
+
+                // Vertical separator + preview pane
+                if let Some(parea) = preview_area {
+                    // Draw vertical separator at column inner.x + list_w
+                    let sep_x = inner.x + list_w;
+                    for yy in inner.y..(inner.y + inner.height) {
+                        let sep = Paragraph::new(Span::styled("│", Style::default().fg(Color::DarkGray)));
+                        f.render_widget(sep, Rect { x: sep_x, y: yy, width: 1, height: 1 });
+                    }
+                    // Determine target session/window/pane for the preview
+                    let preview_text: Option<String> = tree_entries.get(tree_selected).and_then(|(is_win, wid, pid, _label, sess)| {
+                        if *is_win && *wid == usize::MAX {
+                            // Session header — preview the active window's active pane.
+                            // We don't know window id here without fetching; fall through
+                            // to show the first window's id from the list.
+                            tree_entries.iter()
+                                .find(|(iw, w, _p, _l, s)| *iw && *w != usize::MAX && s == sess)
+                                .and_then(|(_, w, _p, _l, s)| crate::preview::get_or_fetch(&mut preview_cache, &home, s, *w, usize::MAX))
+                        } else if *is_win {
+                            crate::preview::get_or_fetch(&mut preview_cache, &home, sess, *wid, usize::MAX)
+                        } else {
+                            crate::preview::get_or_fetch(&mut preview_cache, &home, sess, *wid, *pid)
+                        }
+                    });
+                    let preview_lines = match preview_text {
+                        Some(t) => crate::preview::clip_lines(&t, parea.width, parea.height),
+                        None => vec!["(no preview available)".to_string()],
+                    };
+                    let pv: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
+                    let pv_para = Paragraph::new(Text::from(pv));
+                    f.render_widget(pv_para, parea);
+                }
                 // Scroll position indicator (when content overflows)
                 if tree_entries.len() > visible_h {
                     let max_scroll = tree_entries.len().saturating_sub(visible_h);
