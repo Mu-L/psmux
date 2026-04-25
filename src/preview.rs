@@ -8,6 +8,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+
 use crate::session::{fetch_authed_response_multi, read_session_key};
 use crate::util::LayoutSimple;
 
@@ -37,7 +40,9 @@ pub fn fetch_pane_preview(home: &str, sess: &str, win_id: usize, pane_id: usize)
     } else {
         format!(":@{}.%{}", win_id, pane_id)
     };
-    let cmd = format!("capture-pane -p -t {}\n", target);
+    // Use -e to preserve SGR escape sequences so the preview can show
+    // colors and attributes like the real pane (issue #257 follow-up).
+    let cmd = format!("capture-pane -e -p -t {}\n", target);
     let resp = fetch_authed_response_multi(
         &format!("127.0.0.1:{}", port),
         &key,
@@ -108,6 +113,162 @@ pub fn clip_lines(text: &str, width: u16, height: u16) -> Vec<String> {
             }
             out
         })
+        .collect()
+}
+
+// ---------------------------------------------------------------------
+// ANSI SGR -> ratatui Spans (issue #257 follow-up: faithful preview)
+// ---------------------------------------------------------------------
+
+fn sgr_color_from_8bit(n: u8) -> Color {
+    match n {
+        0 => Color::Black, 1 => Color::Red, 2 => Color::Green, 3 => Color::Yellow,
+        4 => Color::Blue, 5 => Color::Magenta, 6 => Color::Cyan, 7 => Color::Gray,
+        8 => Color::DarkGray, 9 => Color::LightRed, 10 => Color::LightGreen,
+        11 => Color::LightYellow, 12 => Color::LightBlue, 13 => Color::LightMagenta,
+        14 => Color::LightCyan, 15 => Color::White,
+        n => Color::Indexed(n),
+    }
+}
+
+fn apply_sgr(style: &mut Style, params: &[u32]) {
+    let mut i = 0;
+    while i < params.len() {
+        let p = params[i];
+        match p {
+            0 => *style = Style::default(),
+            1 => *style = style.add_modifier(Modifier::BOLD),
+            2 => *style = style.add_modifier(Modifier::DIM),
+            3 => *style = style.add_modifier(Modifier::ITALIC),
+            4 => *style = style.add_modifier(Modifier::UNDERLINED),
+            5 | 6 => *style = style.add_modifier(Modifier::SLOW_BLINK),
+            7 => *style = style.add_modifier(Modifier::REVERSED),
+            9 => *style = style.add_modifier(Modifier::CROSSED_OUT),
+            22 => *style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
+            23 => *style = style.remove_modifier(Modifier::ITALIC),
+            24 => *style = style.remove_modifier(Modifier::UNDERLINED),
+            25 => *style = style.remove_modifier(Modifier::SLOW_BLINK | Modifier::RAPID_BLINK),
+            27 => *style = style.remove_modifier(Modifier::REVERSED),
+            29 => *style = style.remove_modifier(Modifier::CROSSED_OUT),
+            30..=37 => *style = style.fg(sgr_color_from_8bit((p - 30) as u8)),
+            39 => *style = style.fg(Color::Reset),
+            40..=47 => *style = style.bg(sgr_color_from_8bit((p - 40) as u8)),
+            49 => *style = style.bg(Color::Reset),
+            90..=97 => *style = style.fg(sgr_color_from_8bit((p - 90 + 8) as u8)),
+            100..=107 => *style = style.bg(sgr_color_from_8bit((p - 100 + 8) as u8)),
+            38 | 48 => {
+                if let Some(&kind) = params.get(i + 1) {
+                    if kind == 5 {
+                        if let Some(&n) = params.get(i + 2) {
+                            let col = if n <= 255 { Color::Indexed(n as u8) } else { Color::Reset };
+                            *style = if p == 38 { style.fg(col) } else { style.bg(col) };
+                            i += 2;
+                        }
+                    } else if kind == 2 {
+                        if let (Some(&r), Some(&g), Some(&b)) =
+                            (params.get(i + 2), params.get(i + 3), params.get(i + 4))
+                        {
+                            let col = Color::Rgb(r as u8, g as u8, b as u8);
+                            *style = if p == 38 { style.fg(col) } else { style.bg(col) };
+                            i += 4;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+fn parse_sgr_line(line: &str, max_width: usize, style: &mut Style) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut buf = String::new();
+    let mut width = 0usize;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                let mut params_buf = String::new();
+                let mut final_byte = '\0';
+                while let Some(c) = chars.next() {
+                    if c.is_ascii_digit() || c == ';' || c == ':' {
+                        params_buf.push(c);
+                    } else {
+                        final_byte = c;
+                        break;
+                    }
+                }
+                if final_byte == 'm' {
+                    if !buf.is_empty() {
+                        spans.push(Span::styled(std::mem::take(&mut buf), *style));
+                    }
+                    let params: Vec<u32> = if params_buf.is_empty() {
+                        vec![0]
+                    } else {
+                        params_buf
+                            .split(|c| c == ';' || c == ':')
+                            .map(|s| s.parse::<u32>().unwrap_or(0))
+                            .collect()
+                    };
+                    apply_sgr(style, &params);
+                }
+            } else {
+                let _ = chars.next();
+            }
+            continue;
+        }
+        if ch == '\r' { continue; }
+        if (ch as u32) < 0x20 { continue; }
+        if width + 1 > max_width { break; }
+        buf.push(ch);
+        width += 1;
+    }
+    if !buf.is_empty() {
+        spans.push(Span::styled(buf, *style));
+    }
+    spans
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if !(c.is_ascii_digit() || c == ';' || c == ':') { break; }
+                }
+            } else { let _ = chars.next(); }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Parse `capture-pane -e -p` output into ratatui Lines, taking the
+/// most recent `height` non-empty lines and clipping each to `width`.
+pub fn parse_ansi_lines(text: &str, width: u16, height: u16) -> Vec<Line<'static>> {
+    let max_w = width as usize;
+    let max_h = height as usize;
+    if max_w == 0 || max_h == 0 { return Vec::new(); }
+    let raw: Vec<&str> = text.split('\n').collect();
+    let mut end = raw.len();
+    while end > 0 && strip_ansi(raw[end - 1]).trim_end().is_empty() {
+        end -= 1;
+    }
+    let slice = &raw[..end];
+    let start = slice.len().saturating_sub(max_h);
+    let mut style = Style::default();
+    for l in &slice[..start] {
+        let _ = parse_sgr_line(l, usize::MAX, &mut style);
+    }
+    slice[start..]
+        .iter()
+        .map(|l| Line::from(parse_sgr_line(l, max_w, &mut style)))
         .collect()
 }
 
@@ -278,3 +439,45 @@ pub fn layout_separators(
     rec(layout, area, &mut out);
     out
 }
+
+#[cfg(test)]
+mod tests_ansi {
+    use super::*;
+    use ratatui::style::{Color, Modifier};
+
+    #[test]
+    fn parse_ansi_lines_preserves_red_marker() {
+        // Two-line input: a red ABC then a default def.
+        let txt = "\x1b[31mABC\x1b[0m\ndef";
+        let lines = parse_ansi_lines(txt, 10, 5);
+        assert_eq!(lines.len(), 2, "expected 2 lines, got {}", lines.len());
+        // First line should contain a span styled with red foreground.
+        let first = &lines[0];
+        let abc_span = first.spans.iter().find(|s| s.content == "ABC")
+            .expect("no ABC span");
+        assert_eq!(abc_span.style.fg, Some(Color::Red));
+        // Second line def should have default fg.
+        let second = &lines[1];
+        let def_span = second.spans.iter().find(|s| s.content == "def")
+            .expect("no def span");
+        assert_ne!(def_span.style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn parse_ansi_lines_clips_to_width() {
+        let txt = "ABCDEFGHIJ";
+        let lines = parse_ansi_lines(txt, 4, 1);
+        assert_eq!(lines.len(), 1);
+        let total: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(total, "ABCD");
+    }
+
+    #[test]
+    fn parse_ansi_lines_handles_bold() {
+        let txt = "\x1b[1mBOLD\x1b[0m";
+        let lines = parse_ansi_lines(txt, 10, 1);
+        let span = lines[0].spans.iter().find(|s| s.content == "BOLD").expect("no BOLD span");
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+    }
+}
+

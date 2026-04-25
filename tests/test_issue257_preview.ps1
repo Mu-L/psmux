@@ -221,3 +221,56 @@ if ($paneCount -ne 3) {
 
 & $PSMUX kill-session -t $SESSION_LAY 2>&1 | Out-Null
 Remove-Item "$psmuxDir\$SESSION_LAY.*" -Force -EA SilentlyContinue
+
+# === TEST 6: capture-pane -e -p preserves ANSI SGR escape sequences ===
+Write-Host "`n[Test 6] capture-pane -e -p emits SGR escape sequences" -ForegroundColor Yellow
+$SESSION_E = "issue257_esc"
+& $PSMUX kill-session -t $SESSION_E 2>&1 | Out-Null
+Start-Sleep -Milliseconds 300
+Remove-Item "$psmuxDir\$SESSION_E.*" -Force -EA SilentlyContinue
+
+& $PSMUX new-session -d -s $SESSION_E
+Start-Sleep -Seconds 2
+# Print a colored marker (red on default)
+& $PSMUX send-keys -t $SESSION_E "Write-Host 'ESCMARKER' -ForegroundColor Red" Enter
+Start-Sleep -Seconds 2
+
+$capE = & $PSMUX capture-pane -e -p -t $SESSION_E 2>&1 | Out-String
+# Look for ESC[ ... m sequences (SGR) and the marker
+$ESC = [char]27
+$hasSgr = $capE -match "$ESC\["
+$hasMarker = $capE -match 'ESCMARKER'
+if ($hasSgr -and $hasMarker) {
+    Write-Pass "capture-pane -e returned SGR-escaped output containing the marker"
+} else {
+    Write-Fail "Expected SGR + ESCMARKER. hasSgr=$hasSgr hasMarker=$hasMarker"
+}
+& $PSMUX kill-session -t $SESSION_E 2>&1 | Out-Null
+Remove-Item "$psmuxDir\$SESSION_E.*" -Force -EA SilentlyContinue
+
+# === TEST 7: Win32 TUI: pressing 'p' inside choose-session does not crash ===
+Write-Host "`n[Test 7] Win32 TUI: 'p' toggles preview without crashing" -ForegroundColor Yellow
+if (Test-Path $injectorExe) {
+    $SESSION_TG = "issue257_toggle"
+    & $PSMUX kill-session -t $SESSION_TG 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 300
+    Remove-Item "$psmuxDir\$SESSION_TG.*" -Force -EA SilentlyContinue
+
+    $procT = Start-Process -FilePath $PSMUX -ArgumentList "new-session","-s",$SESSION_TG -PassThru
+    Start-Sleep -Seconds 4
+
+    # Open choose-session, press p twice (toggle off, toggle on), then Esc.
+    & $injectorExe $procT.Id "^b{SLEEP:300}s{SLEEP:600}p{SLEEP:200}p{SLEEP:200}{ESC}"
+    Start-Sleep -Seconds 1
+    & $PSMUX has-session -t $SESSION_TG 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Pass "Session survived 'p' toggle in choose-session"
+    } else {
+        Write-Fail "Session died after pressing 'p'"
+    }
+    & $PSMUX kill-session -t $SESSION_TG 2>&1 | Out-Null
+    try { Stop-Process -Id $procT.Id -Force -EA SilentlyContinue } catch {}
+    Remove-Item "$psmuxDir\$SESSION_TG.*" -Force -EA SilentlyContinue
+} else {
+    Write-Fail "Injector not available"
+}

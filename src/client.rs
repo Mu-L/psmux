@@ -469,6 +469,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Layout cache for the same pickers — fetched once per (sess, win)
     // so we can render the actual split layout, not just one pane.
     let mut layout_cache: crate::preview::LayoutCache = std::collections::HashMap::new();
+    // Whether the right-side preview pane is shown. Toggled by `p`
+    // while a chooser is open. Persisted across reopens.
+    let mut preview_enabled: bool = true;
     // Draggable popup state (shared across pickers). Offset is applied on top
     // of the centered rect; resets when no picker is open.
     let mut popup_offset: (i32, i32) = (0, 0);
@@ -1931,6 +1934,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         session_num_buffer.push(c);
                                     }
                                 }
+                                // 'p' toggles the live preview pane in choose-session
+                                KeyCode::Char('p') if session_chooser => {
+                                    preview_enabled = !preview_enabled;
+                                }
                                 // Absorb any other char while the session picker is open so
                                 // it cannot leak through to the focused pane's PTY.
                                 KeyCode::Char(_) if session_chooser => {}
@@ -1962,6 +1969,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     }
                                 }
                                 KeyCode::Esc if tree_chooser => { tree_chooser = false; }
+                                // 'p' toggles the live preview pane in choose-tree
+                                KeyCode::Char('p') if tree_chooser => {
+                                    preview_enabled = !preview_enabled;
+                                }
                                 // --- buffer chooser (C-b =) ---
                                 KeyCode::Up | KeyCode::Char('k') if buffer_chooser => {
                                     if buffer_selected > 0 { buffer_selected -= 1; }
@@ -3803,20 +3814,24 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     height: popup_h,
                 };
                 popup_rect_last = Some(oa);
-                let title = " choose-session (digits+enter=jump, enter=switch, x=kill, esc=close, drag border to move) ";
+                let title = " choose-session (digits+enter=jump, enter=switch, x=kill, p=preview, esc=close, drag border to move) ";
                 let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let inner = overlay.inner(oa);
 
                 // Split inner area: list on the left, preview on the right.
-                let list_w = if inner.width >= 60 {
+                // `p` toggles the preview pane off — when off the list takes
+                // the full inner width.
+                let list_w = if !preview_enabled {
+                    inner.width
+                } else if inner.width >= 60 {
                     (inner.width * 40 / 100).max(30).min(inner.width.saturating_sub(30))
                 } else {
                     inner.width
                 };
                 let list_area = Rect { x: inner.x, y: inner.y, width: list_w, height: inner.height };
-                let preview_area = if inner.width > list_w + 1 {
+                let preview_area = if preview_enabled && inner.width > list_w + 1 {
                     Some(Rect {
                         x: inner.x + list_w + 1,
                         y: inner.y,
@@ -3926,11 +3941,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     let body = crate::preview::get_or_fetch(
                                         &mut preview_cache, &home, sname, wid, lpid,
                                     );
-                                    let lines = match body {
-                                        Some(t) => crate::preview::clip_lines(&t, inside.width, inside.height),
-                                        None => vec!["(no preview)".to_string()],
+                                    let pv: Vec<Line> = match body {
+                                        Some(t) => crate::preview::parse_ansi_lines(&t, inside.width, inside.height),
+                                        None => vec![Line::from("(no preview)")],
                                     };
-                                    let pv: Vec<Line> = lines.into_iter().map(Line::from).collect();
                                     f.render_widget(Paragraph::new(Text::from(pv)), inside);
                                 }
                                 rendered = true;
@@ -3952,11 +3966,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 let wid = win_id?;
                                 crate::preview::get_or_fetch(&mut preview_cache, &home, sname, wid, usize::MAX)
                             });
-                        let preview_lines = match preview_text {
-                            Some(t) => crate::preview::clip_lines(&t, parea.width, parea.height),
-                            None => vec!["(no preview available)".to_string()],
+                        let pv: Vec<Line> = match preview_text {
+                            Some(t) => crate::preview::parse_ansi_lines(&t, parea.width, parea.height),
+                            None => vec![Line::from("(no preview available)")],
                         };
-                        let pv: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
                         let pv_para = Paragraph::new(Text::from(pv));
                         f.render_widget(pv_para, parea);
                     }
@@ -4005,21 +4018,23 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     height: popup_h,
                 };
                 popup_rect_last = Some(oa);
-                let title = " choose-tree (Enter=switch  x=kill  Esc=close  drag border to move) ";
+                let title = " choose-tree (Enter=switch  x=kill  p=preview  Esc=close  drag border to move) ";
                 let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let inner = overlay.inner(oa);
 
                 // Split inner area: list on the left, preview on the right.
-                // Reserve at least 40 cols for the preview when there's room.
-                let list_w = if inner.width >= 60 {
+                // When preview is toggled off (`p`), use full width for the list.
+                let list_w = if !preview_enabled {
+                    inner.width
+                } else if inner.width >= 60 {
                     (inner.width * 40 / 100).max(28).min(inner.width.saturating_sub(30))
                 } else {
                     inner.width
                 };
                 let list_area = Rect { x: inner.x, y: inner.y, width: list_w, height: inner.height };
-                let preview_area = if inner.width > list_w + 1 {
+                let preview_area = if preview_enabled && inner.width > list_w + 1 {
                     Some(Rect {
                         x: inner.x + list_w + 1,
                         y: inner.y,
@@ -4126,11 +4141,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     let body = crate::preview::get_or_fetch(
                                         &mut preview_cache, &home, &sess, twid, lpid,
                                     );
-                                    let lines = match body {
-                                        Some(t) => crate::preview::clip_lines(&t, inside.width, inside.height),
-                                        None => vec!["(no preview)".to_string()],
+                                    let pv: Vec<Line> = match body {
+                                        Some(t) => crate::preview::parse_ansi_lines(&t, inside.width, inside.height),
+                                        None => vec![Line::from("(no preview)")],
                                     };
-                                    let pv: Vec<Line> = lines.into_iter().map(Line::from).collect();
                                     f.render_widget(Paragraph::new(Text::from(pv)), inside);
                                 }
                                 rendered = true;
@@ -4149,11 +4163,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             } else {
                                 crate::preview::get_or_fetch(&mut preview_cache, &home, &sess, wid, pid)
                             };
-                            let preview_lines = match preview_text {
-                                Some(t) => crate::preview::clip_lines(&t, parea.width, parea.height),
-                                None => vec!["(no preview available)".to_string()],
+                            let pv: Vec<Line> = match preview_text {
+                                Some(t) => crate::preview::parse_ansi_lines(&t, parea.width, parea.height),
+                                None => vec![Line::from("(no preview available)")],
                             };
-                            let pv: Vec<Line> = preview_lines.into_iter().map(Line::from).collect();
                             let pv_para = Paragraph::new(Text::from(pv));
                             f.render_widget(pv_para, parea);
                         }
