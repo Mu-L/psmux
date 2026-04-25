@@ -489,24 +489,11 @@ pub fn get_or_fetch_dump(
     let key = format!("{}\t{}", sess, win_id);
     if let Some((layout, ts)) = cache.get(&key) {
         if ts.elapsed() < DUMP_TTL {
-            // Cheap clone: clone the entire tree. LayoutJson is Clone-able
-            // via Serialize+Deserialize round-trip — but it doesn't derive
-            // Clone, so we serialize+deserialize. That's still cheaper than
-            // a TCP round trip and only happens during fast key repeats.
-            if let Ok(s) = serde_json::to_string(layout) {
-                if let Ok(c) = serde_json::from_str::<crate::layout::LayoutJson>(&s) {
-                    return Some(c);
-                }
-            }
+            return Some(layout.clone());
         }
     }
     let layout = fetch_window_dump(home, sess, win_id)?;
-    // Stash a serialized copy for the cache and return the original.
-    if let Ok(s) = serde_json::to_string(&layout) {
-        if let Ok(c) = serde_json::from_str::<crate::layout::LayoutJson>(&s) {
-            cache.insert(key, (c, Instant::now()));
-        }
-    }
+    cache.insert(key, (layout.clone(), Instant::now()));
     Some(layout)
 }
 
@@ -692,6 +679,172 @@ pub fn dump_separators(
     }
     rec(layout, area, &mut out);
     out
+}
+
+/// Render a full `LayoutJson` window dump into `area`, mirroring the
+/// real psmux viewport: NO labelled boxes around panes, just thin
+/// `│` / `─` separators between adjacent panes coloured with the same
+/// `pane_border_fg` / `pane_active_border_fg` the main view uses. Each
+/// leaf's content fills its full sub-rect.
+///
+/// `border_fg` / `active_border_fg` come from the user's
+/// `pane-border-style` / `pane-active-border-style` options so the
+/// preview always matches the running theme. `highlight_pid` lets a
+/// chooser draw extra emphasis on a specific pane (e.g. the one the
+/// cursor is hovering over).
+pub fn render_dump_tree(
+    f: &mut ratatui::Frame,
+    layout: &crate::layout::LayoutJson,
+    area: ratatui::layout::Rect,
+    border_fg: Color,
+    active_border_fg: Color,
+    highlight_pid: Option<usize>,
+) {
+    use ratatui::layout::Rect;
+    use ratatui::widgets::{Paragraph, Clear};
+    use ratatui::text::Text;
+    if area.width == 0 || area.height == 0 { return; }
+
+    fn split_alloc(area: Rect, kind: &str, sizes: &[u16], children_n: usize) -> (bool, Vec<Rect>) {
+        let is_horiz = kind == "Horizontal";
+        let total: u32 = sizes.iter().map(|s| *s as u32).sum::<u32>().max(1);
+        let span = if is_horiz { area.width as u32 } else { area.height as u32 };
+        let sep_count = children_n.saturating_sub(1) as u32;
+        let usable = span.saturating_sub(sep_count);
+        let mut alloc: Vec<u32> = sizes.iter().take(children_n)
+            .map(|s| (*s as u32 * usable) / total)
+            .collect();
+        while alloc.len() < children_n { alloc.push(0); }
+        let used: u32 = alloc.iter().sum();
+        let mut leftover = usable.saturating_sub(used);
+        let alen = alloc.len();
+        let mut idx = 0;
+        while leftover > 0 && alen > 0 {
+            alloc[idx % alen] += 1;
+            idx += 1;
+            leftover -= 1;
+        }
+        let mut rects = Vec::with_capacity(children_n);
+        let mut cursor: u32 = 0;
+        for i in 0..children_n {
+            let size = alloc[i] as u16;
+            let r = if is_horiz {
+                Rect { x: area.x + cursor as u16, y: area.y, width: size, height: area.height }
+            } else {
+                Rect { x: area.x, y: area.y + cursor as u16, width: area.width, height: size }
+            };
+            rects.push(r);
+            cursor += size as u32;
+            if i + 1 < children_n { cursor += 1; }
+        }
+        (is_horiz, rects)
+    }
+
+    fn walk_leaves(
+        f: &mut ratatui::Frame,
+        node: &crate::layout::LayoutJson,
+        area: Rect,
+    ) {
+        match node {
+            crate::layout::LayoutJson::Leaf { rows_v2, .. } => {
+                if area.width < 1 || area.height < 1 { return; }
+                f.render_widget(Clear, area);
+                let mut lines: Vec<Line> = Vec::with_capacity(area.height as usize);
+                for r in 0..(area.height as usize) {
+                    if r >= rows_v2.len() { break; }
+                    lines.push(render_runs_line(&rows_v2[r].runs, area.width));
+                }
+                f.render_widget(Paragraph::new(Text::from(lines)), area);
+            }
+            crate::layout::LayoutJson::Split { kind, sizes, children } => {
+                if children.is_empty() { return; }
+                let (_, rects) = split_alloc(area, kind, sizes, children.len());
+                for (i, child) in children.iter().enumerate() {
+                    walk_leaves(f, child, rects[i]);
+                }
+            }
+        }
+    }
+
+    walk_leaves(f, layout, area);
+
+    // Pass 2: separator lines, drawn directly into the buffer using
+    // the same half-highlight trick as the main render path.
+    fn walk_seps(
+        f: &mut ratatui::Frame,
+        node: &crate::layout::LayoutJson,
+        area: Rect,
+        border_fg: Color,
+        active_border_fg: Color,
+        highlight_pid: Option<usize>,
+    ) {
+        if let crate::layout::LayoutJson::Split { kind, sizes, children } = node {
+            if children.is_empty() { return; }
+            let (is_horiz, rects) = split_alloc(area, kind, sizes, children.len());
+            for (i, child) in children.iter().enumerate() {
+                walk_seps(f, child, rects[i], border_fg, active_border_fg, highlight_pid);
+            }
+            let leaf_act = |node: &crate::layout::LayoutJson| -> bool {
+                if let crate::layout::LayoutJson::Leaf { id, active, .. } = node {
+                    *active || highlight_pid == Some(*id)
+                } else { false }
+            };
+            let buf = f.buffer_mut();
+            for i in 0..children.len().saturating_sub(1) {
+                let left = &children[i];
+                let right = &children[i + 1];
+                let both_leaves = matches!(left, crate::layout::LayoutJson::Leaf { .. })
+                    && matches!(right, crate::layout::LayoutJson::Leaf { .. });
+                let la = leaf_act(left);
+                let ra = leaf_act(right);
+                if is_horiz {
+                    let sep_x = rects[i].x + rects[i].width;
+                    if sep_x >= buf.area.x + buf.area.width { continue; }
+                    let mid_y = area.y + area.height / 2;
+                    for y in area.y..(area.y + area.height) {
+                        let sty = if both_leaves {
+                            let act = if y < mid_y { la } else { ra };
+                            if act { Style::default().fg(active_border_fg) } else { Style::default().fg(border_fg) }
+                        } else if la || ra {
+                            Style::default().fg(active_border_fg)
+                        } else {
+                            Style::default().fg(border_fg)
+                        };
+                        let idx = (y - buf.area.y) as usize * buf.area.width as usize
+                            + (sep_x - buf.area.x) as usize;
+                        if idx < buf.content.len() {
+                            buf.content[idx].set_char('│');
+                            buf.content[idx].set_style(sty);
+                        }
+                    }
+                } else {
+                    let sep_y = rects[i].y + rects[i].height;
+                    if sep_y >= buf.area.y + buf.area.height { continue; }
+                    let mid_x = area.x + area.width / 2;
+                    for x in area.x..(area.x + area.width) {
+                        let sty = if both_leaves {
+                            let act = if x < mid_x { la } else { ra };
+                            if act { Style::default().fg(active_border_fg) } else { Style::default().fg(border_fg) }
+                        } else if la || ra {
+                            Style::default().fg(active_border_fg)
+                        } else {
+                            Style::default().fg(border_fg)
+                        };
+                        let idx = (sep_y - buf.area.y) as usize * buf.area.width as usize
+                            + (x - buf.area.x) as usize;
+                        if idx < buf.content.len() {
+                            buf.content[idx].set_char('─');
+                            buf.content[idx].set_style(sty);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    walk_seps(f, layout, area, border_fg, active_border_fg, highlight_pid);
+    // Snap T/cross intersections so adjacent borders join cleanly,
+    // matching the main viewport's post-render touch-up.
+    crate::rendering::fix_border_intersections(f.buffer_mut());
 }
 
 #[cfg(test)]

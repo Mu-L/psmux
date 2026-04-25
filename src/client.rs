@@ -3913,49 +3913,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             if let Some(layout) = crate::preview::get_or_fetch_dump(
                                 &mut dump_cache, &home, sname, wid,
                             ) {
-                                let rects = crate::preview::flatten_dump_rects(&layout, parea);
-                                let seps = crate::preview::dump_separators(&layout, parea);
-                                for (rect, is_vert) in seps {
-                                    let ch = if is_vert { "│" } else { "─" };
-                                    let style = Style::default().fg(Color::DarkGray);
-                                    if is_vert {
-                                        for yy in rect.y..(rect.y + rect.height) {
-                                            let s = Paragraph::new(Span::styled(ch, style));
-                                            f.render_widget(s, Rect { x: rect.x, y: yy, width: 1, height: 1 });
-                                        }
-                                    } else {
-                                        let s = Paragraph::new(Span::styled(ch.repeat(rect.width as usize), style));
-                                        f.render_widget(s, rect);
-                                    }
-                                }
-                                for (leaf_node, larea) in rects {
-                                    if larea.width < 2 || larea.height < 2 { continue; }
-                                    if let crate::layout::LayoutJson::Leaf {
-                                        id: lpid, active: lactive, rows_v2, title, ..
-                                    } = leaf_node {
-                                        let border_style = if *lactive {
-                                            sel_style
-                                        } else {
-                                            Style::default().fg(Color::DarkGray)
-                                        };
-                                        let label = match title {
-                                            Some(t) if !t.is_empty() => format!(" %{} {} ", lpid, t),
-                                            _ => format!(" %{} ", lpid),
-                                        };
-                                        let blk = Block::default()
-                                            .borders(Borders::ALL)
-                                            .border_style(border_style)
-                                            .title(label);
-                                        let inside = blk.inner(larea);
-                                        f.render_widget(blk, larea);
-                                        let mut pv: Vec<Line> = Vec::with_capacity(inside.height as usize);
-                                        for r in 0..inside.height as usize {
-                                            if r >= rows_v2.len() { break; }
-                                            pv.push(crate::preview::render_runs_line(&rows_v2[r].runs, inside.width));
-                                        }
-                                        f.render_widget(Paragraph::new(Text::from(pv)), inside);
-                                    }
-                                }
+                                crate::preview::render_dump_tree(
+                                    f,
+                                    &layout,
+                                    parea,
+                                    pane_border_fg,
+                                    pane_active_border_fg,
+                                    None,
+                                );
                                 rendered = true;
                             }
                         }
@@ -4108,57 +4073,18 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             if let Some(layout) = crate::preview::get_or_fetch_dump(
                                 &mut dump_cache, &home, &sess, twid,
                             ) {
-                                let rects = crate::preview::flatten_dump_rects(&layout, parea);
-                                let seps = crate::preview::dump_separators(&layout, parea);
-
                                 // Highlight which pane the user is hovering on
                                 // (for pane-level entries). Active pane gets a
-                                // brighter border anyway.
+                                // brighter separator anyway.
                                 let highlight_pid = if !is_win { Some(pid) } else { None };
-
-                                for (rect, is_vert) in seps {
-                                    let ch = if is_vert { "│" } else { "─" };
-                                    let style = Style::default().fg(Color::DarkGray);
-                                    if is_vert {
-                                        for yy in rect.y..(rect.y + rect.height) {
-                                            let s = Paragraph::new(Span::styled(ch, style));
-                                            f.render_widget(s, Rect { x: rect.x, y: yy, width: 1, height: 1 });
-                                        }
-                                    } else {
-                                        let s = Paragraph::new(Span::styled(ch.repeat(rect.width as usize), style));
-                                        f.render_widget(s, rect);
-                                    }
-                                }
-
-                                for (leaf_node, larea) in rects {
-                                    if larea.width < 2 || larea.height < 2 { continue; }
-                                    if let crate::layout::LayoutJson::Leaf {
-                                        id: lpid, active: lactive, rows_v2, title, ..
-                                    } = leaf_node {
-                                        let is_focus = *lactive || highlight_pid == Some(*lpid);
-                                        let border_style = if is_focus {
-                                            sel_style
-                                        } else {
-                                            Style::default().fg(Color::DarkGray)
-                                        };
-                                        let label = match title {
-                                            Some(t) if !t.is_empty() => format!(" %{} {} ", lpid, t),
-                                            _ => format!(" %{} ", lpid),
-                                        };
-                                        let blk = Block::default()
-                                            .borders(Borders::ALL)
-                                            .border_style(border_style)
-                                            .title(label);
-                                        let inside = blk.inner(larea);
-                                        f.render_widget(blk, larea);
-                                        let mut pv: Vec<Line> = Vec::with_capacity(inside.height as usize);
-                                        for r in 0..inside.height as usize {
-                                            if r >= rows_v2.len() { break; }
-                                            pv.push(crate::preview::render_runs_line(&rows_v2[r].runs, inside.width));
-                                        }
-                                        f.render_widget(Paragraph::new(Text::from(pv)), inside);
-                                    }
-                                }
+                                crate::preview::render_dump_tree(
+                                    f,
+                                    &layout,
+                                    parea,
+                                    pane_border_fg,
+                                    pane_active_border_fg,
+                                    highlight_pid,
+                                );
                                 rendered = true;
                             }
                         }
