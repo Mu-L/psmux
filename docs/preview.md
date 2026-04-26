@@ -12,9 +12,12 @@ Open a chooser:
 Inside a chooser:
 
 * Press **p** to toggle the preview pane on or off.
-* Use the **arrow keys** or **j/k** to move the selection. The preview updates automatically.
+* Use the **arrow keys**, **j/k**, or **h/l** to move the selection. The preview updates automatically.
+* Press **g** to jump to the top, **G** to jump to the bottom (matches tmux `mode-tree`).
 * Press **Enter** to switch to the selected target.
 * Press **Esc** or **q** to close.
+
+Full hjkl + g/G navigation also works in `choose-buffer` (prefix + =), the keybindings viewer (prefix + ?), and `customize-mode`.
 
 ## Make the Preview Visible by Default
 

@@ -105,6 +105,25 @@ This is essential for plugins like PPM (`Prefix+I`/`Prefix+U`) and psmux-sensibl
 
 Navigation and resize bindings support **repeat mode**: after pressing the prefix key once, successive keypresses within the `repeat-time` window (default 500ms) trigger the action without needing to re-enter the prefix. This applies to arrow-based pane navigation and resize bindings by default.
 
+## Picker Navigation (choose-session, choose-tree, choose-buffer, list-keys, customize)
+
+Once a picker is open (`Prefix + s`, `Prefix + w`, `Prefix + =`, `Prefix + ?`, or `customize-mode`), the following keys move the selection. This matches tmux's `mode-tree` behavior, so muscle memory carries over.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `k` / `h` | Move selection up |
+| `Down` / `j` / `l` | Move selection down |
+| `g` / `Home` | Jump to first entry |
+| `G` / `End` | Jump to last entry |
+| `PageUp` / `PageDown` | Page up / down |
+| `1`..`9`, `0` | Append digit to jump buffer (Enter consumes it) |
+| `Backspace` | Edit the jump buffer |
+| `Enter` | Switch to the selected entry (or to the jump buffer index if non-empty) |
+| `p` | Toggle live preview (choose-session / choose-tree only) |
+| `x` | Kill selected session (choose-session only) |
+| `d` / `Delete` | Delete selected buffer (choose-buffer only) |
+| `Esc` / `q` | Close the picker |
+
 ## Command Prompt
 
 Press `Prefix + :` to open the command prompt at the bottom of the screen. You can type any psmux/tmux command here.
