@@ -1017,6 +1017,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     meta_dirty = true;
+                    hook_event = Some("after-select-window");
                 }
                 CtrlReq::FocusWindowByName(ref name) => {
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.name == *name) {
@@ -1034,6 +1035,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     meta_dirty = true;
+                    hook_event = Some("after-select-window");
                 }
                 CtrlReq::FocusWindowById(id) => {
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.id == id) {
@@ -1051,6 +1053,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     meta_dirty = true;
+                    hook_event = Some("after-select-window");
                 }
                 CtrlReq::FocusPane(pid) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
@@ -3335,6 +3338,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     app.hooks.remove(&hook);
                 }
                 CtrlReq::KillServer => {
+                    // Notify control clients that the server is going away,
+                    // matching tmux's "%exit" wire notification before close.
+                    // Flushes through the writer thread so iTerm2 sees a
+                    // proper EOF-with-reason instead of a raw TCP RST.
+                    if !app.control_clients.is_empty() {
+                        control::emit_notification(
+                            &app,
+                            crate::types::ControlNotification::Exit {
+                                reason: Some("server exited".to_string()),
+                            },
+                        );
+                        // Brief drain window so writer threads can flush
+                        // %exit + ST before the process exits.
+                        std::thread::sleep(std::time::Duration::from_millis(80));
+                    }
                     // Remove port/key files FIRST so clients see the session
                     // as gone immediately, then kill processes.
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();

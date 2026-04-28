@@ -353,13 +353,25 @@ if control_echo || control_noecho {
             // Wait for response with timeout
             match resp_r.recv_timeout(Duration::from_secs(5)) {
                 Ok(response) => {
-                    if !response.is_empty() {
-                        let _ = write!(write_stream, "{}", response);
-                        if !response.ends_with('\n') {
+                    // Sentinel-encoded error: dispatcher signals %error
+                    // instead of %end by prefixing with \u{0001}ERR\u{0001}.
+                    let (is_error, body) = if let Some(stripped) = response.strip_prefix("\u{0001}ERR\u{0001}") {
+                        (true, stripped.to_string())
+                    } else {
+                        (false, response)
+                    };
+                    if !body.is_empty() {
+                        let _ = write!(write_stream, "{}", body);
+                        if !body.ends_with('\n') {
                             let _ = writeln!(write_stream);
                         }
                     }
-                    let _ = writeln!(write_stream, "{}", control::format_end(ts, cmd_counter));
+                    let footer = if is_error {
+                        control::format_error(ts, cmd_counter)
+                    } else {
+                        control::format_end(ts, cmd_counter)
+                    };
+                    let _ = writeln!(write_stream, "{}", footer);
                 }
                 Err(_) => {
                     let _ = writeln!(write_stream, "command timed out");
@@ -3216,8 +3228,10 @@ fn dispatch_control_command(
             true
         }
         _ => {
-            // Unknown command
-            let _ = resp_tx.send(format!("unknown command: {}", cmd));
+            // Unknown command — emit %error like tmux does, not %end.
+            // The leading "\u{0001}ERR\u{0001}" sentinel tells the dispatch
+            // wrapper to use format_error instead of format_end.
+            let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}unknown command: {}", cmd));
             true
         }
     }
