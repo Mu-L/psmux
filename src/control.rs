@@ -121,6 +121,77 @@ pub fn emit_notification(app: &AppState, notif: ControlNotification) {
     }
 }
 
+/// Send a notification to a single control client by id (no-op if unknown).
+pub fn emit_to_client(app: &AppState, client_id: u64, notif: ControlNotification) {
+    if let Some(client) = app.control_clients.get(&client_id) {
+        let _ = client.notification_tx.try_send(notif);
+    }
+}
+
+/// Emit the initial state burst to a freshly-attached control mode client.
+/// This mirrors what real tmux sends right after `-CC attach` so that
+/// integrations like iTerm2's tmux mode can bootstrap their UI without
+/// having to poll. Without this, iTerm2 sits forever on `-CC attach`
+/// because it expects %session-changed / %window-add up front.
+pub fn emit_initial_state(app: &AppState, client_id: u64) {
+    use crate::tree::get_active_pane_id;
+
+    // 1. %sessions-changed — tells the client to refresh its session list.
+    emit_to_client(app, client_id, ControlNotification::SessionsChanged);
+
+    // 2. %session-changed $id name — bind this client to the current session.
+    emit_to_client(
+        app,
+        client_id,
+        ControlNotification::SessionChanged {
+            session_id: app.session_id,
+            name: app.session_name.clone(),
+        },
+    );
+
+    // 3. For each window: %window-add @id and %layout-change @id layout.
+    let layout = format!("{}x{}", app.last_window_area.width, app.last_window_area.height);
+    for win in &app.windows {
+        emit_to_client(
+            app,
+            client_id,
+            ControlNotification::WindowAdd { window_id: win.id },
+        );
+        emit_to_client(
+            app,
+            client_id,
+            ControlNotification::LayoutChange {
+                window_id: win.id,
+                layout: layout.clone(),
+            },
+        );
+    }
+
+    // 4. %session-window-changed $sid @wid — current active window for this session.
+    if let Some(active_win) = app.windows.get(app.active_idx) {
+        emit_to_client(
+            app,
+            client_id,
+            ControlNotification::SessionWindowChanged {
+                session_id: app.session_id,
+                window_id: active_win.id,
+            },
+        );
+
+        // 5. %window-pane-changed @wid %pid — current active pane in the active window.
+        if let Some(pane_id) = get_active_pane_id(&active_win.root, &active_win.active_path) {
+            emit_to_client(
+                app,
+                client_id,
+                ControlNotification::WindowPaneChanged {
+                    window_id: active_win.id,
+                    pane_id,
+                },
+            );
+        }
+    }
+}
+
 /// Check if any control mode clients are connected.
 pub fn has_control_clients(app: &AppState) -> bool {
     !app.control_clients.is_empty()

@@ -3736,6 +3736,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         is_control: true,
                     });
                     app.attached_clients = app.attached_clients.saturating_add(1);
+                    // Emit the initial state burst (issue #261). Real tmux
+                    // sends %sessions-changed / %session-changed / %window-add /
+                    // %layout-change / %window-pane-changed immediately after
+                    // a control client attaches; iTerm2's tmux integration
+                    // freezes waiting for these if we don't.
+                    control::emit_initial_state(&app, client_id);
                 }
                 CtrlReq::ControlSubscribe { client_id, name, target, format } => {
                     if let Some(cc) = app.control_clients.get_mut(&client_id) {
