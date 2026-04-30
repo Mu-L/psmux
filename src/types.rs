@@ -1270,7 +1270,7 @@ pub struct FrameChannelInner {
     pub rx: std::sync::Mutex<std::sync::mpsc::Receiver<String>>,
 }
 
-static FRAME_PUSH_CHANNELS: std::sync::Mutex<Vec<(u64, std::sync::mpsc::SyncSender<String>)>> =
+static FRAME_PUSH_CHANNELS: std::sync::Mutex<Vec<(u64, FrameChannel)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// Register a bounded frame channel for a persistent connection's writer
@@ -1278,13 +1278,14 @@ static FRAME_PUSH_CHANNELS: std::sync::Mutex<Vec<(u64, std::sync::mpsc::SyncSend
 /// Returns the channel Arc for the writer thread to consume from.
 pub fn register_frame_channel(client_id: u64) -> FrameChannel {
     let (tx, rx) = std::sync::mpsc::sync_channel::<String>(FRAME_CHANNEL_CAPACITY);
-    if let Ok(mut v) = FRAME_PUSH_CHANNELS.lock() {
-        v.push((client_id, tx.clone()));
-    }
-    std::sync::Arc::new(FrameChannelInner {
+    let channel = std::sync::Arc::new(FrameChannelInner {
         tx,
         rx: std::sync::Mutex::new(rx),
-    })
+    });
+    if let Ok(mut v) = FRAME_PUSH_CHANNELS.lock() {
+        v.push((client_id, channel.clone()));
+    }
+    channel
 }
 
 /// Push a serialized frame to all persistent clients.
@@ -1294,18 +1295,28 @@ pub fn register_frame_channel(client_id: u64) -> FrameChannel {
 /// Dead channels (writer thread exited) are pruned automatically.
 pub fn push_frame(frame: &str) {
     if let Ok(mut channels) = FRAME_PUSH_CHANNELS.lock() {
-        channels.retain(|(_, tx)| {
-            match tx.try_send(frame.to_string()) {
+        channels.retain(|(_, channel)| {
+            match channel.tx.try_send(frame.to_string()) {
                 Ok(()) => true,
-                Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                    // Channel full — this happens during sustained high-throughput
-                    // (e.g. rapid scroll in copy mode).  The oldest frame in the
-                    // channel is stale, so we make room by creating a fresh channel
-                    // pair isn't practical here.  Instead, we just skip this frame
-                    // for this client — the next push will likely succeed, and the
-                    // client already has FRAME_CHANNEL_CAPACITY frames queued to
-                    // drain, so it won't miss content.
-                    true
+                Err(std::sync::mpsc::TrySendError::Full(frame)) => {
+                    // Frames are full snapshots, not deltas. If the client is
+                    // behind, stale queued frames should not block the newest
+                    // corrective frame from reaching the terminal.
+                    let rx = match channel.rx.lock() {
+                        Ok(rx) => rx,
+                        Err(_) => return false,
+                    };
+                    loop {
+                        match rx.try_recv() {
+                            Ok(_) => {}
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
+                        }
+                    }
+                    matches!(
+                        channel.tx.try_send(frame),
+                        Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_))
+                    )
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
             }
@@ -1389,3 +1400,7 @@ pub struct ParsedTarget {
     pub pane_is_id: bool,
     pub window_is_id: bool,
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pr267_backpressure_proof.rs"]
+mod tests_pr267_backpressure;
