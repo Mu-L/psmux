@@ -52,6 +52,50 @@ impl HideWindowCommandExt for std::process::Command {
 
 // ---------------------------------------------------------------------------
 
+/// Escape a single argument for a Windows command line per Microsoft's
+/// `CommandLineToArgvW` parsing rules (the same algorithm Rust's
+/// `std::process::Command` uses internally).
+///
+/// Rules: an argument is wrapped in `"..."` when it is empty or contains
+/// whitespace / `"`. Inside the quotes, every embedded `"` is escaped as
+/// `\"`, and any backslash run that immediately precedes a `"` (including
+/// the closing quote) must be doubled. Backslashes in other positions
+/// pass through unchanged — important on Windows where they are the path
+/// separator (e.g. `C:\Program Files\...`).
+///
+/// Returns the argument verbatim when no quoting is needed.
+#[cfg(windows)]
+pub(crate) fn escape_arg_msvcrt(arg: &str) -> String {
+    let needs_quoting = arg.is_empty()
+        || arg.chars().any(|c| c == ' ' || c == '\t' || c == '\n' || c == '\x0b' || c == '"');
+    if !needs_quoting {
+        return arg.to_string();
+    }
+
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes: usize = 0;
+    for c in arg.chars() {
+        if c == '\\' {
+            backslashes += 1;
+        } else if c == '"' {
+            // 2N+1 backslashes followed by `"` = N literal backslashes + literal `"`
+            for _ in 0..(backslashes * 2 + 1) { out.push('\\'); }
+            out.push('"');
+            backslashes = 0;
+        } else {
+            for _ in 0..backslashes { out.push('\\'); }
+            out.push(c);
+            backslashes = 0;
+        }
+    }
+    // Closing quote: any trailing backslashes must be doubled so the
+    // receiver does not see them as escaping the closing quote.
+    for _ in 0..(backslashes * 2) { out.push('\\'); }
+    out.push('"');
+    out
+}
+
 /// Spawn a server process with a hidden console window on Windows.
 ///
 /// Uses raw `CreateProcessW` with `STARTF_USESHOWWINDOW` + `SW_HIDE` and
@@ -116,15 +160,16 @@ pub fn spawn_server_hidden(exe: &std::path::Path, args: &[String]) -> std::io::R
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
 
     // Build command line: "exe" arg1 arg2 ...
-    // Each argument is quoted to handle spaces.
+    // Each argument is escaped per Microsoft's CommandLineToArgvW rules
+    // (see `escape_arg_msvcrt` below). The naive `arg.replace('"', "\\\"")`
+    // approach mishandles values whose closing context is a backslash run
+    // (e.g. `C:\Foo\` ends up serialised as `"C:\Foo\"` where the trailing
+    // `\"` is interpreted by the receiver as an escaped quote, swallowing
+    // the next argument). Issue #265.
     let mut cmdline = format!("\"{}\"", exe.display());
     for arg in args {
-        if arg.contains(' ') || arg.contains('"') {
-            cmdline.push_str(&format!(" \"{}\"", arg.replace('"', "\\\"")));
-        } else {
-            cmdline.push(' ');
-            cmdline.push_str(arg);
-        }
+        cmdline.push(' ');
+        cmdline.push_str(&escape_arg_msvcrt(arg));
     }
     let mut cmdline_wide: Vec<u16> = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
 
@@ -2331,3 +2376,8 @@ pub fn augment_enter_shift(key: &mut crossterm::event::KeyEvent) {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg(windows)]
+#[path = "../tests-rs/test_issue265_argv_backslash.rs"]
+mod tests_issue265_argv_backslash;
