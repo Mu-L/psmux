@@ -1374,6 +1374,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             combined_buf.push_str(&json_escape_string(&expanded));
                             combined_buf.push_str("\"}");
                         }
+                        // Issue #269: forward OSC 9;4 progress from the active
+                        // pane so the client emits the same sequence to the
+                        // host terminal (Windows Terminal taskbar/tab progress).
+                        if combined_buf.ends_with('}') {
+                            if let Some((s, v)) = helpers::active_pane_progress(&app) {
+                                combined_buf.pop();
+                                combined_buf.push_str(",\"host_progress\":\"");
+                                combined_buf.push_str(&format!("{};{}", s, v));
+                                combined_buf.push_str("\"}");
+                            }
+                        }
                         let overlay_json = serialize_overlay_json(&app);
                         if !overlay_json.is_empty() && combined_buf.ends_with('}') {
                             combined_buf.pop();
@@ -4129,6 +4140,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     combined_buf.push_str(",\"host_title\":\"");
                     combined_buf.push_str(&json_escape_string(&expanded));
                     combined_buf.push_str("\"}");
+                }
+                // Issue #269: forward OSC 9;4 progress from the active pane.
+                if combined_buf.ends_with('}') {
+                    if let Some((s, v)) = helpers::active_pane_progress(&app) {
+                        combined_buf.pop();
+                        combined_buf.push_str(",\"host_progress\":\"");
+                        combined_buf.push_str(&format!("{};{}", s, v));
+                        combined_buf.push_str("\"}");
+                    }
                 }
                 let overlay_json = serialize_overlay_json(&app);
                 if !overlay_json.is_empty() && combined_buf.ends_with('}') {

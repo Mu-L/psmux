@@ -1259,6 +1259,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// iTerm2, etc.) follow the active pane / window title.
         #[serde(default)]
         host_title: Option<String>,
+        /// Issue #269: OSC 9;4 progress indicator from the active pane,
+        /// formatted as "<state>;<value>".  Client emits OSC 9;4 to its host
+        /// terminal so apps inside a pane (Copilot CLI, build tools) keep
+        /// driving the Windows Terminal taskbar / tab progress indicator.
+        #[serde(default)]
+        host_progress: Option<String>,
         /// Repeat key timeout in ms (default: 500, synced from server)
         #[serde(default = "default_repeat_time")]
         repeat_time: u64,
@@ -1377,6 +1383,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Last OSC 0 (host terminal title) value emitted to the host terminal.
     // Tracked across iterations so we only re-emit when the title changes.
     let mut last_emitted_host_title: Option<String> = None;
+    // Issue #269: last OSC 9;4 (host terminal progress) value emitted.
+    // Same debounce pattern as host_title.
+    let mut last_emitted_host_progress: Option<String> = None;
     // VT input mode: periodically re-send mouse-enable escape sequences.
     // Covers SSH sessions and JetBrains JediTerm (which sends VT mouse
     // sequences through ConPTY instead of native MOUSE_EVENT records).
@@ -3780,6 +3789,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         // new OSC 0 sequence if it has changed.  Stored as a local so
         // it survives `state` being moved into its other fields below.
         let host_title_this_frame: Option<String> = state.host_title.clone();
+        // Issue #269: capture host_progress for post-draw OSC 9;4 emit.
+        let host_progress_this_frame: Option<String> = state.host_progress.clone();
 
         // Update prefix key from server config (if provided)
         if let Some(ref prefix_str) = state.prefix {
@@ -5093,6 +5104,32 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 let _ = out.flush();
             }
             last_emitted_host_title = host_title_this_frame;
+        }
+
+        // ── Post-draw: forward OSC 9;4 progress (issue #269) ─────────
+        // host_progress is "<state>;<value>" e.g. "1;50" (default, 50%) or
+        // "0;0" (hide).  Re-emit ESC ] 9 ; 4 ; <state> ; <value> ESC \ to
+        // the host terminal so Windows Terminal / iTerm2 / kitty render
+        // the progress indicator that the pane app intended.
+        if host_progress_this_frame != last_emitted_host_progress {
+            if let Some(ref prog) = host_progress_this_frame {
+                if let Some((s, v)) = prog.split_once(';') {
+                    if !s.is_empty() && !v.is_empty()
+                        && s.bytes().all(|b| b.is_ascii_digit())
+                        && v.bytes().all(|b| b.is_ascii_digit())
+                    {
+                        use std::io::Write;
+                        let mut out = std::io::stdout().lock();
+                        let _ = out.write_all(b"\x1b]9;4;");
+                        let _ = out.write_all(s.as_bytes());
+                        let _ = out.write_all(b";");
+                        let _ = out.write_all(v.as_bytes());
+                        let _ = out.write_all(b"\x1b\\");
+                        let _ = out.flush();
+                    }
+                }
+            }
+            last_emitted_host_progress = host_progress_this_frame;
         }
 
         // ── SSH: periodic mouse-enable refresh ───────────────────────

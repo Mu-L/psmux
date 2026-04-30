@@ -64,6 +64,18 @@ pub trait Callbacks {
     /// This callback is called when the terminal receives a OSC sequence
     /// (`\e]`) which is otherwise not implemented.
     fn unhandled_osc(&mut self, _: &mut crate::Screen, _params: &[&[u8]]) {}
+
+    /// This callback is called when the terminal receives an OSC 9;4
+    /// (Windows Terminal progress indicator) sequence.  State values:
+    /// 0 = hide, 1 = default, 2 = error, 3 = indeterminate, 4 = warning.
+    /// Progress is in 0..=100.
+    fn set_progress(
+        &mut self,
+        _: &mut crate::Screen,
+        _state: u8,
+        _progress: u8,
+    ) {
+    }
 }
 
 impl Callbacks for () {}

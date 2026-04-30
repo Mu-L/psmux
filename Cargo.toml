@@ -42,6 +42,10 @@ path = "tests-rs/test_issue155_rendering.rs"
 name = "test_issue201_rename_dialog"
 path = "tests-rs/test_issue201_rename_dialog.rs"
 
+[[test]]
+name = "test_issue269_osc94_dropped"
+path = "tests-rs/test_issue269_osc94_dropped.rs"
+
 # Windows only
 [target.'cfg(not(windows))'.dependencies]
 [target.'cfg(windows)'.dependencies]

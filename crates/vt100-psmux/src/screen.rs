@@ -118,6 +118,12 @@ pub struct Screen {
     /// Used as a fallback for CWD when PEB walking fails (SSH, WSL).
     osc7_path: Option<String>,
 
+    /// Progress indicator state set via OSC 9;4 (Windows Terminal progress).
+    /// Format: `Some((state, value))` where state ∈ {0=hide,1=default,2=error,
+    /// 3=indeterminate,4=warning} and value ∈ 0..=100. `None` until first set;
+    /// stays `Some` after that so a clear (state=0) is also forwarded.
+    osc94_progress: Option<(u8, u8)>,
+
     /// Set to `true` when the screen is cleared (CSI 2J) while
     /// `squelch_clear_pending` is active.  The layout serialiser
     /// checks this flag to know that `cls` has finished.
@@ -152,6 +158,7 @@ impl Screen {
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
             osc_title: String::new(),
             osc7_path: None,
+            osc94_progress: None,
             squelch_cleared: false,
             squelch_clear_pending: false,
             audible_bell_count: 0,
@@ -708,6 +715,24 @@ impl Screen {
                 self.osc7_path = Some(path);
             }
         }
+    }
+
+    /// Returns the most recent OSC 9;4 progress indicator state, if any.
+    /// `Some((state, value))` once an OSC 9;4 has been received, even when
+    /// state==0 (hide); `None` when none has ever been received. Consumers
+    /// (psmux server) forward this to the host terminal so tools like
+    /// GitHub Copilot CLI keep working inside a pane.
+    #[must_use]
+    pub fn progress(&self) -> Option<(u8, u8)> {
+        self.osc94_progress
+    }
+
+    /// Store an OSC 9;4 progress indicator. State is clamped to 0..=4 and
+    /// value to 0..=100 to match the Windows Terminal contract.
+    pub fn set_progress(&mut self, state: u8, value: u8) {
+        let s = state.min(4);
+        let v = value.min(100);
+        self.osc94_progress = Some((s, v));
     }
 
     /// Returns `true` if a screen clear (CSI 2J) was detected while

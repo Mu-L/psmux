@@ -223,6 +223,21 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             [b"7", uri] => {
                 self.screen.set_path(uri);
             }
+            [b"9", b"4", state, progress] => {
+                // OSC 9;4 — Windows Terminal progress indicator.
+                //   state: 0=hide, 1=default, 2=error, 3=indeterminate, 4=warning
+                //   progress: 0..=100
+                let s = std::str::from_utf8(state)
+                    .ok()
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let v = std::str::from_utf8(progress)
+                    .ok()
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .unwrap_or(0);
+                self.screen.set_progress(s, v);
+                self.callbacks.set_progress(&mut self.screen, s, v);
+            }
             [b"9999", ..] => {
                 self.screen.squelch_cleared = true;
             }

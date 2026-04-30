@@ -237,6 +237,21 @@ pub(crate) fn propagate_osc_titles(app: &mut AppState) -> bool {
     dirty
 }
 
+/// Read the active pane's most recent OSC 9;4 progress indicator state.
+/// Returns `Some((state, value))` when a progress sequence has been received,
+/// where state ∈ 0..=4 (0=hide, 1=default, 2=error, 3=indeterminate, 4=warning)
+/// and value ∈ 0..=100. Used by the dump-state builder so the client can
+/// re-emit OSC 9;4 to the host terminal (issue #269).
+pub(crate) fn active_pane_progress(app: &AppState) -> Option<(u8, u8)> {
+    let win = app.windows.get(app.active_idx)?;
+    let pane = crate::tree::active_pane(&win.root, &win.active_path)?;
+    if pane.dead {
+        return None;
+    }
+    let parser = pane.term.lock().ok()?;
+    parser.screen().progress()
+}
+
 fn propagate_osc_titles_in_tree(node: &mut Node, dirty: &mut bool) {
     match node {
         Node::Leaf(p) => {
