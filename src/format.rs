@@ -1566,7 +1566,18 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "status" => if app.status_visible { "on".into() } else { "off".into() },
         "mode_keys" => app.mode_keys.clone(),
         "history_limit" => app.history_limit.to_string(),
-        "history_size" => app.history_limit.to_string(),
+        // history_size reports the number of rows currently held in the
+        // active pane's scrollback (the *retained* count), not the
+        // configured maximum (#271).  Falls back to 0 when no active pane
+        // is reachable, matching tmux's behaviour for empty buffers.
+        "history_size" => {
+            if let Some(p) = active_pane(&win.root, &win.active_path) {
+                if let Ok(parser) = p.term.lock() {
+                    return parser.screen().scrollback_filled().to_string();
+                }
+            }
+            "0".into()
+        }
         "alternate_on" => {
             if let Some(p) = active_pane(&win.root, &win.active_path) {
                 if let Ok(parser) = p.term.lock() {

@@ -199,6 +199,24 @@ impl Grid {
         self.scrollback_offset = rows.min(self.scrollback.len());
     }
 
+    /// Returns the number of rows currently held in the scrollback buffer
+    /// (distinct from `scrollback_len`, which is the configured maximum).
+    pub fn scrollback_filled(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Updates the scrollback buffer's maximum size.  When `new_len` is
+    /// smaller than the current fill, the oldest rows are trimmed away.
+    pub fn set_scrollback_len(&mut self, new_len: usize) {
+        self.scrollback_len = new_len;
+        while self.scrollback.len() > self.scrollback_len {
+            self.scrollback.pop_front();
+        }
+        if self.scrollback_offset > self.scrollback.len() {
+            self.scrollback_offset = self.scrollback.len();
+        }
+    }
+
     pub fn write_contents(&self, contents: &mut String) {
         let mut wrapping = false;
         for row in self.visible_rows() {

@@ -188,6 +188,27 @@ impl Screen {
         self.grid_mut().set_scrollback(rows);
     }
 
+    /// Returns the number of rows currently held in the scrollback buffer
+    /// (the actual retained count, not the configured maximum).
+    #[must_use]
+    pub fn scrollback_filled(&self) -> usize {
+        self.grid().scrollback_filled()
+    }
+
+    /// Updates the maximum scrollback buffer size for the main grid.  Rows
+    /// in excess of the new limit are trimmed from the oldest end.  The
+    /// alternate grid is intentionally left at zero scrollback (apps like
+    /// vim use the alternate screen and do not retain history).
+    pub fn set_scrollback_len(&mut self, new_len: usize) {
+        self.grid_mut().set_scrollback_len(new_len);
+    }
+
+    /// Returns the configured maximum size of the scrollback buffer.
+    #[must_use]
+    pub fn scrollback_len(&self) -> usize {
+        self.grid().scrollback_len()
+    }
+
     /// Returns the current position in the scrollback.
     ///
     /// This position indicates the offset from the top of the screen, and is

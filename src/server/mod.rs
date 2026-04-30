@@ -503,45 +503,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
     }
 
-    // If the user configured a custom default-shell in their config, the
-    // early warm pane has the wrong shell — kill it so create_window falls
-    // through to a cold spawn with the correct shell.
+    // Reconcile the early warm pane (born with all defaults, before
+    // load_config ran) with whatever the config actually established.
+    // The decision lives in warm_pane_sync::for_post_config; this site
+    // just stages the early pane into `app.warm_pane` so the policy
+    // module can act on it uniformly.
     if let Some(wp) = early_warm {
-        if !app.warm_enabled {
-            // Config disabled warm panes — kill the early pre-spawned pane.
-            let mut wp = wp;
-            wp.child.kill().ok();
-        } else if app.default_shell.is_empty() {
-            // No custom shell — the pre-spawned default (pwsh) is correct.
-            // Check if config loaded env vars that the early warm pane is missing.
-            let needs_env = app.environment.iter().any(|(k, _)| {
-                !k.starts_with("PSMUX_TARGET_SESSION") && k != "TMUX" && k != "TMUX_PANE"
-            });
-            // The early warm pane was spawned before load_config with
-            // allow_predictions=false (the default).  If the config set
-            // allow-predictions on, the warm pane has the wrong PSReadLine
-            // init string (PSRL_FIX instead of PSRL_CRASH_GUARD), so it
-            // must be respawned (#165).
-            let needs_predictions_fix = app.allow_predictions;
-            if needs_env || needs_predictions_fix {
-                // The early warm pane was spawned before config, so it lacks
-                // config-defined env vars (e.g. TERM from default-terminal)
-                // or has the wrong PSReadLine prediction init (#165).
-                // Kill it and respawn with the correct settings.
-                let mut wp = wp;
-                wp.child.kill().ok();
-                match spawn_warm_pane(&*pty_system, &mut app) {
-                    Ok(new_wp) => { app.warm_pane = Some(new_wp); }
-                    Err(e) => { eprintln!("psmux: warm pane respawn failed: {e}"); }
-                }
-            } else {
-                app.warm_pane = Some(wp);
-            }
-        } else {
-            // Custom shell set by config — wrong warm pane, kill it
-            let mut wp = wp;
-            wp.child.kill().ok();
-        }
+        app.warm_pane = Some(wp);
+        let sync = crate::warm_pane_sync::for_post_config(&app);
+        crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
     }
 
     // Update shared aliases now that config has been loaded
@@ -1502,20 +1472,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         info.last_activity = std::time::Instant::now();
                     }
                     let (ew, eh) = compute_effective_client_size(&app).unwrap_or((w, h));
-                    app.last_window_area = Rect { x: 0, y: 0, width: ew, height: eh }; 
+                    app.last_window_area = Rect { x: 0, y: 0, width: ew, height: eh };
                     resize_all_panes(&mut app);
-                    // Respawn warm pane at the new terminal dimensions so
-                    // the next new-window gets a pane whose parser grid
-                    // already matches the display — no resize reflow needed,
-                    // prompt appears pixel-perfect on the first frame.
-                    let need_respawn = app.warm_pane.as_ref().map_or(true, |wp| wp.rows != eh || wp.cols != ew);
-                    if need_respawn {
-                        if let Some(mut old) = app.warm_pane.take() { old.child.kill().ok(); }
-                        match spawn_warm_pane(&*pty_system, &mut app) {
-                            Ok(wp) => { app.warm_pane = Some(wp); }
-                            Err(_) => {}
-                        }
-                    }
+                    // Reconcile warm pane dimensions through the central
+                    // policy module so resize uses the same code path as
+                    // every other warm-pane invalidation (#271).
+                    let sync = crate::warm_pane_sync::for_resize(&app, eh, ew);
+                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                     hook_event = Some("client-resized");
                 }
                 CtrlReq::FocusPaneCmd(pid) => {
@@ -2682,6 +2645,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SetOption(option, value) => {
                     apply_set_option(&mut app, &option, &value, false);
                     app.user_set_options.insert(option.clone());
+                    // Reconcile the warm pane with the new option value.
+                    // All option-driven warm-pane lifecycle decisions
+                    // route through this single module — see #271.
+                    let sync = crate::warm_pane_sync::for_option_change(&option, &app);
+                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                     // Update shared aliases if command-alias changed
                     if option == "command-alias" {
                         if let Ok(mut map) = shared_aliases_main.write() {
@@ -2692,16 +2660,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::SetOptionQuiet(option, value, quiet) => {
-                    let old_shell = app.default_shell.clone();
                     apply_set_option(&mut app, &option, &value, quiet);
                     app.user_set_options.insert(option.clone());
-                    // If default-shell changed, kill the warm pane so the next
-                    // new-window spawns the correct shell (fixes #99).
-                    if app.default_shell != old_shell {
-                        if let Some(mut wp) = app.warm_pane.take() {
-                            wp.child.kill().ok();
-                        }
-                    }
+                    // Reconcile the warm pane with the new option value.
+                    // Replaces the prior inline default-shell-only kill
+                    // (#99) with a uniform table-driven policy that
+                    // also covers history-limit (#271), allow-predictions,
+                    // default-terminal, and claude-code-* options.
+                    let sync = crate::warm_pane_sync::for_option_change(&option, &app);
+                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                     // Update shared aliases if command-alias changed
                     if option == "command-alias" {
                         if let Ok(mut map) = shared_aliases_main.write() {
@@ -3281,32 +3248,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SetEnvironment(key, value) => {
                     app.environment.insert(key.clone(), value.clone());
                     env::set_var(&key, &value);
-                    // Kill the warm pane and respawn so it picks up the new
-                    // env var at process level — avoids PTY echo (#137).
-                    if app.warm_pane.is_some() {
-                        if let Some(mut old_wp) = app.warm_pane.take() {
-                            old_wp.child.kill().ok();
-                        }
-                        match spawn_warm_pane(&*pty_system, &mut app) {
-                            Ok(new_wp) => { app.warm_pane = Some(new_wp); }
-                            Err(e) => { eprintln!("psmux: warm pane respawn (SetEnv) failed: {e}"); }
-                        }
-                    }
+                    // Env vars affect the child shell's process state,
+                    // which can't be patched in place — must respawn.
+                    // Centralised through warm_pane_sync (#137 / #271).
+                    let sync = crate::warm_pane_sync::for_env_change();
+                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                 }
                 CtrlReq::UnsetEnvironment(key) => {
                     app.environment.remove(&key);
                     env::remove_var(&key);
-                    // Kill the warm pane and respawn so it no longer has
-                    // the removed env var — avoids PTY echo (#137).
-                    if app.warm_pane.is_some() {
-                        if let Some(mut old_wp) = app.warm_pane.take() {
-                            old_wp.child.kill().ok();
-                        }
-                        match spawn_warm_pane(&*pty_system, &mut app) {
-                            Ok(new_wp) => { app.warm_pane = Some(new_wp); }
-                            Err(e) => { eprintln!("psmux: warm pane respawn (UnsetEnv) failed: {e}"); }
-                        }
-                    }
+                    let sync = crate::warm_pane_sync::for_env_change();
+                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                 }
                 CtrlReq::ShowEnvironment(resp) => {
                     let mut output = String::new();

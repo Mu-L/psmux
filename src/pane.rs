@@ -80,17 +80,20 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
         let area = app.last_window_area;
         let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
         let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
-        if rows != wp.rows || cols != wp.cols {
+        let need_resize = rows != wp.rows || cols != wp.cols;
+        if need_resize {
             let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
             wp.master.resize(size).ok();
-            // Resize the vt100 parser too — otherwise it stays at the
-            // old warm-pane dimensions while last_rows/last_cols are
-            // set to the new size, causing resize_all_panes to skip
-            // it (dimensions already match) and the parser to render
-            // rows/cols beyond its grid as blank spaces.
-            if let Ok(mut parser) = wp.term.lock() {
+        }
+        // Reconcile parser dimensions and scrollback cap.  The cap
+        // sync is the consume-time safety net for #271 — even if a
+        // future caller forgets to invoke warm_pane_sync on a state
+        // change, the parser is brought to the live value here.
+        if let Ok(mut parser) = wp.term.lock() {
+            if need_resize {
                 parser.screen_mut().set_size(rows, cols);
             }
+            crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app.history_limit);
         }
         let epoch = std::time::Instant::now() - Duration::from_secs(2);
         let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
@@ -358,13 +361,18 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     // in the server's CWD, not the requested directory (#107).
     if command.is_none() && start_dir.is_none() && app.warm_pane.is_some() {
         let wp = app.warm_pane.take().unwrap();
-        // Resize ConPTY + parser to the split dimensions
-        if rows != wp.rows || cols != wp.cols {
+        let need_resize = rows != wp.rows || cols != wp.cols;
+        if need_resize {
             let sz = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
             wp.master.resize(sz).ok();
-            if let Ok(mut parser) = wp.term.lock() {
+        }
+        // Same consume-time reconciliation as create_window — see
+        // warm_pane_sync::reconcile_consumed_parser.
+        if let Ok(mut parser) = wp.term.lock() {
+            if need_resize {
                 parser.screen_mut().set_size(rows, cols);
             }
+            crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app.history_limit);
         }
         let epoch = std::time::Instant::now() - Duration::from_secs(2);
         let new_pane_id = wp.pane_id;
@@ -1308,6 +1316,10 @@ mod test_issue155_output_rendering;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue165_prediction_view_style.rs"]
 mod test_issue165_prediction_view_style;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue271_warm_pane_history.rs"]
+mod test_issue271_warm_pane_history;
 
 #[cfg(test)]
 mod test_parser_audible_bell {

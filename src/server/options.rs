@@ -204,6 +204,9 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
         "history-limit" => {
             if let Ok(limit) = value.parse::<usize>() {
                 app.history_limit = limit;
+                // Warm pane reconciliation is handled centrally by
+                // warm_pane_sync::for_option_change once the caller
+                // runs apply_set_option here — see #271.
             }
         }
         "display-time" => {
