@@ -533,6 +533,42 @@ pub fn detect_shell() -> CommandBuilder {
     build_command(None, false, false)
 }
 
+/// Issue #167 escape hatch.  When the user sets `PSMUX_BARE_ENV=1`, replace
+/// the inherited environment block on `builder` with the minimum set Windows
+/// needs to launch a working pwsh process.  Useful when the parent's
+/// environment is the cause of `CreateProcessW err 87` (e.g. Microsoft-account
+/// profiles where OneDrive + WindowsApps inflate the env block close to
+/// Windows's 32 KB hard limit, or where a single env var contains content
+/// that the OS rejects).
+///
+/// Returns `true` when the bare-env path was taken (so callers can log).
+/// Idempotent: calling it twice is safe.
+pub fn apply_bare_env_if_set(builder: &mut CommandBuilder) -> bool {
+    let on = std::env::var("PSMUX_BARE_ENV")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !on {
+        return false;
+    }
+    builder.env_clear();
+    // Re-add only what is genuinely required for a usable shell.  Anything
+    // missing here is something the user explicitly opted out of by
+    // setting PSMUX_BARE_ENV — psmux itself will fill in TERM/COLORTERM/
+    // PSMUX_SESSION/TMUX afterwards via build_command + set_tmux_env.
+    for key in [
+        "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR",
+        "USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH",
+        "COMPUTERNAME", "COMSPEC", "PATH", "PATHEXT",
+        "TEMP", "TMP",
+        "PROCESSOR_ARCHITECTURE",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            builder.env(key, v);
+        }
+    }
+    true
+}
+
 /// Set TMUX, TMUX_PANE, and PSMUX_SESSION environment variables on a CommandBuilder.
 /// TMUX format: /tmp/psmux-{server_pid}/{socket_name},{port},0
 /// TMUX_PANE format: %{pane_id}
@@ -908,6 +944,9 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
             Some(path) => {
                 let mut builder = CommandBuilder::new(&path);
                 if let Some(ref dir) = cwd { builder.cwd(dir); }
+                // Apply PSMUX_BARE_ENV BEFORE adding our own envs, so the
+                // overrides we add below survive env_clear (#167).
+                apply_bare_env_if_set(&mut builder);
                 builder.env("TERM", "xterm-256color");
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
@@ -928,6 +967,7 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
             None => {
                 let mut builder = CommandBuilder::new("pwsh.exe");
                 if let Some(ref dir) = cwd { builder.cwd(dir); }
+                apply_bare_env_if_set(&mut builder);
                 builder.env("TERM", "xterm-256color");
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
@@ -951,6 +991,7 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
             Some(path) => {
                 let mut builder = CommandBuilder::new(&path);
                 if let Some(ref dir) = cwd { builder.cwd(dir); }
+                apply_bare_env_if_set(&mut builder);
                 builder.env("TERM", "xterm-256color");
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
@@ -962,6 +1003,7 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
             None => {
                 let mut builder = CommandBuilder::new("pwsh.exe");
                 if let Some(ref dir) = cwd { builder.cwd(dir); }
+                apply_bare_env_if_set(&mut builder);
                 builder.env("TERM", "xterm-256color");
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
@@ -1033,6 +1075,9 @@ pub fn build_default_shell(shell_path: &str, env_shim: bool, allow_predictions: 
     // Set CWD explicitly — portable_pty on Windows defaults to USERPROFILE
     // (home dir) when no cwd is set on CommandBuilder.
     if let Ok(dir) = std::env::current_dir() { builder.cwd(dir); }
+    // PSMUX_BARE_ENV escape hatch (issue #167): clear inherited env before
+    // adding our own.
+    apply_bare_env_if_set(&mut builder);
     builder.env("TERM", "xterm-256color");
     builder.env("COLORTERM", "truecolor");
     builder.env("PSMUX_SESSION", "1");

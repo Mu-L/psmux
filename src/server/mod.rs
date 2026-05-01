@@ -316,6 +316,98 @@ fn drain_plugin_req(
     }
 }
 
+/// Persist a server-startup failure to `~/.psmux/server-startup.log`.
+///
+/// The detached server has no visible stderr — when the initial pane spawn
+/// fails (e.g. the `CreateProcessW err 87` from psmux issue #167) the user
+/// sees only "psmux flashed black and returned to prompt".  This file lets
+/// the user (or our docs) point them at concrete evidence:
+///
+///   - the actual error message (locale-specific GetLastError text),
+///   - the build/version of psmux that produced it,
+///   - the size of the inherited environment block (a likely culprit on
+///     Microsoft-account profiles where OneDrive + WindowsApps inflate
+///     the env to near the 32 KB Windows limit),
+///   - the path psmux tried to spawn.
+///
+/// Best-effort: any error writing the log is swallowed (we are already
+/// reporting the original failure up the call chain).
+pub(crate) fn write_startup_error_log(err: &dyn std::fmt::Display) {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    if home.is_empty() {
+        return;
+    }
+    let dir = format!("{}\\.psmux", home);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = format!("{}\\server-startup.log", dir);
+
+    use std::os::windows::ffi::OsStrExt;
+    let mut env_count = 0usize;
+    let mut env_chars = 0usize;
+    let mut env_largest = ("".to_string(), 0usize);
+    for (k, v) in std::env::vars_os() {
+        env_count += 1;
+        let kl = k.encode_wide().count();
+        let vl = v.encode_wide().count();
+        env_chars += kl + 1 + vl + 1;
+        let total = kl + vl + 1;
+        if total > env_largest.1 {
+            env_largest = (k.to_string_lossy().into_owned(), total);
+        }
+    }
+
+    let cwd = std::env::current_dir().ok();
+    let userprofile = std::env::var("USERPROFILE").ok();
+    let onedrive_present = std::env::var("OneDrive").is_ok();
+    let comspec = std::env::var("ComSpec").ok();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let body = format!(
+        "psmux server startup error\n\
+         ==========================\n\
+         psmux version : {version}\n\
+         when (epoch s): {now}\n\
+         os.family     : windows\n\
+         \n\
+         error:\n\
+           {err}\n\
+         \n\
+         spawn context:\n\
+           CWD                 : {cwd:?}\n\
+           USERPROFILE         : {up:?}\n\
+           ComSpec             : {cs:?}\n\
+           OneDrive present    : {od}\n\
+           env vars (count)    : {ec}\n\
+           env block size (wch): {eb} (Windows hard limit: 32767)\n\
+           largest env entry   : {key} ({sz} chars)\n\
+         \n\
+         workarounds to try (in order):\n\
+           1. PSMUX_NO_PASSTHROUGH=1   (skip ConPTY passthrough mode)\n\
+           2. PSMUX_BARE_ENV=1         (spawn with minimal env block)\n\
+           3. switch to a local Windows account (Microsoft account\n\
+              profiles often inherit a bloated environment)\n\
+           4. open an issue at https://github.com/psmux/psmux/issues/167\n\
+              and attach this file\n",
+        version = env!("CARGO_PKG_VERSION"),
+        now = now,
+        err = err,
+        cwd = cwd,
+        up = userprofile,
+        cs = comspec,
+        od = onedrive_present,
+        ec = env_count,
+        eb = env_chars,
+        key = env_largest.0,
+        sz = env_largest.1,
+    );
+    let _ = std::fs::write(&path, body);
+}
+
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>, env_vars: Vec<(String, String)>) -> io::Result<()> {
     // Write crash info to a log file when stderr is unavailable (detached server)
     // and clean up port/key files so stale entries do not linger (issue #204).
@@ -529,6 +621,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         create_window(&*pty_system, &mut app, initial_command.as_deref(), None)
     };
     if let Err(e) = create_result {
+        // Issue #167: when the server fails to spawn its initial pane the
+        // detached process exits silently — the user sees only "flashes
+        // black and returns to prompt" with no visible error.  Persist the
+        // failure to a log file the user can find with their next breath
+        // ("look in ~/.psmux/server-startup.log") instead of asking them
+        // to rerun `psmux server` interactively to see the error.
+        write_startup_error_log(&e);
         // Clean up port and key files so stale entries are not left
         // behind when the pane command fails to spawn (issue #204).
         let _ = std::fs::remove_file(&regpath);
@@ -4351,3 +4450,7 @@ mod test_issue202;
 #[cfg(test)]
 #[path = "../../tests-rs/test_new_session_env.rs"]
 mod test_new_session_env;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue167_startup_log.rs"]
+mod test_issue167_startup_log;
