@@ -1,0 +1,176 @@
+# Issue #263 — irrefutable proof via NESTED psmux.
+#
+# OUTER psmux session runs an INNER psmux session attached inside one of its
+# panes. The inner psmux is fully attached, so it goes through the LIVE render
+# path (src/rendering.rs) and writes ANSI to the outer pane's PTY.
+#
+# We then capture-pane on the OUTER pane, which shows literally what the inner
+# psmux wrote to its parent terminal. This is the smoking gun: if the outer
+# capture shows the box-drawing chars with the wrong SGR sequences, the live
+# renderer is dropping per-cell colors.
+
+$ErrorActionPreference = "Continue"
+$PSMUX = (Get-Command psmux -EA Stop).Source
+$OUTER = "issue263_outer"
+$INNER = "issue263_inner"
+$psmuxDir = "$env:USERPROFILE\.psmux"
+$ESC = [char]27
+$BAR = [char]0x2502  # │
+
+function Write-Pass($m) { Write-Host "  [PASS] $m" -ForegroundColor Green }
+function Write-Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red }
+function Write-Info($m) { Write-Host "  [INFO] $m" -ForegroundColor DarkCyan }
+
+# Cleanup
+& $PSMUX kill-session -t $OUTER 2>&1 | Out-Null
+& $PSMUX kill-session -t $INNER 2>&1 | Out-Null
+Start-Sleep -Milliseconds 500
+Remove-Item "$psmuxDir\$OUTER.*" -Force -EA SilentlyContinue
+Remove-Item "$psmuxDir\$INNER.*" -Force -EA SilentlyContinue
+
+# --- Outer psmux session (will host the inner) ---
+& $PSMUX new-session -d -s $OUTER -x 200 -y 60 2>$null
+Start-Sleep -Seconds 3
+& $PSMUX has-session -t $OUTER 2>$null
+if ($LASTEXITCODE -ne 0) { Write-Host "Outer session failed" -F Red; exit 1 }
+
+Write-Host "`n=== Issue #263 NESTED proof ===" -ForegroundColor Cyan
+
+# --- Write the box-drawing repro script (UTF-8 with BOM, exact issue script) ---
+$reproPath = "$env:TEMP\psmux_issue263_repro.ps1"
+$bar = $BAR
+$reproContent = @"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+`$OutputEncoding = [System.Text.Encoding]::UTF8
+Write-Host "${ESC}[90m${bar} SGR 90${ESC}[0m"
+Write-Host "${ESC}[37m${bar} SGR 37${ESC}[0m"
+Write-Host "${ESC}[1;37m${bar} SGR 1;37${ESC}[0m"
+Write-Host "${ESC}[38;5;240m${bar} 256-240${ESC}[0m"
+Write-Host "${ESC}[38;5;250m${bar} 256-250${ESC}[0m"
+Write-Host "${ESC}[38;2;128;128;128m${bar} TC grey${ESC}[0m"
+Write-Host "${ESC}[38;2;255;0;0m${bar} TC red${ESC}[0m"
+"@
+[System.IO.File]::WriteAllText($reproPath, $reproContent, (New-Object System.Text.UTF8Encoding($true)))
+
+Write-Info "Repro script: $reproPath"
+Write-Info "Verifying script content..."
+$bytes = [System.IO.File]::ReadAllBytes($reproPath)
+$preview = ($bytes[0..50] | ForEach-Object { $_.ToString("X2") }) -join ' '
+Write-Info "First 50 bytes: $preview"
+
+# --- Start INNER psmux INSIDE outer (so inner is attached to outer's pane) ---
+# The inner psmux thinks its terminal is outer's pane PTY, so its render
+# output goes through src/rendering.rs and lands in outer's screen buffer.
+& $PSMUX send-keys -t $OUTER 'Clear-Host' Enter
+Start-Sleep -Seconds 1
+
+# Start inner attached. Use TERM=xterm-256color same as the issue env.
+& $PSMUX send-keys -t $OUTER "`$env:TERM='xterm-256color'" Enter
+Start-Sleep -Milliseconds 500
+
+# Important: inner psmux must attach (not detach), otherwise we capture only PowerShell echo
+& $PSMUX send-keys -t $OUTER "psmux new-session -s $INNER" Enter
+Write-Info "Started inner psmux attached inside outer pane. Waiting 6s..."
+Start-Sleep -Seconds 6
+
+# Now we should be inside inner psmux's shell. Run the repro
+& $PSMUX send-keys -t $OUTER "Clear-Host" Enter
+Start-Sleep -Milliseconds 500
+& $PSMUX send-keys -t $OUTER "& '$reproPath'" Enter
+Write-Info "Ran repro inside inner psmux. Waiting 4s for render..."
+Start-Sleep -Seconds 4
+
+# --- Now capture OUTER pane: this is what the INNER psmux's renderer wrote ---
+$capOuter = & $PSMUX capture-pane -t $OUTER -p -e 2>&1 | Out-String
+
+Write-Host "`n--- OUTER capture (what inner psmux's RENDERER wrote) ---"
+$capOuter -split "`n" | ForEach-Object {
+    if ($_ -match "SGR " -or $_ -match "256-" -or $_ -match "TC ") {
+        $shown = $_ -replace $ESC.ToString(), '\e'
+        Write-Host "    $shown"
+    }
+}
+
+# --- Also capture INNER pane directly (for comparison) ---
+$capInner = & $PSMUX capture-pane -t $INNER -p -e 2>&1 | Out-String
+Write-Host "`n--- INNER capture-pane (screen buffer state) ---"
+$capInner -split "`n" | ForEach-Object {
+    if ($_ -match "SGR " -or $_ -match "256-" -or $_ -match "TC ") {
+        $shown = $_ -replace $ESC.ToString(), '\e'
+        Write-Host "    $shown"
+    }
+}
+
+# --- Compare per line: does the OUTER (live render output) carry expected SGR before each box char? ---
+Write-Host "`n--- Verification: does live render keep SGR on box-drawing chars? ---"
+
+$expected = @(
+    @{ desc="SGR 90";   want="90";        token="SGR 90" },
+    @{ desc="SGR 37";   want="37";        token="SGR 37" },
+    @{ desc="SGR 1;37"; want="1;37";      token="SGR 1;37" },
+    @{ desc="256-240";  want="38;5;240";  token="256-240" },
+    @{ desc="256-250";  want="38;5;250";  token="256-250" },
+    @{ desc="TC grey";  want="38;2;128;128;128"; token="TC grey" },
+    @{ desc="TC red";   want="38;2;255;0;0";     token="TC red" }
+)
+
+$capLines = $capOuter -split "`n"
+
+$pass = 0; $fail = 0; $missing = 0
+foreach ($e in $expected) {
+    $matchLine = $capLines | Where-Object { $_ -match [regex]::Escape($e.token) } | Select-Object -First 1
+    if (-not $matchLine) {
+        Write-Fail "$($e.desc): line containing '$($e.token)' NOT in outer capture"
+        $missing++
+        continue
+    }
+    $shown = $matchLine -replace $ESC.ToString(), '\e'
+
+    # Get all SGRs that appear BEFORE the box-drawing char, OR if box char missing in line, look for closest SGR
+    $barIndex = $matchLine.IndexOf($BAR)
+    if ($barIndex -lt 0) {
+        Write-Fail "$($e.desc): no $BAR char in line — box-drawing char never made it. Line=$shown"
+        $fail++
+        continue
+    }
+    $beforeBar = $matchLine.Substring(0, $barIndex)
+    $sgrRx = [regex]::new("$ESC\[([^m]*)m")
+    $sgrs = $sgrRx.Matches($beforeBar) | ForEach-Object { $_.Groups[1].Value }
+    if (-not $sgrs) { $sgrs = @() }
+    $lastSgr = if ($sgrs.Count -gt 0) { $sgrs[-1] } else { "(none)" }
+
+    # Want all components present in the LAST SGR before bar
+    $wantParts = $e.want -split ';'
+    $lastParts = $lastSgr -split ';'
+    $allFound = $true
+    foreach ($wp in $wantParts) {
+        if ($lastParts -notcontains $wp) { $allFound = $false; break }
+    }
+    if ($allFound) {
+        Write-Pass "$($e.desc): box preceded by SGR [$lastSgr] (contains expected '$($e.want)')"
+        $pass++
+    } else {
+        Write-Fail "$($e.desc): expected '$($e.want)' before box, got '[$lastSgr]'. Line=$shown"
+        $fail++
+    }
+}
+
+# --- Cleanup: kill inner first via send-keys, then outer ---
+& $PSMUX send-keys -t $OUTER "psmux kill-server" Enter
+Start-Sleep -Seconds 2
+& $PSMUX kill-session -t $OUTER 2>&1 | Out-Null
+Remove-Item $reproPath -Force -EA SilentlyContinue
+
+Write-Host "`n=== Verdict ===" -ForegroundColor Cyan
+Write-Host "  Live-render correct (PASS): $pass" -ForegroundColor Green
+Write-Host "  Live-render WRONG (FAIL):   $fail" -ForegroundColor Red
+Write-Host "  Lines missing entirely:     $missing" -ForegroundColor Yellow
+
+if ($fail -gt 0) {
+    Write-Host "`n  >>> BUG CONFIRMED in live render path" -ForegroundColor Red
+} elseif ($missing -gt 0) {
+    Write-Host "`n  >>> INCONCLUSIVE: some lines did not render" -ForegroundColor Yellow
+} else {
+    Write-Host "`n  >>> NO BUG IN LIVE RENDER: SGR preserved on box-drawing chars" -ForegroundColor Green
+}
+exit ($fail + $missing)
