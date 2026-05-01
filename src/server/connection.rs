@@ -1626,12 +1626,19 @@ match cmd {
             .filter(|a| !a.starts_with('-'))
             .copied()
             .last();
+        // Extract window index from -t target (issue #266 — needed so
+        // per-window options like automatic-rename can return the right
+        // value for explicitly-targeted windows).
+        let target_window: Option<usize> = extract_flag_value(&args, "-t")
+            .as_deref()
+            .map(parse_target)
+            .and_then(|pt| pt.window);
         if has_v && opt_name.is_some() || (opt_name.is_some() && !has_q) {
             // Single-option query: show-options -v <name> or show <name>
             if let Some(name) = opt_name {
                 let (rtx, rrx) = mpsc::channel::<String>();
                 if window_scope {
-                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name.to_string()));
+                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name.to_string(), target_window));
                 } else {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name.to_string()));
                 }
@@ -2768,11 +2775,17 @@ fn dispatch_control_command(
             let window_scope2 = matches!(cmd, "show-window-options" | "showw") || combined_has2('w');
             let opt_name = args.iter().filter(|a| !a.starts_with('-')).next().map(|s| s.to_string());
             let has_opt_name = opt_name.is_some();
+            // See issue #266 — same -t window-index extraction as the
+            // primary handler above.
+            let target_window2: Option<usize> = extract_flag_value(&args, "-t")
+                .as_deref()
+                .map(parse_target)
+                .and_then(|pt| pt.window);
             if let Some(name) = opt_name {
                 if value_only {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
                 } else if window_scope2 {
-                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name));
+                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name, target_window2));
                 } else {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
                 }

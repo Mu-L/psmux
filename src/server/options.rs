@@ -126,11 +126,46 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
 }
 
 pub(crate) fn get_window_option_value(app: &AppState, name: &str) -> String {
-    if is_window_option(name) {
-        get_option_value(app, name)
-    } else {
-        String::new()
+    get_window_option_value_for(app, name, None)
+}
+
+/// Window-scoped option lookup that honours per-window overrides.
+///
+/// `target_window` selects which window to read from (e.g. for
+/// `show-options -w -v automatic-rename -t SESSION:N`).  `None` means
+/// "active window", which matches what tmux does when `-t` is omitted.
+///
+/// Currently only `automatic-rename` has a real per-window override
+/// (driven by `Window::manual_rename`, which is set when the window is
+/// created with `-n NAME` or renamed via `rename-window`).  Other
+/// window options fall through to the global value — they don't have
+/// per-window storage in psmux today and tmux also defaults to the
+/// global value when no window-local override is set.
+///
+/// See psmux issue #266: prior to this helper, `show-options -w
+/// automatic-rename` always returned the global value, so windows
+/// born with `-n NAME` (which correctly set `manual_rename = true`)
+/// still reported `automatic-rename on`, even though the rename loop
+/// was correctly skipping them.  The bug was reporting-only on those
+/// windows, but the spec violation could mislead user scripts that
+/// branched on the option value.
+pub(crate) fn get_window_option_value_for(
+    app: &AppState,
+    name: &str,
+    target_window: Option<usize>,
+) -> String {
+    if !is_window_option(name) {
+        return String::new();
     }
+    if name == "automatic-rename" {
+        let idx = target_window.unwrap_or(app.active_idx);
+        if let Some(w) = app.windows.get(idx) {
+            if w.manual_rename {
+                return "off".into();
+            }
+        }
+    }
+    get_option_value(app, name)
 }
 
 pub(crate) fn render_window_options(app: &AppState) -> String {
@@ -450,3 +485,7 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue266_per_window_autorename.rs"]
+mod tests_issue266_per_window_autorename;

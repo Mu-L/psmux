@@ -1149,7 +1149,12 @@ pub enum CtrlReq {
     ResizePaneAbsolute(String, u16),
     ResizePanePercent(String, u8), // axis, percentage (0-100)
     ShowOptionValue(mpsc::Sender<String>, String),
-    ShowWindowOptionValue(mpsc::Sender<String>, String),
+    /// Read a window-scoped option value. Optional window index targets a
+    /// specific window (from `show-options -w -t :N`); None falls back to
+    /// the active window. Required so per-window overrides like
+    /// `automatic-rename` (implicitly off for `-n NAME` windows, #266)
+    /// can be reported correctly instead of returning the global value.
+    ShowWindowOptionValue(mpsc::Sender<String>, String, Option<usize>),
     ChooseBuffer(mpsc::Sender<String>),
     ServerInfo(mpsc::Sender<String>),
     SendPrefix,

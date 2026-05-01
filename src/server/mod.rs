@@ -260,8 +260,8 @@ fn drain_plugin_req(
             let val = get_option_value(app, &name);
             let _ = resp.send(val);
         }
-        CtrlReq::ShowWindowOptionValue(resp, name) => {
-            let val = get_window_option_value(app, &name);
+        CtrlReq::ShowWindowOptionValue(resp, name, target) => {
+            let val = crate::server::options::get_window_option_value_for(app, &name, target);
             let _ = resp.send(val);
         }
         CtrlReq::ShowOptions(resp) => {
@@ -538,8 +538,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         return Err(e);
     }
     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
-    // Apply window name if specified via -n
-    if let Some(n) = window_name { app.windows.last_mut().map(|w| w.name = n); }
+    // Apply window name if specified via -n.  Setting `manual_rename = true`
+    // is critical (issue #266) — it implicitly disables automatic-rename for
+    // the initial window of a `new-session -n NAME`, matching tmux semantics
+    // and the two later `-n` paths in this file (lines ~789, ~812).
+    if let Some(n) = window_name {
+        app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; });
+    }
     // Replenish: spawn a warm pane for the NEXT new-window / split.
     // Always replenish when no warm pane is available.
     if app.warm_pane.is_none() {
@@ -3483,8 +3488,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let val = get_option_value(&app, &name);
                     let _ = resp.send(val);
                 }
-                CtrlReq::ShowWindowOptionValue(resp, name) => {
-                    let val = get_window_option_value(&app, &name);
+                CtrlReq::ShowWindowOptionValue(resp, name, target) => {
+                    let val = crate::server::options::get_window_option_value_for(&app, &name, target);
                     let _ = resp.send(val);
                 }
                 CtrlReq::ShowWindowOptions(resp) => {
