@@ -580,6 +580,12 @@ pub struct AppState {
     pub status_interval: u64,
     /// Last time the status-interval hook was fired
     pub last_status_interval_fire: std::time::Instant,
+    /// TTL cache for `#(cmd)` shell expansions. Without this the format
+    /// engine spawns a fresh subprocess on every state_dirty push (~30/s
+    /// during active typing), which serializes a slow helper (e.g. pwsh
+    /// at ~280 ms cold-start) onto the server main loop and lags echo.
+    /// Keyed by command string; entries expire after `status_interval`.
+    pub format_shell_cache: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>,
     /// status-justify: left, centre, right, absolute-centre
     pub status_justify: String,
     /// main-pane-width: percentage for main pane in main-vertical layout (0 = use 60% heuristic)
@@ -797,6 +803,7 @@ impl AppState {
             command_vi_normal: false,
             status_interval: 15,
             last_status_interval_fire: std::time::Instant::now(),
+            format_shell_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             status_justify: "left".to_string(),
             main_pane_width: 0,
             main_pane_height: 0,

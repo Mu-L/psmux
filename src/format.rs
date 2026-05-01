@@ -127,7 +127,7 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                 // #(command) — shell command execution (tmux compat)
                 if let Some(end) = fmt[i + 2..].find(')') {
                     let cmd = &fmt[i + 2..i + 2 + end];
-                    let output = run_shell_command(cmd);
+                    let output = run_shell_command(cmd, app);
                     if has_strftime {
                         result.push_str(&escape_strftime_percent(&output));
                     } else {
@@ -248,9 +248,30 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
 
 /// Execute a shell command and return its stdout (trimmed).
 /// Used for `#(command)` expansion (tmux compatibility).
-/// Caches results for the lifetime of a single format expansion cycle to
-/// avoid repeated subprocess spawning on every refresh.
-fn run_shell_command(cmd: &str) -> String {
+///
+/// Results are cached in `app.format_shell_cache` keyed by the command
+/// string, with TTL = `status-interval` seconds (matching tmux's refresh
+/// semantics for `#(...)`). When `status-interval` is 0, a 1s floor is
+/// used so typing latency is bounded — tmux never repaints fast enough
+/// for the spawn cost to dominate, but our server-push path can fire
+/// ~30 times per second during active TUI redraws.
+///
+/// Cache miss / expiry path spawns a fresh subprocess synchronously.
+/// First call after expiry pays the spawn cost; subsequent calls within
+/// the TTL window return instantly. See issue #272.
+fn run_shell_command(cmd: &str, app: &AppState) -> String {
+    let ttl = std::time::Duration::from_secs(app.status_interval.max(1));
+
+    // Fast path: return cached value if still fresh.
+    if let Ok(guard) = app.format_shell_cache.lock() {
+        if let Some((stored_at, value)) = guard.get(cmd) {
+            if stored_at.elapsed() < ttl {
+                return value.clone();
+            }
+        }
+    }
+
+    // Cache miss or expired: spawn the subprocess.
     use std::process::Command;
     use crate::platform::HideWindowCommandExt;
     let output = if cfg!(windows) {
@@ -258,12 +279,20 @@ fn run_shell_command(cmd: &str) -> String {
     } else {
         Command::new("sh").args(["-c", cmd]).output()
     };
-    match output {
+    let value = match output {
         Ok(o) if o.status.success() => {
             String::from_utf8_lossy(&o.stdout).trim().to_string()
         }
         _ => String::new(),
+    };
+
+    // Insert/refresh the cache entry. Lock failures (poisoned) are
+    // ignored — the subprocess already ran, the user still gets output.
+    if let Ok(mut guard) = app.format_shell_cache.lock() {
+        guard.insert(cmd.to_string(), (std::time::Instant::now(), value.clone()));
     }
+
+    value
 }
 
 /// Escape '%' to '%%' in expanded variable content so chrono's strftime
@@ -1803,3 +1832,7 @@ fn collect_pane_ids(node: &Node, ids: &mut Vec<usize>) {
 #[cfg(test)]
 #[path = "../tests-rs/test_format.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue272_format_shell_cache.rs"]
+mod tests_issue272_format_shell_cache;
