@@ -15,6 +15,14 @@ pub const ROOT_DEFAULTS: &[(&str, &str)] = &[
 /// The overlay and `list-keys` both use this as the canonical source
 /// of truth, so there is exactly *one* place to update.
 pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
+    // ── Send prefix (tmux: bind C-b send-prefix) ──
+    // Pressing the prefix key twice forwards a literal prefix keystroke to the
+    // active pane, which lets shells like nushell/bash interpret C-a as
+    // "go to start of line" even when C-a is the psmux prefix.  When the user
+    // changes the prefix via `set -g prefix <key>`, the new key is also bound
+    // to send-prefix automatically (see config::ensure_prefix_self_binding).
+    ("C-b",     "send-prefix"),
+
     // ── Window management ──
     ("c",       "new-window"),
     ("n",       "next-window"),

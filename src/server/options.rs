@@ -188,6 +188,7 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
         "prefix" => {
             if let Some(kc) = parse_key_string(value) {
                 app.prefix_key = kc;
+                crate::config::ensure_prefix_self_binding(app);
             }
         }
         "prefix2" => {

@@ -2406,3 +2406,7 @@ mod tests_pr207_compat_bugs;
 #[cfg(test)]
 #[path = "../tests-rs/test_named_buffers.rs"]
 mod tests_named_buffers;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue273_send_prefix.rs"]
+mod tests_issue273_send_prefix;

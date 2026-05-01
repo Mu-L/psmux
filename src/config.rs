@@ -537,6 +537,7 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "prefix" => {
             if let Some(key) = parse_key_name(value) {
                 app.prefix_key = key;
+                ensure_prefix_self_binding(app);
             }
         }
         "prefix2" => {
@@ -975,6 +976,24 @@ pub fn parse_unbind_key(app: &mut AppState, line: &str) {
                 binds.retain(|b| b.key != key);
             }
         }
+    }
+}
+
+/// Ensure the current prefix key is bound to `send-prefix` in the prefix table.
+/// This makes pressing the prefix key twice forward a literal prefix keystroke
+/// to the active pane (matches tmux's `bind C-b send-prefix` default, but also
+/// follows the prefix when the user does `set -g prefix C-a`).
+///
+/// Existing bindings for the prefix key are preserved — the user's override
+/// always wins (e.g. `bind C-a some-other-command` after `set prefix C-a`).
+pub fn ensure_prefix_self_binding(app: &mut AppState) {
+    let key = normalize_key_for_binding(app.prefix_key);
+    let table = app.key_tables.entry("prefix".to_string()).or_default();
+    if table.iter().any(|b| b.key == key) {
+        return;
+    }
+    if let Some(action) = parse_command_to_action("send-prefix") {
+        table.push(Bind { key, action, repeat: false });
     }
 }
 
