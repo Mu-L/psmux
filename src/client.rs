@@ -19,6 +19,39 @@ use crate::debug_log::{client_log, client_log_enabled, input_log, input_log_enab
 use crate::layout::RowRunsJson;
 use crate::tree::split_with_gaps;
 
+/// Extract the actual command from a confirm-before argument string.
+/// Handles: `confirm-before -p 'prompt text' kill-pane`
+/// Returns the command to execute after confirmation (e.g. "kill-pane").
+fn extract_confirm_command(args: &str) -> String {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let mut i = 0;
+    while i < parts.len() {
+        if parts[i] == "-p" {
+            i += 1; // skip flag
+            // skip the prompt value (may be quoted with single quotes spanning multiple parts)
+            if i < parts.len() {
+                if parts[i].starts_with('\'') {
+                    // scan until closing quote
+                    while i < parts.len() && !parts[i].ends_with('\'') {
+                        i += 1;
+                    }
+                } else if parts[i].starts_with('"') {
+                    while i < parts.len() && !parts[i].ends_with('"') {
+                        i += 1;
+                    }
+                }
+                i += 1; // move past the prompt value
+            }
+        } else if parts[i].starts_with('-') {
+            i += 1; // skip other flags like -b, -y
+        } else {
+            // Remaining parts form the command
+            return parts[i..].join(" ");
+        }
+    }
+    args.to_string()
+}
+
 /// Build a send-key name with modifier prefix (e.g. "C-Left", "S-Right", "C-S-Up").
 fn modified_key_name(base: &str, mods: KeyModifiers) -> String {
     let mut prefix = String::new();
@@ -2054,10 +2087,15 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 let cmd = &entry.c;
                                 if cmd == "detach-client" || cmd == "detach" {
                                     quit = true;
-                                } else if cmd == "kill-pane" || cmd == "kill-window" {
-                                    confirm_cmd = Some(cmd.clone());
                                 } else if cmd.starts_with("confirm-before") {
-                                    confirm_cmd = Some(cmd.clone());
+                                    // Extract the actual command from confirm-before wrapper
+                                    let inner = cmd.strip_prefix("confirm-before").unwrap_or(cmd).trim();
+                                    // Skip -p 'prompt' flags to get the actual command
+                                    let actual_cmd = extract_confirm_command(inner);
+                                    confirm_cmd = Some(actual_cmd);
+                                } else if cmd == "kill-pane" || cmd == "kill-window" || cmd == "kill-session" {
+                                    // Direct kill without confirmation (user explicitly bound without confirm-before)
+                                    cmd_batch.push(format!("{}\n", cmd));
                                 } else if cmd == "rename-window" {
                                     renaming = true; rename_buf.clear();
                                 } else if cmd == "rename-session" {

@@ -29,7 +29,7 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     ("p",       "previous-window"),
     ("l",       "last-window"),
     ("w",       "choose-tree"),
-    ("&",       "kill-window"),
+    ("&",       "confirm-before -p 'kill-window #W? (y/n)' kill-window"),
     (",",       "rename-window"),
     ("'",       "select-window-index"),
     ("0",       "select-window -t :0"),
@@ -57,7 +57,7 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     ("q",       "display-panes"),
 
     // ── Pane management ──
-    ("x",       "kill-pane"),
+    ("x",       "confirm-before -p 'kill-pane #P? (y/n)' kill-pane"),
     ("z",       "resize-pane -Z"),
     ("{",       "swap-pane -U"),
     ("}",       "swap-pane -D"),

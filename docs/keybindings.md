@@ -351,3 +351,42 @@ unbind-key C-b
 # Unbind all
 unbind-key -a
 ```
+
+## Confirmation Prompts (confirm-before)
+
+By default, destructive keybindings like `Prefix + x` (kill-pane) and `Prefix + &` (kill-window) show a y/n confirmation prompt before executing. This uses the `confirm-before` wrapper, matching tmux behavior.
+
+### Skipping Confirmation
+
+To bind kill commands **without** confirmation, bind the command directly in your config:
+
+```tmux
+# Kill pane immediately (no y/n prompt)
+bind-key x kill-pane
+
+# Kill window immediately (no y/n prompt)
+bind-key & kill-window
+
+# Kill session on a custom key (no prompt)
+bind-key X kill-session
+```
+
+### Adding Confirmation to Any Command
+
+You can wrap any command with `confirm-before` to require y/n confirmation:
+
+```tmux
+# Confirm before killing pane (this is the default)
+bind-key x confirm-before -p 'kill-pane #P? (y/n)' kill-pane
+
+# Confirm before killing window (this is the default)
+bind-key & confirm-before -p 'kill-window #W? (y/n)' kill-window
+
+# Confirm before killing session
+bind-key X confirm-before -p 'kill-session? (y/n)' kill-session
+
+# Confirm before detaching
+bind-key d confirm-before -p 'detach? (y/n)' detach-client
+```
+
+The `-p` flag sets a custom prompt string. Without it, a generic prompt is shown.
