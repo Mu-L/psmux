@@ -13,6 +13,163 @@ static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 use crate::commands::parse_command_line;
 use super::helpers::TMUX_COMMANDS;
 
+/// Split a command line on top-level `;` separators, respecting single and
+/// double quotes and `\` escapes. Real tmux's parser treats `;` as a command
+/// separator on the same line; iTerm2's `sendCommandList` joins many commands
+/// with "; " into one wire line and expects one %begin/%end pair per command.
+fn split_top_level_semicolons(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && !in_single {
+            // Escape: copy the backslash and the next char (if any) verbatim.
+            cur.push(c);
+            if let Some(nc) = chars.next() { cur.push(nc); }
+            continue;
+        }
+        match c {
+            '\'' if !in_double => { in_single = !in_single; cur.push(c); }
+            '"'  if !in_single => { in_double = !in_double; cur.push(c); }
+            ';'  if !in_single && !in_double => {
+                let trimmed = cur.trim().to_string();
+                if !trimmed.is_empty() { out.push(trimmed); }
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    let trimmed = cur.trim().to_string();
+    if !trimmed.is_empty() { out.push(trimmed); }
+    out
+}
+
+/// Try to decode a single `send`/`send-keys` command into the literal byte
+/// payload it would inject and the pane target.  Returns `None` if the
+/// command uses features we don't safely coalesce (e.g. `-X`, `-p`, `-N`,
+/// or named keys like `Up`/`Tab`) — in that case the caller falls back to
+/// normal per-command dispatch.
+///
+/// This is used to merge consecutive `send` sub-commands within one input
+/// line into a single PTY write.  iTerm2 sends arrow keys as
+/// `send -t %1 0x1b 0x5b; send -lt %1 A` — two separate sub-commands.  If
+/// each becomes its own PTY write, pwsh's PSReadLine times out between the
+/// ESC byte and the `[A` and emits them as literal characters.  Coalescing
+/// guarantees the whole VT sequence reaches the shell in one read().
+fn decode_send_command(line: &str) -> Option<(String, Vec<u8>)> {
+    let toks = parse_command_line(line);
+    if toks.is_empty() { return None; }
+    let cmd = toks[0].as_str();
+    if cmd != "send" && cmd != "send-keys" { return None; }
+    let args: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
+
+    // Bail on modes that require special semantics.
+    let any_short = |c: char| {
+        args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|fc| fc == c))
+    };
+    if any_short('X') || any_short('p') || any_short('N') || any_short('R') { return None; }
+
+    let prev_consumes_operand = |i: usize| -> bool {
+        if i == 0 { return false; }
+        if let Some(prev) = args.get(i - 1) {
+            if prev.starts_with('-') && !prev.starts_with("--") && prev.len() >= 2 {
+                if let Some(last) = prev.chars().last() {
+                    return matches!(last, 't' | 'T' | 'N' | 'R' | 'c');
+                }
+            }
+        }
+        false
+    };
+
+    // Find target (-t / -lt /...).  Default to %active if absent.
+    let mut target: Option<String> = None;
+    for (i, a) in args.iter().enumerate() {
+        if a.starts_with('-') && !a.starts_with("--") && a.ends_with('t') {
+            if let Some(t) = args.get(i + 1) { target = Some((*t).to_string()); break; }
+        }
+    }
+
+    let literal = any_short('l');
+    let mut bytes: Vec<u8> = Vec::new();
+    for (i, a) in args.iter().enumerate() {
+        if a.starts_with('-') { continue; }
+        if prev_consumes_operand(i) { continue; }
+        // Hex codepoint?
+        let s = *a;
+        if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                if let Ok(n) = u32::from_str_radix(rest, 16) {
+                    if n <= 0xff { bytes.push(n as u8); continue; }
+                    if let Some(c) = char::from_u32(n) {
+                        let mut buf = [0u8; 4];
+                        bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                        continue;
+                    }
+                }
+            }
+        }
+        // Non-literal mode + non-hex token = could be a named key (Up, Tab,
+        // BSpace, C-a, ...).  We can't safely turn that into raw bytes here,
+        // so refuse to coalesce.
+        if !literal { return None; }
+        bytes.extend_from_slice(s.as_bytes());
+    }
+
+    Some((target.unwrap_or_else(|| String::new()), bytes))
+}
+
+/// Quote a byte string as a single-quoted shell argument so it survives
+/// re-parsing by `parse_command_line`.  Embedded single quotes are escaped
+/// with the standard `'\''` trick.
+fn shell_quote_bytes(b: &[u8]) -> String {
+    let s: String = b.iter().map(|&c| c as char).collect();
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Walk the sub-commands produced by `split_top_level_semicolons` and merge
+/// any consecutive run of `send`/`send-keys` commands targeting the same
+/// pane into a single synthesized `send -lt <target> <bytes>` command.
+/// This keeps multi-byte VT sequences (arrows, function keys, etc.) atomic
+/// when they reach the shell PTY.
+fn coalesce_send_commands(parts: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(parts.len());
+    let mut acc: Vec<u8> = Vec::new();
+    let mut acc_target: Option<String> = None;
+
+    fn flush(out: &mut Vec<String>, acc: &mut Vec<u8>, target: &mut Option<String>) {
+        if acc.is_empty() { return; }
+        let line = match target.as_deref() {
+            Some(t) if !t.is_empty() => format!("send -lt {} {}", t, shell_quote_bytes(acc)),
+            _ => format!("send -l {}", shell_quote_bytes(acc)),
+        };
+        out.push(line);
+        acc.clear();
+        *target = None;
+    }
+
+    for part in parts {
+        match decode_send_command(&part) {
+            Some((tgt, bytes)) => {
+                let target_match = acc.is_empty()
+                    || acc_target.as_deref() == Some(tgt.as_str());
+                if !target_match {
+                    flush(&mut out, &mut acc, &mut acc_target);
+                }
+                if acc.is_empty() { acc_target = Some(tgt); }
+                acc.extend_from_slice(&bytes);
+            }
+            None => {
+                flush(&mut out, &mut acc, &mut acc_target);
+                out.push(part);
+            }
+        }
+    }
+    flush(&mut out, &mut acc, &mut acc_target);
+    out
+}
+
 /// Handle a single TCP connection from a client.
 /// Parses auth, optional TARGET/PERSISTENT flags, then dispatches commands
 /// to the main server event loop via the `tx` channel.
@@ -165,90 +322,141 @@ if control_echo || control_noecho {
 
     let (notif_tx, notif_rx) = std::sync::mpsc::sync_channel::<ControlNotification>(4096);
 
-    // Register with server
+    // Wrap the write stream in a mutex so that the notification writer
+    // thread and the command-response loop never interleave bytes on
+    // the TCP socket.  Real tmux is single-threaded, so it never has
+    // this problem; we need explicit synchronization.
+    let write_lock = std::sync::Arc::new(std::sync::Mutex::new(write_stream));
+
+    // Spawn notification writer thread BEFORE writing DCS or registering,
+    // so it is ready to drain notifications as soon as they arrive.
+    let ws_notif = write_lock.clone();
+    let notif_thread = std::thread::spawn(move || {
+        while let Ok(notif) = notif_rx.recv() {
+            let is_exit = matches!(notif, ControlNotification::Exit { .. });
+            // Skip %exit here: the CLIENT writes %exit + ST to stdout
+            // (matching real tmux's client.c). The server just closes the
+            // TCP connection to signal exit.
+            if is_exit { break; }
+            let formatted = control::format_notification(&notif);
+            let mut ws = match ws_notif.lock() {
+                Ok(ws) => ws,
+                Err(_) => break,
+            };
+            if writeln!(ws, "{}", formatted).is_err() { break; }
+            if ws.flush().is_err() { break; }
+        }
+    });
+
+    // For -CC (no-echo) mode, emit the DCS opening sequence "\033P1000p"
+    // before anything else. Real tmux writes exactly 7 bytes with NO
+    // trailing newline (tmux/control.c control_start()). The next bytes
+    // on the wire are the first %begin line, so iTerm2 sees:
+    //   \x1bP1000p%begin <time> 1 0\n%end <time> 1 0\n
+    // which enters DCS mode and delivers "%begin ..." as the first
+    // DCS data line.
+    //
+    // After the DCS, we emit a synthetic %begin/%end pair representing
+    // the response to the implicit attach-session that bare `tmux -CC` runs.
+    // Real tmux uses flags=0 (server-originated) here. iTerm2's parseBegin:
+    //   - flag=1 (client-originated) requires a queued command in
+    //     commandQueue_, otherwise aborts with "%begin with empty command
+    //     queue" → tmuxHostDisconnected → "Detached".
+    //   - flag=0 (server-originated) creates a synthetic currentCommand_
+    //     and the matching %end fires tmuxInitialCommandDidCompleteSuccessfully
+    //     which kicks off iTerm's tmux integration (phony-command, ping, etc.).
+    {
+        let mut ws = write_lock.lock().unwrap();
+        if control_noecho {
+            let init_ts = chrono::Utc::now().timestamp();
+            // DCS opener (no newline) immediately followed by %begin
+            let _ = ws.write_all(b"\x1bP1000p");
+            let _ = writeln!(ws, "%begin {} 1 0", init_ts);
+            let _ = writeln!(ws, "%end {} 1 0", init_ts);
+        } else {
+            // -C (echo) mode: no DCS, just a blank ready line
+            let _ = writeln!(ws);
+        }
+        let _ = ws.flush();
+    }
+
+    // NOW register with the server. This triggers emit_initial_state()
+    // which sends %session-changed and other notifications through the
+    // notification channel. Because we flushed the DCS + %begin/%end
+    // above, those bytes are already in the kernel send buffer and will
+    // arrive at the client before any notifications.
     let _ = tx.send(CtrlReq::ControlRegister {
         client_id: ctrl_client_id,
         echo: control_echo,
         notif_tx: notif_tx,
     });
 
-    // Spawn notification writer thread
-    let mut ws_notif = match write_stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => {
-            let _ = tx.send(CtrlReq::ControlDeregister { client_id: ctrl_client_id });
-            return;
-        }
-    };
-    let cc_no_echo = control_noecho;
-    let notif_thread = std::thread::spawn(move || {
-        while let Ok(notif) = notif_rx.recv() {
-            let is_exit = matches!(notif, ControlNotification::Exit { .. });
-            let formatted = control::format_notification(&notif);
-            if writeln!(ws_notif, "{}", formatted).is_err() { break; }
-            // In -CC mode, send ST (ESC \) after %exit per tmux protocol
-            if is_exit && cc_no_echo {
-                let _ = ws_notif.write_all(b"\x1b\\");
-            }
-            if ws_notif.flush().is_err() { break; }
-            if is_exit { break; }
-        }
-    });
-
     // Control mode command loop: read lines, dispatch, wrap in %begin/%end/%error
     let mut cmd_counter: u64 = 0;
     let tx_ctrl = tx.clone();
     let aliases_ctrl = aliases.clone();
-
-    // For -CC (no-echo) mode, emit the DCS opening sequence "\033P1000p"
-    // before anything else. This is what tmux does in control_start() and is
-    // what iTerm2's tmux integration watches for to switch from terminal mode
-    // into native tmux UI mode. Without it iTerm2 sits forever waiting.
-    // Reference: tmux/control.c control_start() CLIENT_CONTROLCONTROL branch.
-    if control_noecho {
-        let _ = write_stream.write_all(b"\x1bP1000p");
-    }
-
-    // Notify client that control mode is ready
-    let _ = writeln!(write_stream);
-    let _ = write_stream.flush();
+    // Queue of pending sub-command strings produced by splitting a single input
+    // line on top-level `;` (real tmux does this in its command parser). iTerm2's
+    // sendCommandList joins many commands with "; " into one wire line and
+    // expects one %begin/%end pair per sub-command.
+    let mut pending: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     loop {
-        line.clear();
-        match r.read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Err(e) => {
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut {
-                    continue;
+        let trimmed_owned: String = if let Some(s) = pending.pop_front() {
+            s
+        } else {
+            line.clear();
+            match r.read_line(&mut line) {
+                Ok(0) => break, // EOF
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut {
+                        continue;
+                    }
+                    break;
                 }
-                break;
+                Ok(_) => {}
             }
-            Ok(_) => {}
-        }
 
-        let trimmed = line.trim();
+            // Strip leading ASCII control characters (e.g., \x03 Ctrl-C) that
+            // iTerm2 sends when entering tmux gateway mode. Real tmux's command
+            // parser silently ignores these; without this strip they get glued
+            // onto the first command name (e.g. "\x03phony-command") and are
+            // rejected as "unknown command", causing iTerm2 to detach.
+            let trimmed_raw = line.trim();
+            let stripped = trimmed_raw.trim_start_matches(|c: char| (c as u32) < 0x20 && c != '\t');
+            if stripped.is_empty() { continue; }
+
+            // Split on top-level `;` (respecting single/double quotes and `\`
+            // escapes). If the line splits into multiple sub-commands, queue
+            // the rest and process the first; this mirrors real tmux's parser
+            // and is required for iTerm2's multi-command kickoff lines like
+            // `show -v -q -t $0 @x; refresh-client -C 80,25; show ...`.
+            let parts = split_top_level_semicolons(stripped);
+            let parts = coalesce_send_commands(parts);
+            if parts.is_empty() { continue; }
+            let mut iter = parts.into_iter();
+            let first = iter.next().unwrap();
+            for rest in iter { pending.push_back(rest); }
+            first
+        };
+        let trimmed: &str = trimmed_owned.trim();
         if trimmed.is_empty() { continue; }
 
         cmd_counter += 1;
         let ts = chrono::Utc::now().timestamp();
 
-        // Echo the command if -C mode
-        if control_echo {
-            let _ = writeln!(write_stream, "{}", trimmed);
-            let _ = write_stream.flush();
-        }
-
-        // Send %begin
-        let _ = writeln!(write_stream, "{}", control::format_begin(ts, cmd_counter));
-        let _ = write_stream.flush();
-
-        // Dispatch the command
+        // Dispatch the command (before acquiring write lock)
         let parsed = crate::cli::normalize_flag_equals(parse_command_line(trimmed));
         let raw_cmd = parsed.first().map(|s| s.as_str()).unwrap_or("");
 
         if raw_cmd.is_empty() {
-            let _ = writeln!(write_stream, "{}", control::format_end(ts, cmd_counter));
-            let _ = write_stream.flush();
+            let mut ws = write_lock.lock().unwrap();
+            if control_echo {
+                let _ = writeln!(ws, "{}", trimmed);
+            }
+            let _ = writeln!(ws, "{}", control::format_begin(ts, cmd_counter));
+            let _ = writeln!(ws, "{}", control::format_end(ts, cmd_counter));
+            let _ = ws.flush();
             continue;
         }
 
@@ -352,50 +560,67 @@ if control_echo || control_noecho {
             ctrl_client_id,
         );
 
-        if dispatched {
-            // Wait for response with timeout
-            match resp_r.recv_timeout(Duration::from_secs(5)) {
-                Ok(response) => {
-                    // Sentinel-encoded error: dispatcher signals %error
-                    // instead of %end by prefixing with \u{0001}ERR\u{0001}.
-                    let (is_error, body) = if let Some(stripped) = response.strip_prefix("\u{0001}ERR\u{0001}") {
-                        (true, stripped.to_string())
-                    } else {
-                        (false, response)
-                    };
-                    if !body.is_empty() {
-                        let _ = write!(write_stream, "{}", body);
-                        if !body.ends_with('\n') {
-                            let _ = writeln!(write_stream);
-                        }
-                    }
-                    let footer = if is_error {
-                        control::format_error(ts, cmd_counter)
-                    } else {
-                        control::format_end(ts, cmd_counter)
-                    };
-                    let _ = writeln!(write_stream, "{}", footer);
-                }
-                Err(_) => {
-                    let _ = writeln!(write_stream, "command timed out");
-                    let _ = writeln!(write_stream, "{}", control::format_error(ts, cmd_counter));
-                }
-            }
+        // Collect the response BEFORE acquiring the write lock, so the
+        // notification thread can still write while we wait.
+        let response_result = if dispatched {
+            Some(resp_r.recv_timeout(Duration::from_secs(5)))
         } else {
-            // Command dispatched without response channel (fire and forget)
-            let _ = writeln!(write_stream, "{}", control::format_end(ts, cmd_counter));
+            None
+        };
+
+        // Acquire write lock for the ENTIRE %begin … %end sequence so
+        // notifications from the notification thread never interleave
+        // with command responses.  This matches real tmux's single-
+        // threaded behaviour where command output and notifications are
+        // serialized on one bufferevent.
+        let mut ws = write_lock.lock().unwrap();
+
+        // Echo the command if -C mode
+        if control_echo {
+            let _ = writeln!(ws, "{}", trimmed);
         }
-        let _ = write_stream.flush();
+
+        // Send %begin
+        let _ = writeln!(ws, "{}", control::format_begin(ts, cmd_counter));
+
+        match response_result {
+            Some(Ok(response)) => {
+                // Sentinel-encoded error: dispatcher signals %error
+                // instead of %end by prefixing with \u{0001}ERR\u{0001}.
+                let (is_error, body) = if let Some(stripped) = response.strip_prefix("\u{0001}ERR\u{0001}") {
+                    (true, stripped.to_string())
+                } else {
+                    (false, response)
+                };
+                if !body.is_empty() {
+                    let _ = write!(ws, "{}", body);
+                    if !body.ends_with('\n') {
+                        let _ = writeln!(ws);
+                    }
+                }
+                let footer = if is_error {
+                    control::format_error(ts, cmd_counter)
+                } else {
+                    control::format_end(ts, cmd_counter)
+                };
+                let _ = writeln!(ws, "{}", footer);
+            }
+            Some(Err(_)) => {
+                let _ = writeln!(ws, "command timed out");
+                let _ = writeln!(ws, "{}", control::format_error(ts, cmd_counter));
+            }
+            None => {
+                // Command dispatched without response channel (fire and forget)
+                let _ = writeln!(ws, "{}", control::format_end(ts, cmd_counter));
+            }
+        }
+        let _ = ws.flush();
+        drop(ws);
     }
 
     // Deregister and clean up.
-    // For -CC (no-echo) mode, emit the closing ST (ESC \) so iTerm2 leaves
-    // tmux integration mode cleanly. Real tmux's client always emits ST on
-    // -CC exit (tmux/client.c CLIENT_CONTROLCONTROL exit branch).
-    if control_noecho {
-        let _ = write_stream.write_all(b"\x1b\\");
-        let _ = write_stream.flush();
-    }
+    // The CLIENT emits %exit + ST to stdout (matching real tmux's
+    // client.c), so the server does not need to write ST here.
     let _ = tx.send(CtrlReq::ControlDeregister { client_id: ctrl_client_id });
     drop(notif_thread);
     return;
@@ -897,38 +1122,83 @@ match cmd {
     }
     "toggle-sync" => { let _ = tx.send(CtrlReq::ToggleSync); }
     "set-pane-title" => { let title = args.join(" "); let _ = tx.send(CtrlReq::SetPaneTitle(title)); }
-    "send-keys" => {
-        let literal = args.iter().any(|a| *a == "-l");
-        let paste_mode = args.iter().any(|a| *a == "-p");
-        let has_x = args.iter().any(|a| *a == "-X");
-        // Parse -N <count> for repeat
+    "send-keys" | "send" => {
+        // tmux short-flag clusters (e.g. iTerm2's `send -lt %1 l`): inspect
+        // each `-xyz` arg and check whether any of x/y/z is a known flag.
+        let flag_has = |c: char| -> bool {
+            args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|fc| fc == c))
+        };
+        // Returns true if the previous arg is a short-flag cluster whose
+        // *trailing* character takes an operand (e.g. -t, -lt, -N).
+        let prev_consumes_operand = |i: usize| -> bool {
+            if i == 0 { return false; }
+            if let Some(prev) = args.get(i - 1) {
+                if prev.starts_with('-') && !prev.starts_with("--") && prev.len() >= 2 {
+                    if let Some(last) = prev.chars().last() {
+                        return matches!(last, 't' | 'T' | 'N' | 'R' | 'c');
+                    }
+                }
+            }
+            false
+        };
+        let literal = flag_has('l');
+        let paste_mode = flag_has('p');
+        let has_x = flag_has('X');
+        // Parse -N <count> for repeat (look for any cluster ending in 'N')
         let mut repeat_count: usize = 1;
-        if let Some(n_pos) = args.iter().position(|a| *a == "-N") {
+        if let Some(n_pos) = args.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.ends_with('N')) {
             if let Some(count_str) = args.get(n_pos + 1) {
                 repeat_count = count_str.parse::<usize>().unwrap_or(1).max(1);
             }
         }
         if has_x {
             // send-keys -X copy-mode-command
-            let cmd_parts: Vec<&str> = args.iter().filter(|a| **a != "-X" && !a.starts_with('-')).copied().collect();
+            let cmd_parts: Vec<&str> = args.iter().enumerate()
+                .filter(|(i, a)| !a.starts_with('-') && !prev_consumes_operand(*i))
+                .map(|(_, a)| *a).collect();
             for _ in 0..repeat_count {
                 let _ = tx.send(CtrlReq::SendKeysX(cmd_parts.join(" ")));
             }
         } else {
-            let keys: Vec<&str> = args.iter()
+            let keys: Vec<String> = args.iter()
                 .enumerate()
-                .filter(|(i, a)| {
-                    !a.starts_with('-') && **a != "-l" && **a != "-t"
-                    // Skip the argument to -N
-                    && !(i > &0 && args.get(i - 1).map_or(false, |prev| *prev == "-N"))
+                .filter(|(i, a)| !a.starts_with('-') && !prev_consumes_operand(*i))
+                .map(|(_, a)| {
+                    // Convert real-tmux 0xNN hex codepoint syntax (sent by
+                    // iTerm2's gateway: e.g. `send -t %1 0xd` for Enter) into
+                    // the literal character so SendKeys forwards the right
+                    // byte to the PTY instead of the string "0xd".
+                    let s = *a;
+                    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                            if let Ok(n) = u32::from_str_radix(rest, 16) {
+                                if let Some(c) = char::from_u32(n) {
+                                    return c.to_string();
+                                }
+                            }
+                        }
+                    }
+                    s.to_string()
                 })
-                .map(|(_, a)| *a)
                 .collect();
+            // If any key was a hex-converted single byte, force literal mode so
+            // the byte is written verbatim and not parsed as a key name.
+            let any_hex = args.iter().any(|a| {
+                let s = *a;
+                if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit());
+                }
+                false
+            });
+            let effective_literal = literal || any_hex;
             for _ in 0..repeat_count {
                 if paste_mode {
-                    let _ = tx.send(CtrlReq::SendPaste(keys.join(" ")));
+                    let _ = tx.send(CtrlReq::SendPaste(keys.join("")));
+                } else if effective_literal {
+                    // Literal: concatenate without space separator.
+                    let _ = tx.send(CtrlReq::SendKeys(keys.join(""), true));
                 } else {
-                    let _ = tx.send(CtrlReq::SendKeys(keys.join(" "), literal));
+                    let _ = tx.send(CtrlReq::SendKeys(keys.join(" "), false));
                 }
             }
         }
@@ -2685,11 +2955,49 @@ fn dispatch_control_command(
             }
             true
         }
-        "send-keys" => {
-            let literal = args.iter().any(|a| *a == "-l");
-            let keys: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
-            let text = keys.join(" ");
-            let _ = tx.send(CtrlReq::SendKeys(text, literal));
+        "send-keys" | "send" => {
+            let flag_has = |c: char| -> bool {
+                args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|fc| fc == c))
+            };
+            let prev_consumes_operand = |i: usize| -> bool {
+                if i == 0 { return false; }
+                if let Some(prev) = args.get(i - 1) {
+                    if prev.starts_with('-') && !prev.starts_with("--") && prev.len() >= 2 {
+                        if let Some(last) = prev.chars().last() {
+                            return matches!(last, 't' | 'T' | 'N' | 'R' | 'c');
+                        }
+                    }
+                }
+                false
+            };
+            let literal = flag_has('l');
+            // Convert real-tmux 0xNN hex codepoint syntax (used by iTerm2 for
+            // every keystroke: `send -t %1 0xd` etc.) into literal characters.
+            let keys: Vec<String> = args.iter().enumerate().filter(|(i, a)| {
+                !a.starts_with('-') && !prev_consumes_operand(*i)
+            }).map(|(_, a)| {
+                let s = *a;
+                if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                        if let Ok(n) = u32::from_str_radix(rest, 16) {
+                            if let Some(c) = char::from_u32(n) {
+                                return c.to_string();
+                            }
+                        }
+                    }
+                }
+                s.to_string()
+            }).collect();
+            let any_hex = args.iter().any(|a| {
+                let s = *a;
+                if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit());
+                }
+                false
+            });
+            let effective_literal = literal || any_hex;
+            let text = if effective_literal { keys.join("") } else { keys.join(" ") };
+            let _ = tx.send(CtrlReq::SendKeys(text, effective_literal));
             let _ = resp_tx.send(String::new());
             true
         }
@@ -2796,7 +3104,8 @@ fn dispatch_control_command(
             let _ = resp_tx.send(String::new());
             true
         }
-        "show-options" | "show" | "show-window-options" | "showw" => {
+        "show-options" | "show" | "show-window-options" | "showw"
+        | "show-option" | "show-window-option" => {
             let (rtx, rrx) = mpsc::channel::<String>();
             let combined_has2 = |ch: char| -> bool {
                 args.iter().any(|a| {
@@ -2805,7 +3114,7 @@ fn dispatch_control_command(
                 })
             };
             let value_only = combined_has2('v');
-            let window_scope2 = matches!(cmd, "show-window-options" | "showw") || combined_has2('w');
+            let window_scope2 = matches!(cmd, "show-window-options" | "showw" | "show-window-option") || combined_has2('w');
             let opt_name = args.iter().filter(|a| !a.starts_with('-')).next().map(|s| s.to_string());
             let has_opt_name = opt_name.is_some();
             // See issue #266 — same -t window-index extraction as the
@@ -3303,6 +3612,29 @@ fn dispatch_control_command(
             } else {
                 let _ = resp_tx.send("timeout".to_string());
             }
+            true
+        }
+        // iTerm2 sends "phony-command" as a tmux ping/keepalive on entering
+        // gateway mode (see iTerm2 TmuxController.m kickOffTmuxForRestoration).
+        // Real tmux returns success with no output; we mimic that.
+        "phony-command" => {
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        // Copy mode in tmux control sessions is a no-op for iTerm2 — iTerm
+        // implements its own copy mode locally on captured pane content.
+        // Returning success keeps iTerm's command pipeline alive.
+        "copy-mode" => {
+            let _ = resp_tx.send(String::new());
+            true
+        }
+        // resize-window is sent by iTerm2 (e.g. `resize-window -x 120 -y 30 -t @1`)
+        // to inform the server of the desired window size. We currently track
+        // window geometry per-pane via PTY resizes; accept this as a no-op
+        // success so iTerm's pipeline continues. Returning %error here causes
+        // iTerm to detach.
+        "resize-window" | "resizew" => {
+            let _ = resp_tx.send(String::new());
             true
         }
         _ => {

@@ -1,4 +1,60 @@
-use crate::types::{AppState, ControlNotification};
+use crate::types::{AppState, ControlNotification, Node, LayoutKind, Window};
+use ratatui::layout::Rect;
+
+/// Compute tmux's 16-bit rotating checksum over the layout body.
+/// Matches `layout_checksum()` in tmux's layout-custom.c.
+fn layout_checksum(s: &str) -> u16 {
+    let mut csum: u16 = 0;
+    for b in s.bytes() {
+        csum = (csum >> 1) | ((csum & 1) << 15);
+        csum = csum.wrapping_add(b as u16);
+    }
+    csum
+}
+
+/// Recursively serialise a Node tree into tmux's custom layout format body
+/// (without the leading checksum). Format reference (tmux/layout-custom.c):
+///   Leaf:           WxH,X,Y,paneid
+///   Side-by-side:   WxH,X,Y{child1,child2,...}     (LayoutKind::Horizontal)
+///   Stacked:        WxH,X,Y[child1,child2,...]     (LayoutKind::Vertical)
+fn append_layout_body(node: &Node, area: Rect, out: &mut String) {
+    match node {
+        Node::Leaf(pane) => {
+            out.push_str(&format!("{}x{},{},{},{}", area.width, area.height, area.x, area.y, pane.id));
+        }
+        Node::Split { kind, sizes, children } => {
+            if children.is_empty() {
+                out.push_str(&format!("{}x{},{},{}", area.width, area.height, area.x, area.y));
+                return;
+            }
+            let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
+                sizes.clone()
+            } else {
+                vec![(100 / children.len().max(1)) as u16; children.len()]
+            };
+            let is_horizontal = matches!(*kind, LayoutKind::Horizontal);
+            let rects = crate::tree::split_with_gaps(is_horizontal, &effective_sizes, area);
+            out.push_str(&format!("{}x{},{},{}", area.width, area.height, area.x, area.y));
+            let (open, close) = if is_horizontal { ('{', '}') } else { ('[', ']') };
+            out.push(open);
+            for (i, child) in children.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                let r = rects.get(i).copied().unwrap_or(area);
+                append_layout_body(child, r, out);
+            }
+            out.push(close);
+        }
+    }
+}
+
+/// Build a complete tmux layout string for a window: `<csum>,<body>`.
+/// `area` is normally `app.last_window_area`.
+pub fn window_layout_string(window: &Window, area: Rect) -> String {
+    let mut body = String::new();
+    append_layout_body(&window.root, area, &mut body);
+    let csum = layout_checksum(&body);
+    format!("{:04x},{}", csum, body)
+}
 
 /// Format a control mode notification as a tmux wire-compatible line.
 pub fn format_notification(notif: &ControlNotification) -> String {
@@ -51,7 +107,7 @@ pub fn format_notification(notif: &ControlNotification) -> String {
             format!("%extended-output %{} {} : {}", pane_id, age_ms, escape_output(data))
         }
         ControlNotification::SubscriptionChanged { name, session_id, window_id, window_index, pane_id, value } => {
-            format!("%subscription-changed {} ${} @{} {} %{} - {}", name, session_id, window_id, window_index, pane_id, value)
+            format!("%subscription-changed {} ${} @{} {} %{} : {}", name, session_id, window_id, window_index, pane_id, value)
         }
         ControlNotification::Exit { reason } => {
             if let Some(r) = reason {
@@ -134,12 +190,38 @@ pub fn emit_to_client(app: &AppState, client_id: u64, notif: ControlNotification
 /// having to poll. Without this, iTerm2 sits forever on `-CC attach`
 /// because it expects %session-changed / %window-add up front.
 pub fn emit_initial_state(app: &AppState, client_id: u64) {
-    use crate::tree::get_active_pane_id;
+    let _ = client_id;
+    // Match real tmux's initial burst order exactly. tmux 3.x sends, in this order:
+    //   %window-add @<id>          (one per window)
+    //   %sessions-changed
+    //   %session-changed $<id> <name>
+    // followed only later by %output and any %layout-change as windows are
+    // queried by the client. iTerm2's TmuxGateway *only* leaves the
+    // "not accepting notifications" state once it sees %session-changed (which
+    // is the one notification that bypasses the acceptNotifications_ gate),
+    // so it must come AFTER %window-add (which would otherwise be dropped)
+    // and we must NOT pre-send %layout-change / %session-window-changed /
+    // %window-pane-changed — those are gated on acceptNotifications_=YES,
+    // which only happens after the kickoff command sequence completes.
+    //
+    // Sending extra notifications before the gate opens is harmless (they're
+    // silently dropped) but the order session-changed must come last is
+    // required because that's what flips iTerm into the writable state and
+    // triggers openWindowsInitial + kickOffTmuxForRestoration.
 
-    // 1. %sessions-changed — tells the client to refresh its session list.
+    // 1. %window-add @id for each window.
+    for win in &app.windows {
+        emit_to_client(
+            app,
+            client_id,
+            ControlNotification::WindowAdd { window_id: win.id },
+        );
+    }
+
+    // 2. %sessions-changed.
     emit_to_client(app, client_id, ControlNotification::SessionsChanged);
 
-    // 2. %session-changed $id name — bind this client to the current session.
+    // 3. %session-changed $id name — this is the one that wakes iTerm up.
     emit_to_client(
         app,
         client_id,
@@ -148,48 +230,6 @@ pub fn emit_initial_state(app: &AppState, client_id: u64) {
             name: app.session_name.clone(),
         },
     );
-
-    // 3. For each window: %window-add @id and %layout-change @id layout.
-    let layout = format!("{}x{}", app.last_window_area.width, app.last_window_area.height);
-    for win in &app.windows {
-        emit_to_client(
-            app,
-            client_id,
-            ControlNotification::WindowAdd { window_id: win.id },
-        );
-        emit_to_client(
-            app,
-            client_id,
-            ControlNotification::LayoutChange {
-                window_id: win.id,
-                layout: layout.clone(),
-            },
-        );
-    }
-
-    // 4. %session-window-changed $sid @wid — current active window for this session.
-    if let Some(active_win) = app.windows.get(app.active_idx) {
-        emit_to_client(
-            app,
-            client_id,
-            ControlNotification::SessionWindowChanged {
-                session_id: app.session_id,
-                window_id: active_win.id,
-            },
-        );
-
-        // 5. %window-pane-changed @wid %pid — current active pane in the active window.
-        if let Some(pane_id) = get_active_pane_id(&active_win.root, &active_win.active_path) {
-            emit_to_client(
-                app,
-                client_id,
-                ControlNotification::WindowPaneChanged {
-                    window_id: active_win.id,
-                    pane_id,
-                },
-            );
-        }
-    }
 }
 
 /// Check if any control mode clients are connected.
@@ -440,7 +480,7 @@ mod tests {
             pane_id: 3,
             value: "pwsh".to_string(),
         });
-        assert_eq!(line, "%subscription-changed mysub $0 @1 0 %3 - pwsh");
+        assert_eq!(line, "%subscription-changed mysub $0 @1 0 %3 : pwsh");
     }
 
     #[test]
@@ -509,6 +549,6 @@ mod tests {
             pane_id: 4,
             value: String::new(),
         });
-        assert_eq!(line, "%subscription-changed test_sub $1 @2 3 %4 - ");
+        assert_eq!(line, "%subscription-changed test_sub $1 @2 3 %4 : ");
     }
 }

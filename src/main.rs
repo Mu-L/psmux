@@ -2989,22 +2989,11 @@ fn run_main() -> io::Result<()> {
     // Default behavior (bare `psmux` with no command):
     // tmux-compatible: always create a new session with the next available
     // numeric name (0, 1, 2, ...) and attach to it.
-
-    // Control mode: connect to server with CONTROL/CONTROL_NOECHO protocol
-    // instead of launching the TUI client. Must be checked before the
-    // is_terminal() gate since control mode reads from piped stdin.
-    if control_mode > 0 {
-        return run_control_mode(control_mode);
-    }
-
     //
-    // If stdin is not a terminal (headless/non-interactive environment, e.g.
-    // winget validation pipeline), print version and exit cleanly — starting
-    // a TUI session would fail without an interactive console.
-    if !std::io::stdin().is_terminal() {
-        print_version();
-        return Ok(());
-    }
+    // For both control mode (-C/-CC) and TUI mode, ensure a session server
+    // is running before we try to connect.  Real tmux's bare `tmux -CC`
+    // starts the server and creates a session automatically; we do the same.
+
     if env::var("PSMUX_REMOTE_ATTACH").ok().as_deref() != Some("1") {
         let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
         let session_name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| {
@@ -3078,6 +3067,7 @@ fn run_main() -> io::Result<()> {
             }
         }
 
+
         if !warm_claimed {
             // Cold path: spawn a new background server
             let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
@@ -3107,7 +3097,22 @@ fn run_main() -> io::Result<()> {
         env::set_var("PSMUX_SESSION_NAME", &port_file_base);
         env::set_var("PSMUX_REMOTE_ATTACH", "1");
     }
-    
+
+    // Control mode: connect to server with CONTROL/CONTROL_NOECHO protocol
+    // instead of launching the TUI client. Must be checked before the
+    // is_terminal() gate since control mode reads from piped stdin.
+    if control_mode > 0 {
+        return run_control_mode(control_mode);
+    }
+
+    // If stdin is not a terminal (headless/non-interactive environment, e.g.
+    // winget validation pipeline), print version and exit cleanly — starting
+    // a TUI session would fail without an interactive console.
+    if !std::io::stdin().is_terminal() {
+        print_version();
+        return Ok(());
+    }
+
     // Prevent nesting: similar to tmux checking $TMUX.
     // PSMUX_ACTIVE is set on the client process itself.
     // PSMUX_SESSION is set on child panes spawned by the server.
@@ -3192,41 +3197,173 @@ fn run_main() -> io::Result<()> {
 /// Run as a control mode client (psmux -C or psmux -CC).
 /// Connects to the server via TCP, sends CONTROL/CONTROL_NOECHO,
 /// reads commands from stdin and prints responses/notifications to stdout.
+///
+/// When running over SSH with a ConPTY console, Windows ConPTY silently
+/// consumes DCS escape sequences (including the `\x1bP1000p` that iTerm2
+/// uses to detect tmux control mode) and also interleaves its own cursor
+/// positioning sequences into the output, corrupting the line-based
+/// protocol.  To bypass ConPTY, the SSH client must disable PTY allocation
+/// so that stdin/stdout are raw pipes: `ssh -T user@host tmux -CC`.
 fn run_control_mode(mode: u8) -> io::Result<()> {
     use std::net::TcpStream;
 
+    // Create diagnostic log FIRST, before anything else, so we can see failures.
+    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+    let psmux_dir = format!("{}\\.psmux", home);
+    let _ = std::fs::create_dir_all(&psmux_dir);
+    let cc_log_path = format!("{}\\cc_debug.log", psmux_dir);
+    let mut log_file = std::fs::File::create(&cc_log_path).ok();
+    macro_rules! cclog {
+        ($($arg:tt)*) => {
+            if let Some(ref mut f) = log_file {
+                let _ = writeln!(f, $($arg)*);
+                let _ = f.flush();
+            }
+        }
+    }
+    cclog!("=== psmux control mode log ===");
+    cclog!("time: {:?}", std::time::SystemTime::now());
+    cclog!("mode: {}", if mode == 1 { "CONTROL" } else { "CONTROL_NOECHO" });
+    cclog!("USERPROFILE: {:?}", env::var("USERPROFILE"));
+    cclog!("HOME: {:?}", env::var("HOME"));
+    cclog!("log_path: {}", cc_log_path);
+    cclog!("SSH_CLIENT: {:?}", env::var("SSH_CLIENT"));
+    cclog!("SSH_CONNECTION: {:?}", env::var("SSH_CONNECTION"));
+    cclog!("PSMUX_SESSION_NAME: {:?}", env::var("PSMUX_SESSION_NAME"));
+    cclog!("PSMUX_REMOTE_ATTACH: {:?}", env::var("PSMUX_REMOTE_ATTACH"));
+
+    // Win32 handle diagnostics
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+            fn GetFileType(hFile: *mut std::ffi::c_void) -> u32;
+            fn PeekNamedPipe(
+                hNamedPipe: *mut std::ffi::c_void,
+                lpBuffer: *mut u8,
+                nBufferSize: u32,
+                lpBytesRead: *mut u32,
+                lpTotalBytesAvail: *mut u32,
+                lpBytesLeftThisMessage: *mut u32,
+            ) -> i32;
+            fn GetLastError() -> u32;
+        }
+        const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+        const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+        unsafe {
+            let h_in = GetStdHandle(STD_INPUT_HANDLE);
+            let h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+            let ft_in = GetFileType(h_in);
+            let ft_out = GetFileType(h_out);
+            // FILE_TYPE_UNKNOWN=0, FILE_TYPE_DISK=1, FILE_TYPE_CHAR=2, FILE_TYPE_PIPE=3
+            cclog!("stdin_handle: 0x{:x} (file_type={})", h_in as u64, ft_in);
+            cclog!("stdout_handle: 0x{:x} (file_type={})", h_out as u64, ft_out);
+            // Try to peek stdin to see if pipe is alive
+            let mut avail: u32 = 0;
+            let peek_ok = PeekNamedPipe(h_in, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, std::ptr::null_mut());
+            let last_err = GetLastError();
+            cclog!("stdin PeekNamedPipe: ok={} avail={} last_error={}", peek_ok, avail, last_err);
+        }
+        cclog!("stdin_is_terminal: {}", std::io::stdin().is_terminal());
+        cclog!("stdout_is_terminal: {}", std::io::stdout().is_terminal());
+    }
+
+    // Detect ConPTY + SSH: control mode over SSH requires raw pipe I/O.
+    // ConPTY injects cursor-positioning escape sequences between protocol
+    // lines, corrupting the tmux control protocol for iTerm2.
+    //
+    // Detection: if stdout IS a console handle directly, we know ConPTY is
+    // active. However, when DefaultShell is pwsh, stdout is a pipe from pwsh
+    // and we cannot reliably distinguish ConPTY-backed pipes from raw pipes.
+    // We only block the definite case (direct console handle).
+    // ConPTY raw passthrough: when stdin/stdout are consoles (e.g. ssh -t
+    // allocated a PTY), put them into raw mode so ConPTY doesn't cook bytes
+    // (line buffering, ECHO, NL<->CRLF) or interpret VT sequences. This
+    // lets the tmux DCS protocol flow intact regardless of `ssh -T` vs
+    // `ssh -t`. Some clients (e.g. iTerm2's tmux integration) close stdin
+    // on the SSH session shortly after seeing the DCS opener when no PTY
+    // is allocated, so supporting `ssh -t` is required for them.
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetStdHandle(n: u32) -> *mut std::ffi::c_void;
+            fn GetConsoleMode(h: *mut std::ffi::c_void, m: *mut u32) -> i32;
+            fn SetConsoleMode(h: *mut std::ffi::c_void, m: u32) -> i32;
+        }
+        const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+        const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+        const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+        const ENABLE_LINE_INPUT: u32 = 0x0002;
+        const ENABLE_ECHO_INPUT: u32 = 0x0004;
+        const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+        const ENABLE_VIRTUAL_TERMINAL_PROCESSING_OUT: u32 = 0x0004;
+        const DISABLE_NEWLINE_AUTO_RETURN: u32 = 0x0008;
+        unsafe {
+            let h_in = GetStdHandle(STD_INPUT_HANDLE);
+            let h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+            let mut mode_in: u32 = 0;
+            let mut mode_out: u32 = 0;
+            if GetConsoleMode(h_in, &mut mode_in) != 0 {
+                let new_in = (mode_in & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
+                    | ENABLE_VIRTUAL_TERMINAL_INPUT;
+                let r = SetConsoleMode(h_in, new_in);
+                cclog!("ConPTY stdin: mode 0x{:x} -> 0x{:x} (set ok={})", mode_in, new_in, r);
+            }
+            if GetConsoleMode(h_out, &mut mode_out) != 0 {
+                let new_out = mode_out | ENABLE_VIRTUAL_TERMINAL_PROCESSING_OUT | DISABLE_NEWLINE_AUTO_RETURN;
+                let r = SetConsoleMode(h_out, new_out);
+                cclog!("ConPTY stdout: mode 0x{:x} -> 0x{:x} (set ok={})", mode_out, new_out, r);
+            }
+        }
+    }
+
     let session_name = env::var("PSMUX_SESSION_NAME")
         .unwrap_or_else(|_| "default".to_string());
-    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME"))
-        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "no home directory"))?;
-    let psmux_dir = format!("{}\\.psmux", home);
+    cclog!("session: {}", session_name);
 
     // Read port and key
     let port_path = format!("{}\\{}.port", psmux_dir, session_name);
     let key_path = format!("{}\\{}.key", psmux_dir, session_name);
+    cclog!("port_path: {}", port_path);
+    cclog!("key_path: {}", key_path);
+    cclog!("port_path exists: {}", std::path::Path::new(&port_path).exists());
+    cclog!("key_path exists: {}", std::path::Path::new(&key_path).exists());
 
-    let port_str = std::fs::read_to_string(&port_path)
-        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, format!("session '{}' not found (no port file)", session_name)))?;
-    let port: u16 = port_str.trim().parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "corrupted port file"))?;
-    let key = std::fs::read_to_string(&key_path)
-        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "session key file not found"))?
-        .trim().to_string();
+    let port_str = match std::fs::read_to_string(&port_path) {
+        Ok(s) => { cclog!("port_str: {:?}", s.trim()); s }
+        Err(e) => { cclog!("FATAL: cannot read port file: {}", e); return Err(io::Error::new(io::ErrorKind::NotFound, format!("session '{}' not found (no port file)", session_name))); }
+    };
+    let port: u16 = match port_str.trim().parse() {
+        Ok(p) => { cclog!("port: {}", p); p }
+        Err(e) => { cclog!("FATAL: corrupted port file: {}", e); return Err(io::Error::new(io::ErrorKind::InvalidData, "corrupted port file")); }
+    };
+    let key = match std::fs::read_to_string(&key_path) {
+        Ok(k) => { cclog!("key: (read {} bytes)", k.trim().len()); k.trim().to_string() }
+        Err(e) => { cclog!("FATAL: cannot read key file: {}", e); return Err(io::Error::new(io::ErrorKind::NotFound, "session key file not found")); }
+    };
 
     // Connect
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, format!("cannot connect to session: {}", e)))?;
+    cclog!("connecting to 127.0.0.1:{}", port);
+    let mut stream = match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+        Ok(s) => { cclog!("connected OK"); s }
+        Err(e) => { cclog!("FATAL: connect failed: {}", e); return Err(io::Error::new(io::ErrorKind::ConnectionRefused, format!("cannot connect to session: {}", e))); }
+    };
     let _ = stream.set_nodelay(true);
 
     // Auth
     write!(stream, "AUTH {}\n", key)?;
     stream.flush()?;
+    cclog!("AUTH sent");
 
     // Read OK response
     let mut reader = io::BufReader::new(stream.try_clone()?);
     let mut ok_line = String::new();
     reader.read_line(&mut ok_line)?;
+    cclog!("auth response: {:?}", ok_line.trim());
     if !ok_line.trim().starts_with("OK") {
+        cclog!("FATAL: auth failed");
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("auth failed: {}", ok_line.trim())));
     }
 
@@ -3235,18 +3372,30 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
     let mut write_stream = reader.get_ref().try_clone()?;
     write!(write_stream, "{}\n", mode_str)?;
     write_stream.flush()?;
+    cclog!("{} sent, starting I/O threads", mode_str);
 
     // Spawn a thread to read server responses/notifications and print to stdout
     let reader_stream = reader.get_ref().try_clone()?;
+    let cc_log_path = Some(cc_log_path);
+    let cc_log_out = cc_log_path.clone();
     let reader_thread = std::thread::spawn(move || {
         let mut br = io::BufReader::new(reader_stream);
         let mut line = String::new();
         let stdout = io::stdout();
+        let start = std::time::Instant::now();
+        let mut log_file = cc_log_out.as_ref().and_then(|p| {
+            std::fs::OpenOptions::new().append(true).open(p).ok()
+        });
         loop {
             line.clear();
             match br.read_line(&mut line) {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
+                    if let Some(ref mut f) = log_file {
+                        let _ = writeln!(f, "[{:>8.3}s] OUT ({} bytes): {:?}",
+                            start.elapsed().as_secs_f64(), line.len(),
+                            &line[..line.len().min(200)]);
+                    }
                     let mut out = stdout.lock();
                     let _ = out.write_all(line.as_bytes());
                     let _ = out.flush();
@@ -3255,25 +3404,198 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
         }
     });
 
-    // Read commands from stdin and send to server
-    let stdin = io::stdin();
-    let mut stdin_line = String::new();
-    loop {
-        stdin_line.clear();
-        match stdin.read_line(&mut stdin_line) {
-            Ok(0) => break, // EOF
-            Err(_) => break,
-            Ok(_) => {
-                if write!(write_stream, "{}", stdin_line).is_err() { break; }
-                if write_stream.flush().is_err() { break; }
-            }
-        }
+    // Read commands from stdin and send to server.
+    // iTerm2's tmux integration sends \r as the command terminator by default
+    // (TmuxGateway.newline = @"\r"). On Linux/macOS the PTY's ICRNL flag
+    // translates \r → \n, but Windows ConPTY may not always do this.
+    // Read raw bytes and translate bare \r to \n to avoid blocking the
+    // server's read_line (which splits on \n only).
+    let mut stdin_buf = [0u8; 4096];
+    let stdin_start = std::time::Instant::now();
+    let mut stdin_log_file = cc_log_path.as_ref().and_then(|p| {
+        std::fs::OpenOptions::new().append(true).open(p).ok()
+    });
+    if let Some(ref mut f) = stdin_log_file {
+        let _ = writeln!(f, "[{:>8.3}s] stdin reader started",
+            stdin_start.elapsed().as_secs_f64());
+        let _ = f.flush();
     }
 
-    // After stdin EOF, shut down the write side only so the server
-    // sees EOF and sends its final responses.  The reader thread
-    // keeps running until the server closes *its* side.
+    // Use raw Win32 ReadFile for stdin to handle SSH pipe edge cases.
+    // Windows sshd may close the stdin pipe before the SSH channel is
+    // fully established (race condition). We use PeekNamedPipe to
+    // distinguish a genuinely broken pipe from a temporary condition.
+    #[cfg(windows)]
+    let stdin_handle = {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+        }
+        unsafe { GetStdHandle((-10i32) as u32) }
+    };
+    #[cfg(not(windows))]
+    let stdin_handle = ();
+
+    let mut total_bytes_read: u64 = 0;
+    let mut eof_retries: u32 = 0;
+    const MAX_EOF_RETRIES: u32 = 20; // 20 * 50ms = 1 second of retries
+
+    loop {
+        // On Windows, use ReadFile directly for better diagnostics
+        #[cfg(windows)]
+        let read_result = {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn ReadFile(
+                    hFile: *mut std::ffi::c_void,
+                    lpBuffer: *mut u8,
+                    nNumberOfBytesToRead: u32,
+                    lpNumberOfBytesRead: *mut u32,
+                    lpOverlapped: *mut std::ffi::c_void,
+                ) -> i32;
+                fn GetLastError() -> u32;
+                fn PeekNamedPipe(
+                    hNamedPipe: *mut std::ffi::c_void, lpBuffer: *mut u8, nBufferSize: u32,
+                    lpBytesRead: *mut u32, lpTotalBytesAvail: *mut u32,
+                    lpBytesLeftThisMessage: *mut u32,
+                ) -> i32;
+            }
+            let mut bytes_read: u32 = 0;
+            let ok = unsafe {
+                ReadFile(
+                    stdin_handle,
+                    stdin_buf.as_mut_ptr(),
+                    stdin_buf.len() as u32,
+                    &mut bytes_read,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                let err = unsafe { GetLastError() };
+                // ERROR_BROKEN_PIPE = 109, ERROR_NO_DATA = 232
+                if err == 109 || err == 232 {
+                    // Pipe is broken. Check if we should retry.
+                    if total_bytes_read == 0 && eof_retries < MAX_EOF_RETRIES {
+                        eof_retries += 1;
+                        if let Some(ref mut f) = stdin_log_file {
+                            if eof_retries <= 5 || eof_retries % 20 == 0 {
+                                let _ = writeln!(f, "[{:>8.3}s] stdin pipe broken (err={}), retry {}/{}",
+                                    stdin_start.elapsed().as_secs_f64(), err, eof_retries, MAX_EOF_RETRIES);
+                                let _ = f.flush();
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                        // Re-check pipe state
+                        let mut avail: u32 = 0;
+                        let peek_ok = unsafe {
+                            PeekNamedPipe(stdin_handle, std::ptr::null_mut(), 0,
+                                std::ptr::null_mut(), &mut avail, std::ptr::null_mut())
+                        };
+                        if peek_ok != 0 {
+                            // Pipe is alive again!
+                            if let Some(ref mut f) = stdin_log_file {
+                                let _ = writeln!(f, "[{:>8.3}s] stdin pipe recovered! avail={}",
+                                    stdin_start.elapsed().as_secs_f64(), avail);
+                                let _ = f.flush();
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(ref mut f) = stdin_log_file {
+                        let _ = writeln!(f, "[{:>8.3}s] stdin pipe broken (err={}), giving up after {} retries",
+                            stdin_start.elapsed().as_secs_f64(), err, eof_retries);
+                        let _ = writeln!(f, "HINT: check DefaultShell and SSH client settings");
+                        let _ = f.flush();
+                    }
+                    // Do NOT print to stderr: it travels through the SSH
+                    // session and corrupts iTerm2's tmux control protocol.
+                    // Diagnostics are in ~/.psmux/cc_debug.log.
+                    Err(io::Error::from_raw_os_error(err as i32))
+                } else {
+                    if let Some(ref mut f) = stdin_log_file {
+                        let _ = writeln!(f, "[{:>8.3}s] stdin ReadFile error: {}",
+                            stdin_start.elapsed().as_secs_f64(), err);
+                        let _ = f.flush();
+                    }
+                    Err(io::Error::from_raw_os_error(err as i32))
+                }
+            } else if bytes_read == 0 {
+                // ReadFile succeeded but 0 bytes = EOF
+                if total_bytes_read == 0 && eof_retries < MAX_EOF_RETRIES {
+                    eof_retries += 1;
+                    if let Some(ref mut f) = stdin_log_file {
+                        if eof_retries <= 5 || eof_retries % 20 == 0 {
+                            let _ = writeln!(f, "[{:>8.3}s] stdin EOF (0 bytes), retry {}/{}",
+                                stdin_start.elapsed().as_secs_f64(), eof_retries, MAX_EOF_RETRIES);
+                            let _ = f.flush();
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                if let Some(ref mut f) = stdin_log_file {
+                    let _ = writeln!(f, "[{:>8.3}s] stdin EOF, giving up after {} retries",
+                        stdin_start.elapsed().as_secs_f64(), eof_retries);
+                    let _ = f.flush();
+                }
+                Ok(0usize)
+            } else {
+                eof_retries = 0;
+                Ok(bytes_read as usize)
+            }
+        };
+
+        #[cfg(not(windows))]
+        let read_result = {
+            use std::io::Read;
+            let stdin = io::stdin();
+            stdin.lock().read(&mut stdin_buf)
+        };
+
+        let n = match read_result {
+            Ok(0) => break,
+            Err(_) => break,
+            Ok(n) => {
+                total_bytes_read += n as u64;
+                if let Some(ref mut f) = stdin_log_file {
+                    let hex: String = stdin_buf[..n.min(80)].iter()
+                        .map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                    let _ = writeln!(f, "[{:>8.3}s] IN  ({} bytes): {}",
+                        stdin_start.elapsed().as_secs_f64(), n, hex);
+                    let _ = f.flush();
+                }
+                n
+            }
+        };
+        // Translate bare \r to \n (iTerm2 compat), skip if already \r\n
+        let mut out = Vec::with_capacity(n);
+        let chunk = &stdin_buf[..n];
+        for i in 0..n {
+            if chunk[i] == b'\r' {
+                if i + 1 < n && chunk[i + 1] == b'\n' {
+                    // \r\n pair: keep as-is (the \n will be written next iteration)
+                    out.push(b'\r');
+                } else {
+                    // Bare \r: translate to \n
+                    out.push(b'\n');
+                }
+            } else {
+                out.push(chunk[i]);
+            }
+        }
+        if write_stream.write_all(&out).is_err() { break; }
+        if write_stream.flush().is_err() { break; }
+    }
+
+    // After stdin EOF, shut down the TCP write side so the server sees
+    // EOF and can clean up.  Then emit %exit + ST to stdout like real
+    // tmux's client does (tmux/client.c).
     let _ = write_stream.shutdown(std::net::Shutdown::Write);
+    if let Some(ref mut f) = stdin_log_file {
+        let _ = writeln!(f, "[{:>8.3}s] stdin closed (total_bytes_read={}), TCP write shut down",
+            stdin_start.elapsed().as_secs_f64(), total_bytes_read);
+        let _ = f.flush();
+    }
 
     // Wait briefly for the reader thread to drain remaining responses,
     // then forcibly close.  The server may take up to 5s (its read timeout)
@@ -3291,5 +3613,47 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    // Emit %exit and ST to stdout like real tmux's client does
+    // (tmux/client.c). iTerm2 watches for %exit to leave tmux
+    // integration mode cleanly.  ST (\x1b\\) terminates the DCS.
+    {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        let _ = out.write_all(b"%exit\n");
+        if mode == 2 {
+            let _ = out.write_all(b"\x1b\\");
+        }
+        let _ = out.flush();
+    }
+
     Ok(())
+}
+
+/// Returns `true` when stdout is a Windows console handle (ConPTY).
+/// When stdout is a pipe (e.g. `ssh -T`), returns `false`.
+#[cfg(windows)]
+fn stdout_is_console() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n: u32) -> *mut std::ffi::c_void;
+        fn GetConsoleMode(h: *mut std::ffi::c_void, m: *mut u32) -> i32;
+    }
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle.is_null() || handle == (-1isize as *mut std::ffi::c_void) {
+            return false;
+        }
+        let mut mode: u32 = 0;
+        // GetConsoleMode succeeds only for console handles (not pipes/files)
+        GetConsoleMode(handle, &mut mode) != 0
+    }
+}
+
+/// Returns `true` when the process appears to be running inside an SSH session.
+#[cfg(windows)]
+fn is_ssh_session() -> bool {
+    env::var("SSH_CLIENT").is_ok()
+        || env::var("SSH_CONNECTION").is_ok()
+        || env::var("SSH_TTY").is_ok()
 }

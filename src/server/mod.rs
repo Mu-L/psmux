@@ -3974,20 +3974,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         is_control: true,
                     });
                     app.attached_clients = app.attached_clients.saturating_add(1);
-                    // NOTE: Real tmux does NOT emit a notification burst on
-                    // -CC attach (see tmux/control.c control_start()). It
-                    // sends only the DCS opener "\033P1000p" and lets the
-                    // client (e.g. iTerm2) drive the dialog with explicit
-                    // list-sessions / list-windows -F commands. The DCS is
-                    // emitted by server/connection.rs right after the
-                    // CONTROL_NOECHO line is parsed. Issue #261 fix:
-                    // missing DCS was the actual hang cause for iTerm2.
+                    // Real tmux fires server hooks (session-changed, window-add,
+                    // etc.) as side effects of the initial attach-session command.
+                    // iTerm2 depends on %session-changed to enable writes
+                    // (_canWrite = YES) and flush its command queue. Without
+                    // this notification, iTerm2 never sends any commands and
+                    // sits idle forever.
                     //
-                    // The emit_initial_state() helper remains available for
-                    // future explicit refresh hooks but is intentionally
-                    // NOT called here — calling it would emit notifications
-                    // before iTerm2's own list-* commands, which is
-                    // non-standard.
+                    // The unsolicited %begin/%end pair (flags=0) is emitted by
+                    // connection.rs right after the DCS opener. That triggers
+                    // tmuxInitialCommandDidCompleteSuccessfully in iTerm2 which
+                    // queues the initialization commands. Then the
+                    // %session-changed notification below enables writes so
+                    // those queued commands actually get sent.
+                    crate::control::emit_initial_state(&app, client_id);
                 }
                 CtrlReq::ControlSubscribe { client_id, name, target, format } => {
                     if let Some(cc) = app.control_clients.get_mut(&client_id) {
@@ -4200,9 +4200,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         "after-split-window" | "after-resize-pane" | "after-break-pane"
                         | "after-join-pane" | "after-rotate-window" | "after-swap-pane" => {
+                            let area = app.last_window_area;
+                            let layout = if let Some(w) = app.windows.iter().find(|w| w.id == win_id) {
+                                control::window_layout_string(w, area)
+                            } else {
+                                format!("0000,{}x{},0,0", area.width, area.height)
+                            };
                             control::emit_notification(&app, crate::types::ControlNotification::LayoutChange {
                                 window_id: win_id,
-                                layout: format!("{}x{}", app.last_window_area.width, app.last_window_area.height),
+                                layout,
                             });
                         }
                         "window-linked" => {
