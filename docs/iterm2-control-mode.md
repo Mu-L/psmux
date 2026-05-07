@@ -98,7 +98,11 @@ For a one-click experience:
 
 - ✅ Multiple tmux windows → multiple iTerm2 tabs.
 - ✅ `split-window` / `split-pane` → native iTerm2 splits.
-- ✅ Cmd-T (new tmux window), Cmd-D (split), Cmd-W (kill pane), etc.
+- ✅ Cmd-T (new tmux window/tab), Cmd-D (split), Cmd-W (kill pane), etc.
+  When you press Cmd-T in a tmux-attached pane, iTerm2 prompts
+  **"New tmux Tab / Use Default Profile / Cancel"** — picking
+  *New tmux Tab* opens a new native tab backed by a fresh tmux
+  window via `new-window -PF '#{window_id}'`.
 - ✅ Native iTerm2 scrollback, copy-mode (⌘F find), Touch Bar, tab
   reordering — all work because iTerm2 renders the panes locally.
 - ✅ Keyboard input including Enter, Tab, Backspace, arrow keys,
@@ -107,6 +111,26 @@ For a one-click experience:
   bracketed paste) round-trip correctly to the shell.
 - ✅ Reconnecting after network drop: re-run the SSH command and
   iTerm2 re-attaches to the live psmux session.
+
+---
+
+## Known quirks
+
+### First prompt of a new pane appears at the top
+
+When iTerm2 first opens a tmux pane (initial connection or a fresh
+Cmd-T tab), the first shell prompt is rendered at the **top** of
+the pane. After you press Enter once, the next prompt jumps to the
+**bottom** and subsequent output behaves normally.
+
+This is intrinsic ConPTY behaviour, not a psmux bug. ConPTY starts
+the Windows console buffer with the cursor at row 0; pwsh prints
+its first prompt there. `capture-pane` faithfully reports a single
+row of content, so iTerm2 paints it at the top. Once the shell
+emits its first newline, ConPTY's normal scroll-region behaviour
+takes over and the prompt settles at the bottom of the visible
+region. Real tmux running against pwsh through ConPTY shows the
+same thing.
 
 ---
 
@@ -165,8 +189,11 @@ These are the pieces of psmux that make iTerm2's `tmux -CC` happy:
     (iTerm2 sends these during kickoff).
   - `send` alias for `send-keys` (iTerm uses the short form).
   - `0xNN` hex codepoint argument decoding (every iTerm keystroke).
-  - Combined short-flag clusters: `send -lt %1 X` (`-l` literal +
-    `-t` target both in one cluster).
+  - Combined short-flag clusters where the **last** char takes a
+    value: `new-window -PF '#{window_id}'`,
+    `capture-pane -peqJN -t %1 -S -1000`, `send -lt %1 X` etc.
+    Parsed by `cli::has_short_flag` and the cluster-tail branch
+    of `cli::extract_flag_value`.
   - Top-level `;` command separation with a queue (one
     `%begin/%end` pair per sub-command).
   - **Send-coalescing**: consecutive `send`/`send-keys` sub-commands
