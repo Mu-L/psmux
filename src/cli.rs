@@ -616,17 +616,62 @@ pub fn extract_session_from_target(target: &str) -> String {
     parsed.session.unwrap_or_else(|| "default".to_string())
 }
 
-/// Extract a flag value from args, supporting both two-token (`-F value`)
-/// and concatenated (`-Fvalue`) forms, matching tmux CLI behavior.
+/// Extract a flag value from args, supporting tmux short-flag CLI forms:
+///   * Two-token form: `-F value`
+///   * Concatenated form: `-Fvalue`
+///   * Combined short-flag cluster where the value-taking flag is the last
+///     char in the cluster: `-PF value` (i.e. `-P` boolean + `-F value`).
+///     iTerm2 sends commands like `new-window -PF '#{window_id}'`.
 pub fn extract_flag_value<'a>(args: &[&'a str], flag: &str) -> Option<String> {
     // Two-token form: -F value
     if let Some(w) = args.windows(2).find(|w| w[0] == flag) {
         return Some(w[1].to_string());
     }
     // Concatenated form: -Fvalue
-    args.iter()
+    if let Some(v) = args.iter()
         .find(|a| a.starts_with(flag) && a.len() > flag.len())
         .map(|a| a[flag.len()..].to_string())
+    {
+        return Some(v);
+    }
+    // Combined-cluster form: -XYF value (flag char is last in cluster, next arg
+    // is the value). Only triggers for single-char flags (e.g. "-F").
+    if flag.len() == 2 && flag.starts_with('-') {
+        let fc = flag.chars().nth(1).unwrap();
+        for (i, a) in args.iter().enumerate() {
+            if a.len() > 2
+                && a.starts_with('-')
+                && !a.starts_with("--")
+                && a.chars().last() == Some(fc)
+                && a.chars().skip(1).all(|c| c.is_ascii_alphabetic())
+            {
+                if let Some(next) = args.get(i + 1) {
+                    return Some(next.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Test whether a single-char short flag is set, accepting both standalone
+/// (`-P`) and combined-cluster (`-PF`, `-lt`, etc.) forms.
+pub fn has_short_flag(args: &[&str], flag_char: char) -> bool {
+    for a in args {
+        if a.len() < 2 || !a.starts_with('-') || a.starts_with("--") {
+            continue;
+        }
+        // Skip args of the form -Xvalue where X is a value-taking flag — but
+        // we don't know which flags take values here. Be conservative: only
+        // match if all chars after '-' are ASCII alphabetic (a flag cluster).
+        if !a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) {
+            continue;
+        }
+        if a.chars().skip(1).any(|c| c == flag_char) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

@@ -864,9 +864,9 @@ match cmd {
         }
     }
     "capture-pane" | "capturep" => {
-        let print_stdout = args.iter().any(|a| *a == "-p");
-        let join_lines = args.iter().any(|a| *a == "-J");
-        let escape_seqs = args.iter().any(|a| *a == "-e");
+        let print_stdout = crate::cli::has_short_flag(&args, 'p');
+        let join_lines = crate::cli::has_short_flag(&args, 'J');
+        let escape_seqs = crate::cli::has_short_flag(&args, 'e');
         // Parse -S start and -E end (negative = scrollback offset, - = entire scrollback)
         let s_arg = args.windows(2).find(|w| w[0] == "-S").map(|w| w[1]);
         let e_arg = args.windows(2).find(|w| w[0] == "-E").map(|w| w[1]);
@@ -2901,15 +2901,30 @@ fn dispatch_control_command(
         "new-window" | "neww" => {
             let name = args.windows(2).find(|w| w[0] == "-n").map(|w| w[1].trim_matches('"').to_string());
             let start_dir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
-            let detached = args.iter().any(|a| *a == "-d");
-            let print_info = args.iter().any(|a| *a == "-P");
+            let detached = crate::cli::has_short_flag(&args, 'd');
+            let print_info = crate::cli::has_short_flag(&args, 'P');
             let format_str = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
-            let cmd_str: Option<String> = args.iter()
-                .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a))
-                    && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a))
-                    && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a))
-                    && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
-                .map(|s| s.trim_matches('"').to_string());
+            // Skip arg if it's a flag, the value of a flag, or a flag-cluster
+            // value (e.g. the format string after `-PF`).
+            let mut skip: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for (i, a) in args.iter().enumerate() {
+                if a.starts_with('-') && !a.starts_with("--") {
+                    skip.insert(i);
+                    // Two-token forms: next arg is the value
+                    if matches!(*a, "-n" | "-c" | "-F" | "-t" | "-x" | "-y" | "-e") {
+                        skip.insert(i + 1);
+                    } else if a.len() > 2
+                        && a.chars().skip(1).all(|c| c.is_ascii_alphabetic())
+                        && matches!(a.chars().last(), Some('n') | Some('c') | Some('F') | Some('t') | Some('x') | Some('y') | Some('e'))
+                    {
+                        // Cluster ending in value-taking flag: -PF <value>
+                        skip.insert(i + 1);
+                    }
+                }
+            }
+            let cmd_str: Option<String> = args.iter().enumerate()
+                .find(|(i, _)| !skip.contains(i))
+                .map(|(_, s)| s.trim_matches('"').to_string());
             if print_info {
                 let (rtx, rrx) = mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx));
@@ -2924,15 +2939,15 @@ fn dispatch_control_command(
             }
         }
         "split-window" | "splitw" => {
-            let kind = if args.iter().any(|a| *a == "-h") {
+            let kind = if crate::cli::has_short_flag(&args, 'h') {
                 LayoutKind::Horizontal
             } else {
                 LayoutKind::Vertical
             };
             let cmd_str = args.windows(2).find(|w| w[0] == "-c").map(|_| ()).and(None);
             let start_dir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
-            let detached = args.iter().any(|a| *a == "-d");
-            let print_info = args.iter().any(|a| *a == "-P");
+            let detached = crate::cli::has_short_flag(&args, 'd');
+            let print_info = crate::cli::has_short_flag(&args, 'P');
             let format_str = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
             // -p N = percentage, -l N = cell count, -l N% = percentage (tmux semantics)
             let split_size: Option<(u16, bool)> = args.windows(2).find(|w| w[0] == "-p")
@@ -3004,7 +3019,7 @@ fn dispatch_control_command(
         "capture-pane" | "capturep" => {
             let start = args.windows(2).find(|w| w[0] == "-S").and_then(|w| if w[1] == "-" { Some(i32::MIN) } else { w[1].parse::<i32>().ok() });
             let end = args.windows(2).find(|w| w[0] == "-E").and_then(|w| w[1].parse::<i32>().ok());
-            let styled = args.iter().any(|a| *a == "-e");
+            let styled = crate::cli::has_short_flag(&args, 'e');
             let (rtx, rrx) = mpsc::channel::<String>();
             if styled {
                 let _ = tx.send(CtrlReq::CapturePaneStyled(rtx, start, end));

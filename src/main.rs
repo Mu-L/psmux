@@ -3558,10 +3558,18 @@ fn run_control_mode(mode: u8) -> io::Result<()> {
             Ok(n) => {
                 total_bytes_read += n as u64;
                 if let Some(ref mut f) = stdin_log_file {
-                    let hex: String = stdin_buf[..n.min(80)].iter()
-                        .map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                    // Log a printable ASCII dump of all bytes (replace control bytes with .)
+                    // plus the byte count. Avoids 80-byte truncation in the hex dump.
+                    let asc: String = stdin_buf[..n].iter()
+                        .map(|&b| {
+                            if b == b'\r' { "\\r".to_string() }
+                            else if b == b'\n' { "\\n".to_string() }
+                            else if b == b'\t' { "\\t".to_string() }
+                            else if (0x20..0x7f).contains(&b) { (b as char).to_string() }
+                            else { format!("\\x{:02x}", b) }
+                        }).collect::<String>();
                     let _ = writeln!(f, "[{:>8.3}s] IN  ({} bytes): {}",
-                        stdin_start.elapsed().as_secs_f64(), n, hex);
+                        stdin_start.elapsed().as_secs_f64(), n, asc);
                     let _ = f.flush();
                 }
                 n
