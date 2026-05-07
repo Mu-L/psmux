@@ -3816,6 +3816,32 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // On Windows, window size is controlled by the terminal emulator;
                     // resize-window is a no-op since we adapt to the terminal size.
                 }
+                CtrlReq::ControlClientResize(w, h) => {
+                    // iTerm2 (or another -CC client) is the authoritative
+                    // source for window geometry: it sends `refresh-client
+                    // -C w,h` on attach and `resize-window -x w -y h -t @N`
+                    // whenever the user drag-resizes its window.  Update
+                    // last_window_area, resize all panes, and emit
+                    // %layout-change so iTerm2 can repaint splits.
+                    if w > 0 && h > 0 {
+                        let new_area = ratatui::layout::Rect { x: 0, y: 0, width: w, height: h };
+                        if app.last_window_area != new_area {
+                            app.last_window_area = new_area;
+                            resize_all_panes(&mut app);
+                            state_dirty = true;
+                            meta_dirty = true;
+                            if !app.control_clients.is_empty() {
+                                for w_ref in &app.windows {
+                                    let layout = control::window_layout_string(w_ref, new_area);
+                                    control::emit_notification(&app, crate::types::ControlNotification::LayoutChange {
+                                        window_id: w_ref.id,
+                                        layout,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
                 CtrlReq::RespawnWindow => {
                     // Kill all panes in the active window and respawn	
                     respawn_active_pane(&mut app, Some(&*pty_system), None, true)?;
@@ -4531,10 +4557,71 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // Check if all windows/panes have exited (throttled to every 250ms)
         if last_reap.elapsed() >= Duration::from_millis(100) {
             last_reap = Instant::now();
+            // Snapshot per-window state BEFORE reap so we can diff and emit
+            // accurate %window-close / %layout-change / %window-pane-changed
+            // notifications to control-mode clients (iTerm2 etc.).  Without
+            // this, a pane that exits naturally (`exit` in pwsh, child dies)
+            // is silently pruned server-side but iTerm2 keeps showing the
+            // dead split forever.  Fixes the "exit doesn't kill the pane"
+            // report on issue #261.
+            let pre_reap: Vec<(usize, Option<usize>, usize)> = if !app.control_clients.is_empty() {
+                app.windows.iter().map(|w| (
+                    w.id,
+                    tree::get_active_pane_id(&w.root, &w.active_path),
+                    tree::count_panes(&w.root),
+                )).collect()
+            } else { Vec::new() };
+            let pre_active_win_id: Option<usize> = if !app.control_clients.is_empty() && app.active_idx < app.windows.len() {
+                Some(app.windows[app.active_idx].id)
+            } else { None };
+
             let (all_empty, any_pruned, any_newly_dead) = tree::reap_children(&mut app)?;
             if any_pruned {
                 // A pane was removed from the tree - resize remaining panes to fill the space
                 resize_all_panes(&mut app);
+                // Notify any attached control-mode clients about the diff.
+                if !app.control_clients.is_empty() {
+                    let area = app.last_window_area;
+                    for (win_id, prev_active, prev_leaves) in &pre_reap {
+                        if let Some(w) = app.windows.iter().find(|w| w.id == *win_id) {
+                            let new_leaves = tree::count_panes(&w.root);
+                            let new_active = tree::get_active_pane_id(&w.root, &w.active_path);
+                            if new_leaves != *prev_leaves {
+                                let layout = control::window_layout_string(w, area);
+                                control::emit_notification(&app, crate::types::ControlNotification::LayoutChange {
+                                    window_id: *win_id,
+                                    layout,
+                                });
+                            }
+                            if new_active != *prev_active {
+                                if let Some(pid) = new_active {
+                                    control::emit_notification(&app, crate::types::ControlNotification::WindowPaneChanged {
+                                        window_id: *win_id,
+                                        pane_id: pid,
+                                    });
+                                }
+                            }
+                        } else {
+                            // Window completely removed (last pane died).
+                            control::emit_notification(&app, crate::types::ControlNotification::WindowClose {
+                                window_id: *win_id,
+                            });
+                        }
+                    }
+                    // If the session's active window changed (because the
+                    // previous active window was removed), tell iTerm2.
+                    if let Some(prev) = pre_active_win_id {
+                        if app.active_idx < app.windows.len() {
+                            let new_win_id = app.windows[app.active_idx].id;
+                            if new_win_id != prev {
+                                control::emit_notification(&app, crate::types::ControlNotification::SessionWindowChanged {
+                                    session_id: app.session_id,
+                                    window_id: new_win_id,
+                                });
+                            }
+                        }
+                    }
+                }
             }
             if any_pruned || any_newly_dead {
                 // A pane exited — fire hooks whether it was removed (remain-on-exit off)

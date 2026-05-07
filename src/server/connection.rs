@@ -3613,6 +3613,22 @@ fn dispatch_control_command(
                     i += 2;
                     continue;
                 }
+                // Parse -C w,h (control client viewport size).  iTerm2 sends
+                // this on attach and after every drag-resize so the server
+                // knows the gateway window dimensions and can size panes
+                // accordingly.
+                if args[i] == "-C" {
+                    if let Some(spec) = args.get(i + 1) {
+                        let spec = spec.trim_matches('"').trim_matches('\'');
+                        if let Some((w_s, h_s)) = spec.split_once(',') {
+                            if let (Ok(w), Ok(h)) = (w_s.parse::<u16>(), h_s.parse::<u16>()) {
+                                let _ = tx.send(CtrlReq::ControlClientResize(w, h));
+                            }
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
                 i += 1;
             }
             let _ = resp_tx.send(String::new());
@@ -3644,11 +3660,15 @@ fn dispatch_control_command(
             true
         }
         // resize-window is sent by iTerm2 (e.g. `resize-window -x 120 -y 30 -t @1`)
-        // to inform the server of the desired window size. We currently track
-        // window geometry per-pane via PTY resizes; accept this as a no-op
-        // success so iTerm's pipeline continues. Returning %error here causes
-        // iTerm to detach.
+        // when the user drag-resizes its native window.  Update the server's
+        // window geometry and resize all panes so iTerm2's view stays in
+        // sync with what psmux thinks the terminal size is.
         "resize-window" | "resizew" => {
+            let w = args.windows(2).find(|w| w[0] == "-x").and_then(|w| w[1].parse::<u16>().ok());
+            let h = args.windows(2).find(|w| w[0] == "-y").and_then(|w| w[1].parse::<u16>().ok());
+            if let (Some(w), Some(h)) = (w, h) {
+                let _ = tx.send(CtrlReq::ControlClientResize(w, h));
+            }
             let _ = resp_tx.send(String::new());
             true
         }

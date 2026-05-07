@@ -1175,6 +1175,11 @@ pub enum CtrlReq {
     SwitchClientTable(String),
     ListCommands(mpsc::Sender<String>),
     ResizeWindow(String, u16),
+    /// Control-mode client (iTerm2 etc.) reports its viewport size in cells.
+    /// Sent on connect (`refresh-client -C w,h`) and whenever the user
+    /// drag-resizes the iTerm2 window (`resize-window -x w -y h`).
+    /// Updates `app.last_window_area` and resizes all panes accordingly.
+    ControlClientResize(u16, u16),
     RespawnWindow,
     FocusIn,
     FocusOut,

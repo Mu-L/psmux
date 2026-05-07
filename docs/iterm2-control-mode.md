@@ -103,6 +103,16 @@ For a one-click experience:
   **"New tmux Tab / Use Default Profile / Cancel"** — picking
   *New tmux Tab* opens a new native tab backed by a fresh tmux
   window via `new-window -PF '#{window_id}'`.
+- ✅ Drag-resizing the native iTerm2 window resizes all panes
+  inside it. iTerm2 sends `refresh-client -C w,h` (on attach) and
+  `resize-window -x w -y h -t @N` (on every drag) and psmux
+  propagates the new geometry to every pane and emits
+  `%layout-change` so the splits repaint.
+- ✅ Typing `exit` (or otherwise terminating the shell) in a pane
+  removes that split natively in iTerm2. psmux diffs window state
+  on every reap cycle and emits `%layout-change` /
+  `%window-pane-changed` (or `%window-close` for the last pane in
+  a window) so iTerm2 stays in sync.
 - ✅ Native iTerm2 scrollback, copy-mode (⌘F find), Touch Bar, tab
   reordering — all work because iTerm2 renders the panes locally.
 - ✅ Keyboard input including Enter, Tab, Backspace, arrow keys,
@@ -194,6 +204,10 @@ These are the pieces of psmux that make iTerm2's `tmux -CC` happy:
     `capture-pane -peqJN -t %1 -S -1000`, `send -lt %1 X` etc.
     Parsed by `cli::has_short_flag` and the cluster-tail branch
     of `cli::extract_flag_value`.
+  - `refresh-client -C w,h` and `resize-window -x w -y h -t @N`
+    update `app.last_window_area`, run `resize_all_panes`, and
+    emit `%layout-change` so the gateway always stays in sync
+    with the iTerm2 window's actual cell dimensions.
   - Top-level `;` command separation with a queue (one
     `%begin/%end` pair per sub-command).
   - **Send-coalescing**: consecutive `send`/`send-keys` sub-commands
@@ -203,6 +217,13 @@ These are the pieces of psmux that make iTerm2's `tmux -CC` happy:
     `[A` and prints them as literal characters.
 - **`%subscription-changed`** format in `src/control.rs` — uses `:`
   separator (iTerm requires colon, not dash).
+- **Pane-death notifications** in `src/server/mod.rs` reap loop —
+  snapshots `(window_id, active_pane_id, leaf_count)` per window
+  before `tree::reap_children`, then diffs after to emit
+  `%layout-change` / `%window-pane-changed` / `%window-close` /
+  `%session-window-changed` to control-mode clients. Without this,
+  shells that exit naturally (`exit` in pwsh) leave dead splits
+  visible in iTerm2 forever.
 - **ConPTY raw mode** in `src/main.rs` — when stdin is a console
   handle (e.g. `ssh -t`), clear `ENABLE_PROCESSED_INPUT |
   ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT` and set
