@@ -678,6 +678,10 @@ pub fn capture_active_pane_text(app: &mut AppState) -> io::Result<Option<String>
         text.push_str(row.trim_end());
         text.push('\n');
     }
+    // Trim trailing all-empty lines so iTerm2 doesn't advance its cursor
+    // past the actual content on initial attach.
+    while text.ends_with("\n\n") { text.pop(); }
+    if text == "\n" { text.clear(); }
     Ok(Some(text))
 }
 
@@ -963,6 +967,12 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
             text.push_str(row.trim_end());
             text.push('\n');
         }
+        // Trim trailing all-empty lines: prevents iTerm2 from advancing its
+        // cursor past the actual content on initial attach, which would
+        // otherwise place the first prompt arriving via %output at the
+        // bottom of the window instead of the top.
+        while text.ends_with("\n\n") { text.pop(); }
+        if text == "\n" { text.clear(); }
         return Ok(Some(text));
     }
 
@@ -1019,6 +1029,12 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
 
     // Restore original scrollback offset (no side effects on user view)
     parser.screen_mut().set_scrollback(saved_sb);
+    // Trim trailing all-empty lines: prevents iTerm2 from advancing its
+    // cursor past the actual content on initial attach, which would
+    // otherwise place the first prompt arriving via %output at the
+    // bottom of the window instead of the top.
+    while text.ends_with("\n\n") { text.pop(); }
+    if text == "\n" { text.clear(); }
     Ok(Some(text))
 }
 
