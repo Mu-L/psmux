@@ -427,6 +427,14 @@ pub struct AppState {
     pub status_left: String,
     pub status_right: String,
     pub window_base_index: usize,
+    /// Stable per-window display indices, parallel to `windows` and kept sorted
+    /// ascending. `window_indices[i]` is the tmux-style number of `windows[i]`.
+    /// Decoupling the display number from the Vec position lets `renumber-windows
+    /// off` (the default) leave gaps when a window is killed, matching tmux.
+    /// When this vec is out of sync with `windows` (e.g. mock AppState in unit
+    /// tests that push windows directly), the helper methods fall back to the
+    /// legacy affine mapping `pos + window_base_index`, so nothing breaks.
+    pub window_indices: Vec<usize>,
     pub copy_anchor: Option<(u16,u16)>,
     /// Scroll offset when copy_anchor was set (for viewport-relative adjustment)
     pub copy_anchor_scroll_offset: usize,
@@ -733,6 +741,123 @@ impl AppState {
         }
     }
 
+    /// True when `window_indices` is a valid parallel array for `windows`.
+    /// When false (e.g. a mock AppState that pushed windows directly), the
+    /// index helpers use the legacy affine mapping so existing behavior holds.
+    pub fn window_indices_valid(&self) -> bool {
+        self.window_indices.len() == self.windows.len() && !self.windows.is_empty()
+    }
+
+    /// move-window: give the active window display index `target`, then keep the
+    /// arrays sorted by index. Refuses (returns false) if another window already
+    /// holds `target`, matching tmux. Returns false when indices are not tracked
+    /// so the caller can use the legacy Vec-position move.
+    pub fn move_active_window_to_index(&mut self, target: usize) -> bool {
+        if !self.window_indices_valid() { return false; }
+        if let Some(p) = self.win_pos(target) {
+            if p != self.active_idx { return false; } // occupied by another window
+            return true; // already at target
+        }
+        self.window_indices[self.active_idx] = target;
+        self.resort_windows_by_index();
+        true
+    }
+
+    /// Display (tmux-style) index of the window at Vec position `pos`.
+    pub fn win_display_index(&self, pos: usize) -> usize {
+        if self.window_indices_valid() {
+            self.window_indices.get(pos).copied()
+                .unwrap_or(pos + self.window_base_index)
+        } else {
+            pos + self.window_base_index
+        }
+    }
+
+    /// Vec position of the window whose display index is `display`, if any.
+    pub fn win_pos(&self, display: usize) -> Option<usize> {
+        if self.window_indices_valid() {
+            self.window_indices.iter().position(|&x| x == display)
+        } else if display >= self.window_base_index {
+            let pos = display - self.window_base_index;
+            if pos < self.windows.len() { Some(pos) } else { None }
+        } else {
+            None
+        }
+    }
+
+    /// Next display index for an appended window: one past the current highest
+    /// so the parallel array stays sorted without reordering. (tmux also fills
+    /// interior gaps; psmux appends to avoid reshuffling `active_idx`, which the
+    /// detached new-window restore relies on. Gaps from kills still persist.)
+    ///
+    /// Derived purely from `window_indices` (not `windows.len()`): this is called
+    /// from `on_window_appended` *after* the window was pushed, so the two arrays
+    /// are momentarily out of sync and a length-based computation would collide
+    /// with an existing index.
+    pub fn alloc_window_index(&self) -> usize {
+        self.window_indices.iter().copied().max()
+            .map(|m| m + 1)
+            .unwrap_or(self.window_base_index)
+    }
+
+    /// Rewrite indices to contiguous base, base+1, ... in Vec order.
+    /// tmux does this only when `renumber-windows` is on.
+    fn renumber_windows_contiguous(&mut self) {
+        for i in 0..self.window_indices.len() {
+            self.window_indices[i] = i + self.window_base_index;
+        }
+    }
+
+    /// Keep `windows` and `window_indices` sorted ascending by index, preserving
+    /// which window is active by re-resolving `active_idx` via the window id.
+    fn resort_windows_by_index(&mut self) {
+        if !self.window_indices_valid() { return; }
+        let active_id = self.windows.get(self.active_idx).map(|w| w.id);
+        let mut order: Vec<usize> = (0..self.windows.len()).collect();
+        order.sort_by_key(|&i| self.window_indices[i]);
+        if order.iter().enumerate().all(|(i, &o)| i == o) { return; } // already sorted
+        let mut new_windows: Vec<Window> = Vec::with_capacity(self.windows.len());
+        let mut new_indices: Vec<usize> = Vec::with_capacity(self.windows.len());
+        for &i in &order {
+            new_indices.push(self.window_indices[i]);
+        }
+        // Move windows out in the new order without cloning.
+        let mut taken: Vec<Option<Window>> = self.windows.drain(..).map(Some).collect();
+        for &i in &order {
+            new_windows.push(taken[i].take().unwrap());
+        }
+        self.windows = new_windows;
+        self.window_indices = new_indices;
+        if let Some(aid) = active_id {
+            if let Some(p) = self.windows.iter().position(|w| w.id == aid) {
+                self.active_idx = p;
+            }
+        }
+    }
+
+    /// Call right after a new window was pushed onto `windows`. Assigns it the
+    /// next display index (append semantics; see `alloc_window_index`). Does not
+    /// touch `active_idx` — the caller owns that. Only maintains the parallel
+    /// array when it was already in sync (or when this is the first window), so
+    /// mock AppState that pushes windows directly stays in affine-fallback mode.
+    pub fn on_window_appended(&mut self) {
+        if self.window_indices.len() + 1 == self.windows.len() {
+            let idx = self.alloc_window_index();
+            self.window_indices.push(idx);
+        }
+    }
+
+    /// Call right after `windows.remove(pos)`. Drops the parallel index and,
+    /// when `renumber-windows` is on, renumbers the survivors contiguously.
+    pub fn on_window_removed(&mut self, pos: usize) {
+        if self.window_indices.len() == self.windows.len() + 1 && pos < self.window_indices.len() {
+            self.window_indices.remove(pos);
+            if self.renumber_windows {
+                self.renumber_windows_contiguous();
+            }
+        }
+    }
+
     /// Create a new AppState with sensible defaults.
     /// Caller should set `session_name` and call `load_config()` after construction.
     pub fn new(session_name: String) -> Self {
@@ -764,6 +889,7 @@ impl AppState {
             status_left: "[#S] ".to_string(),
             status_right: "#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}\"#{=21:pane_title}\" %H:%M %d-%b-%y".to_string(),
             window_base_index: 0,
+            window_indices: Vec::new(),
             copy_anchor: None,
             copy_anchor_scroll_offset: 0,
             copy_pos: None,

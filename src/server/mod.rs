@@ -1415,9 +1415,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::FocusWindow(wid) => {
                     // wid is a display index (same as tmux window number), convert to internal array index
-                    if wid >= app.window_base_index {
-                        let internal_idx = wid - app.window_base_index;
-                        if internal_idx < app.windows.len() && internal_idx != app.active_idx {
+                    if let Some(internal_idx) = app.win_pos(wid) {
+                        if internal_idx != app.active_idx {
                             switch_with_copy_save(&mut app, |app| {
                                 app.last_window_idx = app.active_idx;
                                 app.active_idx = internal_idx;
@@ -1501,11 +1500,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         ).unwrap_or(usize::MAX);
                         temp_focus_restore = Some((app.active_idx, pane_id));
                     }
-                    if wid >= app.window_base_index {
-                        let internal_idx = wid - app.window_base_index;
-                        if internal_idx < app.windows.len() {
-                            app.active_idx = internal_idx;
-                        }
+                    if let Some(internal_idx) = app.win_pos(wid) {
+                        app.active_idx = internal_idx;
                     }
                 }
                 CtrlReq::FocusWindowByNameTemp(ref name) => {
@@ -2606,9 +2602,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::SelectWindow(idx) => {
                     if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
-                    if idx >= app.window_base_index {
-                        let internal_idx = idx - app.window_base_index;
-                        if internal_idx < app.windows.len() && internal_idx != app.active_idx {
+                    if let Some(internal_idx) = app.win_pos(idx) {
+                        if internal_idx != app.active_idx {
                             switch_with_copy_save(&mut app, |app| {
                                 app.last_window_idx = app.active_idx;
                                 app.active_idx = internal_idx;
@@ -2670,7 +2665,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let mut panes = Vec::new();
                         collect_all_panes(&win.root, &mut panes);
                         for (id, cols, rows) in panes {
-                            output.push_str(&format!("{}:{}: %{} [{}x{}]\n", app.session_name, wi + app.window_base_index, id, cols, rows));
+                            output.push_str(&format!("{}:{}: %{} [{}x{}]\n", app.session_name, app.win_display_index(wi), id, cols, rows));
                         }
                     }
                     let _ = resp.send(output);
@@ -2684,8 +2679,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::KillWindow => {
                     if app.windows.len() > 1 {
-                        let mut win = app.windows.remove(app.active_idx);
+                        let removed_pos = app.active_idx;
+                        let mut win = app.windows.remove(removed_pos);
                         kill_all_children(&mut win.root);
+                        app.on_window_removed(removed_pos);
                         if app.active_idx >= app.windows.len() { app.active_idx = app.windows.len() - 1; }
                     } else {
                         // Last window: kill all children; reaper will detect empty session and exit
@@ -3140,24 +3137,26 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::JoinPane { src_win, src_pane, target_win, target_pane, horizontal }
                 | CtrlReq::MovePane { src_win, src_pane, target_win, target_pane, horizontal } => {
                     unzoom_if_zoomed(&mut app);
-                    // Resolve source window index (default: active window)
-                    let src_idx = src_win.unwrap_or(app.active_idx);
-                    // Resolve target window index (default: active window, but must differ from source)
-                    let raw_target_win = target_win.unwrap_or(app.active_idx);
+                    // Resolve source/target display indices to Vec positions
+                    // (default: active window). win_pos honors gapped indices.
+                    let src_pos = match src_win { Some(d) => app.win_pos(d), None => Some(app.active_idx) };
+                    let tgt_pos = match target_win { Some(d) => app.win_pos(d), None => Some(app.active_idx) };
                     // Surface an explicit error instead of silently doing nothing when the
                     // target cannot be resolved (issue #437). psmux defaults base-index to 0,
                     // so a tmux user typing `join-pane -t :2` on a 2-window session targets a
                     // non-existent window; the old silent no-op made join-pane appear broken.
-                    if src_idx >= app.windows.len() {
-                        app.status_message = Some((format!("join-pane: can't find source window: {}", src_idx), Instant::now(), None));
+                    if src_pos.is_none() {
+                        app.status_message = Some((format!("join-pane: can't find source window: {}", src_win.unwrap_or(0)), Instant::now(), None));
                         meta_dirty = true;
-                    } else if raw_target_win >= app.windows.len() {
-                        app.status_message = Some((format!("join-pane: can't find window: {}", raw_target_win), Instant::now(), None));
+                    } else if tgt_pos.is_none() {
+                        app.status_message = Some((format!("join-pane: can't find window: {}", target_win.unwrap_or(0)), Instant::now(), None));
                         meta_dirty = true;
-                    } else if src_idx == raw_target_win {
+                    } else if src_pos == tgt_pos {
                         app.status_message = Some(("join-pane: can't join a pane to its own window".to_string(), Instant::now(), None));
                         meta_dirty = true;
                     } else {
+                        let src_idx = src_pos.unwrap();
+                        let raw_target_win = tgt_pos.unwrap();
                         // Resolve source pane path within source window
                         let src_path = if let Some(pidx) = src_pane {
                             // Get Nth pane path in DFS order
@@ -3191,6 +3190,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             let tgt = if src_empty && raw_target_win > src_idx { raw_target_win - 1 } else { raw_target_win };
                             if src_empty {
                                 app.windows.remove(src_idx);
+                                app.on_window_removed(src_idx);
                                 if app.active_idx >= app.windows.len() {
                                     app.active_idx = app.windows.len().saturating_sub(1);
                                 }
@@ -3606,7 +3606,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::MoveWindow(target) => {
                     if let Some(t) = target {
-                        if t < app.windows.len() && app.active_idx != t {
+                        if app.window_indices_valid() {
+                            // t is a display index; give it to the active window.
+                            app.move_active_window_to_index(t);
+                        } else if t < app.windows.len() && app.active_idx != t {
+                            // legacy Vec-position move (mock AppState)
                             let win = app.windows.remove(app.active_idx);
                             let insert_idx = if t > app.active_idx { t - 1 } else { t };
                             app.windows.insert(insert_idx.min(app.windows.len()), win);
@@ -3615,8 +3619,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::SwapWindow(target) => {
-                    if target < app.windows.len() && app.active_idx != target {
-                        app.windows.swap(app.active_idx, target);
+                    // target is a display index; map it to a Vec position. The two
+                    // windows trade positions while `window_indices` stays put, so
+                    // they exchange display numbers (tmux swap-window semantics).
+                    let tpos = app.win_pos(target).unwrap_or(target);
+                    if tpos < app.windows.len() && app.active_idx != tpos {
+                        app.windows.swap(app.active_idx, tpos);
                     }
                 }
                 CtrlReq::LinkWindow(src_idx_opt, dst_idx_opt) => {
@@ -3627,18 +3635,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if src < app.windows.len() {
                         let src_id = app.windows[src].id;
                         let src_name = app.windows[src].name.clone();
-                        let dst = dst_idx_opt.unwrap_or(app.windows.len());
                         let pty_system = portable_pty::native_pty_system();
                         match crate::pane::create_window(&*pty_system, &mut app, None, None) {
                             Ok(()) => {
                                 let new_idx = app.windows.len() - 1;
                                 app.windows[new_idx].linked_from = Some(src_id);
                                 app.windows[new_idx].name = src_name;
-                                if dst < new_idx {
-                                    let win = app.windows.remove(new_idx);
-                                    app.windows.insert(dst, win);
-                                    if app.active_idx > dst && app.active_idx <= new_idx {
-                                        app.active_idx = app.active_idx.saturating_sub(1);
+                                if let Some(dst) = dst_idx_opt {
+                                    if app.window_indices_valid() {
+                                        // dst is a display index; place the newly
+                                        // created (active) linked window there.
+                                        app.move_active_window_to_index(dst);
+                                    } else if dst < new_idx {
+                                        let win = app.windows.remove(new_idx);
+                                        app.windows.insert(dst, win);
+                                        if app.active_idx > dst && app.active_idx <= new_idx {
+                                            app.active_idx = app.active_idx.saturating_sub(1);
+                                        }
                                     }
                                 }
                                 resize_all_panes(&mut app);
@@ -3656,8 +3669,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::UnlinkWindow => {
                     if app.windows.len() > 1 {
-                        let mut win = app.windows.remove(app.active_idx);
+                        let removed_pos = app.active_idx;
+                        let mut win = app.windows.remove(removed_pos);
                         kill_all_children(&mut win.root);
+                        app.on_window_removed(removed_pos);
                         if app.active_idx >= app.windows.len() {
                             app.active_idx = app.windows.len() - 1;
                         }
@@ -3674,7 +3689,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let mut output = String::new();
                     for (i, win) in app.windows.iter().enumerate() {
                         if win.name.contains(&pattern) {
-                            output.push_str(&format!("{}: {} []\n", i + app.window_base_index, win.name));
+                            output.push_str(&format!("{}: {} []\n", app.win_display_index(i), win.name));
                         }
                     }
                     let _ = resp.send(output);

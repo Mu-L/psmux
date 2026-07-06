@@ -548,7 +548,7 @@ pub fn update_tab_positions(app: &mut AppState) {
     cursor_x += session_label_len;
     // Window tabs: "idx: window_name " for each window
     for (i, w) in app.windows.iter().enumerate() {
-        let display_idx = i + app.window_base_index;
+        let display_idx = app.win_display_index(i);
         let label = format!("{}: {} ", display_idx, w.name);
         let start_x = cursor_x;
         cursor_x += label.len() as u16;
@@ -1504,11 +1504,13 @@ pub fn break_pane_to_window(app: &mut AppState) {
             linked_from: None,
         });
         app.next_win_id += 1;
-        
+        app.on_window_appended();
+
         if src_empty {
             app.windows.remove(src_idx);
+            app.on_window_removed(src_idx);
         }
-        
+
         // Switch to the new window
         app.active_idx = app.windows.len() - 1;
     } else {

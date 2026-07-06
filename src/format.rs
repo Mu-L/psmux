@@ -154,7 +154,7 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                     i += 2; continue;
                 }
                 b'I' => {
-                    let n = if win_idx < app.windows.len() { win_idx + app.window_base_index } else { 0 };
+                    let n = if win_idx < app.windows.len() { app.win_display_index(win_idx) } else { 0 };
                     result.push_str(&n.to_string());
                     i += 2; continue;
                 }
@@ -1104,7 +1104,7 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
             .unwrap_or_default(),
 
         // ── Window ──
-        "window_index" => (win_idx + app.window_base_index).to_string(),
+        "window_index" => app.win_display_index(win_idx).to_string(),
         "window_name" => win.name.clone(),
         "window_active" => if win_idx == app.active_idx { "1".into() } else { "0".into() },
         "window_panes" => count_panes(&win.root).to_string(),

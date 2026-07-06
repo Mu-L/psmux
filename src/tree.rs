@@ -896,6 +896,7 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
             }
             None => {
                 app.windows.remove(i);
+                app.on_window_removed(i);
                 any_pruned = true;
                 // Adjust active_idx after removing a window
                 let _old = app.active_idx;

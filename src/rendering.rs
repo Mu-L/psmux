@@ -473,14 +473,14 @@ pub fn compute_active_rect_pub(node: &Node, active_path: &[usize], area: Rect) -
 /// Expand simple status variables using AppState context.
 pub fn expand_status(fmt: &str, app: &AppState, time_str: &str) -> String {
     let window = &app.windows[app.active_idx];
-    let win_idx = app.active_idx + app.window_base_index;
+    let win_idx = app.win_display_index(app.active_idx);
     crate::style::expand_status(fmt, &app.session_name, &window.name, win_idx, time_str)
 }
 
 /// Parse a status format string with AppState context into styled spans.
 pub fn parse_status(fmt: &str, app: &AppState, time_str: &str) -> Vec<Span<'static>> {
     let window = &app.windows[app.active_idx];
-    let win_idx = app.active_idx + app.window_base_index;
+    let win_idx = app.win_display_index(app.active_idx);
     crate::style::parse_status(fmt, &app.session_name, &window.name, win_idx, time_str)
 }
 

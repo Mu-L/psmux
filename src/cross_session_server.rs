@@ -66,6 +66,7 @@ pub fn handle_pane_forward_extract(
     }
     if src_empty {
         app.windows.remove(win_idx);
+        app.on_window_removed(win_idx);
         if app.active_idx >= app.windows.len() {
             app.active_idx = app.windows.len().saturating_sub(1);
         }

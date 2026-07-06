@@ -378,19 +378,27 @@ fn generate_show_options(app: &AppState) -> String {
 /// Local join-pane: extract source pane and graft into target window.
 fn join_pane_local(app: &mut AppState, src_win: Option<usize>, src_pane: Option<usize>,
                    target_win: Option<usize>, target_pane: Option<usize>, horizontal: bool) {
-    let src_idx = src_win.unwrap_or(app.active_idx);
-    let raw_target_win = target_win.unwrap_or(app.active_idx);
+    // Resolve source/target display indices to Vec positions (default: active
+    // window). win_pos honors gapped indices left by renumber-windows off.
+    let src_pos = match src_win { Some(d) => app.win_pos(d), None => Some(app.active_idx) };
+    let tgt_pos = match target_win { Some(d) => app.win_pos(d), None => Some(app.active_idx) };
     // tmux surfaces an explicit error rather than silently doing nothing when the
     // target cannot be resolved. Without this, `join-pane -t :N` where window N does
     // not exist (common when a user assumes base-index 1) fails with no feedback.
-    if src_idx >= app.windows.len() {
-        app.status_message = Some((format!("join-pane: can't find source window: {}", src_idx), Instant::now(), None));
-        return;
-    }
-    if raw_target_win >= app.windows.len() {
-        app.status_message = Some((format!("join-pane: can't find window: {}", raw_target_win), Instant::now(), None));
-        return;
-    }
+    let src_idx = match src_pos {
+        Some(p) => p,
+        None => {
+            app.status_message = Some((format!("join-pane: can't find source window: {}", src_win.unwrap_or(0)), Instant::now(), None));
+            return;
+        }
+    };
+    let raw_target_win = match tgt_pos {
+        Some(p) => p,
+        None => {
+            app.status_message = Some((format!("join-pane: can't find window: {}", target_win.unwrap_or(0)), Instant::now(), None));
+            return;
+        }
+    };
     if src_idx == raw_target_win {
         app.status_message = Some(("join-pane: can't join a pane to its own window".to_string(), Instant::now(), None));
         return;
@@ -420,6 +428,7 @@ fn join_pane_local(app: &mut AppState, src_win: Option<usize>, src_pane: Option<
             let tgt = if src_empty && raw_target_win > src_idx { raw_target_win - 1 } else { raw_target_win };
             if src_empty {
                 app.windows.remove(src_idx);
+                app.on_window_removed(src_idx);
                 if app.active_idx >= app.windows.len() {
                     app.active_idx = app.windows.len().saturating_sub(1);
                 }
@@ -975,8 +984,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         }
         "kill-window" | "killw" => {
             if app.windows.len() > 1 {
-                let mut win = app.windows.remove(app.active_idx);
+                let removed_pos = app.active_idx;
+                let mut win = app.windows.remove(removed_pos);
                 kill_all_children(&mut win.root);
+                app.on_window_removed(removed_pos);
                 if app.active_idx >= app.windows.len() {
                     app.active_idx = app.windows.len() - 1;
                 }
@@ -1011,14 +1022,11 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(t_pos) = parts.iter().position(|p| *p == "-t") {
                 if let Some(t) = parts.get(t_pos + 1) {
                     if let Some(idx) = parse_window_target(t) {
-                        if idx >= app.window_base_index {
-                            let internal_idx = idx - app.window_base_index;
-                            if internal_idx < app.windows.len() {
-                                switch_with_copy_save(app, |app| {
-                                    app.last_window_idx = app.active_idx;
-                                    app.active_idx = internal_idx;
-                                });
-                            }
+                        if let Some(internal_idx) = app.win_pos(idx) {
+                            switch_with_copy_save(app, |app| {
+                                app.last_window_idx = app.active_idx;
+                                app.active_idx = internal_idx;
+                            });
                         }
                     }
                 }
@@ -1892,7 +1900,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let mut output = String::new();
                 for (i, win) in app.windows.iter().enumerate() {
                     if win.name.contains(pattern) {
-                        output.push_str(&format!("{}: {}\n", i + app.window_base_index, win.name));
+                        output.push_str(&format!("{}: {}\n", app.win_display_index(i), win.name));
                     }
                 }
                 if output.is_empty() { output.push_str(&format!("(no windows matching '{}')\n", pattern)); }
@@ -1906,7 +1914,9 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let target = parts[1..].iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse().ok());
                 if let Some(t) = target {
                     let t: usize = t;
-                    if t < app.windows.len() && app.active_idx != t {
+                    if app.window_indices_valid() {
+                        app.move_active_window_to_index(t);
+                    } else if t < app.windows.len() && app.active_idx != t {
                         let win = app.windows.remove(app.active_idx);
                         let insert_idx = if t > app.active_idx { t - 1 } else { t };
                         app.windows.insert(insert_idx.min(app.windows.len()), win);
@@ -1920,8 +1930,9 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
                 if let Some(target) = parts[1..].iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse::<usize>().ok()) {
-                    if target < app.windows.len() && app.active_idx != target {
-                        app.windows.swap(app.active_idx, target);
+                    let tpos = app.win_pos(target).unwrap_or(target);
+                    if tpos < app.windows.len() && app.active_idx != tpos {
+                        app.windows.swap(app.active_idx, tpos);
                     }
                 }
             }
@@ -1945,7 +1956,9 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         app.windows[new_idx].linked_from = Some(src_id);
                         app.windows[new_idx].name = src_name;
                         if let Some(dst) = dst_idx {
-                            if dst < new_idx {
+                            if app.window_indices_valid() {
+                                app.move_active_window_to_index(dst);
+                            } else if dst < new_idx {
                                 let win = app.windows.remove(new_idx);
                                 app.windows.insert(dst, win);
                             }
@@ -1961,8 +1974,10 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else if app.windows.len() > 1 {
-                let mut win = app.windows.remove(app.active_idx);
+                let removed_pos = app.active_idx;
+                let mut win = app.windows.remove(removed_pos);
                 kill_all_children(&mut win.root);
+                app.on_window_removed(removed_pos);
                 if app.active_idx >= app.windows.len() {
                     app.active_idx = app.windows.len() - 1;
                 }
