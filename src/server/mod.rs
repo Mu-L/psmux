@@ -3144,7 +3144,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let src_idx = src_win.unwrap_or(app.active_idx);
                     // Resolve target window index (default: active window, but must differ from source)
                     let raw_target_win = target_win.unwrap_or(app.active_idx);
-                    if src_idx < app.windows.len() && raw_target_win < app.windows.len() && src_idx != raw_target_win {
+                    // Surface an explicit error instead of silently doing nothing when the
+                    // target cannot be resolved (issue #437). psmux defaults base-index to 0,
+                    // so a tmux user typing `join-pane -t :2` on a 2-window session targets a
+                    // non-existent window; the old silent no-op made join-pane appear broken.
+                    if src_idx >= app.windows.len() {
+                        app.status_message = Some((format!("join-pane: can't find source window: {}", src_idx), Instant::now(), None));
+                        meta_dirty = true;
+                    } else if raw_target_win >= app.windows.len() {
+                        app.status_message = Some((format!("join-pane: can't find window: {}", raw_target_win), Instant::now(), None));
+                        meta_dirty = true;
+                    } else if src_idx == raw_target_win {
+                        app.status_message = Some(("join-pane: can't join a pane to its own window".to_string(), Instant::now(), None));
+                        meta_dirty = true;
+                    } else {
                         // Resolve source pane path within source window
                         let src_path = if let Some(pidx) = src_pane {
                             // Get Nth pane path in DFS order

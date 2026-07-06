@@ -380,7 +380,22 @@ fn join_pane_local(app: &mut AppState, src_win: Option<usize>, src_pane: Option<
                    target_win: Option<usize>, target_pane: Option<usize>, horizontal: bool) {
     let src_idx = src_win.unwrap_or(app.active_idx);
     let raw_target_win = target_win.unwrap_or(app.active_idx);
-    if src_idx < app.windows.len() && raw_target_win < app.windows.len() && src_idx != raw_target_win {
+    // tmux surfaces an explicit error rather than silently doing nothing when the
+    // target cannot be resolved. Without this, `join-pane -t :N` where window N does
+    // not exist (common when a user assumes base-index 1) fails with no feedback.
+    if src_idx >= app.windows.len() {
+        app.status_message = Some((format!("join-pane: can't find source window: {}", src_idx), Instant::now(), None));
+        return;
+    }
+    if raw_target_win >= app.windows.len() {
+        app.status_message = Some((format!("join-pane: can't find window: {}", raw_target_win), Instant::now(), None));
+        return;
+    }
+    if src_idx == raw_target_win {
+        app.status_message = Some(("join-pane: can't join a pane to its own window".to_string(), Instant::now(), None));
+        return;
+    }
+    {
         // Resolve source pane path
         let src_path = if let Some(pidx) = src_pane {
             let mut leaves = Vec::new();
