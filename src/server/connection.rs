@@ -282,21 +282,32 @@ if line.trim() == "PERSISTENT" {
         Ok(s) => s,
         Err(_) => return,
     };
+    let tx_writer = tx.clone();
     std::thread::spawn(move || {
         // Deregister the frame channel and shut down the TCP connection when
         // this thread exits for any reason (write timeout, resp_rx disconnect,
         // etc.). The shutdown causes the client's reader thread to see EOF,
         // which triggers reconnect rather than leaving the client frozen.
-        struct Guard { client_id: u64, shutdown: std::net::TcpStream }
+        //
+        // Also enqueue ClientDetach so a teardown observed *only* by the writer
+        // path (write timeout / broken pipe / resp_rx disconnect, before the
+        // reader loop reaches its EOF branch, or when the reader never set
+        // `attached_sent`) still reaps the `client_registry` entry. The reaper
+        // is idempotent, so if the reader path also fires ClientDetach for the
+        // same `client_id` the second one is a harmless no-op. The client
+        // reconnects under a *new* `client_id`, so reaping the old id here does
+        // not remove the live reconnected client.
+        struct Guard { client_id: u64, shutdown: std::net::TcpStream, tx: mpsc::Sender<CtrlReq> }
         impl Drop for Guard {
             fn drop(&mut self) {
                 let _ = self.shutdown.shutdown(std::net::Shutdown::Both);
                 crate::types::deregister_frame_channel(self.client_id);
                 crate::types::remove_directive_channel(self.client_id);
                 crate::types::deregister_persistent_stream(self.client_id);
+                let _ = self.tx.send(CtrlReq::ClientDetach(self.client_id));
             }
         }
-        let _guard = Guard { client_id, shutdown: ws_shutdown };
+        let _guard = Guard { client_id, shutdown: ws_shutdown, tx: tx_writer };
 
         loop {
             // Each iteration drains all three sources in priority order

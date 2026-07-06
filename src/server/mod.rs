@@ -1604,33 +1604,33 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::ClientDetach(cid) => {
-                    app.attached_clients = app.attached_clients.saturating_sub(1);
-                    app.client_sizes.remove(&cid);
-                    app.client_registry.remove(&cid);
-                    app.client_prefix_active = false;
-                    if app.latest_client_id == Some(cid) {
-                        app.latest_client_id = None;
-                    }
-                    // Recompute effective size from remaining clients
-                    if let Some((w, h)) = compute_effective_client_size(&app) {
-                        app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
-                        resize_all_panes(&mut app);
-                    }
-                    hook_event = Some("client-detached");
-                    if app.attached_clients == 0 && app.destroy_unattached {
-                        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                        let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
-                        let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
-                        let _ = std::fs::remove_file(&regpath);
-                        let _ = std::fs::remove_file(&keypath);
-                        crate::session::remove_session_id_file(&app.port_file_base());
-                        crate::types::shutdown_persistent_streams();
-                        tree::kill_all_children_batch(&mut app.windows);
-                        if let Some(mut wp) = app.warm_pane.take() {
-                            wp.child.kill().ok();
+                    // Route through the idempotent reaper so a duplicate detach
+                    // for one `cid` (e.g. reader-EOF and writer-teardown both
+                    // observing the same dead connection) cannot over-decrement
+                    // `attached_clients` or re-run the destroy-unattached path.
+                    // Side effects run only on a real reap.
+                    if app.reap_client(cid) {
+                        // Recompute effective size from remaining clients
+                        if let Some((w, h)) = compute_effective_client_size(&app) {
+                            app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                            resize_all_panes(&mut app);
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        std::process::exit(0);
+                        hook_event = Some("client-detached");
+                        if app.attached_clients == 0 && app.destroy_unattached {
+                            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                            let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
+                            let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                            let _ = std::fs::remove_file(&regpath);
+                            let _ = std::fs::remove_file(&keypath);
+                            crate::session::remove_session_id_file(&app.port_file_base());
+                            crate::types::shutdown_persistent_streams();
+                            tree::kill_all_children_batch(&mut app.windows);
+                            if let Some(mut wp) = app.warm_pane.take() {
+                                wp.child.kill().ok();
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            std::process::exit(0);
+                        }
                     }
                 }
                 CtrlReq::DumpLayout(resp) => {
@@ -4645,8 +4645,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::ControlDeregister { client_id } => {
                     app.control_clients.remove(&client_id);
-                    app.client_registry.remove(&client_id);
-                    app.attached_clients = app.attached_clients.saturating_sub(1);
+                    // Idempotent reap keeps the counter in lock-step with the
+                    // registry even if a control client is deregistered twice.
+                    app.reap_client(client_id);
                 }
                 CtrlReq::CustomizeMode => {
                     let options = crate::server::option_catalog::build_option_list(&app);

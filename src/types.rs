@@ -709,6 +709,30 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Reap a dead client's `client_registry` entry exactly once, keeping the
+    /// `attached_clients` counter in lock-step with the registry.
+    ///
+    /// Returns `true` only when an entry was actually present and removed, so
+    /// callers run teardown side effects (resize, hooks, destroy-unattached)
+    /// only on a real reap. It is idempotent: a second reap of the same `cid`
+    /// is a safe no-op that leaves `attached_clients` untouched. This prevents
+    /// the over-decrement that a duplicate `ClientDetach` for one `cid` would
+    /// otherwise cause (registry entry present ⟺ counted, guaranteed by
+    /// `ClientAttach` incrementing and inserting together).
+    pub fn reap_client(&mut self, cid: u64) -> bool {
+        self.client_sizes.remove(&cid);
+        if self.client_registry.remove(&cid).is_some() {
+            self.attached_clients = self.attached_clients.saturating_sub(1);
+            self.client_prefix_active = false;
+            if self.latest_client_id == Some(cid) {
+                self.latest_client_id = self.client_registry.keys().max().copied();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// Create a new AppState with sensible defaults.
     /// Caller should set `session_name` and call `load_config()` after construction.
     pub fn new(session_name: String) -> Self {
@@ -1498,3 +1522,7 @@ pub struct ParsedTarget {
 #[cfg(test)]
 #[path = "../tests-rs/test_pr267_backpressure_proof.rs"]
 mod tests_pr267_backpressure;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue434_reap_client.rs"]
+mod tests_issue434_reap_client;

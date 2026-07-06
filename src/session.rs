@@ -72,11 +72,70 @@ pub fn next_session_name(ns_prefix: Option<&str>) -> String {
     id.to_string()
 }
 
+/// Serializes session-id allocation within this process. Without it, two
+/// threads (e.g. concurrent `new-session` handling, or the test harness running
+/// tests in parallel) can both read the same value from the counter file before
+/// either writes back, and hand out duplicate ids.
+static SESSION_ID_ALLOC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Best-effort cross-process advisory lock backed by an atomically-created lock
+/// file. Separate psmux server processes share the same `next_session_id`
+/// counter, so the in-process mutex alone is not enough; this closes the
+/// read-modify-write gap across processes too. Released on drop. A lock left by
+/// a crashed process is taken over once it is clearly stale; the guarded
+/// critical section is sub-millisecond, so the staleness bound never steals a
+/// live lock.
+struct CounterLock {
+    path: String,
+}
+
+impl CounterLock {
+    const STALE_AFTER: Duration = Duration::from_secs(5);
+
+    fn acquire(path: String) -> Self {
+        for _ in 0..2000 {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut f) => {
+                    let _ = write!(f, "{}", std::process::id());
+                    return CounterLock { path };
+                }
+                Err(_) => {
+                    // Take over a stale lock left behind by a crashed holder.
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .map(|t| t.elapsed().map(|d| d >= Self::STALE_AFTER).unwrap_or(false))
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = std::fs::remove_file(&path);
+                        continue;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+        // Never observed in practice (the critical section is microseconds);
+        // proceed rather than hang session creation indefinitely.
+        CounterLock { path }
+    }
+}
+
+impl Drop for CounterLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Allocate a globally unique session ID by reading and incrementing
 /// the persistent counter file `.psmux/next_session_id`.
+///
+/// The read-modify-write is serialized within the process by `SESSION_ID_ALLOC`
+/// and across processes by an advisory lock file, so concurrent callers can
+/// never observe the same `current` and return duplicate ids.
 pub fn allocate_session_id() -> usize {
+    let _guard = SESSION_ID_ALLOC.lock().unwrap_or_else(|e| e.into_inner());
     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
     let counter_path = format!("{}\\.psmux\\next_session_id", home);
+    let _xlock = CounterLock::acquire(format!("{}.lock", counter_path));
     let current = std::fs::read_to_string(&counter_path)
         .ok()
         .and_then(|s| s.trim().parse::<usize>().ok())
@@ -1159,3 +1218,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue250_root_cause.rs"]
 mod tests_issue250_root_cause;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_session_id_alloc_race.rs"]
+mod tests_session_id_alloc_race;
