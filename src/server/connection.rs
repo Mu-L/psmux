@@ -179,6 +179,12 @@ fn parse_new_pane_args(args: &[&str]) -> CtrlReq {
     let mut border = String::new();
     let mut title: Option<String> = None;
     let (mut x, mut y, mut w, mut h): (Option<u16>, Option<u16>, Option<u16>, Option<u16>) = (None, None, None, None);
+    // Movement (uppercase -X/-Y absolute, -U/-D/-L/-R directional). When any is
+    // present, new-pane MOVES the focused float instead of creating one.
+    let (mut abs_x, mut abs_y): (Option<u16>, Option<u16>) = (None, None);
+    let mut dir: Option<crate::floating::MoveDir> = None;
+    let mut step: u16 = 1;
+    let mut is_move = false;
     let mut skip = std::collections::HashSet::new();
     let mut i = 0;
     while i < args.len() {
@@ -191,9 +197,21 @@ fn parse_new_pane_args(args: &[&str]) -> CtrlReq {
             "-y" => { if let Some(v) = args.get(i+1) { y = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
             "-w" => { if let Some(v) = args.get(i+1) { w = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
             "-h" => { if let Some(v) = args.get(i+1) { h = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-U" | "-D" | "-L" | "-R" => {
+                is_move = true;
+                dir = crate::floating::MoveDir::parse(args[i]);
+                // Optional numeric step follows (e.g. `-R 5`).
+                if let Some(v) = args.get(i+1).and_then(|s| s.parse::<u16>().ok()) { step = v; skip.insert(i+1); i += 1; }
+                skip.insert(i);
+            }
+            "-X" => { is_move = true; if let Some(v) = args.get(i+1) { abs_x = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-Y" => { is_move = true; if let Some(v) = args.get(i+1) { abs_y = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
             _ => {}
         }
         i += 1;
+    }
+    if is_move {
+        return CtrlReq::FloatMove { dir, abs_x, abs_y, step };
     }
     let command = args.iter().enumerate()
         .filter(|(idx, _)| !skip.contains(idx))

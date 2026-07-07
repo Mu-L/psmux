@@ -1131,6 +1131,13 @@ pub enum CtrlReq {
         position: Option<String>,
         detached: bool,
     },
+    /// Move the focused floating pane: a directional step and/or absolute x/y.
+    FloatMove {
+        dir: Option<crate::floating::MoveDir>,
+        abs_x: Option<u16>,
+        abs_y: Option<u16>,
+        step: u16,
+    },
     KillPane,
     KillPaneById(usize),
     CapturePane(mpsc::Sender<String>),

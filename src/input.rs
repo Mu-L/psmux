@@ -2942,6 +2942,19 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
         return Ok(());
     }
 
+    // A focused floating pane (tmux new-pane) receives input instead of the
+    // tiled active pane, while the layout keeps rendering underneath.
+    {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(fi) = win.floating_focus {
+            if let Some(fp) = win.floating.get_mut(fi) {
+                let _ = fp.pane.writer.write_all(text.as_bytes());
+                let _ = fp.pane.writer.flush();
+                return Ok(());
+            }
+        }
+    }
+
     if app.sync_input {
         // Fan out to ALL panes in the current window
         let win = &mut app.windows[app.active_idx];
@@ -3493,6 +3506,18 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             _ => {}
         }
         let _ = p.writer.flush();
+    }
+
+    // A focused floating pane (tmux new-pane) receives the key instead of the
+    // tiled active pane.
+    {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(fi) = win.floating_focus {
+            if let Some(fp) = win.floating.get_mut(fi) {
+                write_named_key_to_pane(&mut fp.pane, k);
+                return Ok(());
+            }
+        }
     }
 
     // Distribute the key to all panes (sync) or just the active pane.

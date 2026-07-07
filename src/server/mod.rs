@@ -1124,11 +1124,28 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = pane.writer.flush();
                     }
                 }
+                // Answer CPR for the active window's floating panes too — same
+                // reason as popups: an interactive float shell blocks on ESC[6n.
+                if let Some(win) = app.windows.get_mut(app.active_idx) {
+                    for fp in win.floating.iter_mut() {
+                        if fp.pane.cpr_pending.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                            let (r, c) = fp.pane.term.lock()
+                                .map(|g| g.screen().cursor_position())
+                                .unwrap_or((0, 0));
+                            let response = format!("\x1b[{};{}R", r + 1, c + 1);
+                            use std::io::Write as _;
+                            let _ = fp.pane.writer.write_all(response.as_bytes());
+                            let _ = fp.pane.writer.flush();
+                        }
+                    }
+                }
             }
         }
-        // When a popup PTY is active, always push frames so interactive
-        // content (e.g. fzf, shell prompts) updates in real-time.
-        if matches!(app.mode, Mode::PopupMode { .. }) {
+        // When a popup PTY or a floating pane is active, always push frames so
+        // interactive content (fzf, shell prompts) updates in real-time.
+        if matches!(app.mode, Mode::PopupMode { .. })
+            || app.windows.get(app.active_idx).map_or(false, |w| !w.floating.is_empty())
+        {
             state_dirty = true;
         }
         let echo_active = echo_pending_until.map_or(false, |t| t.elapsed().as_millis() < 50);
@@ -1440,7 +1457,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::KillPane => {
                     if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
-                    unzoom_if_zoomed(&mut app); let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
+                    // A focused floating pane is closed by kill-pane instead of a
+                    // tiled pane. The child is dropped with the FloatingPane.
+                    let closed_float = {
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(fi) = win.floating_focus {
+                            if fi < win.floating.len() {
+                                let mut fp = win.floating.remove(fi);
+                                let _ = fp.pane.child.kill();
+                                win.floating_focus = if win.floating.is_empty() { None } else { Some(win.floating.len() - 1) };
+                                true
+                            } else { false }
+                        } else { false }
+                    };
+                    if closed_float {
+                        state_dirty = true;
+                    } else {
+                        unzoom_if_zoomed(&mut app); let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
+                    }
                 }
                 CtrlReq::KillPaneById(pid) => {
                     if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
@@ -3029,14 +3063,51 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::ResizePane(dir, amount) => {
-                    unzoom_if_zoomed(&mut app);
-                    match dir.as_str() {
-                        "U" | "D" => { resize_pane_vertical(&mut app, if dir == "U" { -(amount as i16) } else { amount as i16 }); }
-                        "L" | "R" => { resize_pane_horizontal(&mut app, if dir == "L" { -(amount as i16) } else { amount as i16 }); }
-                        _ => {}
+                    // A focused floating pane resizes itself (and its PTY) instead
+                    // of the tiled layout.
+                    let mut handled_float = false;
+                    {
+                        let win_w = app.last_window_area.width.max(10);
+                        let win_h = app.last_window_area.height.max(10);
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(fi) = win.floating_focus {
+                            if let Some(fp) = win.floating.get_mut(fi) {
+                                let d = amount as i16;
+                                match dir.as_str() {
+                                    "L" => fp.w = (fp.w as i16 - d).max(3) as u16,
+                                    "R" => fp.w = (fp.w as i16 + d).max(3) as u16,
+                                    "U" => fp.h = (fp.h as i16 - d).max(3) as u16,
+                                    "D" => fp.h = (fp.h as i16 + d).max(3) as u16,
+                                    _ => {}
+                                }
+                                fp.w = fp.w.min(win_w);
+                                fp.h = fp.h.min(win_h);
+                                let (nx, ny) = crate::floating::clamp_into(fp.x, fp.y, fp.w, fp.h, win_w, win_h);
+                                fp.x = nx; fp.y = ny;
+                                let inner_h = fp.h.saturating_sub(2).max(1);
+                                let inner_w = fp.w.saturating_sub(2).max(1);
+                                if fp.pane.last_rows != inner_h || fp.pane.last_cols != inner_w {
+                                    let _ = fp.pane.master.resize(portable_pty::PtySize { rows: inner_h, cols: inner_w, pixel_width: 0, pixel_height: 0 });
+                                    if let Ok(mut parser) = fp.pane.term.lock() { parser.screen_mut().set_size(inner_h, inner_w); }
+                                    fp.pane.last_rows = inner_h;
+                                    fp.pane.last_cols = inner_w;
+                                }
+                                handled_float = true;
+                            }
+                        }
                     }
-                    resize_all_panes(&mut app); meta_dirty = true;
-                    hook_event = Some("after-resize-pane");
+                    if handled_float {
+                        state_dirty = true;
+                    } else {
+                        unzoom_if_zoomed(&mut app);
+                        match dir.as_str() {
+                            "U" | "D" => { resize_pane_vertical(&mut app, if dir == "U" { -(amount as i16) } else { amount as i16 }); }
+                            "L" | "R" => { resize_pane_horizontal(&mut app, if dir == "L" { -(amount as i16) } else { amount as i16 }); }
+                            _ => {}
+                        }
+                        resize_all_panes(&mut app); meta_dirty = true;
+                        hook_event = Some("after-resize-pane");
+                    }
                 }
                 CtrlReq::SetBuffer(content) => {
                     app.paste_buffers.insert(0, content);
@@ -4463,6 +4534,27 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.status_message = Some(("new-pane: failed to start pane".to_string(), std::time::Instant::now(), None));
                     }
                 }
+                CtrlReq::FloatMove { dir, abs_x, abs_y, step } => {
+                    let win_w = app.last_window_area.width.max(1);
+                    let win_h = app.last_window_area.height.max(1);
+                    let win = &mut app.windows[app.active_idx];
+                    if let Some(fi) = win.floating_focus {
+                        if let Some(fp) = win.floating.get_mut(fi) {
+                            if let Some(nx) = abs_x { fp.x = nx; }
+                            if let Some(ny) = abs_y { fp.y = ny; }
+                            if let Some(d) = dir {
+                                let (nx, ny) = crate::floating::move_step(d, fp.x, fp.y, fp.w, fp.h, win_w, win_h, step.max(1));
+                                fp.x = nx; fp.y = ny;
+                            } else {
+                                let (cx, cy) = crate::floating::clamp_into(fp.x, fp.y, fp.w, fp.h, win_w, win_h);
+                                fp.x = cx; fp.y = cy;
+                            }
+                            // An explicit move overrides any `-P` anchor.
+                            fp.position = None;
+                            state_dirty = true;
+                        }
+                    }
+                }
                 CtrlReq::ConfirmBefore(prompt, cmd) => {
                     let prompt_text = if prompt.is_empty() {
                         format!("Confirm: {}? (y/n)", cmd)
@@ -5375,6 +5467,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             } else { false };
             if should_close && close_on_exit {
                 app.mode = Mode::Passthrough;
+                state_dirty = true;
+            }
+        }
+        // Reap exited floating panes (tmux new-pane) across all windows: a float
+        // whose child process has exited is removed, and the focus index is
+        // fixed up so it never dangles past the end of the vec.
+        for win in app.windows.iter_mut() {
+            if win.floating.is_empty() { continue; }
+            let before = win.floating.len();
+            win.floating.retain_mut(|fp| !matches!(fp.pane.child.try_wait(), Ok(Some(_))));
+            if win.floating.len() != before {
+                // Simplest correct focus fix: focus the last remaining float, or
+                // drop focus entirely when none remain.
+                win.floating_focus = if win.floating.is_empty() {
+                    None
+                } else {
+                    Some(win.floating.len() - 1)
+                };
                 state_dirty = true;
             }
         }
