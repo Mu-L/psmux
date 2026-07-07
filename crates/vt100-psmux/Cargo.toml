@@ -45,6 +45,10 @@ repository = "https://github.com/psmux/vt100-rust-patched"
 name = "vt100_psmux"
 path = "src/lib.rs"
 
+[[test]]
+name = "width_thai_441"
+path = "tests/width_thai_441.rs"
+
 [dependencies.itoa]
 version = "1.0.15"
 
