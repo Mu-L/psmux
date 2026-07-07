@@ -578,6 +578,24 @@ pub fn capture_active_pane(app: &mut AppState) -> io::Result<()> {
     Ok(())
 }
 
+/// Append one grid cell's text to a capture row.
+///
+/// A never-written cell (skipped over by a cursor advance such as CUF `ESC[nC`
+/// or CHA `ESC[nG`) reports empty `contents()`, so pushing that string verbatim
+/// contributes nothing and collapses the on-screen gap between words (issue
+/// #443). Emit a single space for every in-bounds blank cell instead, matching
+/// how the cell renders on screen. The second half of a wide glyph
+/// (`is_wide_continuation`) is skipped entirely: its leading half already
+/// carried the full multi-column character, so emitting a space here would add
+/// a phantom column after every wide/CJK glyph.
+fn push_capture_cell(row: &mut String, cell: Option<&vt100::Cell>) {
+    match cell {
+        Some(c) if c.is_wide_continuation() => {}
+        Some(c) if c.has_contents() => row.push_str(c.contents()),
+        _ => row.push(' '),
+    }
+}
+
 pub fn capture_active_pane_text(app: &mut AppState) -> io::Result<Option<String>> {
     let win = &mut app.windows[app.active_idx];
     let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
@@ -586,7 +604,7 @@ pub fn capture_active_pane_text(app: &mut AppState) -> io::Result<Option<String>
     let mut text = String::new();
     for r in 0..p.last_rows {
         let mut row = String::new();
-        for c in 0..p.last_cols { if let Some(cell) = screen.cell(r, c) { row.push_str(&cell.contents().to_string()); } else { row.push(' '); } }
+        for c in 0..p.last_cols { push_capture_cell(&mut row, screen.cell(r, c)); }
         text.push_str(row.trim_end());
         text.push('\n');
     }
@@ -875,7 +893,7 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
         let mut text = String::new();
         for r in start..=end {
             let mut row = String::new();
-            for c in 0..cols { if let Some(cell) = screen.cell(r, c) { row.push_str(&cell.contents().to_string()); } else { row.push(' '); } }
+            for c in 0..cols { push_capture_cell(&mut row, screen.cell(r, c)); }
             text.push_str(row.trim_end());
             text.push('\n');
         }
@@ -931,7 +949,7 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
             let r = (aline + actual_sb) as u16;
             let mut row = String::new();
             for c in 0..cols {
-                if let Some(cell) = parser.screen().cell(r, c) { row.push_str(&cell.contents().to_string()); } else { row.push(' '); }
+                push_capture_cell(&mut row, parser.screen().cell(r, c));
             }
             text.push_str(row.trim_end());
             text.push('\n');
@@ -980,6 +998,10 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
         let mut any_style_active = false;
         for c in 0..cols {
             if let Some(cell) = screen.cell(r, c) {
+                // Second half of a wide glyph: the leading half already emitted
+                // the full multi-column character, so skip it entirely (issue
+                // #443 fix must not add a phantom column after wide/CJK glyphs).
+                if cell.is_wide_continuation() { continue; }
                 let fg = cell.fgcolor();
                 let bg = cell.bgcolor();
                 let bold = cell.bold();
@@ -1043,7 +1065,11 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                     None
                 };
                 row_sgr.push(sgr);
-                row_chars.push(cell.contents().to_string());
+                // A never-written cell (skipped by a cursor advance) reports
+                // empty contents; emit a space so interior gaps between words
+                // survive instead of collapsing (issue #443).
+                let contents = cell.contents();
+                row_chars.push(if contents.is_empty() { " ".to_string() } else { contents.to_string() });
             } else {
                 row_sgr.push(None);
                 row_chars.push(" ".to_string());
