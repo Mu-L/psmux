@@ -45,7 +45,7 @@ use crossterm::event::{EnableMouseCapture, DisableMouseCapture, EnableBracketedP
 
 use crate::platform::enable_virtual_terminal_processing;
 use crate::cli::{print_help, print_version, print_commands};
-use crate::session::{cleanup_stale_port_files, read_session_key, send_control,
+use crate::session::{cleanup_stale_port_files, reap_orphaned_servers, read_session_key, send_control,
     send_control_with_response, resolve_default_session_name,
     kill_remaining_server_processes};
 use crate::rendering::apply_cursor_style;
@@ -177,7 +177,12 @@ fn run_main() -> io::Result<()> {
 
     // Clean up any stale port files at startup
     cleanup_stale_port_files();
-    
+    // Then reap any LIVE but orphaned server processes (issue #448): duplicates
+    // or crashed-client headless servers that cleanup_stale_port_files cannot
+    // see because they have no registry file. Bounds the process count so
+    // orphans can't accumulate to the point of exhausting Windows desktop-heap.
+    reap_orphaned_servers();
+
     // Parse -L flag early (tmux-compatible: names the server socket for namespace isolation)
     // In psmux, -L <name> creates a namespace prefix for session port/key files.
     // Sessions under -L "foo" are stored as "foo__sessionname.port".

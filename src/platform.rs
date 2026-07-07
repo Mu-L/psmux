@@ -1909,6 +1909,108 @@ pub mod process_kill {
         descendants
     }
 
+    // ── Orphaned-server reaper support (issue #448) ───────────────────────
+    //
+    // The stale-port cleanup only removes registry *files* for servers proven
+    // dead; a live server whose registry entry was lost (a spawn-race duplicate,
+    // or a crashed client's headless server) keeps running forever, invisible to
+    // that file-driven pass. These helpers let the reaper enumerate live psmux
+    // server processes by identity (loopback TCP listener + image name + creation
+    // time) so an untracked one can be terminated at startup.
+
+    #[link(name = "iphlpapi")]
+    extern "system" {
+        fn GetExtendedTcpTable(
+            p_tcp_table: *mut u8,
+            pdw_size: *mut u32,
+            b_order: i32,
+            ul_af: u32,
+            table_class: u32,
+            reserved: u32,
+        ) -> u32;
+    }
+
+    const AF_INET: u32 = 2;
+    const TCP_TABLE_OWNER_PID_LISTENER: u32 = 3;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    /// 127.0.0.1 as a native-endian u32 (bytes 127,0,0,1 in the on-wire order the
+    /// TCP table stores dwLocalAddr in). psmux servers always bind 127.0.0.1, so
+    /// this is the only address we consider a server listener.
+    const LOOPBACK_ADDR: u32 = 0x0100_007F;
+
+    /// Enumerate every 127.0.0.1 TCP *listener* as `(owning_pid, port)`.
+    ///
+    /// Uses `GetExtendedTcpTable(TCP_TABLE_OWNER_PID_LISTENER)` so only listening
+    /// sockets are returned — a psmux *client* never listens, so clients can never
+    /// appear here and are structurally safe from the reaper.
+    pub fn loopback_listener_pids() -> Vec<(u32, u16)> {
+        let mut out = Vec::new();
+        unsafe {
+            let mut size: u32 = 0;
+            // First call sizes the buffer.
+            let _ = GetExtendedTcpTable(
+                std::ptr::null_mut(), &mut size, 0, AF_INET,
+                TCP_TABLE_OWNER_PID_LISTENER, 0,
+            );
+            if size == 0 { return out; }
+            let mut buf = vec![0u8; size as usize];
+            let mut attempts = 0;
+            let mut ret = GetExtendedTcpTable(
+                buf.as_mut_ptr(), &mut size, 0, AF_INET,
+                TCP_TABLE_OWNER_PID_LISTENER, 0,
+            );
+            // The table can grow between the sizing and filling calls; retry a
+            // couple of times on ERROR_INSUFFICIENT_BUFFER with the new size.
+            while ret == ERROR_INSUFFICIENT_BUFFER && attempts < 3 {
+                buf.resize(size as usize, 0);
+                ret = GetExtendedTcpTable(
+                    buf.as_mut_ptr(), &mut size, 0, AF_INET,
+                    TCP_TABLE_OWNER_PID_LISTENER, 0,
+                );
+                attempts += 1;
+            }
+            if ret != 0 { return out; }
+
+            // MIB_TCPTABLE_OWNER_PID: u32 dwNumEntries, then rows.
+            // MIB_TCPROW_OWNER_PID (24 bytes): state, localAddr, localPort,
+            // remoteAddr, remotePort, owningPid — each a u32.
+            let base = buf.as_ptr();
+            let num = (base as *const u32).read_unaligned() as usize;
+            const ROW: usize = 24;
+            for i in 0..num {
+                let row = base.add(4 + i * ROW);
+                if 4 + i * ROW + ROW > buf.len() { break; }
+                let local_addr = (row.add(4) as *const u32).read_unaligned();
+                if local_addr != LOOPBACK_ADDR { continue; }
+                let local_port_raw = (row.add(8) as *const u32).read_unaligned();
+                // dwLocalPort is network byte order in the low 16 bits.
+                let port = (((local_port_raw & 0xff) << 8) | ((local_port_raw >> 8) & 0xff)) as u16;
+                let pid = (row.add(20) as *const u32).read_unaligned();
+                out.push((pid, port));
+            }
+        }
+        out
+    }
+
+    /// Current system time as a FILETIME (100ns ticks). Callers capture this
+    /// BEFORE enumerating processes and pass it to `terminate_server_pid` as the
+    /// PID-reuse cutoff (see `terminate_pid`).
+    pub fn now_process_filetime() -> u64 {
+        now_filetime()
+    }
+
+    /// Creation time (FILETIME) of a process by PID, or None if it can't be read.
+    pub fn process_creation_time(pid: u32) -> Option<u64> {
+        process_creation_filetime(pid)
+    }
+
+    /// Terminate an orphaned server PID, guarded by the #447 PID-reuse check:
+    /// the process is killed only if its creation time is no later than
+    /// `max_creation_ft` (captured before the enumeration that found it).
+    pub fn terminate_server_pid(pid: u32, max_creation_ft: u64) {
+        terminate_pid(pid, max_creation_ft);
+    }
+
     #[cfg(test)]
     #[path = "../../../tests-rs/test_issue447_kill_pid_reuse.rs"]
     mod tests_issue447_kill_pid_reuse;
@@ -1927,6 +2029,12 @@ pub mod process_kill {
             let _ = child.kill();
         }
     }
+
+    // Orphaned-server reaper stubs (issue #448) — no-ops off Windows.
+    pub fn loopback_listener_pids() -> Vec<(u32, u16)> { Vec::new() }
+    pub fn now_process_filetime() -> u64 { 0 }
+    pub fn process_creation_time(_pid: u32) -> Option<u64> { None }
+    pub fn terminate_server_pid(_pid: u32, _max_creation_ft: u64) {}
 }
 
 // ---------------------------------------------------------------------------

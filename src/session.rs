@@ -151,11 +151,34 @@ pub fn write_session_id_file(port_file_base: &str, session_id: usize) {
     let _ = std::fs::write(&sid_path, session_id.to_string());
 }
 
-/// Remove the `.sid` file for a session.
+/// Remove the `.sid` file for a session. Also removes the twin `.pid` file
+/// (issue #448): both are per-session identity sentinels written together by
+/// `ensure_session_registry_files`, and every session-teardown site already
+/// calls this, so piggybacking `.pid` cleanup here keeps the registry consistent
+/// without touching each teardown call site.
 pub fn remove_session_id_file(port_file_base: &str) {
     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
     let sid_path = format!("{}\\.psmux\\{}.sid", home, port_file_base);
     let _ = std::fs::remove_file(&sid_path);
+    remove_session_pid_file(port_file_base);
+}
+
+/// Write a `.pid` file recording the OS process ID of the server that owns this
+/// session (issue #448). The stale-port cleanup only knew a server by its TCP
+/// port; a wedged server that stopped listening but hasn't exited could not be
+/// targeted by identity at all. The PID gives every registry entry a stable
+/// process anchor.
+pub fn write_session_pid_file(port_file_base: &str, pid: u32) {
+    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+    let pid_path = format!("{}\\.psmux\\{}.pid", home, port_file_base);
+    let _ = std::fs::write(&pid_path, pid.to_string());
+}
+
+/// Remove the `.pid` file for a session.
+pub fn remove_session_pid_file(port_file_base: &str) {
+    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+    let pid_path = format!("{}\\.psmux\\{}.pid", home, port_file_base);
+    let _ = std::fs::remove_file(&pid_path);
 }
 
 /// Resolve a tmux session ID (`$N`) to the port file base name of the
@@ -198,6 +221,155 @@ pub fn cleanup_stale_port_files() {
 
 fn cleanup_stale_port_files_in(psmux_dir: &Path) {
     cleanup_stale_port_files_in_with(psmux_dir, probe_session_for_cleanup);
+}
+
+/// Image-name stems (lower-case, no extension) that count as a psmux server for
+/// the orphan reaper. Only processes whose executable matches one of these are
+/// ever candidates for termination — an unrelated app that happens to hold a
+/// loopback listener is never touched.
+const PSMUX_SERVER_IMAGE_NAMES: &[&str] = &["psmux", "tmux", "pmux"];
+
+/// Grace period before a live server process is eligible for orphan reaping.
+/// A server that just bound its socket but hasn't finished writing its `.port`
+/// file yet (or a concurrent `new-session` still coming up) would otherwise look
+/// untracked; requiring the process to be older than this avoids that race. The
+/// spawn-race itself is fixed in #444 — this reaper is only the accumulation
+/// backstop, so it can afford to skip very young processes and catch them next
+/// startup instead.
+const ORPHAN_REAP_MIN_AGE: Duration = Duration::from_secs(10);
+
+/// A live psmux server process discovered by the reaper: its PID, every loopback
+/// port it listens on, and its process creation time (FILETIME 100ns ticks).
+#[derive(Clone, Debug, PartialEq)]
+struct ServerCandidate {
+    pid: u32,
+    ports: Vec<u16>,
+    creation_ft: u64,
+}
+
+/// Pure orphan-selection policy (unit-testable, no OS calls).
+///
+/// A candidate server is an orphan to reap iff ALL hold:
+///  - it is not this very process (`self_pid`),
+///  - its PID is not recorded in any live registry entry (`tracked_pids`),
+///  - NONE of its listening ports is claimed by a registry `.port` file
+///    (`tracked_ports`) — i.e. nothing references this server, so it is a
+///    duplicate / lost headless server rather than a legitimate session,
+///  - it was created at or before `age_cutoff_ft` (older than the grace window),
+///    so a just-spawned server still writing its registry files is never reaped.
+///
+/// The port check is the primary anchor: a legitimate server ALWAYS has a
+/// `.port` file pointing at it, so it can never be selected even if its `.pid`
+/// file is missing (backward compatibility with servers started before #448).
+fn select_orphan_pids(
+    candidates: &[ServerCandidate],
+    tracked_ports: &std::collections::HashSet<u16>,
+    tracked_pids: &std::collections::HashSet<u32>,
+    self_pid: u32,
+    age_cutoff_ft: u64,
+) -> Vec<u32> {
+    let mut out = Vec::new();
+    for c in candidates {
+        if c.pid == self_pid { continue; }
+        if tracked_pids.contains(&c.pid) { continue; }
+        if c.ports.iter().any(|p| tracked_ports.contains(p)) { continue; }
+        // Only reap processes old enough to have finished registering.
+        if age_cutoff_ft != 0 && c.creation_ft > age_cutoff_ft { continue; }
+        out.push(c.pid);
+    }
+    out
+}
+
+/// Read the set of ports referenced by `.port` files and the set of PIDs
+/// recorded in `.pid` files whose sibling `.port` still exists. A `.pid` without
+/// a live `.port` is ignored so a dead-then-reused PID can't be treated as
+/// tracked.
+fn read_tracked_registry(psmux_dir: &Path)
+    -> (std::collections::HashSet<u16>, std::collections::HashSet<u32>)
+{
+    let mut tracked_ports = std::collections::HashSet::new();
+    let mut tracked_pids = std::collections::HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(psmux_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match path.extension().and_then(|e| e.to_str()) {
+                Some("port") => {
+                    if let Ok(s) = std::fs::read_to_string(&path) {
+                        if let Ok(p) = s.trim().parse::<u16>() { tracked_ports.insert(p); }
+                    }
+                }
+                Some("pid") => {
+                    // Only trust a PID whose session still has a live .port file.
+                    let port_sibling = path.with_extension("port");
+                    if port_sibling.exists() {
+                        if let Ok(s) = std::fs::read_to_string(&path) {
+                            if let Ok(pid) = s.trim().parse::<u32>() { tracked_pids.insert(pid); }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (tracked_ports, tracked_pids)
+}
+
+/// Terminate live psmux *server* processes that no registry entry accounts for
+/// (issue #448). Complements `cleanup_stale_port_files`, which only removes
+/// registry files for servers already proven dead: this pass finds a live but
+/// orphaned server (a spawn-race duplicate, or a crashed client's headless
+/// server) and reaps the process itself, bounding the process count regardless
+/// of how the duplicate arose.
+pub fn reap_orphaned_servers() {
+    let home = match env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let psmux_dir = format!("{}\\.psmux", home);
+    reap_orphaned_servers_in(Path::new(&psmux_dir));
+}
+
+fn reap_orphaned_servers_in(psmux_dir: &Path) {
+    use crate::platform::process_kill;
+
+    let (tracked_ports, tracked_pids) = read_tracked_registry(psmux_dir);
+    let self_pid = std::process::id();
+
+    // Capture the reuse-guard cutoff BEFORE enumerating: any process we see now
+    // was created at or before this instant, so a PID reused afterwards is
+    // rejected by terminate_server_pid (#447 guard).
+    let now_ft = process_kill::now_process_filetime();
+    // 100ns ticks in the grace window; a process is "old enough" to reap only if
+    // its creation time is at or before now - grace.
+    let grace_ticks = (ORPHAN_REAP_MIN_AGE.as_nanos() / 100) as u64;
+    let age_cutoff_ft = now_ft.saturating_sub(grace_ticks);
+
+    // Group loopback listeners by PID, keeping only psmux-image server processes.
+    let mut by_pid: std::collections::HashMap<u32, Vec<u16>> = std::collections::HashMap::new();
+    for (pid, port) in process_kill::loopback_listener_pids() {
+        by_pid.entry(pid).or_default().push(port);
+    }
+    let mut candidates: Vec<ServerCandidate> = Vec::new();
+    for (pid, ports) in by_pid {
+        let is_psmux = crate::platform::process_info::get_process_name(pid)
+            .map(|n| {
+                let n = n.to_ascii_lowercase();
+                PSMUX_SERVER_IMAGE_NAMES.contains(&n.as_str())
+            })
+            .unwrap_or(false);
+        if !is_psmux { continue; }
+        let creation_ft = process_kill::process_creation_time(pid).unwrap_or(u64::MAX);
+        candidates.push(ServerCandidate { pid, ports, creation_ft });
+    }
+
+    let orphans = select_orphan_pids(&candidates, &tracked_ports, &tracked_pids, self_pid, age_cutoff_ft);
+    for pid in orphans {
+        if crate::debug_log::session_log_enabled() {
+            crate::debug_log::session_log("reaper", &format!(
+                "terminating orphaned psmux server pid {} (no registry entry references it)", pid));
+        }
+        process_kill::terminate_server_pid(pid, now_ft);
+    }
 }
 
 /// Resolve the session key stored alongside a `.port` file (the sibling
@@ -305,6 +477,10 @@ fn remove_session_registry_files(port_path: &Path) {
     let _ = std::fs::remove_file(&key_path);
     let sid_path = port_path.with_extension("sid");
     let _ = std::fs::remove_file(&sid_path);
+    // Also drop the twin .pid sentinel (issue #448) so a dead server's PID
+    // never lingers to be mistaken for a live tracked process by the reaper.
+    let pid_path = port_path.with_extension("pid");
+    let _ = std::fs::remove_file(&pid_path);
 }
 
 /// Outcome of a single AUTH handshake against the listener on a port.
@@ -1222,3 +1398,7 @@ mod tests_issue250_root_cause;
 #[cfg(test)]
 #[path = "../tests-rs/test_session_id_alloc_race.rs"]
 mod tests_session_id_alloc_race;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue448_orphan_reaper.rs"]
+mod tests_issue448_orphan_reaper;

@@ -107,6 +107,19 @@ fn ensure_session_registry_files(home: &str, app: &AppState) {
     {
         let _ = std::fs::write(&sid_path, &sid_value);
     }
+
+    // Record this server's OS process ID (issue #448). Written together with
+    // port/key/sid so a live server is never listening without a PID anchor, and
+    // re-ensured periodically so the entry self-heals after rename/claim. This is
+    // what lets startup reap live-but-orphaned duplicate servers by identity.
+    let pid_path = format!("{}\\{}.pid", dir, base);
+    let pid_value = std::process::id().to_string();
+    if std::fs::read_to_string(&pid_path)
+        .map(|s| s.trim() != pid_value)
+        .unwrap_or(true)
+    {
+        let _ = std::fs::write(&pid_path, &pid_value);
+    }
 }
 
 /// Diagnostic-only logging for warm-server lifecycle races. Gated behind
@@ -660,6 +673,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         let _ = std::fs::remove_file(format!("{}\\.psmux\\{}.port", home, base));
         let _ = std::fs::remove_file(format!("{}\\.psmux\\{}.key", home, base));
         let _ = std::fs::remove_file(format!("{}\\.psmux\\{}.sid", home, base));
+        let _ = std::fs::remove_file(format!("{}\\.psmux\\{}.pid", home, base));
     }));
     // Install console control handler to prevent termination on client detach
     install_console_ctrl_handler();
@@ -2755,6 +2769,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // Rename .sid file to match new session name
                         crate::session::remove_session_id_file(&app.port_file_base());
                         crate::session::write_session_id_file(&new_base, app.session_id);
+                        // Re-anchor the PID sentinel to the new base (issue #448):
+                        // remove_session_id_file above dropped the old .pid.
+                        crate::session::write_session_pid_file(&new_base, std::process::id());
                     }
                     app.session_name = name;
                     // Update env so run-shell/hooks from this server target the new name
@@ -2802,6 +2819,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // Rename .sid file to match new session name
                         crate::session::remove_session_id_file(&app.port_file_base());
                         crate::session::write_session_id_file(&new_base, app.session_id);
+                        // Re-anchor the PID sentinel to the new base (issue #448):
+                        // remove_session_id_file above dropped the old .pid.
+                        crate::session::write_session_pid_file(&new_base, std::process::id());
                     }
                     app.session_name = name;
                     // Warm server's created_at is the warm process start time, not the
