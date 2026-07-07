@@ -2554,6 +2554,10 @@ mod tests_pr255_active_border;
 mod tests_pane_border_lines_render;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_copy_line_numbers_render.rs"]
+mod tests_copy_line_numbers_render;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_pr207_compat_bugs.rs"]
 mod tests_pr207_compat_bugs;
 

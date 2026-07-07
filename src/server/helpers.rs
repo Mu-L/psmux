@@ -52,6 +52,35 @@ pub(crate) fn serialize_bindings_json(app: &AppState) -> String {
 
 /// Escape a string for embedding inside a JSON double-quoted value.
 /// Handles backslashes, double-quotes, and control characters.
+/// Append the copy-mode-line-numbers state fields to a JSON object buffer that
+/// currently ends with `}`. Emits nothing when the option is unset or `off`.
+/// Ships the option value, the active pane's scrollback size (for absolute /
+/// hybrid numbering), and the optional gutter styles.
+pub(crate) fn append_copy_ln_json(app: &AppState, buf: &mut String) {
+    let Some(cln) = app.user_options.get("copy-mode-line-numbers") else { return; };
+    if cln == "off" || !buf.ends_with('}') { return; }
+    let hsize = app.windows.get(app.active_idx)
+        .and_then(|win| crate::tree::active_pane(&win.root, &win.active_path))
+        .and_then(|p| p.term.lock().ok().map(|g| g.screen().scrollback_filled()))
+        .unwrap_or(0);
+    buf.pop();
+    buf.push_str(",\"copy_mode_line_numbers\":\"");
+    buf.push_str(&json_escape_string(cln));
+    buf.push_str("\",\"copy_hsize\":");
+    buf.push_str(&hsize.to_string());
+    if let Some(st) = app.user_options.get("copy-mode-line-number-style") {
+        buf.push_str(",\"copy_mode_line_number_style\":\"");
+        buf.push_str(&json_escape_string(st));
+        buf.push('"');
+    }
+    if let Some(st) = app.user_options.get("copy-mode-current-line-number-style") {
+        buf.push_str(",\"copy_mode_current_line_number_style\":\"");
+        buf.push_str(&json_escape_string(st));
+        buf.push('"');
+    }
+    buf.push('}');
+}
+
 pub(crate) fn json_escape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {

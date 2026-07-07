@@ -710,6 +710,7 @@ pub fn render_dump_tree(
         "",               // border_format irrelevant
         total_panes,
         crate::border_lines::border_chars(crate::border_lines::DEFAULT),
+        None,
     );
     crate::rendering::fix_border_intersections(f.buffer_mut(), crate::border_lines::border_chars(crate::border_lines::DEFAULT));
 }

@@ -1838,6 +1838,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 combined_buf.push('}');
                             }
                         }
+                        helpers::append_copy_ln_json(&app, &mut combined_buf);
                         // set-titles: when on, expand set-titles-string and ship
                         // it so the client emits OSC 0 to its host terminal.
                         if app.set_titles && combined_buf.ends_with('}') {
@@ -5107,6 +5108,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         combined_buf.push('}');
                     }
                 }
+                helpers::append_copy_ln_json(&app, &mut combined_buf);
                 // set-titles: when on, expand set-titles-string and ship
                 // it so the client emits OSC 0 to its host terminal.
                 if app.set_titles && combined_buf.ends_with('}') {

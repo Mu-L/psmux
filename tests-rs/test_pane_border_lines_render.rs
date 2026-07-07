@@ -67,6 +67,7 @@ fn render_counts(kind: &str, style: &str, w: u16, h: u16) -> std::collections::H
             "", false, "off", "",
             total,
             bchars,
+            None,
         );
         crate::rendering::fix_border_intersections(f.buffer_mut(), bchars);
     }).unwrap();
@@ -154,6 +155,7 @@ fn nested_split_produces_double_junction() {
         crate::client::render_layout_json(
             f, &layout, area, false, Color::DarkGray, Color::Green,
             false, Color::Reset, active_rect, "", false, "off", "", total, bchars,
+            None,
         );
         crate::rendering::fix_border_intersections(f.buffer_mut(), bchars);
     }).unwrap();

@@ -9,6 +9,7 @@ mod session;
 mod tree;
 mod style;
 mod border_lines;
+mod copy_line_numbers;
 mod rendering;
 mod config;
 mod commands;
@@ -416,6 +417,7 @@ fn run_main() -> io::Result<()> {
                     "", false, "off", "",
                     total_panes,
                     crate::border_lines::border_chars(crate::border_lines::DEFAULT),
+                    None,
                 );
                 crate::rendering::fix_border_intersections(f.buffer_mut(), crate::border_lines::border_chars(crate::border_lines::DEFAULT));
             }).unwrap();

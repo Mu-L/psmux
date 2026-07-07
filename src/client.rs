@@ -678,6 +678,16 @@ pub fn render_clock_overlay(f: &mut Frame, area: Rect, colour: Color) {
 /// pane renderer used by both the main viewport and the choose-tree/
 /// choose-session preview, so a preview is a true miniature of the real
 /// window (same separators, same colors, same content rendering).
+/// Copy-mode line-number rendering config, resolved once per frame from the
+/// `copy-mode-line-numbers` option and the active pane's scrollback size.
+#[derive(Clone, Copy)]
+pub struct CopyLnRender {
+    pub mode: crate::copy_line_numbers::CopyLnMode,
+    pub hsize: usize,
+    pub num_style: Style,
+    pub cur_style: Style,
+}
+
 pub fn render_layout_json(
     f: &mut Frame,
     node: &LayoutJson,
@@ -694,6 +704,7 @@ pub fn render_layout_json(
     border_format: &str,
     total_panes: usize,
     bchars: Option<crate::border_lines::BorderChars>,
+    copy_ln: Option<CopyLnRender>,
 ) {
     match node {
         LayoutJson::Leaf {
@@ -895,6 +906,25 @@ pub fn render_layout_json(
                     lines.push(Line::from(spans));
                 }
             }
+            // Copy-mode line-number gutter (#copy-mode-line-numbers). Prepend a
+            // right-aligned number column to each visible row; content shifts
+            // right and the rightmost columns clip, matching tmux's reduced
+            // content width. Only the active copy-mode pane shows the gutter.
+            let gutter_w: u16 = if *copy_mode && *active {
+                copy_ln.map(|cfg| crate::copy_line_numbers::gutter_width(cfg.mode, cfg.hsize, inner.height as usize) as u16).unwrap_or(0)
+            } else { 0 };
+            if gutter_w > 0 {
+                if let Some(cfg) = copy_ln {
+                    let oy = *scroll_offset;
+                    let cy = copy_cursor_row.map(|r| r as usize).unwrap_or(usize::MAX);
+                    for (r, line) in lines.iter_mut().enumerate() {
+                        let txt = crate::copy_line_numbers::gutter_text(cfg.mode, gutter_w as usize, r, oy, cy, cfg.hsize);
+                        let sty = if crate::copy_line_numbers::is_current_row(r, cy) { cfg.cur_style } else { cfg.num_style };
+                        line.spans.insert(0, Span::styled(txt, sty));
+                    }
+                }
+            }
+
             f.render_widget(Clear, inner);
             let para = Paragraph::new(Text::from(lines));
             f.render_widget(para, inner);
@@ -931,9 +961,10 @@ pub fn render_layout_json(
             if *copy_mode && *active {
                 if let (Some(cr), Some(cc)) = (copy_cursor_row, copy_cursor_col) {
                     let cr = (*cr).min(inner.height.saturating_sub(1));
-                    let cc = (*cc).min(inner.width.saturating_sub(1));
+                    // The gutter shifts content right, so the cursor shifts too.
+                    let cc = (*cc).min(inner.width.saturating_sub(1).saturating_sub(gutter_w));
                     let cy = inner.y + cr;
-                    let cx = inner.x + cc;
+                    let cx = inner.x + gutter_w + cc;
                     f.set_cursor_position((cx, cy));
                     let buf = f.buffer_mut();
                     let buf_area = buf.area;
@@ -976,7 +1007,7 @@ pub fn render_layout_json(
             if zoomed {
                 if let Some(i) = effective_sizes.iter().position(|&s| s != 0) {
                     if let Some(child) = children.get(i) {
-                        render_layout_json(f, child, area, dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars);
+                        render_layout_json(f, child, area, dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars, copy_ln);
                     }
                 }
                 return;
@@ -986,7 +1017,7 @@ pub fn render_layout_json(
 
             for (i, child) in children.iter().enumerate() {
                 if i < rects.len() {
-                    render_layout_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars);
+                    render_layout_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars, copy_ln);
                 }
             }
             let border_style = Style::default().fg(border_fg);
@@ -1478,6 +1509,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         pane_border_format: Option<String>,
         #[serde(default)]
         pane_border_lines: Option<String>,
+        /// copy-mode-line-numbers option (off/default/absolute/relative/hybrid)
+        #[serde(default)]
+        copy_mode_line_numbers: Option<String>,
+        /// Active pane scrollback size, for absolute/hybrid line numbers.
+        #[serde(default)]
+        copy_hsize: usize,
+        #[serde(default)]
+        copy_mode_line_number_style: Option<String>,
+        #[serde(default)]
+        copy_mode_current_line_number_style: Option<String>,
         /// window-status-format (short key to save bandwidth)
         #[serde(default)]
         wsf: Option<String>,
@@ -4623,7 +4664,20 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             let total_panes = if state.zoomed { 1 } else { root.count_leaves() };
             let bchars = crate::border_lines::border_chars(
                 state.pane_border_lines.as_deref().unwrap_or(crate::border_lines::DEFAULT));
-            render_layout_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed, border_status, border_format, total_panes, bchars);
+            // copy-mode-line-numbers: build the gutter render config from the
+            // option value + active pane scrollback size shipped in state.
+            let copy_ln = {
+                let mode = crate::copy_line_numbers::CopyLnMode::parse(
+                    state.copy_mode_line_numbers.as_deref().unwrap_or(crate::copy_line_numbers::DEFAULT));
+                if mode.is_active() {
+                    let num_style = state.copy_mode_line_number_style.as_deref()
+                        .map(crate::style::parse_tmux_style).unwrap_or_else(|| Style::default().fg(Color::DarkGray));
+                    let cur_style = state.copy_mode_current_line_number_style.as_deref()
+                        .map(crate::style::parse_tmux_style).unwrap_or_else(|| Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+                    Some(CopyLnRender { mode, hsize: state.copy_hsize, num_style, cur_style })
+                } else { None }
+            };
+            render_layout_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed, border_status, border_format, total_panes, bchars, copy_ln);
             fix_border_intersections(f.buffer_mut(), bchars);
             // render_json and fix_border_intersections can leave inconsistent styles
             // at intersections and along edges shared by nested splits.

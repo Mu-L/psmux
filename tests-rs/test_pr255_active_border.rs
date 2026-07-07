@@ -135,6 +135,7 @@ fn render_three_panes_does_not_color_unrelated_separator_active() {
             "", false, "off", "",
             total,
             crate::border_lines::border_chars("single"),
+            None,
         );
         crate::rendering::fix_border_intersections(f.buffer_mut(), crate::border_lines::border_chars("single"));
     }).unwrap();
@@ -201,6 +202,7 @@ fn render_two_panes_keeps_half_highlight_path() {
             "", false, "off", "",
             total,
             crate::border_lines::border_chars("single"),
+            None,
         );
         crate::rendering::fix_border_intersections(f.buffer_mut(), crate::border_lines::border_chars("single"));
     }).unwrap();
