@@ -1156,6 +1156,8 @@ pub enum CtrlReq {
         title: Option<String>,
         start_dir: Option<String>,
         detached: bool,
+        /// -E: create an empty pane (no command / process).
+        empty: bool,
         /// -P: reply with the new pane id over `resp`.
         resp: Option<mpsc::Sender<String>>,
     },

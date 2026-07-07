@@ -170,6 +170,70 @@ pub fn create_popup_pane(
     })
 }
 
+// ── Empty (childless) panes ─────────────────────────────────────────
+
+/// A stand-in `Child` for an empty pane (tmux `-E`), which has no process.
+/// `try_wait` always reports "still running" so the pane is never reaped, and
+/// `kill` is a no-op. This lets a pane exist with a live PTY but no command,
+/// exactly like a tmux empty pane, until `respawn-pane` gives it a command.
+#[derive(Debug, Clone)]
+pub struct NullChild;
+
+impl portable_pty::ChildKiller for NullChild {
+    fn kill(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> { Box::new(NullChild) }
+}
+
+impl portable_pty::Child for NullChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> { Ok(None) }
+    fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> { Ok(portable_pty::ExitStatus::with_exit_code(0)) }
+    fn process_id(&self) -> Option<u32> { None }
+    #[cfg(windows)]
+    fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> { None }
+}
+
+/// Create an EMPTY pane (tmux `-E`): a PTY-backed `Pane` with NO child process.
+/// It renders blank and ignores input until `respawn-pane` gives it a command.
+/// No reader thread is spawned since there is never any output.
+pub fn create_empty_pane(rows: u16, cols: u16, pane_id: usize) -> Option<Pane> {
+    let pty_sys = portable_pty::native_pty_system();
+    let pty_size = portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+    let pair = pty_sys.openpty(pty_size).ok()?;
+    let pty_writer = pair.master.take_writer().ok()?;
+    // Drop the slave: with no child attached the pty stays inert; we never read.
+    drop(pair.slave);
+    let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+    let epoch = std::time::Instant::now() - std::time::Duration::from_secs(2);
+    Some(Pane {
+        master: pair.master,
+        writer: pty_writer,
+        child: Box::new(NullChild),
+        term,
+        last_rows: rows,
+        last_cols: cols,
+        id: pane_id,
+        title: String::new(),
+        title_locked: false,
+        child_pid: None,
+        data_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        last_title_check: epoch,
+        last_infer_title: epoch,
+        dead: false,
+        last_text_input: None,
+        last_special_key: None,
+        vt_bridge_cache: None,
+        vti_mode_cache: None,
+        mouse_input_cache: None,
+        cursor_shape: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::pane::CURSOR_SHAPE_UNSET)),
+        bell_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cpr_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        copy_state: None,
+        pane_style: None,
+        squelch_until: None,
+        output_ring: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+    })
+}
+
 // ── Server-side popup serialization ─────────────────────────────────
 
 /// Build a JSON fragment with overlay state for the current popup.

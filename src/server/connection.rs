@@ -184,11 +184,13 @@ struct ParsedNewPane {
     start_dir: Option<String>, // -c
     detached: bool,     // -d
     print: bool,        // -P
+    empty: bool,        // -E (empty pane, no command)
 }
 
 fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
     let mut detached = false;
     let mut print = false;
+    let mut empty = false;
     let mut border = String::new();
     let mut title: Option<String> = None;
     let mut start_dir: Option<String> = None;
@@ -200,6 +202,7 @@ fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
         match args[i] {
             "-d" => { skip.insert(i); detached = true; }
             "-P" => { skip.insert(i); print = true; }
+            "-E" => { skip.insert(i); empty = true; }
             "-B" => { if let Some(v) = args.get(i+1) { border = v.trim_matches('"').to_string(); skip.insert(i); skip.insert(i+1); i += 1; } }
             "-T" => { if let Some(v) = args.get(i+1) { title = Some(v.trim_matches('"').to_string()); skip.insert(i); skip.insert(i+1); i += 1; } }
             "-c" => { if let Some(v) = args.get(i+1) { start_dir = Some(v.trim_matches('"').to_string()); skip.insert(i); skip.insert(i+1); i += 1; } }
@@ -216,7 +219,7 @@ fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
         .map(|(_, a)| *a)
         .collect::<Vec<&str>>()
         .join(" ");
-    ParsedNewPane { command, x, y, w, h, border, title, start_dir, detached, print }
+    ParsedNewPane { command, x, y, w, h, border, title, start_dir, detached, print, empty }
 }
 
 /// Handle a single TCP connection from a client.
@@ -2440,14 +2443,14 @@ match cmd {
         let p = parse_new_pane_args(&args);
         if p.print {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, resp: Some(rtx) });
+            let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: Some(rtx) });
             if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 let _ = write!(write_stream, "{}\n", text);
                 let _ = write_stream.flush();
             }
             if !persistent { break; }
         } else {
-            let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, resp: None });
+            let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: None });
         }
     }
     "display-popup" | "popup" => {
@@ -3151,11 +3154,11 @@ fn dispatch_control_command(
             let p = parse_new_pane_args(args);
             if p.print {
                 let (rtx, rrx) = mpsc::channel::<String>();
-                let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, resp: Some(rtx) });
+                let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: Some(rtx) });
                 if let Ok(text) = rrx.recv_timeout(Duration::from_secs(2)) { let _ = resp_tx.send(text); }
                 true
             } else {
-                let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, resp: None });
+                let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, empty: p.empty, resp: None });
                 false
             }
         }

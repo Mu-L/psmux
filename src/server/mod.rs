@@ -4505,7 +4505,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     state_dirty = true;
                 }
-                CtrlReq::NewFloat { command, x, y, w, h, border, title, start_dir, detached, resp } => {
+                CtrlReq::NewFloat { command, x, y, w, h, border, title, start_dir, detached, empty, resp } => {
                     // A floating pane (tmux new-pane): a PTY-backed pane rendered
                     // over the active window's tiled layout. Flags match tmux:
                     // -x/-y are SIZE, -X/-Y are POSITION. Reuses the popup pane
@@ -4526,15 +4526,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let inner_h = fh.saturating_sub(2).max(1);
                     let inner_w = fw.saturating_sub(2).max(1);
                     let pane_id = app.next_pane_id;
-                    let pane_opt = crate::popup::create_popup_pane(
-                        &command,
-                        sd.as_deref(),
-                        inner_h,
-                        inner_w,
-                        pane_id,
-                        &app.session_name,
-                        &app.environment,
-                    );
+                    // -E: an empty pane has no process (blank until respawn-pane).
+                    let pane_opt = if empty {
+                        crate::popup::create_empty_pane(inner_h, inner_w, pane_id)
+                    } else {
+                        crate::popup::create_popup_pane(
+                            &command,
+                            sd.as_deref(),
+                            inner_h,
+                            inner_w,
+                            pane_id,
+                            &app.session_name,
+                            &app.environment,
+                        )
+                    };
                     if let Some(mut pane) = pane_opt {
                         app.next_pane_id += 1;
                         let title_str = title.clone().unwrap_or_default();
