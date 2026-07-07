@@ -674,8 +674,8 @@ fn choose_tree_enters_window_chooser_mode() {
 fn choose_tree_builds_correct_tree_from_list_all_sessions() {
     // Directly test list_all_sessions_tree with known data
     let windows = vec![
-        ("editor".to_string(), 1usize, "120x30".to_string(), true),
-        ("server".to_string(), 2, "120x30".to_string(), false),
+        ("editor".to_string(), 1usize, "120x30".to_string(), true, 0usize),
+        ("server".to_string(), 2, "120x30".to_string(), false, 1usize),
     ];
     // Create a fake port file for our session so the tree builder can find it
     let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap();

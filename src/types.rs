@@ -1253,7 +1253,8 @@ pub enum CtrlReq {
     ShowWindowOptions(mpsc::Sender<String>),
     SourceFile(String),
     MoveWindow(Option<usize>),
-    SwapWindow(usize),
+    // (source display index, target display index); source None = active window
+    SwapWindow(Option<usize>, usize),
     /// link-window: (source window index, target insertion index)
     LinkWindow(Option<usize>, Option<usize>),
     UnlinkWindow,

@@ -1205,7 +1205,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         CtrlReq::PaneForwardStatus(..) => "PaneForwardStatus",
                         CtrlReq::PaneForwardKill(..) => "PaneForwardKill",
                         CtrlReq::MoveWindow(..) => "MoveWindow",
-                        CtrlReq::SwapWindow(_) => "SwapWindow",
+                        CtrlReq::SwapWindow(..) => "SwapWindow",
                         _ => "",
                     };
                     match req {
@@ -3618,13 +3618,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::SwapWindow(target) => {
-                    // target is a display index; map it to a Vec position. The two
-                    // windows trade positions while `window_indices` stays put, so
-                    // they exchange display numbers (tmux swap-window semantics).
+                CtrlReq::SwapWindow(src, target) => {
+                    // Both are display indices; map to Vec positions honoring gaps.
+                    // The two windows trade Vec positions while `window_indices`
+                    // stays put, so they exchange display numbers (tmux swap-window).
+                    let spos = match src { Some(d) => app.win_pos(d).unwrap_or(d), None => app.active_idx };
                     let tpos = app.win_pos(target).unwrap_or(target);
-                    if tpos < app.windows.len() && app.active_idx != tpos {
-                        app.windows.swap(app.active_idx, tpos);
+                    if spos != tpos && spos < app.windows.len() && tpos < app.windows.len() {
+                        app.windows.swap(spos, tpos);
                     }
                 }
                 CtrlReq::LinkWindow(src_idx_opt, dst_idx_opt) => {

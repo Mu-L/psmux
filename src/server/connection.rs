@@ -810,7 +810,8 @@ let args: Vec<&str> = {
 // Commands that should permanently change focus when used with -t
 let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp");
 // Commands that handle -t internally and should NOT get FocusWindowTemp
-let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "movep");
+let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "movep"
+    | "move-window" | "movew" | "swap-window" | "swapw");
 if let Some(wid) = target_win {
     if is_focus_cmd {
         if target_win_is_id {
@@ -2138,12 +2139,29 @@ match cmd {
         }
     }
     "move-window" | "movew" => {
-        let target = args.iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse().ok());
+        // Destination display index: the parsed -t window target (arrives via the
+        // TARGET line / `-t :N`), else a bare positional (`move-window N`). The
+        // -t value was stripped from `args`, so scan positionals for the fallback
+        // (skipping the `-s` source value). Server handler honors gapped indices.
+        let target = target_win.or_else(|| {
+            args.iter().enumerate()
+                .filter(|(i, a)| !a.starts_with('-') && (*i == 0 || args[*i - 1] != "-s"))
+                .find_map(|(_, a)| a.trim_start_matches(':').parse::<usize>().ok())
+        });
         let _ = tx.send(CtrlReq::MoveWindow(target));
     }
     "swap-window" | "swapw" => {
-        if let Some(target) = args.iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse().ok()) {
-            let _ = tx.send(CtrlReq::SwapWindow(target));
+        // Source: `-s <win>` (bare or ':'-prefixed); None = active window.
+        let src = args.windows(2).find(|w| w[0] == "-s")
+            .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
+        // Destination: parsed -t window target, else bare positional.
+        let target = target_win.or_else(|| {
+            args.iter().enumerate()
+                .filter(|(i, a)| !a.starts_with('-') && (*i == 0 || args[*i - 1] != "-s"))
+                .find_map(|(_, a)| a.trim_start_matches(':').parse::<usize>().ok())
+        });
+        if let Some(t) = target {
+            let _ = tx.send(CtrlReq::SwapWindow(src, t));
         }
     }
     "link-window" | "linkw" => {

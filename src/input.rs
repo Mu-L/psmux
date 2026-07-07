@@ -608,10 +608,13 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     if let Mode::WindowChooser { selected: s, ref tree } = &app.mode {
                         let entry = &tree[*s];
                         if entry.is_current_session {
-                            // Same session: switch window directly
+                            // Same session: switch window directly. window_index is a
+                            // DISPLAY index (honors gaps); map it to a Vec position.
                             if let Some(wi) = entry.window_index {
-                                app.last_window_idx = app.active_idx;
-                                app.active_idx = wi;
+                                if let Some(pos) = app.win_pos(wi) {
+                                    app.last_window_idx = app.active_idx;
+                                    app.active_idx = pos;
+                                }
                             }
                         } else {
                             // Different session: set env and trigger switch

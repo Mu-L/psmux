@@ -84,13 +84,13 @@ pub fn infer_title_from_prompt(screen: &vt100::Screen, rows: u16, cols: u16) -> 
 // resolve_last_session_name and resolve_default_session_name are in session.rs
 
 #[derive(Serialize, Deserialize)]
-pub struct WinInfo { pub id: usize, pub name: String, pub active: bool, #[serde(default)] pub activity: bool, #[serde(default)] pub tab_text: String }
+pub struct WinInfo { pub id: usize, pub name: String, pub active: bool, #[serde(default)] pub activity: bool, #[serde(default)] pub tab_text: String, #[serde(default)] pub idx: usize }
 
 #[derive(Serialize, Deserialize)]
 pub struct PaneInfo { pub id: usize, pub title: String }
 
 #[derive(Serialize, Deserialize)]
-pub struct WinTree { pub id: usize, pub name: String, pub active: bool, pub panes: Vec<PaneInfo> }
+pub struct WinTree { pub id: usize, pub name: String, pub active: bool, pub panes: Vec<PaneInfo>, #[serde(default)] pub idx: usize }
 
 /// Lightweight layout description for cross-session preview rendering
 /// (issue #257). Mirrors the structural part of `LayoutJson` without any
@@ -107,7 +107,7 @@ pub enum LayoutSimple {
 
 pub fn list_windows_json(app: &AppState) -> io::Result<String> {
     let mut v: Vec<WinInfo> = Vec::new();
-    for (i, w) in app.windows.iter().enumerate() { v.push(WinInfo { id: w.id, name: w.name.clone(), active: i == app.active_idx, activity: w.activity_flag, tab_text: String::new() }); }
+    for (i, w) in app.windows.iter().enumerate() { v.push(WinInfo { id: w.id, name: w.name.clone(), active: i == app.active_idx, activity: w.activity_flag, tab_text: String::new(), idx: app.win_display_index(i) }); }
     let s = serde_json::to_string(&v).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("json error: {e}")))?;
     Ok(s)
 }
@@ -145,7 +145,7 @@ pub fn list_tree_json(app: &AppState) -> io::Result<String> {
     for (i, w) in app.windows.iter().enumerate() {
         let mut panes = Vec::new();
         collect_panes(&w.root, &mut panes);
-        v.push(WinTree { id: w.id, name: w.name.clone(), active: i == app.active_idx, panes });
+        v.push(WinTree { id: w.id, name: w.name.clone(), active: i == app.active_idx, panes, idx: app.win_display_index(i) });
     }
     let s = serde_json::to_string(&v).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("json error: {e}")))?;
     Ok(s)

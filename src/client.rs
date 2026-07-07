@@ -1390,7 +1390,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut srv_customize_options: Vec<CustomizeOption> = Vec::new();
 
     #[derive(serde::Deserialize, Default)]
-    struct WinStatus { id: usize, name: String, active: bool, #[serde(default)] activity: bool, #[serde(default)] tab_text: String }
+    struct WinStatus { id: usize, name: String, active: bool, #[serde(default)] activity: bool, #[serde(default)] tab_text: String, #[serde(default)] idx: usize }
     
     fn default_base_index() -> usize { 1 }
     fn default_prediction_dimming() -> bool { dim_predictions_enabled() }
@@ -1675,9 +1675,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Client-side tab position tracking for accurate mouse click detection.
     // The server's update_tab_positions() uses a different algorithm than what
     // the client actually renders, so we track positions at render time.
-    let mut client_tab_positions: Vec<(usize, u16, u16)> = Vec::new(); // (window_array_idx, x_start, x_end)
+    let mut client_tab_positions: Vec<(usize, u16, u16)> = Vec::new(); // (window_display_idx, x_start, x_end)
     let mut client_status_row: u16 = u16::MAX; // row where status bar tabs are rendered
-    let mut client_base_index: usize = 0; // base-index for window numbering
     let mut client_pane_rects: Vec<(usize, Rect)> = Vec::new();
     let mut client_borders: Vec<(Vec<usize>, String, usize, u16, u16, Vec<u16>, Rect)> = Vec::new();
     let mut client_content_area: Rect = Rect::default();
@@ -2601,7 +2600,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 // Query ALL sessions (like tmux choose-tree)
                                 let dir = format!("{}\\.psmux", home);
                                 if let Ok(entries) = std::fs::read_dir(&dir) {
-                                    let mut sessions: Vec<(String, Vec<(usize, String, bool, Vec<(usize, String)>)>)> = Vec::new();
+                                    let mut sessions: Vec<(String, Vec<(usize, String, bool, Vec<(usize, String)>, usize)>)> = Vec::new();
                                     for e in entries.flatten() {
                                         if let Some(fname) = e.file_name().to_str().map(|s| s.to_string()) {
                                             if let Some((base, ext)) = fname.rsplit_once('.') {
@@ -2624,7 +2623,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                                                     let mut win_data = Vec::new();
                                                                     for w in &wins {
                                                                         let panes: Vec<(usize, String)> = w.panes.iter().map(|p| (p.id, p.title.clone())).collect();
-                                                                        win_data.push((w.id, w.name.clone(), w.active, panes));
+                                                                        win_data.push((w.id, w.name.clone(), w.active, panes, w.idx));
                                                                     }
                                                                     sessions.push((base.to_string(), win_data));
                                                                 }
@@ -2653,11 +2652,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                             format!("{}: {} windows{}", sess_name, nw, attached),
                                             sess_name.clone()));
                                         if is_current {
-                                            for (wi, (wid, wname, active, panes)) in wins.iter().enumerate() {
+                                            for (wid, wname, active, panes, disp) in wins.iter() {
                                                 let marker = if *active { "*" } else { "" };
                                                 if *active { active_tree_row = Some(tree_entries.len()); }
                                                 tree_entries.push((true, *wid, 0,
-                                                    format!("  {}: {}{} ({} panes)", wi, wname, marker, panes.len()),
+                                                    format!("  {}: {}{} ({} panes)", disp, wname, marker, panes.len()),
                                                     sess_name.clone()));
                                                 for (pid, ptitle) in panes {
                                                     tree_entries.push((false, *wid, *pid,
@@ -2666,10 +2665,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                                 }
                                             }
                                         } else {
-                                            for (wi, (wid, wname, active, panes)) in wins.iter().enumerate() {
+                                            for (wid, wname, active, panes, disp) in wins.iter() {
                                                 let marker = if *active { "*" } else { "" };
                                                 tree_entries.push((true, *wid, 0,
-                                                    format!("  {}: {}{} ({} panes)", wi, wname, marker, panes.len()),
+                                                    format!("  {}: {}{} ({} panes)", disp, wname, marker, panes.len()),
                                                     sess_name.clone()));
                                             }
                                         }
@@ -3682,8 +3681,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         }
                                     }
                                     if let Some(idx) = clicked_tab {
-                                        let display_idx = idx + client_base_index;
-                                        cmd_batch.push(format!("select-window -t :{}\n", display_idx));
+                                        // client_tab_positions now stores the true display
+                                        // index (honors gaps from renumber-windows off).
+                                        cmd_batch.push(format!("select-window -t :{}\n", idx));
                                     }
                                 } else {
                                     // Border detection
@@ -4339,7 +4339,6 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         }
         last_tree = state.tree;
         let base_index = state.base_index;
-        client_base_index = base_index;
         client_copy_mode = active_pane_in_copy_mode(&root);
         client_pwsh_selection = state.pwsh_mouse_selection;
         client_mouse_selection = state.mouse_selection;
@@ -5289,7 +5288,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 let tab_start = tab_cursor;
                 let tab_w: u16 = parsed.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref()) as u16).sum();
                 tab_cursor += tab_w;
-                tab_rel_positions.push((i, tab_start, tab_cursor));
+                tab_rel_positions.push((w.idx, tab_start, tab_cursor));
                 tab_spans_all.extend(parsed);
             }
 
@@ -5415,7 +5414,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 client_tab_positions = layout.ranges.iter().filter_map(|(rt, s, e)| {
                     match rt {
                         crate::style::StatusRangeType::Window(idx) => {
-                            Some((*idx, *s + status_chunk.x, *e + status_chunk.x))
+                            Some((*idx + base_index, *s + status_chunk.x, *e + status_chunk.x))
                         }
                     }
                 }).collect();

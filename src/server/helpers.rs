@@ -88,6 +88,7 @@ pub(crate) fn list_windows_json_with_tabs(app: &AppState) -> io::Result<String> 
             active: is_active,
             activity: w.activity_flag,
             tab_text: tab,
+            idx: app.win_display_index(i),
         });
     }
     serde_json::to_string(&v)

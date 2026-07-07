@@ -465,10 +465,10 @@ fn generate_list_commands() -> String {
 
 /// Build the choose-tree data for the WindowChooser mode.
 pub fn build_choose_tree(app: &AppState) -> Vec<crate::session::TreeEntry> {
-    let current_windows: Vec<(String, usize, String, bool)> = app.windows.iter().enumerate().map(|(i, w)| {
+    let current_windows: Vec<(String, usize, String, bool, usize)> = app.windows.iter().enumerate().map(|(i, w)| {
         let panes = crate::tree::count_panes(&w.root);
         let size = format!("{}x{}", app.last_window_area.width, app.last_window_area.height);
-        (w.name.clone(), panes, size, i == app.active_idx)
+        (w.name.clone(), panes, size, i == app.active_idx, app.win_display_index(i))
     }).collect();
     list_all_sessions_tree(&app.session_name, &current_windows)
 }
@@ -1911,9 +1911,13 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                let target = parts[1..].iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse().ok());
+                // Destination: `-t <win>` (accept ':'-prefixed) or bare positional.
+                let target = parts.windows(2).find(|w| w[0] == "-t")
+                    .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok())
+                    .or_else(|| parts[1..].iter()
+                        .filter(|a| !a.starts_with('-'))
+                        .find_map(|s| s.trim_start_matches(':').parse::<usize>().ok()));
                 if let Some(t) = target {
-                    let t: usize = t;
                     if app.window_indices_valid() {
                         app.move_active_window_to_index(t);
                     } else if t < app.windows.len() && app.active_idx != t {
@@ -1929,10 +1933,18 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                if let Some(target) = parts[1..].iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse::<usize>().ok()) {
-                    let tpos = app.win_pos(target).unwrap_or(target);
-                    if tpos < app.windows.len() && app.active_idx != tpos {
-                        app.windows.swap(app.active_idx, tpos);
+                let src = parts.windows(2).find(|w| w[0] == "-s")
+                    .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
+                let target = parts.windows(2).find(|w| w[0] == "-t")
+                    .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok())
+                    .or_else(|| parts[1..].iter()
+                        .filter(|a| !a.starts_with('-'))
+                        .find_map(|s| s.trim_start_matches(':').parse::<usize>().ok()));
+                if let Some(t) = target {
+                    let spos = match src { Some(d) => app.win_pos(d).unwrap_or(d), None => app.active_idx };
+                    let tpos = app.win_pos(t).unwrap_or(t);
+                    if spos != tpos && spos < app.windows.len() && tpos < app.windows.len() {
+                        app.windows.swap(spos, tpos);
                     }
                 }
             }

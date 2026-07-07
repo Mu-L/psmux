@@ -223,8 +223,19 @@ fn run_main() -> io::Result<()> {
     // PSMUX_TARGET_FULL stores the full target (session:window.pane) for the server
     if let Some(pos) = args.iter().position(|a| a == "-t") {
         if let Some(target) = args.get(pos + 1) {
+            // move-window/swap-window: a bare numeric -t is a WINDOW index (tmux
+            // target-window semantics), not a session. Coerce "N" -> ":N" so the
+            // generic parser treats it as a window and routing stays on the current
+            // server. Every other command keeps bare = session.
+            let is_window_move = args.iter().any(|a|
+                a == "move-window" || a == "movew" || a == "swap-window" || a == "swapw");
+            let target: String = if is_window_move && target.parse::<usize>().is_ok() {
+                format!(":{}", target)
+            } else {
+                target.to_string()
+            };
             // Extract just the session name for port file lookup
-            let parsed_target = crate::cli::parse_target(target);
+            let parsed_target = crate::cli::parse_target(&target);
             let has_explicit_session = parsed_target.session.is_some();
             let session = parsed_target.session.unwrap_or_else(|| "default".to_string());
             // Store the full target for the server to parse, with $N resolved
@@ -3057,6 +3068,7 @@ fn run_main() -> io::Result<()> {
                                 i += 1;
                             }
                         }
+                        s if !s.starts_with('-') => { cmd.push_str(&format!(" {}", s)); }
                         _ => {}
                     }
                     i += 1;
@@ -3084,6 +3096,7 @@ fn run_main() -> io::Result<()> {
                                 i += 1;
                             }
                         }
+                        s if !s.starts_with('-') => { cmd.push_str(&format!(" {}", s)); }
                         _ => {}
                     }
                     i += 1;

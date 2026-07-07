@@ -1029,7 +1029,7 @@ pub struct TreeEntry {
 
 /// List all running sessions and their windows for choose-tree display.
 /// Queries each running server via its TCP port for window list info.
-pub fn list_all_sessions_tree(current_session: &str, current_windows: &[(String, usize, String, bool)]) -> Vec<TreeEntry> {
+pub fn list_all_sessions_tree(current_session: &str, current_windows: &[(String, usize, String, bool, usize)]) -> Vec<TreeEntry> {
     let home = match env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
         Ok(h) => h,
         Err(_) => return vec![],
@@ -1077,12 +1077,12 @@ pub fn list_all_sessions_tree(current_session: &str, current_windows: &[(String,
 
         if is_current {
             // Use local data for the current session (fast, no IPC)
-            for (i, (wname, panes, size, is_active)) in current_windows.iter().enumerate() {
+            for (wname, panes, size, is_active, disp_idx) in current_windows.iter() {
                 tree.push(TreeEntry {
                     session_name: name.clone(),
                     session_port: *port,
                     is_session_header: false,
-                    window_index: Some(i),
+                    window_index: Some(*disp_idx),
                     window_name: wname.clone(),
                     window_panes: *panes,
                     window_size: size.clone(),
