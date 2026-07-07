@@ -1337,6 +1337,7 @@ fn run_main() -> io::Result<()> {
                 let mut format_str: Option<String> = None;
                 let mut start_dir: Option<String> = None;
                 let mut title_arg: Option<String> = None;
+                let mut empty_flag = false;
                 let mut nw_positional: Vec<String> = Vec::new();
                 {
                     let mut i = 1;
@@ -1352,6 +1353,7 @@ fn run_main() -> io::Result<()> {
                             "-t" | "-e" | "-S" => { i += 1; /* skip value */ }
                             "-d" => { detached = true; }
                             "-P" => { print_info = true; }
+                            "-E" => { empty_flag = true; }
                             "-a" | "-D" | "-k" => { /* ignored for compatibility */ }
                             _ if a.starts_with('-') => { /* unknown flag, skip */ }
                             _ => { nw_positional.extend(cmd_args[i..].iter().map(|s| s.to_string())); break; }
@@ -1379,6 +1381,7 @@ fn run_main() -> io::Result<()> {
                 let mut cmd_line = "new-window".to_string();
                 if detached { cmd_line.push_str(" -d"); }
                 if print_info { cmd_line.push_str(" -P"); }
+                if empty_flag { cmd_line.push_str(" -E"); }
                 if let Some(ref fmt) = format_str {
                     cmd_line.push_str(&format!(" -F \"{}\"", fmt.replace("\"", "\\\"")));
                 }

@@ -44,11 +44,23 @@ Start-Sleep -Seconds 2
 $ds2 = DS
 Check "retained" ($ds2 -match '"floats"\s*:\s*\[\s*\{') "empty pane retained (not reaped)"
 
-# And the whole server remains responsive to a normal command afterwards.
+# new-window -E: a new window whose tiled pane is empty (blank).
+& $PSMUX new-window -E -t $S 2>&1 | Out-Null
+Start-Sleep -Milliseconds 600
+$capNW = (& $PSMUX capture-pane -p -t $S 2>&1) -join ""
+Check "new-window-E-blank" (($capNW.Trim()).Length -eq 0) "new-window -E pane is blank ('$($capNW.Trim())')"
+
+# respawn-pane -E: a running pane, once respawned empty, goes blank.
 & $PSMUX new-window -t $S 2>&1 | Out-Null
-Start-Sleep -Milliseconds 400
-$wins = (& $PSMUX list-windows -t $S 2>&1 | Measure-Object -Line).Lines
-Check "responsive" ($wins -ge 2) "server still handles new-window ($wins windows)"
+Start-Sleep -Milliseconds 800
+& $PSMUX send-keys -t $S "echo RESPAWNME" Enter 2>&1 | Out-Null
+Start-Sleep -Milliseconds 1000
+$capBefore = (& $PSMUX capture-pane -p -t $S 2>&1) -join "`n"
+Check "respawn-before" ($capBefore -match "RESPAWNME") "pane shows output before respawn"
+& $PSMUX respawn-pane -E -t $S 2>&1 | Out-Null
+Start-Sleep -Milliseconds 800
+$capAfter = (& $PSMUX capture-pane -p -t $S 2>&1) -join "`n"
+Check "respawn-pane-E-blank" (-not ($capAfter -match "RESPAWNME")) "respawn-pane -E cleared the pane to empty"
 
 Stop-All
 Write-Host ""

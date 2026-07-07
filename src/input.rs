@@ -156,7 +156,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 }
                 KeyCode::Char('c') => {
                     let pty_system = native_pty_system();
-                    create_window(&*pty_system, app, None, None)?;
+                    create_window(&*pty_system, app, None, None, false)?;
                     true
                 }
                 KeyCode::Char('n') => {

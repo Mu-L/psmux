@@ -845,7 +845,7 @@ pub fn execute_action(app: &mut AppState, action: &Action) -> io::Result<bool> {
         }
         Action::NewWindow => {
             let pty_system = portable_pty::native_pty_system();
-            create_window(&*pty_system, app, None, None)?;
+            create_window(&*pty_system, app, None, None, false)?;
         }
         Action::SplitHorizontal => {
             split_active(app, LayoutKind::Horizontal)?;
@@ -928,7 +928,7 @@ pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
         // execute_command_prompt() is only reached in embedded mode.
         "new-window" | "neww" => {
             let pty_system = portable_pty::native_pty_system();
-            create_window(&*pty_system, app, None, None)?;
+            create_window(&*pty_system, app, None, None, false)?;
         }
         "split-window" | "splitw" | "split-pane" | "splitp" => {
             let kind = if parts.iter().any(|p| *p == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
@@ -1339,13 +1339,14 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                let kill = parts.iter().any(|p| *p == "-k");
+                let empty = parts.iter().any(|p| *p == "-E");
+                let kill = parts.iter().any(|p| *p == "-k") || empty;
                 // Honor `-- <shell-command>` (issue #399).
                 let command = parts.iter().position(|p| *p == "--")
                     .map(|i| parts[i + 1..].join(" "))
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
-                crate::window_ops::respawn_active_pane(app, None, None, kill, command.as_deref())?;
+                crate::window_ops::respawn_active_pane(app, None, None, kill, command.as_deref(), empty)?;
             }
         }
         "toggle-sync" => {
@@ -1963,7 +1964,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     let src_id = app.windows[src].id;
                     let src_name = app.windows[src].name.clone();
                     let pty_system = portable_pty::native_pty_system();
-                    if let Ok(()) = crate::pane::create_window(&*pty_system, app, None, None) {
+                    if let Ok(()) = crate::pane::create_window(&*pty_system, app, None, None, false) {
                         let new_idx = app.windows.len() - 1;
                         app.windows[new_idx].linked_from = Some(src_id);
                         app.windows[new_idx].name = src_name;

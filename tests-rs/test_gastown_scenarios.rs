@@ -578,9 +578,9 @@ fn auto_respawn_hook_full_chain_verify() {
 fn ctrl_req_respawn_pane_carries_kill_flag() {
     // Verify CtrlReq::RespawnPane enum variant stores workdir, kill, and command.
     // (issue #399: added the optional `-- <command>` field.)
-    let req_with_kill = CtrlReq::RespawnPane(Some("/tmp".to_string()), true, None);
+    let req_with_kill = CtrlReq::RespawnPane(Some("/tmp".to_string()), true, None, false);
     match req_with_kill {
-        CtrlReq::RespawnPane(wd, kill, cmd) => {
+        CtrlReq::RespawnPane(wd, kill, cmd, _) => {
             assert_eq!(wd.as_deref(), Some("/tmp"));
             assert!(kill, "kill flag must be true");
             assert!(cmd.is_none(), "no -- command in this case");
@@ -589,9 +589,9 @@ fn ctrl_req_respawn_pane_carries_kill_flag() {
     }
 
     // issue #399: a teammate launch delivers the command via `respawn-pane -- <cmd>`.
-    let req_with_cmd = CtrlReq::RespawnPane(None, true, Some("claude --agent-id Bob".to_string()));
+    let req_with_cmd = CtrlReq::RespawnPane(None, true, Some("claude --agent-id Bob".to_string()), false);
     match req_with_cmd {
-        CtrlReq::RespawnPane(wd, kill, cmd) => {
+        CtrlReq::RespawnPane(wd, kill, cmd, _) => {
             assert!(wd.is_none());
             assert!(kill);
             assert_eq!(cmd.as_deref(), Some("claude --agent-id Bob"), "-- command must be carried");
@@ -599,9 +599,9 @@ fn ctrl_req_respawn_pane_carries_kill_flag() {
         _ => panic!("wrong variant"),
     }
 
-    let req_without_kill = CtrlReq::RespawnPane(None, false, None);
+    let req_without_kill = CtrlReq::RespawnPane(None, false, None, false);
     match req_without_kill {
-        CtrlReq::RespawnPane(wd, kill, cmd) => {
+        CtrlReq::RespawnPane(wd, kill, cmd, _) => {
             assert!(wd.is_none());
             assert!(!kill, "kill flag must be false");
             assert!(cmd.is_none());

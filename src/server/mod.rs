@@ -925,7 +925,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let create_result = if let Some(ref raw_args) = raw_command {
         create_window_raw(&*pty_system, &mut app, raw_args)
     } else {
-        create_window(&*pty_system, &mut app, initial_command.as_deref(), None)
+        create_window(&*pty_system, &mut app, initial_command.as_deref(), None, false)
     };
     if let Err(e) = create_result {
         // Issue #167: when the server fails to spawn its initial pane the
@@ -1240,7 +1240,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         _ => "",
                     };
                     match req {
-                CtrlReq::NewWindow(cmd, name, detached, start_dir, title) => {
+                CtrlReq::NewWindow(cmd, name, detached, start_dir, title, empty) => {
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let prev_idx = app.active_idx;
                     // Expand format variables like #{pane_current_path} (#111)
@@ -1250,7 +1250,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Hide the warm pane when an explicit start dir is requested
                     // so create_window spawns a fresh shell in the correct CWD.
                     let stashed_warm = if start_dir.is_some() { app.warm_pane.take() } else { None };
-                    if let Err(e) = create_window(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref()) {
+                    if let Err(e) = create_window(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref(), empty) {
                         eprintln!("psmux: new-window error: {e}");
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
@@ -1275,14 +1275,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
-                CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp, title) => {
+                CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp, title, empty) => {
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let prev_idx = app.active_idx;
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
                     let stashed_warm = if start_dir.is_some() { app.warm_pane.take() } else { None };
-                    if let Err(e) = create_window(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref()) {
+                    if let Err(e) = create_window(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref(), empty) {
                         eprintln!("psmux: new-window error: {e}");
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
@@ -3435,8 +3435,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = fp.child.kill();
                     }
                 }
-                CtrlReq::RespawnPane(workdir, kill, command) => {
-                    respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), kill, command.as_deref())?;
+                CtrlReq::RespawnPane(workdir, kill, command, empty) => {
+                    respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), kill, command.as_deref(), empty)?;
                     hook_event = Some("after-respawn-pane");
                 }
                 CtrlReq::BindKey(table_name, key, command, repeat) => {
@@ -3803,7 +3803,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let src_id = app.windows[src].id;
                         let src_name = app.windows[src].name.clone();
                         let pty_system = portable_pty::native_pty_system();
-                        match crate::pane::create_window(&*pty_system, &mut app, None, None) {
+                        match crate::pane::create_window(&*pty_system, &mut app, None, None, false) {
                             Ok(()) => {
                                 let new_idx = app.windows.len() - 1;
                                 app.windows[new_idx].linked_from = Some(src_id);
@@ -4771,7 +4771,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::RespawnWindow => {
                     // Kill all panes in the active window and respawn
-                    respawn_active_pane(&mut app, Some(&*pty_system), None, true, None)?;
+                    respawn_active_pane(&mut app, Some(&*pty_system), None, true, None, false)?;
                     state_dirty = true;
                 }
                 CtrlReq::PopupInput(data) => {

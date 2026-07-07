@@ -918,19 +918,20 @@ match cmd {
         let print_info = args.iter().any(|a| *a == "-P");
         let format_str: Option<String> = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
         let title: Option<String> = extract_flag_value(&args, "-T").map(|s| s.trim_matches('"').to_string());
+        let empty = args.iter().any(|a| *a == "-E");
         let cmd_str: Option<String> = args.iter()
             .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
             .map(|s| s.trim_matches('"').to_string());
         if print_info {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title));
+            let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title, empty));
             if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 let _ = write!(write_stream, "{}\n", text);
                 let _ = write_stream.flush();
             }
             if !persistent { break; }
         } else {
-            let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir, title));
+            let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir, title, empty));
         }
     }
     "split-window" | "splitw" | "split-pane" | "splitp" => {
@@ -1767,7 +1768,9 @@ match cmd {
     }
     "respawn-pane" | "respawnp" => {
         let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
-        let kill = args.iter().any(|a| *a == "-k");
+        let empty = args.iter().any(|a| *a == "-E");
+        // -E implies replacing the running pane, so it also kills it.
+        let kill = args.iter().any(|a| *a == "-k") || empty;
         // Honor `-- <shell-command>` (issue #399): Claude Code agent-teams
         // delivers the teammate launch via `respawn-pane -k -t %N -- "<cmd>"`.
         // Without this the pane is respawned with the default shell and the
@@ -1776,7 +1779,7 @@ match cmd {
             .map(|i| args[i + 1..].join(" "))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command));
+        let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command, empty));
     }
     // ── Cross-session pane forwarding commands ──────────────────────
     "pane-forward-extract" => {
@@ -3169,6 +3172,7 @@ fn dispatch_control_command(
             let print_info = crate::cli::has_short_flag(&args, 'P');
             let format_str = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
             let title = extract_flag_value(&args, "-T").map(|s| s.trim_matches('"').to_string());
+            let empty = args.iter().any(|a| *a == "-E");
             // Skip arg if it's a flag, the value of a flag, or a flag-cluster
             // value (e.g. the format string after `-PF`).
             let mut skip: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -3192,13 +3196,13 @@ fn dispatch_control_command(
                 .map(|(_, s)| s.trim_matches('"').to_string());
             if print_info {
                 let (rtx, rrx) = mpsc::channel::<String>();
-                let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title));
+                let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title, empty));
                 if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                     let _ = resp_tx.send(text);
                 }
                 true
             } else {
-                let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir, title));
+                let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir, title, empty));
                 let _ = resp_tx.send(String::new());
                 true
             }
@@ -3815,13 +3819,14 @@ fn dispatch_control_command(
         }
         "respawn-pane" | "respawnp" => {
             let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
-            let kill = args.iter().any(|a| *a == "-k");
+            let empty = args.iter().any(|a| *a == "-E");
+            let kill = args.iter().any(|a| *a == "-k") || empty;
             // Honor `-- <shell-command>` (issue #399): teammate launch delivery.
             let command = args.iter().position(|a| *a == "--")
                 .map(|i| args[i + 1..].join(" "))
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command));
+            let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command, empty));
             let _ = resp_tx.send(String::new());
             true
         }

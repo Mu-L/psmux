@@ -71,7 +71,23 @@ fn default_shell_name(command: Option<&str>, configured_shell: Option<&str>) -> 
     }
 }
 
-pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, command: Option<&str>, start_dir: Option<&str>) -> io::Result<()> {
+pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, command: Option<&str>, start_dir: Option<&str>, empty: bool) -> io::Result<()> {
+    // ── Empty window (tmux new-window -E): a new window whose single pane has
+    // no command/process. It renders blank until respawn-pane gives it one. ──
+    if empty {
+        let area = app.last_window_area;
+        let rows = (if area.height > 1 { area.height } else { 30 }).max(MIN_PANE_DIM);
+        let cols = (if area.width > 1 { area.width } else { 120 }).max(MIN_PANE_DIM);
+        let pane_id = app.next_pane_id;
+        if let Some(pane) = crate::popup::create_empty_pane(rows, cols, pane_id) {
+            app.next_pane_id += 1;
+            app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: hostname_cached(), id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
+            app.next_win_id += 1;
+            app.active_idx = app.windows.len() - 1;
+            app.on_window_appended();
+        }
+        return Ok(());
+    }
     // ── Fast path: use pre-spawned warm pane when creating a default shell ──
     // The warm pane has its shell already loaded (~470ms for pwsh), so the
     // prompt appears instantly — matching wezterm's "instant tab" feel.

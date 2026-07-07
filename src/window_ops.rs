@@ -1596,7 +1596,7 @@ pub fn break_pane_to_window(app: &mut AppState) {
     }
 }
 
-pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn portable_pty::PtySystem>, workdir: Option<&str>, kill: bool, command: Option<&str>) -> io::Result<()> {
+pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn portable_pty::PtySystem>, workdir: Option<&str>, kill: bool, command: Option<&str>, empty: bool) -> io::Result<()> {
     // tmux semantics: without -k, respawn only works on dead panes.
     // With -k, kill the running process first and respawn.
     {
@@ -1616,6 +1616,20 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
                 pane.dead = true;
             }
         }
+    }
+
+    // -E: respawn as an EMPTY pane (no command). Replace the pane in place with
+    // a childless empty pane, keeping its id/title/size, and return.
+    if empty {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
+            let (r, c, id, title) = (pane.last_rows, pane.last_cols, pane.id, pane.title.clone());
+            if let Some(mut ep) = crate::popup::create_empty_pane(r.max(1), c.max(1), id) {
+                ep.title = title;
+                *pane = ep;
+            }
+        }
+        return Ok(());
     }
 
     // Reuse provided PTY system or create one as fallback
