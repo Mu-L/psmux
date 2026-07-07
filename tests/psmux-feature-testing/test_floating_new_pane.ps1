@@ -32,24 +32,25 @@ Start-Sleep -Seconds 2
 $before = (& $PSMUX dump-state 2>&1) -join ""
 Check "baseline" (-not ($before -match '"floats"\s*:\s*\[\s*\{')) "no float before new-pane"
 
-# Create a floating pane at an explicit position/size with a double border.
-& $PSMUX new-pane -x 8 -y 4 -w 30 -h 10 -B double -T FLTTITLE 2>&1 | Out-Null
+# tmux flags: -X/-Y = position, -x/-y = size, -B = border, -T = title, -P = print id.
+$pid1 = (& $PSMUX new-pane -X 8 -Y 4 -x 30 -y 10 -B double -T FLTTITLE -P 2>&1 | ForEach-Object { ($_ -replace "\x1b\[[0-9;]*m","").Trim() }) -join ""
 Start-Sleep -Milliseconds 800
+Check "print-id" ($pid1 -match '^%\d+$') "new-pane -P returned pane id '$pid1'"
 
 $after = (& $PSMUX dump-state 2>&1) -join ""
 Check "float-present" ($after -match '"floats"\s*:\s*\[\s*\{') "floats array present in state"
-Check "float-x" ($after -match '"x"\s*:\s*8') "float x=8 in state"
-Check "float-y" ($after -match '"y"\s*:\s*4') "float y=4 in state"
-Check "float-w" ($after -match '"w"\s*:\s*30') "float w=30 in state"
+Check "float-x(pos)" ($after -match '"x"\s*:\s*8') "float x-position=8 (from -X)"
+Check "float-y(pos)" ($after -match '"y"\s*:\s*4') "float y-position=4 (from -Y)"
+Check "float-w(size)" ($after -match '"w"\s*:\s*30') "float width=30 (from -x)"
+Check "float-h(size)" ($after -match '"h"\s*:\s*10') "float height=10 (from -y)"
 Check "float-border" ($after -match '"border"\s*:\s*"double"') "border=double in state"
 Check "float-title" ($after -match 'FLTTITLE') "title shipped in state"
 
-# Position keyword form also creates a float.
-& $PSMUX new-pane -P top-right -w 20 -h 6 2>&1 | Out-Null
+# Numeric position: -X 80 anchors the top-right corner (100-wide window, 20-wide float).
+& $PSMUX new-pane -X 80 -Y 0 -x 20 -y 6 2>&1 | Out-Null
 Start-Sleep -Milliseconds 600
 $after2 = (& $PSMUX dump-state 2>&1) -join ""
-# top-right of a 100-wide window with a 20-wide float => x = 80.
-Check "position-keyword" ($after2 -match '"x"\s*:\s*80') "top-right float anchored to x=80"
+Check "position-numeric" ($after2 -match '"x"\s*:\s*80') "float anchored to x=80 via -X"
 
 Stop-All
 

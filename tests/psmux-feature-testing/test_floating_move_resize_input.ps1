@@ -1,8 +1,9 @@
-# Feature: floating panes phases 3-4 - move / resize / input focus / kill.
+# Feature: floating panes - resize / input focus / kill (tmux-accurate flags).
 #
-# Drives a real psmux server and proves, via dump-state, that:
-#  - new-pane -R moves the focused float right (x increases)
-#  - resize-pane -R grows the focused float (w increases)
+# tmux moves floats by MOUSE only; resize is via resize-pane. This proves, via
+# dump-state, that:
+#  - new-pane -X/-Y (position) + -x/-y (size) creates the float at that geometry
+#  - resize-pane -R grows the focused float; resize-pane -x sets absolute width
 #  - send-keys typed into the focused float echoes into the float's content
 #  - kill-pane closes the focused float
 #
@@ -35,29 +36,25 @@ Stop-All
 & $PSMUX new-session -d -s $S -x 100 -y 30 2>&1 | Out-Null
 Start-Sleep -Seconds 2
 
-# Create a focused float at x=10.
-& $PSMUX new-pane -x 10 -y 5 -w 30 -h 10 2>&1 | Out-Null
+# Create a focused float: -X/-Y position, -x/-y size (tmux semantics).
+& $PSMUX new-pane -X 10 -Y 5 -x 30 -y 10 2>&1 | Out-Null
 Start-Sleep -Milliseconds 700
 $x0 = FloatField (DS) "x"
-Check "create" ($x0 -eq 10) "float created at x=$x0"
+$w0 = FloatField (DS) "w"
+Check "create" ($x0 -eq 10 -and $w0 -eq 30) "float at x=$x0, w=$w0"
 
-# Move right by 6 -> x should be 16.
-& $PSMUX new-pane -R 6 2>&1 | Out-Null
-Start-Sleep -Milliseconds 400
-$x1 = FloatField (DS) "x"
-Check "move-right" ($x1 -eq 16) "x moved $x0 -> $x1 (expected 16)"
-
-# Move up by 3 -> y should be 2.
-& $PSMUX new-pane -U 3 2>&1 | Out-Null
-Start-Sleep -Milliseconds 400
-$y1 = FloatField (DS) "y"
-Check "move-up" ($y1 -eq 2) "y moved 5 -> $y1 (expected 2)"
-
-# Resize: grow width by 8 -> w 30 -> 38.
+# tmux moves floats by MOUSE only; resize is via resize-pane. Grow width by 8
+# (resize-pane -R) -> w 30 -> 38.
 & $PSMUX resize-pane -R 8 2>&1 | Out-Null
 Start-Sleep -Milliseconds 400
 $w1 = FloatField (DS) "w"
 Check "resize-grow" ($w1 -eq 38) "w grew 30 -> $w1 (expected 38)"
+
+# Absolute resize: resize-pane -x 24 sets the float width to 24 (tmux -x).
+& $PSMUX resize-pane -x 24 2>&1 | Out-Null
+Start-Sleep -Milliseconds 400
+$w2 = FloatField (DS) "w"
+Check "resize-absolute" ($w2 -eq 24) "w set absolute 38 -> $w2 (expected 24)"
 
 # Input: type into the focused float; its content should echo the text.
 & $PSMUX send-keys -t $S "echo FLTECHO" 2>&1 | Out-Null

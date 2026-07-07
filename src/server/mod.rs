@@ -4505,9 +4505,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     state_dirty = true;
                 }
-                CtrlReq::NewFloat { command, x, y, w, h, border, title, position, detached } => {
+                CtrlReq::NewFloat { command, x, y, w, h, border, title, start_dir, detached, resp } => {
                     // A floating pane (tmux new-pane): a PTY-backed pane rendered
-                    // over the active window's tiled layout. Reuses the popup pane
+                    // over the active window's tiled layout. Flags match tmux:
+                    // -x/-y are SIZE, -X/-Y are POSITION. Reuses the popup pane
                     // constructor for all PTY/vt100/reader-thread infrastructure.
                     let win_w = app.last_window_area.width.max(10);
                     let win_h = app.last_window_area.height.max(10);
@@ -4515,21 +4516,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Panic-free clamp: min then max (win_w/win_h are >= 10 above).
                     let fw = w.unwrap_or(dw).min(win_w).max(3);
                     let fh = h.unwrap_or(dh).min(win_h).max(3);
-                    // Position: explicit -x/-y win; else a -P keyword; else centre.
+                    // Position via -X/-Y (top-left); else centred (tmux default).
                     let (fx, fy) = if x.is_some() || y.is_some() {
-                        let px = x.unwrap_or(0);
-                        let py = y.unwrap_or(0);
-                        crate::floating::clamp_into(px, py, fw, fh, win_w, win_h)
+                        crate::floating::clamp_into(x.unwrap_or(0), y.unwrap_or(0), fw, fh, win_w, win_h)
                     } else {
-                        crate::floating::resolve_position(
-                            position.as_deref().unwrap_or("centre"), win_w, win_h, fw, fh)
+                        crate::floating::resolve_position("centre", win_w, win_h, fw, fh)
                     };
+                    let sd = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let inner_h = fh.saturating_sub(2).max(1);
                     let inner_w = fw.saturating_sub(2).max(1);
                     let pane_id = app.next_pane_id;
                     let pane_opt = crate::popup::create_popup_pane(
                         &command,
-                        None,
+                        sd.as_deref(),
                         inner_h,
                         inner_w,
                         pane_id,
@@ -4550,7 +4549,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             border: border_style,
                             id: pane_id,
                             title: title_str,
-                            position: position.clone(),
+                            position: None,
                         };
                         let win = &mut app.windows[app.active_idx];
                         win.floating.push(fp);
@@ -4558,29 +4557,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             win.floating_focus = Some(win.floating.len() - 1);
                         }
                         state_dirty = true;
+                        // -P: print the new pane id (tmux new-pane -P).
+                        if let Some(r) = resp { let _ = r.send(format!("%{}", pane_id)); }
                     } else {
                         app.status_message = Some(("new-pane: failed to start pane".to_string(), std::time::Instant::now(), None));
-                    }
-                }
-                CtrlReq::FloatMove { dir, abs_x, abs_y, step } => {
-                    let win_w = app.last_window_area.width.max(1);
-                    let win_h = app.last_window_area.height.max(1);
-                    let win = &mut app.windows[app.active_idx];
-                    if let Some(fi) = win.floating_focus {
-                        if let Some(fp) = win.floating.get_mut(fi) {
-                            if let Some(nx) = abs_x { fp.x = nx; }
-                            if let Some(ny) = abs_y { fp.y = ny; }
-                            if let Some(d) = dir {
-                                let (nx, ny) = crate::floating::move_step(d, fp.x, fp.y, fp.w, fp.h, win_w, win_h, step.max(1));
-                                fp.x = nx; fp.y = ny;
-                            } else {
-                                let (cx, cy) = crate::floating::clamp_into(fp.x, fp.y, fp.w, fp.h, win_w, win_h);
-                                fp.x = cx; fp.y = cy;
-                            }
-                            // An explicit move overrides any `-P` anchor.
-                            fp.position = None;
-                            state_dirty = true;
-                        }
+                        if let Some(r) = resp { let _ = r.send(String::new()); }
                     }
                 }
                 CtrlReq::ConfirmBefore(prompt, cmd) => {
@@ -4603,10 +4584,42 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::ResizePaneAbsolute(axis, size) => {
-                    unzoom_if_zoomed(&mut app);
-                    resize_pane_absolute(&mut app, &axis, size);
-                    resize_all_panes(&mut app);
-                    hook_event = Some("after-resize-pane");
+                    // tmux: resize-pane -x/-y sets the focused float's absolute
+                    // OUTER size (and its PTY) instead of the tiled pane.
+                    let mut handled_float = false;
+                    {
+                        let win_w = app.last_window_area.width.max(10);
+                        let win_h = app.last_window_area.height.max(10);
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(fi) = win.floating_focus {
+                            if let Some(fp) = win.floating.get_mut(fi) {
+                                match axis.as_str() {
+                                    "x" => fp.w = size.max(3).min(win_w),
+                                    "y" => fp.h = size.max(3).min(win_h),
+                                    _ => {}
+                                }
+                                let (nx, ny) = crate::floating::clamp_into(fp.x, fp.y, fp.w, fp.h, win_w, win_h);
+                                fp.x = nx; fp.y = ny;
+                                let inner_h = fp.h.saturating_sub(2).max(1);
+                                let inner_w = fp.w.saturating_sub(2).max(1);
+                                if fp.pane.last_rows != inner_h || fp.pane.last_cols != inner_w {
+                                    let _ = fp.pane.master.resize(portable_pty::PtySize { rows: inner_h, cols: inner_w, pixel_width: 0, pixel_height: 0 });
+                                    if let Ok(mut parser) = fp.pane.term.lock() { parser.screen_mut().set_size(inner_h, inner_w); }
+                                    fp.pane.last_rows = inner_h;
+                                    fp.pane.last_cols = inner_w;
+                                }
+                                handled_float = true;
+                            }
+                        }
+                    }
+                    if handled_float {
+                        state_dirty = true;
+                    } else {
+                        unzoom_if_zoomed(&mut app);
+                        resize_pane_absolute(&mut app, &axis, size);
+                        resize_all_panes(&mut app);
+                        hook_event = Some("after-resize-pane");
+                    }
                 }
                 CtrlReq::ResizePanePercent(axis, pct) => {
                     unzoom_if_zoomed(&mut app);

@@ -1120,23 +1120,24 @@ pub enum CtrlReq {
     SplitWindow(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, mpsc::Sender<String>, Option<String>),  // kind, cmd, detached, start_dir, size (value, is_percent), error_resp, title (-T)
     SplitWindowPrint(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, Option<String>, mpsc::Sender<String>, Option<String>),  // kind, cmd, detached, start_dir, size (value, is_percent), format, resp, title (-T)
     /// new-pane: create a floating pane over the active window's layout.
+    /// Flags match tmux: `-X`/`-Y` position, `-x`/`-y` size, `-B` border,
+    /// `-T` title, `-c` dir, `-d` detached, `-P` print (returns the pane id).
     NewFloat {
         command: String,
+        /// -X x-position (top-left column); None = centre horizontally.
         x: Option<u16>,
+        /// -Y y-position (top-left row); None = centre vertically.
         y: Option<u16>,
+        /// -x width (outer, incl. border).
         w: Option<u16>,
+        /// -y height (outer, incl. border).
         h: Option<u16>,
         border: String,
         title: Option<String>,
-        position: Option<String>,
+        start_dir: Option<String>,
         detached: bool,
-    },
-    /// Move the focused floating pane: a directional step and/or absolute x/y.
-    FloatMove {
-        dir: Option<crate::floating::MoveDir>,
-        abs_x: Option<u16>,
-        abs_y: Option<u16>,
-        step: u16,
+        /// -P: reply with the new pane id over `resp`.
+        resp: Option<mpsc::Sender<String>>,
     },
     KillPane,
     KillPaneById(usize),

@@ -170,55 +170,53 @@ fn coalesce_send_commands(parts: Vec<String>) -> Vec<String> {
     out
 }
 
-/// Parse `new-pane` (floating-pane) arguments into a `NewFloat` request.
-/// Flags: -d (detached), -P <position>, -B <border>, -T <title>,
-/// -x/-y/-w/-h <n>; remaining tokens form the command.
-fn parse_new_pane_args(args: &[&str]) -> CtrlReq {
+/// Parsed `new-pane` flags. Semantics match tmux `cmd-split-window.c`:
+/// `-x`=width, `-y`=height, `-X`=x-position, `-Y`=y-position, `-B`=border-lines,
+/// `-T`=title, `-c`=start-directory, `-d`=detached, `-P`=print pane id.
+struct ParsedNewPane {
+    command: String,
+    x: Option<u16>,     // -X x-position
+    y: Option<u16>,     // -Y y-position
+    w: Option<u16>,     // -x width
+    h: Option<u16>,     // -y height
+    border: String,     // -B
+    title: Option<String>, // -T
+    start_dir: Option<String>, // -c
+    detached: bool,     // -d
+    print: bool,        // -P
+}
+
+fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
     let mut detached = false;
-    let mut position: Option<String> = None;
+    let mut print = false;
     let mut border = String::new();
     let mut title: Option<String> = None;
+    let mut start_dir: Option<String> = None;
+    // x/y = POSITION (from -X/-Y); w/h = SIZE (from -x/-y). tmux ordering.
     let (mut x, mut y, mut w, mut h): (Option<u16>, Option<u16>, Option<u16>, Option<u16>) = (None, None, None, None);
-    // Movement (uppercase -X/-Y absolute, -U/-D/-L/-R directional). When any is
-    // present, new-pane MOVES the focused float instead of creating one.
-    let (mut abs_x, mut abs_y): (Option<u16>, Option<u16>) = (None, None);
-    let mut dir: Option<crate::floating::MoveDir> = None;
-    let mut step: u16 = 1;
-    let mut is_move = false;
     let mut skip = std::collections::HashSet::new();
     let mut i = 0;
     while i < args.len() {
         match args[i] {
             "-d" => { skip.insert(i); detached = true; }
-            "-P" => { if let Some(v) = args.get(i+1) { position = Some(v.trim_matches('"').to_string()); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-P" => { skip.insert(i); print = true; }
             "-B" => { if let Some(v) = args.get(i+1) { border = v.trim_matches('"').to_string(); skip.insert(i); skip.insert(i+1); i += 1; } }
             "-T" => { if let Some(v) = args.get(i+1) { title = Some(v.trim_matches('"').to_string()); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-x" => { if let Some(v) = args.get(i+1) { x = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-y" => { if let Some(v) = args.get(i+1) { y = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-w" => { if let Some(v) = args.get(i+1) { w = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-h" => { if let Some(v) = args.get(i+1) { h = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-U" | "-D" | "-L" | "-R" => {
-                is_move = true;
-                dir = crate::floating::MoveDir::parse(args[i]);
-                // Optional numeric step follows (e.g. `-R 5`).
-                if let Some(v) = args.get(i+1).and_then(|s| s.parse::<u16>().ok()) { step = v; skip.insert(i+1); i += 1; }
-                skip.insert(i);
-            }
-            "-X" => { is_move = true; if let Some(v) = args.get(i+1) { abs_x = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
-            "-Y" => { is_move = true; if let Some(v) = args.get(i+1) { abs_y = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-c" => { if let Some(v) = args.get(i+1) { start_dir = Some(v.trim_matches('"').to_string()); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-x" => { if let Some(v) = args.get(i+1) { w = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-y" => { if let Some(v) = args.get(i+1) { h = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-X" => { if let Some(v) = args.get(i+1) { x = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-Y" => { if let Some(v) = args.get(i+1) { y = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
             _ => {}
         }
         i += 1;
-    }
-    if is_move {
-        return CtrlReq::FloatMove { dir, abs_x, abs_y, step };
     }
     let command = args.iter().enumerate()
         .filter(|(idx, _)| !skip.contains(idx))
         .map(|(_, a)| *a)
         .collect::<Vec<&str>>()
         .join(" ");
-    CtrlReq::NewFloat { command, x, y, w, h, border, title, position, detached }
+    ParsedNewPane { command, x, y, w, h, border, title, start_dir, detached, print }
 }
 
 /// Handle a single TCP connection from a client.
@@ -2439,7 +2437,18 @@ match cmd {
         }
     }
     "new-pane" | "newp" => {
-        let _ = tx.send(parse_new_pane_args(&args));
+        let p = parse_new_pane_args(&args);
+        if p.print {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, resp: Some(rtx) });
+            if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
+                let _ = write!(write_stream, "{}\n", text);
+                let _ = write_stream.flush();
+            }
+            if !persistent { break; }
+        } else {
+            let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, resp: None });
+        }
     }
     "display-popup" | "popup" => {
         // Default close-on-exit = true (tmux parity: popup closes when command finishes)
@@ -3139,8 +3148,16 @@ fn dispatch_control_command(
             true
         }
         "new-pane" | "newp" => {
-            let _ = tx.send(parse_new_pane_args(args));
-            false
+            let p = parse_new_pane_args(args);
+            if p.print {
+                let (rtx, rrx) = mpsc::channel::<String>();
+                let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, resp: Some(rtx) });
+                if let Ok(text) = rrx.recv_timeout(Duration::from_secs(2)) { let _ = resp_tx.send(text); }
+                true
+            } else {
+                let _ = tx.send(CtrlReq::NewFloat { command: p.command, x: p.x, y: p.y, w: p.w, h: p.h, border: p.border, title: p.title, start_dir: p.start_dir, detached: p.detached, resp: None });
+                false
+            }
         }
         "new-window" | "neww" => {
             let name = args.windows(2).find(|w| w[0] == "-n").map(|w| w[1].trim_matches('"').to_string());

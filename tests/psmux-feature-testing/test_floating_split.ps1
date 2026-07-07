@@ -37,8 +37,8 @@ Start-Sleep -Seconds 2
 # One tiled pane baseline.
 $panes0 = (& $PSMUX list-panes -t $S 2>&1 | Measure-Object -Line).Lines
 
-# Create a focused float.
-& $PSMUX new-pane -x 10 -y 5 -w 30 -h 10 2>&1 | Out-Null
+# Create a focused float (tmux flags: -X/-Y position, -x/-y size).
+& $PSMUX new-pane -X 10 -Y 5 -x 30 -y 10 2>&1 | Out-Null
 Start-Sleep -Milliseconds 700
 $c1 = FloatCount (DS)
 Check "one-float" ($c1 -eq 1) "float count = $c1"

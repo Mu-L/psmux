@@ -3484,11 +3484,25 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             // display-popup - Display a popup window
-            "display-popup" | "popup" | "new-pane" | "newp" => {
+            "display-popup" | "popup" => {
                 let parts: Vec<String> = cmd_args.iter().map(|s| {
                     if s.contains(' ') || s.contains('"') { format!("\"{}\"" , s.replace('"', "\\\"")) } else { s.to_string() }
                 }).collect();
                 send_control(format!("{}\n", parts.join(" ")))?;
+                return Ok(());
+            }
+            "new-pane" | "newp" => {
+                let parts: Vec<String> = cmd_args.iter().map(|s| {
+                    if s.contains(' ') || s.contains('"') { format!("\"{}\"" , s.replace('"', "\\\"")) } else { s.to_string() }
+                }).collect();
+                let line = format!("{}\n", parts.join(" "));
+                // -P prints the new pane id, so read the server's response.
+                if cmd_args.iter().any(|a| a.as_str() == "-P") {
+                    let resp = send_control_with_response(line)?;
+                    print!("{}", resp);
+                } else {
+                    send_control(line)?;
+                }
                 return Ok(());
             }
             // server-info - Show server information
