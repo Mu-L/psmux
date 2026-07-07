@@ -415,6 +415,8 @@ pub struct AppState {
     /// Default: off
     pub allow_predictions: bool,
     pub drag: Option<DragState>,
+    /// In-progress mouse drag on a floating pane (move/resize), if any.
+    pub float_drag: Option<FloatDrag>,
     pub last_window_area: Rect,
     pub mouse_enabled: bool,
     /// bold-is-bright: when on (default), rewrite crossterm's 256-indexed
@@ -905,6 +907,7 @@ impl AppState {
                 .unwrap_or(false),
             allow_predictions: false,
             drag: None,
+            float_drag: None,
             last_window_area: Rect { x: 0, y: 0, width: 120, height: 30 },
             mouse_enabled: true,
             bold_is_bright: true,
@@ -1083,6 +1086,23 @@ pub struct DragState {
     pub _right_initial: u16,
     /// Total pixel dimension of the parent split area along the split axis.
     pub total_pixels: u16,
+}
+
+/// An in-progress mouse drag on a floating pane (tmux moves/resizes floats by
+/// dragging). Grabbing the body moves it; grabbing the bottom/right edge resizes.
+#[derive(Clone, Copy)]
+pub struct FloatDrag {
+    /// Index into the active window's `floating` vec.
+    pub index: usize,
+    pub mode: FloatDragMode,
+}
+
+#[derive(Clone, Copy)]
+pub enum FloatDragMode {
+    /// Move: the cursor's offset (dx, dy) from the float's top-left at grab time.
+    Move { dx: u16, dy: u16 },
+    /// Resize from the bottom-right corner.
+    Resize,
 }
 
 #[derive(Clone)]

@@ -566,6 +566,34 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
         return;
     }
 
+    // Floating panes sit above the tiled layout: a click inside a float grabs
+    // it (tmux moves/resizes floats by dragging) and gives it focus. The
+    // bottom-right edge starts a resize; the body starts a move.
+    {
+        let ox = app.last_window_area.x;
+        let oy = app.last_window_area.y;
+        let hit = {
+            let win = &app.windows[app.active_idx];
+            win.floating.iter().enumerate().rev().find_map(|(i, fp)| {
+                let x0 = ox + fp.x; let y0 = oy + fp.y;
+                if x >= x0 && x < x0 + fp.w && y >= y0 && y < y0 + fp.h {
+                    Some((i, x0, y0, fp.w, fp.h))
+                } else { None }
+            })
+        };
+        if let Some((i, x0, y0, w, h)) = hit {
+            let on_edge = x >= x0 + w.saturating_sub(1) || y >= y0 + h.saturating_sub(1);
+            let mode = if on_edge {
+                crate::types::FloatDragMode::Resize
+            } else {
+                crate::types::FloatDragMode::Move { dx: x - x0, dy: y - y0 }
+            };
+            app.windows[app.active_idx].floating_focus = Some(i);
+            app.float_drag = Some(crate::types::FloatDrag { index: i, mode });
+            return;
+        }
+    }
+
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -626,6 +654,44 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
 
 pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
     let (x, y) = map_client_coords(app, x, y);
+
+    // A floating-pane drag moves or resizes the grabbed float, following the
+    // cursor. Runs before any tiled handling and short-circuits it.
+    if let Some(fd) = app.float_drag {
+        let ox = app.last_window_area.x;
+        let oy = app.last_window_area.y;
+        let win_w = app.last_window_area.width.max(10);
+        let win_h = app.last_window_area.height.max(10);
+        let win = &mut app.windows[app.active_idx];
+        if let Some(fp) = win.floating.get_mut(fd.index) {
+            match fd.mode {
+                crate::types::FloatDragMode::Move { dx, dy } => {
+                    let nx = x.saturating_sub(ox).saturating_sub(dx);
+                    let ny = y.saturating_sub(oy).saturating_sub(dy);
+                    let (cx, cy) = crate::floating::clamp_into(nx, ny, fp.w, fp.h, win_w, win_h);
+                    fp.x = cx; fp.y = cy;
+                }
+                crate::types::FloatDragMode::Resize => {
+                    let x0 = ox + fp.x;
+                    let y0 = oy + fp.y;
+                    fp.w = (x.saturating_sub(x0) + 1).max(3).min(win_w);
+                    fp.h = (y.saturating_sub(y0) + 1).max(3).min(win_h);
+                    let (cx, cy) = crate::floating::clamp_into(fp.x, fp.y, fp.w, fp.h, win_w, win_h);
+                    fp.x = cx; fp.y = cy;
+                    let inner_h = fp.h.saturating_sub(2).max(1);
+                    let inner_w = fp.w.saturating_sub(2).max(1);
+                    if fp.pane.last_rows != inner_h || fp.pane.last_cols != inner_w {
+                        let _ = fp.pane.master.resize(portable_pty::PtySize { rows: inner_h, cols: inner_w, pixel_width: 0, pixel_height: 0 });
+                        if let Ok(mut parser) = fp.pane.term.lock() { parser.screen_mut().set_size(inner_h, inner_w); }
+                        fp.pane.last_rows = inner_h;
+                        fp.pane.last_cols = inner_w;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -668,6 +734,11 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
 
 pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
     let (x, y) = map_client_coords(app, x, y);
+    // End any floating-pane drag.
+    if app.float_drag.is_some() {
+        app.float_drag = None;
+        return;
+    }
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
