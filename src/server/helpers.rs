@@ -81,6 +81,17 @@ pub(crate) fn append_copy_ln_json(app: &AppState, buf: &mut String) {
     buf.push('}');
 }
 
+/// Append the active window's floating-pane overlays to a JSON object buffer
+/// that currently ends with `}`. Emits nothing when there are no floats.
+pub(crate) fn append_floats_json(app: &AppState, buf: &mut String) {
+    if !buf.ends_with('}') { return; }
+    let frag = crate::popup::serialize_floats_json(app);
+    if frag.is_empty() { return; }
+    buf.pop();
+    buf.push_str(&frag);
+    buf.push('}');
+}
+
 pub(crate) fn json_escape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {

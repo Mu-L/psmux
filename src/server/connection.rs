@@ -170,6 +170,39 @@ fn coalesce_send_commands(parts: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Parse `new-pane` (floating-pane) arguments into a `NewFloat` request.
+/// Flags: -d (detached), -P <position>, -B <border>, -T <title>,
+/// -x/-y/-w/-h <n>; remaining tokens form the command.
+fn parse_new_pane_args(args: &[&str]) -> CtrlReq {
+    let mut detached = false;
+    let mut position: Option<String> = None;
+    let mut border = String::new();
+    let mut title: Option<String> = None;
+    let (mut x, mut y, mut w, mut h): (Option<u16>, Option<u16>, Option<u16>, Option<u16>) = (None, None, None, None);
+    let mut skip = std::collections::HashSet::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "-d" => { skip.insert(i); detached = true; }
+            "-P" => { if let Some(v) = args.get(i+1) { position = Some(v.trim_matches('"').to_string()); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-B" => { if let Some(v) = args.get(i+1) { border = v.trim_matches('"').to_string(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-T" => { if let Some(v) = args.get(i+1) { title = Some(v.trim_matches('"').to_string()); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-x" => { if let Some(v) = args.get(i+1) { x = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-y" => { if let Some(v) = args.get(i+1) { y = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-w" => { if let Some(v) = args.get(i+1) { w = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            "-h" => { if let Some(v) = args.get(i+1) { h = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
+            _ => {}
+        }
+        i += 1;
+    }
+    let command = args.iter().enumerate()
+        .filter(|(idx, _)| !skip.contains(idx))
+        .map(|(_, a)| *a)
+        .collect::<Vec<&str>>()
+        .join(" ");
+    CtrlReq::NewFloat { command, x, y, w, h, border, title, position, detached }
+}
+
 /// Handle a single TCP connection from a client.
 /// Parses auth, optional TARGET/PERSISTENT flags, then dispatches commands
 /// to the main server event loop via the `tx` channel.
@@ -2387,6 +2420,9 @@ match cmd {
             let _ = tx.send(CtrlReq::DisplayMenuDirect(menu));
         }
     }
+    "new-pane" | "newp" => {
+        let _ = tx.send(parse_new_pane_args(&args));
+    }
     "display-popup" | "popup" => {
         // Default close-on-exit = true (tmux parity: popup closes when command finishes)
         let close_on_exit = !args.iter().any(|a| *a == "-K");
@@ -3083,6 +3119,10 @@ fn dispatch_control_command(
                 let _ = resp_tx.send(text);
             }
             true
+        }
+        "new-pane" | "newp" => {
+            let _ = tx.send(parse_new_pane_args(args));
+            false
         }
         "new-window" | "neww" => {
             let name = args.windows(2).find(|w| w[0] == "-n").map(|w| w[1].trim_matches('"').to_string());

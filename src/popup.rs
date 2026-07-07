@@ -346,6 +346,68 @@ pub fn serialize_popup_overlay(app: &AppState) -> String {
     out
 }
 
+/// Serialize the active window's floating panes into a JSON fragment
+/// (`,"floats":[{x,y,w,h,border,focused,title,rows}]`) for the client to draw
+/// as positioned overlays. Returns an empty string when there are no floats.
+/// Only the active window's floats are emitted, so non-active windows' floats
+/// are correctly hidden.
+pub fn serialize_floats_json(app: &AppState) -> String {
+    use crate::server::helpers::json_escape_string;
+    let win = match app.windows.get(app.active_idx) {
+        Some(w) => w,
+        None => return String::new(),
+    };
+    if win.floating.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(",\"floats\":[");
+    for (i, fp) in win.floating.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let inner_h = fp.h.saturating_sub(2);
+        let inner_w = fp.w.saturating_sub(2);
+        let focused = win.floating_focus == Some(i);
+        let _ = std::fmt::Write::write_fmt(
+            &mut out,
+            format_args!(
+                "{{\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"border\":\"{}\",\"focused\":{},\"title\":\"",
+                fp.x, fp.y, fp.w, fp.h, json_escape_string(&fp.border), focused
+            ),
+        );
+        out.push_str(&json_escape_string(&fp.title));
+        out.push_str("\",\"rows\":[");
+        if let Ok(parser) = fp.pane.term.lock() {
+            let rows_data = serialize_screen_rows(parser.screen(), inner_h, inner_w);
+            for (j, row) in rows_data.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                out.push_str("{\"runs\":[");
+                for (k, run) in row.runs.iter().enumerate() {
+                    if k > 0 {
+                        out.push(',');
+                    }
+                    out.push_str("{\"text\":\"");
+                    json_esc_inline(&run.text, &mut out);
+                    out.push_str("\",\"fg\":\"");
+                    out.push_str(&run.fg);
+                    out.push_str("\",\"bg\":\"");
+                    out.push_str(&run.bg);
+                    let _ = std::fmt::Write::write_fmt(
+                        &mut out,
+                        format_args!("\",\"flags\":{},\"width\":{}}}", run.flags, run.width),
+                    );
+                }
+                out.push_str("]}");
+            }
+        }
+        out.push_str("]}");
+    }
+    out.push(']');
+    out
+}
+
 /// JSON-escape a string inline (for popup run serialization).
 fn json_esc_inline(s: &str, out: &mut String) {
     for c in s.chars() {

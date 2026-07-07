@@ -3484,7 +3484,7 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             // display-popup - Display a popup window
-            "display-popup" | "popup" => {
+            "display-popup" | "popup" | "new-pane" | "newp" => {
                 let parts: Vec<String> = cmd_args.iter().map(|s| {
                     if s.contains(' ') || s.contains('"') { format!("\"{}\"" , s.replace('"', "\\\"")) } else { s.to_string() }
                 }).collect();
@@ -3494,6 +3494,12 @@ fn run_main() -> io::Result<()> {
             // server-info - Show server information
             "server-info" | "info" => {
                 let resp = send_control_with_response("server-info\n".to_string())?;
+                print!("{}", resp);
+                return Ok(());
+            }
+            // dump-state - print the server's live state JSON (debug / testing aid)
+            "dump-state" | "dump" => {
+                let resp = send_control_with_response("dump-state\n".to_string())?;
                 print!("{}", resp);
                 return Ok(());
             }

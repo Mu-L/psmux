@@ -1119,6 +1119,18 @@ pub enum CtrlReq {
     NewWindowPrint(Option<String>, Option<String>, bool, Option<String>, Option<String>, mpsc::Sender<String>, Option<String>),  // cmd, name, detached, start_dir, format, resp, title (-T)
     SplitWindow(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, mpsc::Sender<String>, Option<String>),  // kind, cmd, detached, start_dir, size (value, is_percent), error_resp, title (-T)
     SplitWindowPrint(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, Option<String>, mpsc::Sender<String>, Option<String>),  // kind, cmd, detached, start_dir, size (value, is_percent), format, resp, title (-T)
+    /// new-pane: create a floating pane over the active window's layout.
+    NewFloat {
+        command: String,
+        x: Option<u16>,
+        y: Option<u16>,
+        w: Option<u16>,
+        h: Option<u16>,
+        border: String,
+        title: Option<String>,
+        position: Option<String>,
+        detached: bool,
+    },
     KillPane,
     KillPaneById(usize),
     CapturePane(mpsc::Sender<String>),

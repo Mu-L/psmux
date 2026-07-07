@@ -19,6 +19,20 @@ use crate::debug_log::{client_log, client_log_enabled, input_log, input_log_enab
 use crate::layout::RowRunsJson;
 use crate::tree::split_with_gaps;
 
+/// A floating pane (tmux new-pane) as shipped from the server: position, size,
+/// border style, focus, title, and the pane's rendered rows.
+#[derive(serde::Deserialize, Clone, Default)]
+pub(crate) struct FloatJson {
+    #[serde(default)] pub x: u16,
+    #[serde(default)] pub y: u16,
+    #[serde(default)] pub w: u16,
+    #[serde(default)] pub h: u16,
+    #[serde(default)] pub border: String,
+    #[serde(default)] pub focused: bool,
+    #[serde(default)] pub title: String,
+    #[serde(default)] pub rows: Vec<crate::layout::RowRunsJson>,
+}
+
 /// Extract the actual command from a confirm-before argument string.
 /// Handles: `confirm-before -p 'prompt text' kill-pane`
 /// Returns the command to execute after confirmation (e.g. "kill-pane").
@@ -678,6 +692,77 @@ pub fn render_clock_overlay(f: &mut Frame, area: Rect, colour: Color) {
 /// pane renderer used by both the main viewport and the choose-tree/
 /// choose-session preview, so a preview is a true miniature of the real
 /// window (same separators, same colors, same content rendering).
+/// Draw the active window's floating panes (tmux new-pane) as positioned
+/// overlays over the tiled layout. Called after `render_layout_json` and before
+/// the modal popup overlay, so popups still stack on top. Reuses the popup
+/// run-rendering; borders come from `-B` (mapped to ratatui border types),
+/// `none` draws no border. The focused float gets a highlighted border.
+pub(crate) fn render_float_overlays(f: &mut Frame, content_chunk: Rect, floats: &[FloatJson]) {
+    for fl in floats {
+        if fl.w < 2 || fl.h < 2 { continue; }
+        let w = fl.w.min(content_chunk.width);
+        let h = fl.h.min(content_chunk.height);
+        let x = content_chunk.x + fl.x.min(content_chunk.width.saturating_sub(w));
+        let y = content_chunk.y + fl.y.min(content_chunk.height.saturating_sub(h));
+        let area = Rect { x, y, width: w, height: h };
+        let border_type = match fl.border.as_str() {
+            "double" => Some(BorderType::Double),
+            "heavy" => Some(BorderType::Thick),
+            "none" => None,
+            // single/simple/number/spaces/unknown -> plain line box
+            _ => Some(BorderType::Plain),
+        };
+        let bcol = if fl.focused { Color::Green } else { Color::DarkGray };
+        let inner_w = if border_type.is_some() { w.saturating_sub(2) } else { w };
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for row_data in &fl.rows {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut col: u16 = 0;
+            for run in &row_data.runs {
+                if col >= inner_w { break; }
+                let fg = crate::style::map_color(&run.fg);
+                let bg = crate::style::map_color(&run.bg);
+                let mut style = Style::default().fg(fg).bg(bg);
+                if run.flags & 1  != 0 { style = style.add_modifier(Modifier::DIM); }
+                if run.flags & 2  != 0 { style = style.add_modifier(Modifier::BOLD); }
+                if run.flags & 4  != 0 { style = style.add_modifier(Modifier::ITALIC); }
+                if run.flags & 8  != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+                if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
+                if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
+                if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
+                let text: &str = if run.flags & 64 != 0 { " " } else if run.text.is_empty() { " " } else { &run.text };
+                let run_w = run.width.max(1);
+                if col + run_w > inner_w {
+                    let avail = (inner_w - col) as usize;
+                    let truncated: String = text.chars().take(avail).collect();
+                    if !truncated.is_empty() { spans.push(Span::styled(truncated, style)); }
+                    col = inner_w;
+                } else {
+                    spans.push(Span::styled(text.to_string(), style));
+                    col += run_w;
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+        f.render_widget(Clear, area);
+        match border_type {
+            Some(bt) => {
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(bt)
+                    .border_style(Style::default().fg(bcol))
+                    .title(fl.title.clone());
+                let inner = block.inner(area);
+                f.render_widget(block, area);
+                f.render_widget(Paragraph::new(Text::from(lines)), inner);
+            }
+            None => {
+                f.render_widget(Paragraph::new(Text::from(lines)), area);
+            }
+        }
+    }
+}
+
 /// Copy-mode line-number rendering config, resolved once per frame from the
 /// `copy-mode-line-numbers` option and the active pane's scrollback size.
 #[derive(Clone, Copy)]
@@ -1384,6 +1469,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut srv_popup_lines: Vec<String> = Vec::new();
     #[allow(unused_assignments)]
     let mut srv_popup_rows: Vec<crate::layout::RowRunsJson> = Vec::new();
+    let mut srv_floats: Vec<FloatJson> = Vec::new();
     #[allow(unused_assignments)]
     let mut srv_popup_has_pty = false;
     let mut srv_popup_scroll: u16 = 0;
@@ -1646,6 +1732,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         popup_rows: Vec<crate::layout::RowRunsJson>,
         #[serde(default)]
         popup_has_pty: bool,
+        /// Floating panes (tmux new-pane) overlaid on the active window.
+        #[serde(default)]
+        floats: Vec<FloatJson>,
         /// Confirm overlay active
         #[serde(default)]
         confirm_active: bool,
@@ -4398,6 +4487,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         clock_colour_str = state.clock_colour;
         let state_cursor_style_code = state.cursor_style_code;
         // Server-side overlay state (update persistent variables)
+        srv_floats = state.floats;
         srv_popup_active = state.popup_active;
         srv_popup_command = state.popup_command.unwrap_or_default();
         srv_popup_width = state.popup_width.unwrap_or(80);
@@ -5551,6 +5641,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             }
 
             // ── Server-side overlay rendering ────────────────────────
+            // Floating panes (tmux new-pane) draw above the tiled layout but
+            // below modal popups so a popup still stacks on top.
+            if !srv_floats.is_empty() {
+                render_float_overlays(f, content_chunk, &srv_floats);
+            }
             if srv_popup_active {
                 let w = srv_popup_width.min(content_chunk.width.saturating_sub(2));
                 let h = srv_popup_height.min(content_chunk.height.saturating_sub(2));

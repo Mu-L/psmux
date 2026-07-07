@@ -1873,6 +1873,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                         helpers::append_copy_ln_json(&app, &mut combined_buf);
+                        helpers::append_floats_json(&app, &mut combined_buf);
                         // set-titles: when on, expand set-titles-string and ship
                         // it so the client emits OSC 0 to its host terminal.
                         if app.set_titles && combined_buf.ends_with('}') {
@@ -4405,6 +4406,63 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     state_dirty = true;
                 }
+                CtrlReq::NewFloat { command, x, y, w, h, border, title, position, detached } => {
+                    // A floating pane (tmux new-pane): a PTY-backed pane rendered
+                    // over the active window's tiled layout. Reuses the popup pane
+                    // constructor for all PTY/vt100/reader-thread infrastructure.
+                    let win_w = app.last_window_area.width.max(10);
+                    let win_h = app.last_window_area.height.max(10);
+                    let (dw, dh) = crate::floating::default_size(win_w, win_h);
+                    // Panic-free clamp: min then max (win_w/win_h are >= 10 above).
+                    let fw = w.unwrap_or(dw).min(win_w).max(3);
+                    let fh = h.unwrap_or(dh).min(win_h).max(3);
+                    // Position: explicit -x/-y win; else a -P keyword; else centre.
+                    let (fx, fy) = if x.is_some() || y.is_some() {
+                        let px = x.unwrap_or(0);
+                        let py = y.unwrap_or(0);
+                        crate::floating::clamp_into(px, py, fw, fh, win_w, win_h)
+                    } else {
+                        crate::floating::resolve_position(
+                            position.as_deref().unwrap_or("centre"), win_w, win_h, fw, fh)
+                    };
+                    let inner_h = fh.saturating_sub(2).max(1);
+                    let inner_w = fw.saturating_sub(2).max(1);
+                    let pane_id = app.next_pane_id;
+                    let pane_opt = crate::popup::create_popup_pane(
+                        &command,
+                        None,
+                        inner_h,
+                        inner_w,
+                        pane_id,
+                        &app.session_name,
+                        &app.environment,
+                    );
+                    if let Some(mut pane) = pane_opt {
+                        app.next_pane_id += 1;
+                        let title_str = title.clone().unwrap_or_default();
+                        if !title_str.is_empty() {
+                            pane.title = title_str.clone();
+                            pane.title_locked = true;
+                        }
+                        let border_style = if border.is_empty() { "single".to_string() } else { border.clone() };
+                        let fp = crate::types::FloatingPane {
+                            pane,
+                            x: fx, y: fy, w: fw, h: fh,
+                            border: border_style,
+                            id: pane_id,
+                            title: title_str,
+                            position: position.clone(),
+                        };
+                        let win = &mut app.windows[app.active_idx];
+                        win.floating.push(fp);
+                        if !detached {
+                            win.floating_focus = Some(win.floating.len() - 1);
+                        }
+                        state_dirty = true;
+                    } else {
+                        app.status_message = Some(("new-pane: failed to start pane".to_string(), std::time::Instant::now(), None));
+                    }
+                }
                 CtrlReq::ConfirmBefore(prompt, cmd) => {
                     let prompt_text = if prompt.is_empty() {
                         format!("Confirm: {}? (y/n)", cmd)
@@ -5143,6 +5201,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 helpers::append_copy_ln_json(&app, &mut combined_buf);
+                helpers::append_floats_json(&app, &mut combined_buf);
                 // set-titles: when on, expand set-titles-string and ship
                 // it so the client emits OSC 0 to its host terminal.
                 if app.set_titles && combined_buf.ends_with('}') {
