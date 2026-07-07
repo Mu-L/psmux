@@ -1315,6 +1315,33 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // tmux: split-window without -Z permanently unzooms (#82)
                     unzoom_if_zoomed(&mut app);
+                    // tmux: split-window INSIDE a floating pane creates ANOTHER
+                    // floating pane (offset from it), not a tiled split.
+                    let float_src = {
+                        let win = &app.windows[app.active_idx];
+                        win.floating_focus.and_then(|fi| win.floating.get(fi)).map(|fp| (fp.x, fp.y, fp.w, fp.h, fp.border.clone()))
+                    };
+                    if let Some((sx, sy, sw, sh, sborder)) = float_src {
+                        let win_w = app.last_window_area.width.max(10);
+                        let win_h = app.last_window_area.height.max(10);
+                        let nx = (sx + 2).min(win_w.saturating_sub(sw));
+                        let ny = (sy + 2).min(win_h.saturating_sub(sh));
+                        let inner_h = sh.saturating_sub(2).max(1);
+                        let inner_w = sw.saturating_sub(2).max(1);
+                        let cmdstr = cmd.clone().unwrap_or_default();
+                        let sd = start_dir.clone().map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
+                        let pane_id = app.next_pane_id;
+                        if let Some(mut pane) = crate::popup::create_popup_pane(&cmdstr, sd.as_deref(), inner_h, inner_w, pane_id, &app.session_name, &app.environment) {
+                            app.next_pane_id += 1;
+                            let t = title.clone().unwrap_or_default();
+                            if !t.is_empty() { pane.title = t.clone(); pane.title_locked = true; }
+                            let win = &mut app.windows[app.active_idx];
+                            win.floating.push(crate::types::FloatingPane { pane, x: nx, y: ny, w: sw, h: sh, border: sborder, id: pane_id, title: t, position: None });
+                            if !detached { win.floating_focus = Some(win.floating.len() - 1); }
+                            state_dirty = true;
+                        }
+                        let _ = resp.send(String::new());
+                    } else {
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
@@ -1387,6 +1414,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
+                    }
                 }
                 CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, split_size, format_str, resp, title) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
