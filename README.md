@@ -19,6 +19,7 @@
 <p align="center">
   <a href="#installation">Install</a> ·
   <a href="#usage">Usage</a> ·
+  <a href="docs/use-cases.md">Use Cases</a> ·
   <a href="docs/claude-code.md">Claude Code</a> ·
   <a href="docs/features.md">Features</a> ·
   <a href="docs/compatibility.md">Compatibility</a> ·
@@ -146,6 +147,7 @@ No extra configuration needed. Full guide: **[docs/claude-code.md](docs/claude-c
 
 | Topic | Description |
 |-------|-------------|
+| **[Windows Use Cases](docs/use-cases.md)** | Practical Windows scenarios — startup services, AI agents, dashboards, remote admin |
 | **[Features](docs/features.md)** | Full feature list — mouse, copy mode, layouts, format engine |
 | **[Compatibility](docs/compatibility.md)** | tmux command/config compatibility matrix |
 | **[Performance](docs/performance.md)** | Benchmarks and optimization details |
