@@ -897,11 +897,13 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
             text.push_str(row.trim_end());
             text.push('\n');
         }
-        // Trim trailing all-empty lines: prevents iTerm2 from advancing its
-        // cursor past the actual content on initial attach, which would
-        // otherwise place the first prompt arriving via %output at the
-        // bottom of the window instead of the top.
-        while text.ends_with("\n\n") { text.pop(); }
+        // An explicit range (-S/-E) is honored line for line, matching tmux:
+        // every requested row is emitted, including trailing blank rows inside
+        // the range. Unlike the no-range attach capture (capture_active_pane_text),
+        // we do NOT collapse trailing empty lines here, so `capture-pane -p -S 0
+        // -E 5` returns the full 6 requested lines instead of only the non-blank
+        // prefix. The iTerm2 attach path never reaches this function (it uses the
+        // no-range CtrlReq::CapturePane path).
         if text == "\n" { text.clear(); }
         return Ok(Some(text));
     }
