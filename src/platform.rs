@@ -1605,6 +1605,14 @@ pub mod process_kill {
         sz_exe_file: [u16; 260],
     }
 
+    #[allow(non_snake_case)]
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct FILETIME {
+        dwLowDateTime: u32,
+        dwHighDateTime: u32,
+    }
+
     #[link(name = "kernel32")]
     extern "system" {
         fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
@@ -1613,6 +1621,55 @@ pub mod process_kill {
         fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> isize;
         fn TerminateProcess(h_process: isize, exit_code: u32) -> i32;
         fn CloseHandle(handle: isize) -> i32;
+        fn GetProcessTimes(
+            h_process: isize,
+            lp_creation: *mut FILETIME,
+            lp_exit: *mut FILETIME,
+            lp_kernel: *mut FILETIME,
+            lp_user: *mut FILETIME,
+        ) -> i32;
+        fn GetSystemTimeAsFileTime(lp: *mut FILETIME);
+    }
+
+    #[inline]
+    fn filetime_to_u64(ft: FILETIME) -> u64 {
+        ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64)
+    }
+
+    /// Current system time as a 64-bit FILETIME (100ns ticks since 1601).
+    /// Used as the "cutoff" for PID-reuse detection: any process whose
+    /// creation time is LATER than the cutoff captured just before our
+    /// snapshot cannot be a process we enumerated, so it must be a reused PID.
+    fn now_filetime() -> u64 {
+        unsafe {
+            let mut ft = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            GetSystemTimeAsFileTime(&mut ft);
+            filetime_to_u64(ft)
+        }
+    }
+
+    /// Read a process's creation time (FILETIME) by PID. Returns None if the
+    /// process cannot be opened or queried (already gone, or a different
+    /// security context). The handle is opened with QUERY_LIMITED_INFORMATION
+    /// which succeeds for same-user processes.
+    fn process_creation_filetime(pid: u32) -> Option<u64> {
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h == 0 || h == INVALID_HANDLE {
+                return None;
+            }
+            let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let mut exit = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let ok = GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user);
+            CloseHandle(h);
+            if ok == 0 {
+                return None;
+            }
+            Some(filetime_to_u64(creation))
+        }
     }
 
     /// Collect all descendant PIDs of `root_pid` (children, grandchildren, etc.).
@@ -1653,8 +1710,31 @@ pub mod process_kill {
         descendants
     }
 
-    /// Force-terminate a single process by PID.
-    fn terminate_pid(pid: u32) {
+    /// Force-terminate a single process by PID, but ONLY if its creation time is
+    /// no later than `max_creation_ft` (issue #447 PID-reuse guard).
+    ///
+    /// The caller captures `max_creation_ft` (via `now_filetime()`) immediately
+    /// BEFORE taking the process snapshot that identified `pid`. Any process
+    /// that was legitimately enumerated in that snapshot must have been created
+    /// at or before the cutoff. If the PID has since been reused by an unrelated
+    /// process, that new process was created AFTER the cutoff, so its creation
+    /// time exceeds `max_creation_ft` and we refuse to terminate it.
+    ///
+    /// Pass `u64::MAX` to disable the guard (unconditional kill) for callers that
+    /// terminate a process they hold a first-class reference to rather than a
+    /// snapshot-derived PID.
+    fn terminate_pid(pid: u32, max_creation_ft: u64) {
+        // PID-reuse guard: verify identity by creation time before killing.
+        if max_creation_ft != u64::MAX {
+            match process_creation_filetime(pid) {
+                // Created after our snapshot cutoff -> PID was reused. Do NOT kill.
+                Some(created) if created > max_creation_ft => return,
+                // Could not confirm identity (gone / foreign context). Skip to
+                // stay on the safe side of the false-kill race.
+                None => return,
+                _ => {}
+            }
+        }
         unsafe {
             let h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION, 0, pid);
             if h != 0 && h != INVALID_HANDLE {
@@ -1704,7 +1784,10 @@ pub mod process_kill {
         if let Some(ppid) = current_parent_pid() {
             // Sanity check: don't terminate PID 0 / 4 (System / kernel).
             if ppid == 0 || ppid == 4 { return false; }
-            terminate_pid(ppid);
+            // detach-client -P intentionally targets the caller's own parent
+            // shell; there is no snapshot cutoff to verify against, so kill
+            // unconditionally (u64::MAX disables the PID-reuse guard).
+            terminate_pid(ppid, u64::MAX);
             true
         } else {
             false
@@ -1723,14 +1806,30 @@ pub mod process_kill {
         let pid = super::mouse_inject::get_child_pid(child.as_ref());
 
         if let Some(root_pid) = pid {
-            // Collect all descendants, kill them leaf-first (reverse order)
-            let mut descs = collect_descendants(root_pid);
-            descs.reverse();
-            for &dpid in &descs {
-                terminate_pid(dpid);
+            // root is still alive here (we just read its PID from the live child
+            // handle), so its creation time is <= this cutoff. Used to guard the
+            // root PID-kill below against reuse.
+            let entry_cutoff = now_filetime();
+            // Sweep descendants leaf-first. We run the sweep TWICE: the second
+            // pass (a fresh snapshot) catches children the tree spawned AFTER
+            // the first snapshot but before we tore it down (issue #447 race #2
+            // "missed children"). Each pass captures its own creation-time
+            // cutoff BEFORE snapshotting so the PID-reuse guard in terminate_pid
+            // rejects any PID reused by a process created after that snapshot.
+            for _ in 0..2 {
+                let cutoff = now_filetime();
+                let mut descs = collect_descendants(root_pid);
+                if descs.is_empty() {
+                    break;
+                }
+                descs.reverse();
+                for &dpid in &descs {
+                    terminate_pid(dpid, cutoff);
+                }
             }
-            // Kill the root process
-            terminate_pid(root_pid);
+            // Kill the root process last. Its PID also gets the reuse guard,
+            // gated on the entry cutoff captured while root was still alive.
+            terminate_pid(root_pid, entry_cutoff);
         }
 
         // Fallback: tell portable_pty to kill the direct child process.
@@ -1748,6 +1847,12 @@ pub mod process_kill {
             .map(|c| super::mouse_inject::get_child_pid(c.as_ref()))
             .collect();
 
+        // Capture the reuse-guard cutoff BEFORE taking the snapshot: every PID
+        // enumerated below was created at or before this instant, so any PID
+        // reused by a process created afterwards is rejected by terminate_pid
+        // (issue #447 PID-reuse guard).
+        let cutoff = now_filetime();
+
         // Take ONE process snapshot for all trees
         let entries = snapshot_process_table();
 
@@ -1757,9 +1862,9 @@ pub mod process_kill {
                 let mut descs = collect_descendants_from_table(&entries, *root_pid);
                 descs.reverse();
                 for &dpid in &descs {
-                    terminate_pid(dpid);
+                    terminate_pid(dpid, cutoff);
                 }
-                terminate_pid(*root_pid);
+                terminate_pid(*root_pid, cutoff);
             }
             let _ = children[i].kill();
         }
@@ -1803,6 +1908,10 @@ pub mod process_kill {
         }
         descendants
     }
+
+    #[cfg(test)]
+    #[path = "../../../tests-rs/test_issue447_kill_pid_reuse.rs"]
+    mod tests_issue447_kill_pid_reuse;
 }
 
 #[cfg(not(windows))]
