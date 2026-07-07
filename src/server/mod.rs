@@ -1223,7 +1223,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         _ => "",
                     };
                     match req {
-                CtrlReq::NewWindow(cmd, name, detached, start_dir) => {
+                CtrlReq::NewWindow(cmd, name, detached, start_dir, title) => {
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let prev_idx = app.active_idx;
                     // Expand format variables like #{pane_current_path} (#111)
@@ -1239,6 +1239,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     if let Some(n) = name { app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
+                    // -T: set the new pane's title at creation (tmux new-window -T).
+                    if let Some(t) = title {
+                        if let Some(win) = app.windows.last_mut() {
+                            if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                                p.title_locked = !t.is_empty();
+                                p.title = t;
+                            }
+                        }
+                    }
                     if detached { app.active_idx = prev_idx; }
                     // Replenish warm pane pool for next new-window
                     if app.warm_pane.is_none() {
@@ -1249,7 +1258,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
-                CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp) => {
+                CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp, title) => {
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let prev_idx = app.active_idx;
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
@@ -1262,6 +1271,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     if let Some(n) = name { app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
+                    if let Some(t) = title {
+                        if let Some(win) = app.windows.last_mut() {
+                            if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                                p.title_locked = !t.is_empty();
+                                p.title = t;
+                            }
+                        }
+                    }
                     // Use full format engine for -P output (tmux compatible)
                     let new_win_idx = app.windows.len() - 1;
                     let fmt = format_str.as_deref().unwrap_or("#{session_name}:#{window_index}");
@@ -1277,7 +1294,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
-                CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp) => {
+                CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp, title) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // tmux: split-window without -Z permanently unzooms (#82)
                     unzoom_if_zoomed(&mut app);
@@ -1309,6 +1326,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if let Some(Node::Split { sizes, .. }) = get_split_mut(&mut win.root, &prev_path) {
                             sizes[0] = 100 - pct;
                             sizes[1] = pct;
+                        }
+                    }
+                    // -T: the just-created pane is currently active in this
+                    // window, so set its title before any detached revert.
+                    if let Some(t) = title {
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                            p.title_locked = !t.is_empty();
+                            p.title = t;
                         }
                     }
                     if detached {
@@ -1345,7 +1371,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                 }
-                CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, split_size, format_str, resp) => {
+                CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, split_size, format_str, resp, title) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     unzoom_if_zoomed(&mut app);
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
@@ -1371,6 +1397,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if let Some(Node::Split { sizes, .. }) = get_split_mut(&mut win.root, &prev_path) {
                             sizes[0] = 100 - pct;
                             sizes[1] = pct;
+                        }
+                    }
+                    // -T: set the new (currently active) pane's title.
+                    if let Some(t) = title {
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                            p.title_locked = !t.is_empty();
+                            p.title = t;
                         }
                     }
                     // Use full format engine for -P output (tmux compatible)

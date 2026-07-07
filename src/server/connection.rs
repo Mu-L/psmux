@@ -865,19 +865,20 @@ match cmd {
         let detached = args.iter().any(|a| *a == "-d");
         let print_info = args.iter().any(|a| *a == "-P");
         let format_str: Option<String> = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
+        let title: Option<String> = extract_flag_value(&args, "-T").map(|s| s.trim_matches('"').to_string());
         let cmd_str: Option<String> = args.iter()
-            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
+            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
             .map(|s| s.trim_matches('"').to_string());
         if print_info {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx));
+            let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title));
             if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 let _ = write!(write_stream, "{}\n", text);
                 let _ = write_stream.flush();
             }
             if !persistent { break; }
         } else {
-            let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir));
+            let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir, title));
         }
     }
     "split-window" | "splitw" | "split-pane" | "splitp" => {
@@ -885,6 +886,7 @@ match cmd {
         let detached = args.iter().any(|a| *a == "-d");
         let print_info = args.iter().any(|a| *a == "-P");
         let format_str: Option<String> = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
+        let title: Option<String> = extract_flag_value(&args, "-T").map(|s| s.trim_matches('"').to_string());
         let start_dir: Option<String> = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
         // -p N = percentage, -l N = cell count, -l N% = percentage (tmux semantics)
         let split_size: Option<(u16, bool)> = args.windows(2).find(|w| w[0] == "-p")
@@ -897,11 +899,11 @@ match cmd {
                     raw.trim_end_matches('%').parse::<u16>().ok().map(|v| (v, is_pct))
                 }));
         let cmd_str: Option<String> = args.iter()
-            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)))
+            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)))
             .map(|s| s.trim_matches('"').to_string());
         if print_info {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx));
+            let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx, title));
             if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 let _ = write!(write_stream, "{}\n", text);
                 let _ = write_stream.flush();
@@ -909,7 +911,7 @@ match cmd {
             if !persistent { break; }
         } else {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx));
+            let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx, title));
             if let Ok(err_msg) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 if !err_msg.is_empty() {
                     let _ = write!(write_stream, "{}\n", err_msg);
@@ -3088,6 +3090,7 @@ fn dispatch_control_command(
             let detached = crate::cli::has_short_flag(&args, 'd');
             let print_info = crate::cli::has_short_flag(&args, 'P');
             let format_str = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
+            let title = extract_flag_value(&args, "-T").map(|s| s.trim_matches('"').to_string());
             // Skip arg if it's a flag, the value of a flag, or a flag-cluster
             // value (e.g. the format string after `-PF`).
             let mut skip: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -3095,11 +3098,11 @@ fn dispatch_control_command(
                 if a.starts_with('-') && !a.starts_with("--") {
                     skip.insert(i);
                     // Two-token forms: next arg is the value
-                    if matches!(*a, "-n" | "-c" | "-F" | "-t" | "-x" | "-y" | "-e") {
+                    if matches!(*a, "-n" | "-c" | "-F" | "-t" | "-x" | "-y" | "-e" | "-T") {
                         skip.insert(i + 1);
                     } else if a.len() > 2
                         && a.chars().skip(1).all(|c| c.is_ascii_alphabetic())
-                        && matches!(a.chars().last(), Some('n') | Some('c') | Some('F') | Some('t') | Some('x') | Some('y') | Some('e'))
+                        && matches!(a.chars().last(), Some('n') | Some('c') | Some('F') | Some('t') | Some('x') | Some('y') | Some('e') | Some('T'))
                     {
                         // Cluster ending in value-taking flag: -PF <value>
                         skip.insert(i + 1);
@@ -3111,13 +3114,13 @@ fn dispatch_control_command(
                 .map(|(_, s)| s.trim_matches('"').to_string());
             if print_info {
                 let (rtx, rrx) = mpsc::channel::<String>();
-                let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx));
+                let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title));
                 if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                     let _ = resp_tx.send(text);
                 }
                 true
             } else {
-                let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir));
+                let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir, title));
                 let _ = resp_tx.send(String::new());
                 true
             }
@@ -3133,6 +3136,7 @@ fn dispatch_control_command(
             let detached = crate::cli::has_short_flag(&args, 'd');
             let print_info = crate::cli::has_short_flag(&args, 'P');
             let format_str = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
+            let title = extract_flag_value(&args, "-T").map(|s| s.trim_matches('"').to_string());
             // -p N = percentage, -l N = cell count, -l N% = percentage (tmux semantics)
             let split_size: Option<(u16, bool)> = args.windows(2).find(|w| w[0] == "-p")
                 .and_then(|w| w[1].trim_end_matches('%').parse::<u16>().ok())
@@ -3145,9 +3149,9 @@ fn dispatch_control_command(
                     }));
             let (rtx, rrx) = mpsc::channel::<String>();
             if print_info {
-                let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx));
+                let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx, title));
             } else {
-                let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx));
+                let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx, title));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);

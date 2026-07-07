@@ -1335,6 +1335,7 @@ fn run_main() -> io::Result<()> {
                 let mut print_info = false;
                 let mut format_str: Option<String> = None;
                 let mut start_dir: Option<String> = None;
+                let mut title_arg: Option<String> = None;
                 let mut nw_positional: Vec<String> = Vec::new();
                 {
                     let mut i = 1;
@@ -1346,6 +1347,7 @@ fn run_main() -> io::Result<()> {
                             "-F" => { i += 1; if i < cmd_args.len() { format_str = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             s if s.starts_with("-F") && s.len() > 2 => { format_str = Some(s[2..].trim_matches('"').to_string()); }
                             "-c" => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } }
+                            "-T" => { i += 1; if i < cmd_args.len() { title_arg = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-t" | "-e" | "-S" => { i += 1; /* skip value */ }
                             "-d" => { detached = true; }
                             "-P" => { print_info = true; }
@@ -1382,6 +1384,9 @@ fn run_main() -> io::Result<()> {
                 if let Some(name) = &name_arg {
                     cmd_line.push_str(&format!(" -n \"{}\"", name.replace("\"", "\\\"")));
                 }
+                if let Some(t) = &title_arg {
+                    cmd_line.push_str(&format!(" -T \"{}\"", t.replace("\"", "\\\"")));
+                }
                 if let Some(dir) = &start_dir {
                     cmd_line.push_str(&format!(" -c \"{}\"", dir.replace("\"", "\\\"")));
                 }
@@ -1411,6 +1416,7 @@ fn run_main() -> io::Result<()> {
                 let mut start_dir: Option<String> = None;
                 let mut size_pct: Option<String> = None;
                 let mut size_cells: Option<String> = None;
+                let mut title_arg: Option<String> = None;
                 let mut sw_positional: Vec<String> = Vec::new();
                 {
                     let mut i = 1;
@@ -1421,6 +1427,7 @@ fn run_main() -> io::Result<()> {
                             "-F" => { i += 1; if i < cmd_args.len() { format_str = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             s if s.starts_with("-F") && s.len() > 2 => { format_str = Some(s[2..].trim_matches('"').to_string()); }
                             "-c" => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } }
+                            "-T" => { i += 1; if i < cmd_args.len() { title_arg = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-p" => { i += 1; if i < cmd_args.len() { size_pct = Some(cmd_args[i].to_string()); size_cells = None; } }
                             "-l" => { i += 1; if i < cmd_args.len() { let v = cmd_args[i].to_string(); if v.ends_with('%') { size_pct = Some(v); size_cells = None; } else { size_cells = Some(v); size_pct = None; } } }
                             "-t" | "-e" => { i += 1; /* skip value */ }
@@ -1454,6 +1461,9 @@ fn run_main() -> io::Result<()> {
                 }
                 if let Some(dir) = &start_dir {
                     cmd_line.push_str(&format!(" -c \"{}\"", dir.replace("\"", "\\\"")));
+                }
+                if let Some(t) = &title_arg {
+                    cmd_line.push_str(&format!(" -T \"{}\"", t.replace("\"", "\\\"")));
                 }
                 if let Some(pct) = &size_pct {
                     cmd_line.push_str(&format!(" -p {}", pct));

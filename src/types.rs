@@ -1085,10 +1085,10 @@ pub enum Action {
 pub struct Bind { pub key: (KeyCode, KeyModifiers), pub action: Action, pub repeat: bool }
 
 pub enum CtrlReq {
-    NewWindow(Option<String>, Option<String>, bool, Option<String>),  // cmd, name, detached, start_dir
-    NewWindowPrint(Option<String>, Option<String>, bool, Option<String>, Option<String>, mpsc::Sender<String>),  // cmd, name, detached, start_dir, format, resp
-    SplitWindow(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, mpsc::Sender<String>),  // kind, cmd, detached, start_dir, size (value, is_percent), error_resp
-    SplitWindowPrint(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, Option<String>, mpsc::Sender<String>),  // kind, cmd, detached, start_dir, size (value, is_percent), format, resp
+    NewWindow(Option<String>, Option<String>, bool, Option<String>, Option<String>),  // cmd, name, detached, start_dir, title (-T)
+    NewWindowPrint(Option<String>, Option<String>, bool, Option<String>, Option<String>, mpsc::Sender<String>, Option<String>),  // cmd, name, detached, start_dir, format, resp, title (-T)
+    SplitWindow(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, mpsc::Sender<String>, Option<String>),  // kind, cmd, detached, start_dir, size (value, is_percent), error_resp, title (-T)
+    SplitWindowPrint(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, Option<String>, mpsc::Sender<String>, Option<String>),  // kind, cmd, detached, start_dir, size (value, is_percent), format, resp, title (-T)
     KillPane,
     KillPaneById(usize),
     CapturePane(mpsc::Sender<String>),
