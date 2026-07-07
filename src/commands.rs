@@ -2550,6 +2550,10 @@ mod tests_issue245_mouse_selection;
 mod tests_pr255_active_border;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_pane_border_lines_render.rs"]
+mod tests_pane_border_lines_render;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_pr207_compat_bugs.rs"]
 mod tests_pr207_compat_bugs;
 

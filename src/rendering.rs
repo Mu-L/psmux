@@ -131,16 +131,29 @@ pub fn render_window(f: &mut Frame, app: &mut AppState, area: Rect) {
         .filter(|s| !s.is_empty())
         .cloned()
         .unwrap_or_else(|| "#{pane_index} \"#{pane_title}\"".to_string());
+    // pane-border-lines (#pane-border-lines): choose the glyph set for the
+    // separators drawn between panes. `none` suppresses them entirely.
+    let border_lines_name = app.user_options.get("pane-border-lines")
+        .cloned()
+        .unwrap_or_else(|| crate::border_lines::DEFAULT.to_string());
+    let bchars = crate::border_lines::border_chars(&border_lines_name);
     let win = &mut app.windows[app.active_idx];
     let active_rect = compute_active_rect(&win.root, &win.active_path, area);
-    render_node(f, &mut win.root, &win.active_path, &mut Vec::new(), area, dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_style, window_active_style, &border_status, &border_format, &mut 0);
-    fix_border_intersections(f.buffer_mut());
+    render_node(f, &mut win.root, &win.active_path, &mut Vec::new(), area, dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_style, window_active_style, &border_status, &border_format, &mut 0, bchars);
+    fix_border_intersections(f.buffer_mut(), bchars);
 }
 
 /// Post-pass: fix border intersection characters where horizontal and vertical
 /// separator lines meet. Converts plain '│' and '─' to proper junction
 /// characters ('┼', '├', '┤', '┬', '┴') at intersection points.
-pub fn fix_border_intersections(buf: &mut Buffer) {
+pub fn fix_border_intersections(buf: &mut Buffer, bchars: Option<crate::border_lines::BorderChars>) {
+    // `none` (bchars == None) draws no separators, and `spaces` has no distinct
+    // junction glyphs, so intersection-fixing is a no-op for both.
+    let Some(bc) = bchars else { return; };
+    if !bc.has_junctions { return; }
+    let vert = bc.vertical;
+    let horiz = bc.horizontal;
+
     let w = buf.area.width as usize;
     let h = buf.area.height as usize;
     if w == 0 || h == 0 { return; }
@@ -154,42 +167,38 @@ pub fn fix_border_intersections(buf: &mut Buffer) {
             if idx >= buf.content.len() { continue; }
             let ch = buf.content[idx].symbol().chars().next().unwrap_or(' ');
 
-            match ch {
-                '│' => {
-                    // Cell already has vertical (up+down). Check for horizontal neighbours.
-                    let has_left = col > 0 && {
-                        let li = row * w + (col - 1);
-                        li < buf.content.len() && buf.content[li].symbol().chars().next() == Some('─')
-                    };
-                    let has_right = col + 1 < w && {
-                        let ri = row * w + (col + 1);
-                        ri < buf.content.len() && buf.content[ri].symbol().chars().next() == Some('─')
-                    };
-                    match (has_left, has_right) {
-                        (true, true)  => fixes.push((idx, '┼')),
-                        (true, false) => fixes.push((idx, '┤')),
-                        (false, true) => fixes.push((idx, '├')),
-                        _ => {}
-                    }
+            if ch == vert {
+                // Cell already has vertical (up+down). Check for horizontal neighbours.
+                let has_left = col > 0 && {
+                    let li = row * w + (col - 1);
+                    li < buf.content.len() && buf.content[li].symbol().chars().next() == Some(horiz)
+                };
+                let has_right = col + 1 < w && {
+                    let ri = row * w + (col + 1);
+                    ri < buf.content.len() && buf.content[ri].symbol().chars().next() == Some(horiz)
+                };
+                match (has_left, has_right) {
+                    (true, true)  => fixes.push((idx, bc.cross)),
+                    (true, false) => fixes.push((idx, bc.right_tee)),
+                    (false, true) => fixes.push((idx, bc.left_tee)),
+                    _ => {}
                 }
-                '─' => {
-                    // Cell already has horizontal (left+right). Check for vertical neighbours.
-                    let has_up = row > 0 && {
-                        let ui = (row - 1) * w + col;
-                        ui < buf.content.len() && buf.content[ui].symbol().chars().next() == Some('│')
-                    };
-                    let has_down = row + 1 < h && {
-                        let di = (row + 1) * w + col;
-                        di < buf.content.len() && buf.content[di].symbol().chars().next() == Some('│')
-                    };
-                    match (has_up, has_down) {
-                        (true, true)  => fixes.push((idx, '┼')),
-                        (true, false) => fixes.push((idx, '┴')),
-                        (false, true) => fixes.push((idx, '┬')),
-                        _ => {}
-                    }
+            } else if ch == horiz {
+                // Cell already has horizontal (left+right). Check for vertical neighbours.
+                let has_up = row > 0 && {
+                    let ui = (row - 1) * w + col;
+                    ui < buf.content.len() && buf.content[ui].symbol().chars().next() == Some(vert)
+                };
+                let has_down = row + 1 < h && {
+                    let di = (row + 1) * w + col;
+                    di < buf.content.len() && buf.content[di].symbol().chars().next() == Some(vert)
+                };
+                match (has_up, has_down) {
+                    (true, true)  => fixes.push((idx, bc.cross)),
+                    (true, false) => fixes.push((idx, bc.bottom_tee)),
+                    (false, true) => fixes.push((idx, bc.top_tee)),
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -215,6 +224,7 @@ pub fn render_node(
     border_status: &str,
     border_format: &str,
     pane_idx: &mut usize,
+    bchars: Option<crate::border_lines::BorderChars>,
 ) {
     match node {
         Node::Leaf(pane) => {
@@ -347,11 +357,14 @@ pub fn render_node(
             for (i, child) in children.iter_mut().enumerate() {
                 cur_path.push(i);
                 if i < rects.len() {
-                    render_node(f, child, active_path, cur_path, rects[i], dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_style, window_active_style, border_status, border_format, pane_idx);
+                    render_node(f, child, active_path, cur_path, rects[i], dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_style, window_active_style, border_status, border_format, pane_idx, bchars);
                 }
                 cur_path.pop();
             }
-            // Draw separator lines
+            // Draw separator lines. `pane-border-lines none` (bchars == None)
+            // suppresses them entirely.
+            let Some(bc) = bchars else { return; };
+            let (v_char, h_char) = (bc.vertical, bc.horizontal);
             let buf = f.buffer_mut();
             for i in 0..children.len().saturating_sub(1) {
                 if i >= rects.len() { break; }
@@ -375,7 +388,7 @@ pub fn render_node(
                                 let sty = if y < mid_y { left_sty } else { right_sty };
                                 let idx = (y - buf.area.y) as usize * buf.area.width as usize + (sep_x - buf.area.x) as usize;
                                 if idx < buf.content.len() {
-                                    buf.content[idx].set_char('│');
+                                    buf.content[idx].set_char(v_char);
                                     buf.content[idx].set_style(sty);
                                 }
                             }
@@ -388,7 +401,7 @@ pub fn render_node(
                                 let sty = if active { active_border_style } else { border_style };
                                 let idx = (y - buf.area.y) as usize * buf.area.width as usize + (sep_x - buf.area.x) as usize;
                                 if idx < buf.content.len() {
-                                    buf.content[idx].set_char('│');
+                                    buf.content[idx].set_char(v_char);
                                     buf.content[idx].set_style(sty);
                                 }
                             }
@@ -411,7 +424,7 @@ pub fn render_node(
                                 let sty = if x < mid_x { top_sty } else { bot_sty };
                                 let idx = (sep_y - buf.area.y) as usize * buf.area.width as usize + (x - buf.area.x) as usize;
                                 if idx < buf.content.len() {
-                                    buf.content[idx].set_char('─');
+                                    buf.content[idx].set_char(h_char);
                                     buf.content[idx].set_style(sty);
                                 }
                             }
@@ -424,7 +437,7 @@ pub fn render_node(
                                 let sty = if active { active_border_style } else { border_style };
                                 let idx = (sep_y - buf.area.y) as usize * buf.area.width as usize + (x - buf.area.x) as usize;
                                 if idx < buf.content.len() {
-                                    buf.content[idx].set_char('─');
+                                    buf.content[idx].set_char(h_char);
                                     buf.content[idx].set_style(sty);
                                 }
                             }

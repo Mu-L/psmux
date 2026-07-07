@@ -8,6 +8,7 @@ mod cli;
 mod session;
 mod tree;
 mod style;
+mod border_lines;
 mod rendering;
 mod config;
 mod commands;
@@ -414,8 +415,9 @@ fn run_main() -> io::Result<()> {
                     active_rect,
                     "", false, "off", "",
                     total_panes,
+                    crate::border_lines::border_chars(crate::border_lines::DEFAULT),
                 );
-                crate::rendering::fix_border_intersections(f.buffer_mut());
+                crate::rendering::fix_border_intersections(f.buffer_mut(), crate::border_lines::border_chars(crate::border_lines::DEFAULT));
             }).unwrap();
             // Dump the buffer as ANSI escape sequences so colors are visible.
             let buf = term.backend().buffer().clone();

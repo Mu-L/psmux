@@ -90,6 +90,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     // ── Pane options ──
     OptionDef { name: "pane-border-style", scope: "pane", option_type: "string", default: "default", description: "Inactive pane border style" },
     OptionDef { name: "pane-active-border-style", scope: "pane", option_type: "string", default: "fg=green", description: "Active pane border style" },
+    OptionDef { name: "pane-border-lines", scope: "pane", option_type: "choice", default: "single", description: "Pane border line style (single/double/heavy/simple/number/spaces/none)" },
 ];
 
 /// Build the flattened option list for CustomizeMode using live values from AppState.

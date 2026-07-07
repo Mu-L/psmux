@@ -693,6 +693,7 @@ pub fn render_layout_json(
     border_status: &str,
     border_format: &str,
     total_panes: usize,
+    bchars: Option<crate::border_lines::BorderChars>,
 ) {
     match node {
         LayoutJson::Leaf {
@@ -975,7 +976,7 @@ pub fn render_layout_json(
             if zoomed {
                 if let Some(i) = effective_sizes.iter().position(|&s| s != 0) {
                     if let Some(child) = children.get(i) {
-                        render_layout_json(f, child, area, dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes);
+                        render_layout_json(f, child, area, dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars);
                     }
                 }
                 return;
@@ -985,11 +986,14 @@ pub fn render_layout_json(
 
             for (i, child) in children.iter().enumerate() {
                 if i < rects.len() {
-                    render_layout_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes);
+                    render_layout_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars);
                 }
             }
             let border_style = Style::default().fg(border_fg);
             let active_border_style = Style::default().fg(active_border_fg);
+            // pane-border-lines none: children are drawn, but no separators.
+            let Some(bc) = bchars else { return; };
+            let (v_char, h_char) = (bc.vertical, bc.horizontal);
             let buf = f.buffer_mut();
             for i in 0..children.len().saturating_sub(1) {
                 if i >= rects.len() { break; }
@@ -1011,7 +1015,7 @@ pub fn render_layout_json(
                                 let idx = (y - buf.area.y) as usize * buf.area.width as usize
                                     + (sep_x - buf.area.x) as usize;
                                 if idx < buf.content.len() {
-                                    buf.content[idx].set_char('│');
+                                    buf.content[idx].set_char(v_char);
                                     buf.content[idx].set_style(sty);
                                 }
                             }
@@ -1025,7 +1029,7 @@ pub fn render_layout_json(
                                 let idx = (y - buf.area.y) as usize * buf.area.width as usize
                                     + (sep_x - buf.area.x) as usize;
                                 if idx < buf.content.len() {
-                                    buf.content[idx].set_char('│');
+                                    buf.content[idx].set_char(v_char);
                                     buf.content[idx].set_style(sty);
                                 }
                             }
@@ -1045,7 +1049,7 @@ pub fn render_layout_json(
                                 let idx = (sep_y - buf.area.y) as usize * buf.area.width as usize
                                     + (x - buf.area.x) as usize;
                                 if idx < buf.content.len() {
-                                    buf.content[idx].set_char('─');
+                                    buf.content[idx].set_char(h_char);
                                     buf.content[idx].set_style(sty);
                                 }
                             }
@@ -1059,7 +1063,7 @@ pub fn render_layout_json(
                                 let idx = (sep_y - buf.area.y) as usize * buf.area.width as usize
                                     + (x - buf.area.x) as usize;
                                 if idx < buf.content.len() {
-                                    buf.content[idx].set_char('─');
+                                    buf.content[idx].set_char(h_char);
                                     buf.content[idx].set_style(sty);
                                 }
                             }
@@ -1472,6 +1476,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         pane_border_status: Option<String>,
         #[serde(default)]
         pane_border_format: Option<String>,
+        #[serde(default)]
+        pane_border_lines: Option<String>,
         /// window-status-format (short key to save bandwidth)
         #[serde(default)]
         wsf: Option<String>,
@@ -4615,8 +4621,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             };
             // O(N) per frame but pane counts are small in practice (typically < 20).
             let total_panes = if state.zoomed { 1 } else { root.count_leaves() };
-            render_layout_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed, border_status, border_format, total_panes);
-            fix_border_intersections(f.buffer_mut());
+            let bchars = crate::border_lines::border_chars(
+                state.pane_border_lines.as_deref().unwrap_or(crate::border_lines::DEFAULT));
+            render_layout_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed, border_status, border_format, total_panes, bchars);
+            fix_border_intersections(f.buffer_mut(), bchars);
             // render_json and fix_border_intersections can leave inconsistent styles
             // at intersections and along edges shared by nested splits.
             if let Some(ar) = active_rect {

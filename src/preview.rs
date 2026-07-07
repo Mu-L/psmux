@@ -709,8 +709,9 @@ pub fn render_dump_tree(
         "off",            // border_status off (no per-pane title bar)
         "",               // border_format irrelevant
         total_panes,
+        crate::border_lines::border_chars(crate::border_lines::DEFAULT),
     );
-    crate::rendering::fix_border_intersections(f.buffer_mut());
+    crate::rendering::fix_border_intersections(f.buffer_mut(), crate::border_lines::border_chars(crate::border_lines::DEFAULT));
 }
 
 #[cfg(test)]

@@ -1827,6 +1827,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 combined_buf.push('}');
                             }
                         }
+                        // Inject pane-border-lines independently — it may be set
+                        // without pane-border-status.
+                        if let Some(pbl) = app.user_options.get("pane-border-lines") {
+                            if combined_buf.ends_with('}') {
+                                combined_buf.pop();
+                                combined_buf.push_str(",\"pane_border_lines\":\"");
+                                combined_buf.push_str(&json_escape_string(pbl));
+                                combined_buf.push('"');
+                                combined_buf.push('}');
+                            }
+                        }
                         // set-titles: when on, expand set-titles-string and ship
                         // it so the client emits OSC 0 to its host terminal.
                         if app.set_titles && combined_buf.ends_with('}') {
@@ -5082,6 +5093,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             combined_buf.push_str(&json_escape_string(pbf));
                             combined_buf.push('"');
                         }
+                        combined_buf.push('}');
+                    }
+                }
+                // Inject pane-border-lines independently — it may be set
+                // without pane-border-status.
+                if let Some(pbl) = app.user_options.get("pane-border-lines") {
+                    if combined_buf.ends_with('}') {
+                        combined_buf.pop();
+                        combined_buf.push_str(",\"pane_border_lines\":\"");
+                        combined_buf.push_str(&json_escape_string(pbl));
+                        combined_buf.push('"');
                         combined_buf.push('}');
                     }
                 }
