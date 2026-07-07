@@ -162,7 +162,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
 
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone());
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone(), app.next_pane_id);
 
     let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
@@ -229,7 +229,7 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
         .try_clone_reader()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone());
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone(), pane_id);
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
     let mut pty_writer = pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
@@ -280,7 +280,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
 
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone());
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone(), app.next_pane_id);
 
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
     let mut pty_writer = pair.master.take_writer()
@@ -438,7 +438,7 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     let cpr_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cpr_writer = cpr_pending.clone();
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone());
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone(), app.next_pane_id);
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
     let mut pty_writer = pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
@@ -1340,6 +1340,7 @@ pub fn spawn_reader_thread(
     bell_pending: Arc<std::sync::atomic::AtomicBool>,
     cpr_pending: Arc<std::sync::atomic::AtomicBool>,
     output_ring: Arc<Mutex<std::collections::VecDeque<u8>>>,
+    pane_id: usize,
 ) {
     // ── Issue #246: split the old single reader thread into two threads ──
     //
@@ -1423,6 +1424,29 @@ pub fn spawn_reader_thread(
                             ring.extend(&local[..n]);
                         }
                     }
+                    // Issue #440: tee raw pane output to any registered pipe-pane
+                    // writer for this pane. The atomic gate keeps this a single
+                    // relaxed load (no mutex) whenever nothing is being piped,
+                    // which is the common case. When a writer's child has exited
+                    // its pipe write fails; drop that entry and decrement the gate
+                    // so the reader stops trying.
+                    if crate::types::PIPE_PANE_COUNT.load(Ordering::Relaxed) > 0 {
+                        if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
+                            use std::io::Write;
+                            let mut i = 0;
+                            while i < writers.len() {
+                                if writers[i].0 == pane_id {
+                                    let w = &mut writers[i].1;
+                                    if w.write_all(&local[..n]).is_err() || w.flush().is_err() {
+                                        writers.remove(i);
+                                        crate::types::PIPE_PANE_COUNT.fetch_sub(1, Ordering::Relaxed);
+                                        continue;
+                                    }
+                                }
+                                i += 1;
+                            }
+                        }
+                    }
                 }
                 Ok(_) => {
                     zero_reads += 1;
@@ -1430,6 +1454,20 @@ pub fn spawn_reader_thread(
                     thread::sleep(Duration::from_millis(1));
                 }
                 Err(_) => break,
+            }
+        }
+        // Issue #440: this pane is gone. Drop any pipe-pane writer still bound
+        // to it so the piped command sees EOF instead of blocking forever on a
+        // stdin that will never fill, and keep the count gate in sync. pane_id
+        // is monotonic and never reused, so this can only match this pane.
+        if crate::types::PIPE_PANE_COUNT.load(Ordering::Relaxed) > 0 {
+            if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
+                let before = writers.len();
+                writers.retain(|(id, _)| *id != pane_id);
+                let removed = before - writers.len();
+                if removed > 0 {
+                    crate::types::PIPE_PANE_COUNT.fetch_sub(removed, Ordering::Relaxed);
+                }
             }
         }
         // Signal end-of-stream and wake parser thread one last time so it

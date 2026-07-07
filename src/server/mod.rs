@@ -3696,13 +3696,35 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(output);
                 }
                 CtrlReq::PipePane(cmd, stdin, stdout, toggle) => {
+                    // The `-t` target (if any) was temp-focused by the connection
+                    // layer before this request ran, so the active pane here IS the
+                    // requested target pane (issue #440 defect 2). The pipe binds to
+                    // this concrete pane_id and keeps receiving that pane's output
+                    // even after focus moves elsewhere.
                     let win = &app.windows[app.active_idx];
                     let pane_id = get_active_pane_id(&win.root, &win.active_path).unwrap_or(0);
                     let has_existing = app.pipe_panes.iter().any(|p| p.pane_id == pane_id);
-                    
+
+                    // Drop any writer this pane's reader thread was teeing to
+                    // (issue #440). Dropping the ChildStdin closes the pipe so the
+                    // child sees EOF; the count gate is kept in sync so idle panes
+                    // pay nothing.
+                    let unregister_writer = |pid: usize| {
+                        if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
+                            let before = writers.len();
+                            writers.retain(|(id, _)| *id != pid);
+                            let removed = before - writers.len();
+                            if removed > 0 {
+                                crate::types::PIPE_PANE_COUNT
+                                    .fetch_sub(removed, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    };
+
                     if cmd.is_empty() {
                         // No command: close any existing pipe on this pane
                         if let Some(idx) = app.pipe_panes.iter().position(|p| p.pane_id == pane_id) {
+                            unregister_writer(pane_id);
                             if let Some(ref mut proc) = app.pipe_panes[idx].process {
                                 let _ = proc.kill();
                             }
@@ -3711,6 +3733,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else if toggle && has_existing {
                         // -o flag with existing pipe: close it (toggle off), don't start new
                         if let Some(idx) = app.pipe_panes.iter().position(|p| p.pane_id == pane_id) {
+                            unregister_writer(pane_id);
                             if let Some(ref mut proc) = app.pipe_panes[idx].process {
                                 let _ = proc.kill();
                             }
@@ -3719,6 +3742,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         // Close any existing pipe first (replace)
                         if let Some(idx) = app.pipe_panes.iter().position(|p| p.pane_id == pane_id) {
+                            unregister_writer(pane_id);
                             if let Some(ref mut proc) = app.pipe_panes[idx].process {
                                 let _ = proc.kill();
                             }
@@ -3726,7 +3750,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         // Start new pipe
                         let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
-                        let process = {
+                        let mut process = {
                             let mut c = std::process::Command::new(&shell_prog);
                             for a in &shell_args { c.arg(a); }
                             c.arg(&cmd);
@@ -3736,7 +3760,25 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             { use crate::platform::HideWindowCommandExt; c.hide_window(); }
                             c.spawn().ok()
                         };
-                        
+
+                        // Issue #440: hand the child's stdin to this pane's reader
+                        // thread so pane output is actually fed to the pipe command.
+                        // Without this the child blocked on an empty pipe forever and
+                        // the sink stayed 0 bytes. Only the output direction (`-O` /
+                        // default) registers a writer; `-I` (child stdout -> pane
+                        // input) is unchanged.
+                        if stdout {
+                            if let Some(child) = process.as_mut() {
+                                if let Some(stdin_handle) = child.stdin.take() {
+                                    if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
+                                        writers.push((pane_id, stdin_handle));
+                                        crate::types::PIPE_PANE_COUNT
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+
                         app.pipe_panes.push(PipePaneState {
                             pane_id,
                             process,

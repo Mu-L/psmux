@@ -277,6 +277,7 @@ pub fn handle_pane_forward_inject(
         proxy_pane.bell_pending.clone(),
         proxy_pane.cpr_pending.clone(),
         proxy_pane.output_ring.clone(),
+        pane_id,
     );
     // Graft into the target window tree
     let tgt_idx = target_win.unwrap_or(app.active_idx);

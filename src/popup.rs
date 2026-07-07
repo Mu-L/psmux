@@ -114,6 +114,7 @@ pub fn create_popup_pane(
                 bell_pending.clone(),
                 cpr_pending.clone(),
                 output_ring.clone(),
+                pane_id,
             );
         }
         Err(e) => {

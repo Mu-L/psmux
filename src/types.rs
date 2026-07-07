@@ -1449,6 +1449,21 @@ pub static PTY_DATA_READY: std::sync::atomic::AtomicBool = std::sync::atomic::At
 /// Lets the server loop skip the tree walk when no CPR response is needed.
 pub static CPR_DATA_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Issue #440: `pipe-pane` output routing.
+///
+/// A pane's PTY reader thread tees every raw output chunk to any pipe writer
+/// registered under its `pane_id`, so `pipe-pane -o '<cmd>'` actually receives
+/// the pane transcript on the child's stdin (previously the child was spawned
+/// with a piped stdin that nothing ever wrote to, so it blocked on an empty
+/// pipe forever and the sink stayed 0 bytes).
+///
+/// `PIPE_PANE_COUNT` is a cheap gate: it lets every reader thread skip the mutex
+/// entirely in the overwhelmingly common case where no pipe is active, so panes
+/// that are not being piped pay nothing. The server handler (`CtrlReq::PipePane`)
+/// pushes/removes `(pane_id, child_stdin)` entries and keeps the count in sync.
+pub static PIPE_PANE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static PIPE_WRITERS: Mutex<Vec<(usize, std::process::ChildStdin)>> = Mutex::new(Vec::new());
+
 /// Tracked persistent client TCP streams.
 /// Connection handlers register clones here so the server can explicitly
 /// `shutdown()` them before `process::exit(0)`.  Without this, Windows
