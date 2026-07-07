@@ -236,6 +236,36 @@ pub struct Window {
     pub zoom_saved: Option<Vec<(Vec<usize>, Vec<u16>)>>,
     /// If this window is a linked reference, stores the source window ID it was linked from.
     pub linked_from: Option<usize>,
+    /// Floating panes overlaid ABOVE this window's tiled layout (tmux `new-pane`).
+    /// Unlike a popup (a modal `Mode`), floating panes are persistent and coexist
+    /// with the tiled panes. Drawn in order, so later entries stack on top.
+    pub floating: Vec<FloatingPane>,
+    /// Index into `floating` of the pane currently holding input focus, if any.
+    /// When `None`, input goes to the tiled active pane.
+    pub floating_focus: Option<usize>,
+}
+
+/// A floating pane: a PTY-backed pane rendered as a positioned overlay above the
+/// tiled layout (tmux `new-pane`). Reuses the full `Pane` infrastructure
+/// (vt100 parsing, ConPTY I/O, screen serialization) exactly like popups do,
+/// but is persistent, positioned, movable, and resizable rather than modal.
+pub struct FloatingPane {
+    pub pane: Pane,
+    /// Top-left position within the window content area (0-based cols/rows).
+    pub x: u16,
+    pub y: u16,
+    /// Outer size in cells, including the 1-cell border on each side.
+    pub w: u16,
+    pub h: u16,
+    /// Border line style: a `pane-border-lines` value
+    /// (single/double/heavy/simple/none). Empty or "single" => default single.
+    pub border: String,
+    /// Unique pane id (shares the `next_pane_id` space with tiled panes).
+    pub id: usize,
+    pub title: String,
+    /// Last `-P` position keyword (top-left/centre/...), kept so the float can
+    /// be re-anchored when the terminal is resized. `None` for explicit coords.
+    pub position: Option<String>,
 }
 
 /// A menu item for display-menu

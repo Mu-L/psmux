@@ -35,6 +35,8 @@ fn new_window_with_name_sets_manual_rename() {
         pane_mru: vec![],
         zoom_saved: None,
         linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
     };
     app.windows.push(win_default);
 
@@ -59,6 +61,8 @@ fn new_window_with_name_sets_manual_rename() {
         pane_mru: vec![],
         zoom_saved: None,
         linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
     };
     app.windows.push(win_named);
 
@@ -96,6 +100,8 @@ fn rename_window_sets_manual_rename() {
         pane_mru: vec![],
         zoom_saved: None,
         linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
     };
     app.windows.push(win);
 
@@ -130,6 +136,8 @@ fn new_window_without_name_does_not_set_manual_rename() {
         pane_mru: vec![],
         zoom_saved: None,
         linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
     };
     app.windows.push(win);
 
@@ -167,6 +175,8 @@ fn set_automatic_rename_clears_manual_rename() {
         pane_mru: vec![],
         zoom_saved: None,
         linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
     };
     app.windows.push(win);
     app.active_idx = 0;

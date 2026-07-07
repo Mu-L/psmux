@@ -10,6 +10,7 @@ mod tree;
 mod style;
 mod border_lines;
 mod copy_line_numbers;
+mod floating;
 mod rendering;
 mod config;
 mod commands;

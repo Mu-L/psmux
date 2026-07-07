@@ -123,6 +123,8 @@ fn send_prefix_command_dispatches_with_c_a_prefix() {
         pane_mru: vec![],
         zoom_saved: None,
         linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
     });
     app.prefix_key = (KeyCode::Char('a'), KeyModifiers::CONTROL);
 

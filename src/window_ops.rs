@@ -1337,6 +1337,8 @@ mod swap_mru_tests {
             pane_mru: vec![right_id, left_id],
             zoom_saved: None,
             linked_from: None,
+            floating: Vec::new(),
+            floating_focus: None,
         }
     }
 
@@ -1502,6 +1504,8 @@ pub fn break_pane_to_window(app: &mut AppState) {
             pane_mru: initial_mru,
             zoom_saved: None,
             linked_from: None,
+            floating: Vec::new(),
+            floating_focus: None,
         });
         app.next_win_id += 1;
         app.on_window_appended();

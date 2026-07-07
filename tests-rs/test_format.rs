@@ -131,6 +131,8 @@ fn mock_window(name: &str) -> crate::types::Window {
         pane_mru: vec![],
         zoom_saved: None,
         linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
     }
 }
 

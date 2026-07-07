@@ -27,6 +27,8 @@ fn test_generate_list_clients() {
         pane_mru: vec![],
         zoom_saved: None,
         linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
     };
     app.windows.push(win);
     let output = generate_list_clients(&app);
@@ -91,6 +93,8 @@ fn mock_app_with_window() -> AppState {
         pane_mru: vec![],
         zoom_saved: None,
         linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
     };
     app.windows.push(win);
 

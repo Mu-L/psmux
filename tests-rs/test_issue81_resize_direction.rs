@@ -38,6 +38,8 @@ fn app_with_split(kind: LayoutKind, active_child: usize) -> AppState {
         pane_mru: vec![],
         zoom_saved: None,
         linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
     };
     app.windows.push(win);
     app
