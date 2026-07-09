@@ -3395,6 +3395,25 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     let _ = p.writer.flush();
                 }
             }
+            // Ctrl+Break (issue #454).  The attached client traps the Ctrl+Break
+            // console signal — which Windows never delivers as a keystroke — and
+            // forwards it here as `send-key C-Break` so it interrupts the running
+            // program instead of tearing down the client / session.
+            //
+            // We deliver it as an interrupt via the SAME reliable path as Ctrl+C:
+            // the raw 0x03 byte on the ConPTY input pipe plus a CTRL_C_EVENT for
+            // cooked console apps.  A *real* CTRL_BREAK_EVENT cannot be used here:
+            // GenerateConsoleCtrlEvent does not relay into a ConPTY child console,
+            // and broadcasting it to process group 0 only kills the server that
+            // hosts the pane (proven empirically) without ever reaching the child.
+            "break" | "Break" | "C-Break" | "c-break" | "C-break" => {
+                let _ = p.writer.write_all(&[0x03]);
+                let _ = p.writer.flush();
+                #[cfg(windows)]
+                if let Some(pid) = p.child_pid {
+                    crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                }
+            }
             s if s.starts_with("C-") && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('c');
                 // tmux-parity mapping so C-/ -> 0x1f (^_), not the naive '/' & 0x1f

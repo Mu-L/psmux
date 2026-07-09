@@ -1938,6 +1938,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Cache the last-sent DECSCUSR code so we only write it when it
     // actually changes (avoids resetting WT's blink timer every frame).
     let mut last_cursor_style: u8 = 255;
+    // Trap Ctrl+Break (and stray Ctrl+C) console signals so they interrupt the
+    // pane's foreground program instead of terminating this client and
+    // detaching the still-running session (issue #454).  The signal is drained
+    // into cmd_batch as `send-key C-Break` at the top of each iteration.
+    crate::platform::install_client_console_ctrl_handler();
     loop {
         // ── Poll background reconnect result (non-blocking) ──────────────────
         // If a background reconnect thread has finished, apply its result here
@@ -2079,6 +2084,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             };
 
         cmd_batch.clear();
+
+        // ── Ctrl+Break signal → forward to pane (issue #454) ───────────
+        // A trapped Ctrl+Break console signal can't come through the key loop,
+        // so drain it here and relay it to the active pane's foreground process.
+        // Write straight to the server rather than via cmd_batch: cmd_batch is
+        // cleared every iteration and some event branches `continue` before the
+        // batch flush, which could silently drop the break.
+        if crate::platform::take_client_ctrl_break() {
+            let _ = writer.write_all(b"send-key C-Break\n");
+            let _ = writer.flush();
+        }
 
         // ── Windows paste pending-buffer management ────────────────────
         // Flush or promote chars based on how long they've been buffered.

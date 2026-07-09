@@ -391,13 +391,23 @@ pub fn install_console_ctrl_handler() {
         fn SetConsoleCtrlHandler(handler: Option<HandlerRoutine>, add: i32) -> i32;
     }
 
+    const CTRL_C_EVENT: u32 = 0;
+    const CTRL_BREAK_EVENT: u32 = 1;
     const CTRL_CLOSE_EVENT: u32 = 2;
     const CTRL_LOGOFF_EVENT: u32 = 5;
     const CTRL_SHUTDOWN_EVENT: u32 = 6;
 
     unsafe extern "system" fn handler(ctrl_type: u32) -> i32 {
         match ctrl_type {
-            CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => 1,
+            // Never let a Ctrl+C / Ctrl+Break signal terminate the server — that
+            // would tear down every session at once.  When psmux relays such a
+            // signal to a pane's child it briefly AttachConsole()s to the child's
+            // console, which places the server in that console's process group;
+            // a GenerateConsoleCtrlEvent(_, 0) broadcast would then kill the
+            // server itself.  SetConsoleCtrlHandler(None,1) only suppresses
+            // Ctrl+C, so Ctrl+Break needs this explicit survival (issue #454).
+            CTRL_C_EVENT | CTRL_BREAK_EVENT
+            | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => 1,
             _ => 0,
         }
     }
@@ -410,6 +420,74 @@ pub fn install_console_ctrl_handler() {
 #[cfg(not(windows))]
 pub fn install_console_ctrl_handler() {
     // No-op on non-Windows platforms
+}
+
+/// Set true by the client's console-control handler when a Ctrl+Break signal
+/// is trapped, drained by the client's main loop.  (issue #454)
+#[cfg(windows)]
+static CLIENT_CTRL_BREAK_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Install a console control handler on the ATTACHED CLIENT so Ctrl+Break
+/// interrupts the pane's foreground program instead of killing the client and
+/// detaching the still-running session (issue #454).
+///
+/// Ctrl+Break is ALWAYS delivered as a CTRL_BREAK_EVENT console signal — it
+/// cannot be read as a keystroke even in raw mode — so crossterm's key loop
+/// never sees it.  With no handler installed the OS default terminates the
+/// client, which is exactly the reported bug: the session survives on the
+/// server while the attached window vanishes.  We trap the signal, return TRUE
+/// to stay alive, and flag the main loop to forward a `send-key C-Break` to the
+/// server, which interrupts the pane's foreground program via the reliable
+/// Ctrl+C path (a real CTRL_BREAK_EVENT cannot be relayed into a ConPTY child).
+/// A stray CTRL_C signal (rare in raw mode, where Ctrl+C arrives as a keystroke)
+/// is likewise swallowed so it can never kill the client.
+#[cfg(windows)]
+pub fn install_client_console_ctrl_handler() {
+    use std::sync::atomic::Ordering;
+    type HandlerRoutine = unsafe extern "system" fn(u32) -> i32;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetConsoleCtrlHandler(handler: Option<HandlerRoutine>, add: i32) -> i32;
+    }
+
+    const CTRL_C_EVENT: u32 = 0;
+    const CTRL_BREAK_EVENT: u32 = 1;
+
+    unsafe extern "system" fn handler(ctrl_type: u32) -> i32 {
+        match ctrl_type {
+            CTRL_BREAK_EVENT => {
+                CLIENT_CTRL_BREAK_PENDING.store(true, Ordering::SeqCst);
+                1
+            }
+            // Never let a stray Ctrl+C signal terminate the client; normal
+            // Ctrl+C is already handled via the keystroke path.
+            CTRL_C_EVENT => 1,
+            // Close / logoff / shutdown: let the OS proceed with cleanup.
+            _ => 0,
+        }
+    }
+
+    unsafe {
+        SetConsoleCtrlHandler(Some(handler), 1);
+    }
+}
+
+/// Returns true exactly once per trapped Ctrl+Break signal.  (issue #454)
+#[cfg(windows)]
+pub fn take_client_ctrl_break() -> bool {
+    CLIENT_CTRL_BREAK_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(not(windows))]
+pub fn install_client_console_ctrl_handler() {
+    // No-op on non-Windows platforms
+}
+
+#[cfg(not(windows))]
+pub fn take_client_ctrl_break() -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
