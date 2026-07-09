@@ -140,13 +140,22 @@ pub fn render_window(f: &mut Frame, app: &mut AppState, area: Rect) {
     let win = &mut app.windows[app.active_idx];
     let active_rect = compute_active_rect(&win.root, &win.active_path, area);
     render_node(f, &mut win.root, &win.active_path, &mut Vec::new(), area, dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_style, window_active_style, &border_status, &border_format, &mut 0, bchars);
-    fix_border_intersections(f.buffer_mut(), bchars);
+    let buf_area = f.buffer_mut().area;
+    let mask = border_mask_from_node(&win.root, area, buf_area);
+    fix_border_intersections(f.buffer_mut(), bchars, &mask);
 }
 
 /// Post-pass: fix border intersection characters where horizontal and vertical
 /// separator lines meet. Converts plain '│' and '─' to proper junction
 /// characters ('┼', '├', '┤', '┬', '┴') at intersection points.
-pub fn fix_border_intersections(buf: &mut Buffer, bchars: Option<crate::border_lines::BorderChars>) {
+///
+/// `sep_cells` is the sorted, deduplicated list of cell indices psmux actually
+/// drew separators on (indexed like `buf.content`, i.e. `row * buf.area.width +
+/// col` relative to `buf.area`). Both the candidate cell and the crossing
+/// neighbour must be in `sep_cells` before a junction glyph is pushed, so
+/// box-drawing characters printed by child programs inside pane content (which
+/// are never in the list) are left untouched.
+pub fn fix_border_intersections(buf: &mut Buffer, bchars: Option<crate::border_lines::BorderChars>, sep_cells: &[usize]) {
     // `none` (bchars == None) draws no separators, and `spaces` has no distinct
     // junction glyphs, so intersection-fixing is a no-op for both.
     let Some(bc) = bchars else { return; };
@@ -158,53 +167,115 @@ pub fn fix_border_intersections(buf: &mut Buffer, bchars: Option<crate::border_l
     let h = buf.area.height as usize;
     if w == 0 || h == 0 { return; }
 
+    let is_sep = |i: usize| sep_cells.binary_search(&i).is_ok();
+
     // Collect fixes first so detection sees only original characters.
     let mut fixes: Vec<(usize, char)> = Vec::new();
 
-    for row in 0..h {
-        for col in 0..w {
-            let idx = row * w + col;
-            if idx >= buf.content.len() { continue; }
-            let ch = buf.content[idx].symbol().chars().next().unwrap_or(' ');
+    // Walk only the drawn separator cells rather than scanning the whole buffer.
+    for &idx in sep_cells {
+        if idx >= buf.content.len() { continue; }
+        let row = idx / w;
+        let col = idx % w;
+        let ch = buf.content[idx].symbol().chars().next().unwrap_or(' ');
 
-            if ch == vert {
-                // Cell already has vertical (up+down). Check for horizontal neighbours.
-                let has_left = col > 0 && {
-                    let li = row * w + (col - 1);
-                    li < buf.content.len() && buf.content[li].symbol().chars().next() == Some(horiz)
-                };
-                let has_right = col + 1 < w && {
-                    let ri = row * w + (col + 1);
-                    ri < buf.content.len() && buf.content[ri].symbol().chars().next() == Some(horiz)
-                };
-                match (has_left, has_right) {
-                    (true, true)  => fixes.push((idx, bc.cross)),
-                    (true, false) => fixes.push((idx, bc.right_tee)),
-                    (false, true) => fixes.push((idx, bc.left_tee)),
-                    _ => {}
-                }
-            } else if ch == horiz {
-                // Cell already has horizontal (left+right). Check for vertical neighbours.
-                let has_up = row > 0 && {
-                    let ui = (row - 1) * w + col;
-                    ui < buf.content.len() && buf.content[ui].symbol().chars().next() == Some(vert)
-                };
-                let has_down = row + 1 < h && {
-                    let di = (row + 1) * w + col;
-                    di < buf.content.len() && buf.content[di].symbol().chars().next() == Some(vert)
-                };
-                match (has_up, has_down) {
-                    (true, true)  => fixes.push((idx, bc.cross)),
-                    (true, false) => fixes.push((idx, bc.bottom_tee)),
-                    (false, true) => fixes.push((idx, bc.top_tee)),
-                    _ => {}
-                }
+        if ch == vert {
+            // Cell already has vertical (up+down). Check for horizontal neighbours.
+            let has_left = col > 0 && {
+                let li = row * w + (col - 1);
+                li < buf.content.len() && is_sep(li)
+                    && buf.content[li].symbol().starts_with(horiz)
+            };
+            let has_right = col + 1 < w && {
+                let ri = row * w + (col + 1);
+                ri < buf.content.len() && is_sep(ri)
+                    && buf.content[ri].symbol().starts_with(horiz)
+            };
+            match (has_left, has_right) {
+                (true, true)  => fixes.push((idx, bc.cross)),
+                (true, false) => fixes.push((idx, bc.right_tee)),
+                (false, true) => fixes.push((idx, bc.left_tee)),
+                _ => {}
+            }
+        } else if ch == horiz {
+            // Cell already has horizontal (left+right). Check for vertical neighbours.
+            let has_up = row > 0 && {
+                let ui = (row - 1) * w + col;
+                ui < buf.content.len() && is_sep(ui)
+                    && buf.content[ui].symbol().starts_with(vert)
+            };
+            let has_down = row + 1 < h && {
+                let di = (row + 1) * w + col;
+                di < buf.content.len() && is_sep(di)
+                    && buf.content[di].symbol().starts_with(vert)
+            };
+            match (has_up, has_down) {
+                (true, true)  => fixes.push((idx, bc.cross)),
+                (true, false) => fixes.push((idx, bc.bottom_tee)),
+                (false, true) => fixes.push((idx, bc.top_tee)),
+                _ => {}
             }
         }
     }
 
     for (idx, ch) in fixes {
         buf.content[idx].set_char(ch);
+    }
+}
+
+/// Collect the buffer-cell indices where psmux draws a pane separator,
+/// mirroring the separator geometry in [`render_node`]'s `Node::Split` arm
+/// (`split_with_gaps` → `rects[i].x + width` / `rects[i].y + height`, spanning
+/// the split's own `area`).
+///
+/// Indices match `Buffer::content` (`(y - buf_area.y) * buf_area.width +
+/// (x - buf_area.x)`). The result is sorted and deduplicated so callers can
+/// iterate the drawn cells directly and test membership with `binary_search`
+/// (see [`fix_border_intersections`]) — no whole-buffer array needed.
+pub fn border_mask_from_node(root: &Node, area: Rect, buf_area: Rect) -> Vec<usize> {
+    let mut cells = Vec::new();
+    mark_node_borders(root, area, buf_area, &mut cells);
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+}
+
+fn mark_node_borders(node: &Node, area: Rect, buf_area: Rect, cells: &mut Vec<usize>) {
+    let Node::Split { kind, sizes, children } = node else { return; };
+    let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
+        sizes.clone()
+    } else { vec![100 / children.len().max(1) as u16; children.len()] };
+    let is_horizontal = *kind == LayoutKind::Horizontal;
+    let rects = split_with_gaps(is_horizontal, &effective_sizes, area);
+    for (i, child) in children.iter().enumerate() {
+        if i < rects.len() {
+            mark_node_borders(child, rects[i], buf_area, cells);
+        }
+    }
+
+    let w = buf_area.width as usize;
+    for i in 0..children.len().saturating_sub(1) {
+        if i >= rects.len() { break; }
+        if is_horizontal {
+            let sep_x = rects[i].x + rects[i].width;
+            if sep_x < buf_area.x + buf_area.width && sep_x >= buf_area.x {
+                for y in area.y..area.y + area.height {
+                    if y >= buf_area.y && y < buf_area.y + buf_area.height {
+                        // Guards above bound y/x to buf_area, so idx < w*h.
+                        cells.push((y - buf_area.y) as usize * w + (sep_x - buf_area.x) as usize);
+                    }
+                }
+            }
+        } else {
+            let sep_y = rects[i].y + rects[i].height;
+            if sep_y < buf_area.y + buf_area.height && sep_y >= buf_area.y {
+                for x in area.x..area.x + area.width {
+                    if x >= buf_area.x && x < buf_area.x + buf_area.width {
+                        cells.push((sep_y - buf_area.y) as usize * w + (x - buf_area.x) as usize);
+                    }
+                }
+            }
+        }
     }
 }
 

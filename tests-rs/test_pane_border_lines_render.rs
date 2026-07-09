@@ -69,7 +69,8 @@ fn render_counts(kind: &str, style: &str, w: u16, h: u16) -> std::collections::H
             bchars,
             None,
         );
-        crate::rendering::fix_border_intersections(f.buffer_mut(), bchars);
+        let border_mask = crate::client::border_mask_from_layout(&layout, area, f.buffer_mut().area, false);
+        crate::rendering::fix_border_intersections(f.buffer_mut(), bchars, &border_mask);
     }).unwrap();
 
     let buf = term.backend().buffer().clone();
@@ -157,7 +158,8 @@ fn nested_split_produces_double_junction() {
             false, Color::Reset, active_rect, "", false, "off", "", total, bchars,
             None,
         );
-        crate::rendering::fix_border_intersections(f.buffer_mut(), bchars);
+        let border_mask = crate::client::border_mask_from_layout(&layout, area, f.buffer_mut().area, false);
+        crate::rendering::fix_border_intersections(f.buffer_mut(), bchars, &border_mask);
     }).unwrap();
     let buf = term.backend().buffer().clone();
     let mut junctions = 0;

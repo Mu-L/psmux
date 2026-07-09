@@ -2555,6 +2555,10 @@ mod tests_pr255_active_border;
 mod tests_pane_border_lines_render;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_pane_content_box_drawing.rs"]
+mod tests_pane_content_box_drawing;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_copy_line_numbers_render.rs"]
 mod tests_copy_line_numbers_render;
 
