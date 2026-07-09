@@ -5543,6 +5543,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // Check if all windows/panes have exited (throttled to every 250ms)
         if last_reap.elapsed() >= Duration::from_millis(100) {
             last_reap = Instant::now();
+            // #450: self-heal the warm pane pool.  The spare shell can die
+            // while idling (shell crash, external kill, dead conhost); the
+            // consume-time gate in create_window/split then falls back to a
+            // cold spawn, but replacing the corpse here keeps the next
+            // new-window on the instant warm path.
+            let warm_dead = app.warm_pane.as_mut()
+                .map(|wp| !crate::pane::warm_pane_is_live(wp))
+                .unwrap_or(false);
+            if warm_dead {
+                if let Some(mut dead) = app.warm_pane.take() { dead.child.kill().ok(); }
+                if let Ok(nw) = spawn_warm_pane(&*pty_system, &mut app) {
+                    app.warm_pane = Some(nw);
+                }
+            }
             // Snapshot per-window state BEFORE reap so we can diff and emit
             // accurate %window-close / %layout-change / %window-pane-changed
             // notifications to control-mode clients (iTerm2 etc.).  Without

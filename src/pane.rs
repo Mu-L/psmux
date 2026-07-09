@@ -92,36 +92,48 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     // The warm pane has its shell already loaded (~470ms for pwsh), so the
     // prompt appears instantly — matching wezterm's "instant tab" feel.
     if command.is_none() && start_dir.is_none() && app.warm_pane.is_some() {
-        let wp = app.warm_pane.take().unwrap();
+        let mut wp = app.warm_pane.take().unwrap();
         // Resize to current terminal dimensions if they changed since pre-spawn
         let area = app.last_window_area;
         let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
         let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
         let need_resize = rows != wp.rows || cols != wp.cols;
-        if need_resize {
+        // #450: the spare shell can die while idling in the pool (shell
+        // crash, external kill, dead conhost).  Transplanting the corpse
+        // yields a broken empty window that the reaper prunes one tick
+        // later — the user sees prefix+c "open nothing" or flash a dead
+        // pane.  Gate the transplant on child liveness; a failed ConPTY
+        // resize doubles as a dead-conhost probe.  On a dead spare, fall
+        // through to the synchronous cold-spawn path below.
+        let mut live = warm_pane_is_live(&mut wp);
+        if live && need_resize {
             let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
-            wp.master.resize(size).ok();
+            live = wp.master.resize(size).is_ok();
         }
-        // Reconcile parser dimensions and scrollback cap.  The cap
-        // sync is the consume-time safety net for #271 — even if a
-        // future caller forgets to invoke warm_pane_sync on a state
-        // change, the parser is brought to the live value here.
-        if let Ok(mut parser) = wp.term.lock() {
-            if need_resize {
-                parser.screen_mut().set_size(rows, cols);
+        if live {
+            // Reconcile parser dimensions and scrollback cap.  The cap
+            // sync is the consume-time safety net for #271 — even if a
+            // future caller forgets to invoke warm_pane_sync on a state
+            // change, the parser is brought to the live value here.
+            if let Ok(mut parser) = wp.term.lock() {
+                if need_resize {
+                    parser.screen_mut().set_size(rows, cols);
+                }
+                crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app);
             }
-            crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app);
+            let epoch = std::time::Instant::now() - Duration::from_secs(2);
+            let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
+            let pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring };
+            let win_name = default_shell_name(None, configured_shell);
+            let initial_pane_id = wp.pane_id;
+            app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![initial_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
+            app.next_win_id += 1;
+            app.active_idx = app.windows.len() - 1;
+            app.on_window_appended();
+            return Ok(());
         }
-        let epoch = std::time::Instant::now() - Duration::from_secs(2);
-        let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
-        let pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring };
-        let win_name = default_shell_name(None, configured_shell);
-        let initial_pane_id = wp.pane_id;
-        app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![initial_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
-        app.next_win_id += 1;
-        app.active_idx = app.windows.len() - 1;
-        app.on_window_appended();
-        return Ok(());
+        // Dead spare: make sure the corpse is fully gone, then cold-spawn.
+        wp.child.kill().ok();
     }
     // ── Normal path: spawn a new ConPTY + shell synchronously ──
     // Use actual terminal size if known, otherwise fall back to defaults
@@ -195,6 +207,15 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     app.active_idx = app.windows.len() - 1;
     app.on_window_appended();
     Ok(())
+}
+
+/// #450: is the pooled spare shell still alive?  A warm pane can die while
+/// idling — the shell can crash (e.g. pwsh FailFast on a broken console
+/// read), be killed externally, or lose its conhost.  `Ok(None)` from
+/// `try_wait` is the only state in which a transplant is safe; both a
+/// reported exit and a wait error mean the child is unusable.
+pub fn warm_pane_is_live(wp: &mut crate::types::WarmPane) -> bool {
+    matches!(wp.child.try_wait(), Ok(None))
 }
 
 /// Pre-spawn a shell in the background so the next `new-window` (default shell,
@@ -392,31 +413,39 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     // Skip warm pane when start_dir is set — the warm pane was spawned
     // in the server's CWD, not the requested directory (#107).
     if command.is_none() && start_dir.is_none() && app.warm_pane.is_some() {
-        let wp = app.warm_pane.take().unwrap();
+        let mut wp = app.warm_pane.take().unwrap();
         let need_resize = rows != wp.rows || cols != wp.cols;
-        if need_resize {
+        // #450: never transplant a spare whose shell died in the pool —
+        // see the matching gate in create_window.  Fall through to the
+        // cold-spawn path below instead.
+        let mut live = warm_pane_is_live(&mut wp);
+        if live && need_resize {
             let sz = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
-            wp.master.resize(sz).ok();
+            live = wp.master.resize(sz).is_ok();
         }
-        // Same consume-time reconciliation as create_window — see
-        // warm_pane_sync::reconcile_consumed_parser.
-        if let Ok(mut parser) = wp.term.lock() {
-            if need_resize {
-                parser.screen_mut().set_size(rows, cols);
+        if live {
+            // Same consume-time reconciliation as create_window — see
+            // warm_pane_sync::reconcile_consumed_parser.
+            if let Ok(mut parser) = wp.term.lock() {
+                if need_resize {
+                    parser.screen_mut().set_size(rows, cols);
+                }
+                crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app);
             }
-            crate::warm_pane_sync::reconcile_consumed_parser(&mut parser, app);
+            let epoch = std::time::Instant::now() - Duration::from_secs(2);
+            let new_pane_id = wp.pane_id;
+            let new_leaf = Node::Leaf(Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring });
+            let win = &mut app.windows[app.active_idx];
+            replace_leaf_with_split(&mut win.root, &win.active_path, kind, new_leaf);
+            let mut new_path = win.active_path.clone();
+            new_path.push(1);
+            win.active_path = new_path;
+            // Add new pane to MRU (most recent)
+            crate::tree::touch_mru(&mut win.pane_mru, new_pane_id);
+            return Ok(());
         }
-        let epoch = std::time::Instant::now() - Duration::from_secs(2);
-        let new_pane_id = wp.pane_id;
-        let new_leaf = Node::Leaf(Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring });
-        let win = &mut app.windows[app.active_idx];
-        replace_leaf_with_split(&mut win.root, &win.active_path, kind, new_leaf);
-        let mut new_path = win.active_path.clone();
-        new_path.push(1);
-        win.active_path = new_path;
-        // Add new pane to MRU (most recent)
-        crate::tree::touch_mru(&mut win.pane_mru, new_pane_id);
-        return Ok(());
+        // Dead spare: make sure the corpse is fully gone, then cold-spawn.
+        wp.child.kill().ok();
     }
 
     // ── Normal path: cold-spawn a new ConPTY + shell ────────────────
@@ -1721,3 +1750,7 @@ mod test_parser_audible_bell {
 }
 
 // reap_children is in tree.rs
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue450_dead_warm_pane.rs"]
+mod tests_issue450_dead_warm_pane;
