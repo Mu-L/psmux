@@ -4,6 +4,22 @@ use serde::{Serialize, Deserialize};
 
 use crate::types::{AppState, Node};
 
+/// Shared lock for tests that mutate the process-global USERPROFILE/HOME env.
+/// `std::env::set_var`/`remove_var` are process-wide, so every test module that
+/// touches them (e.g. test_config_plugin_paths and test_issue167_startup_log)
+/// must serialise through THIS single lock rather than a per-module mutex.
+/// With separate mutexes, a reader in one module can observe a half-swapped env
+/// set by another module and panic (flaky server-startup.log tests under the
+/// full parallel suite). `lock_test_env` recovers a poisoned lock so a panicking
+/// test cannot cascade failures into every later env-touching test.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Expand `~` to the user's home directory in a shell command string,
 /// then rewrite `~/.psmux/plugins/` to `~/.config/psmux/plugins/` when
 /// the classic path does not exist but the XDG path does (issue psmux-plugins#2).

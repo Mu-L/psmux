@@ -11,10 +11,12 @@
 use super::*;
 
 // All tests in this module touch the same on-disk log file and the
-// process-global USERPROFILE/HOME env vars.  cargo runs tests in
-// parallel by default, so without serialisation `home_missing` wipes
-// the env vars while other tests are mid-write.  Serialise the lot.
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// process-global USERPROFILE/HOME env vars.  cargo runs tests in parallel by
+// default, so without serialisation `home_missing` wipes the env vars while
+// other tests are mid-write.  Serialise through crate::util::lock_test_env(),
+// the SHARED process-wide lock, so we also mutually exclude with other modules
+// that mutate USERPROFILE/HOME (e.g. test_config_plugin_paths) - a per-module
+// mutex here left that cross-module race open.
 
 fn home_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(
@@ -34,7 +36,7 @@ fn cleanup() {
 
 #[test]
 fn writes_a_log_file_with_the_error_message() {
-    let _g = SERIAL.lock().unwrap();
+    let _g = crate::util::lock_test_env();
     cleanup();
     write_startup_error_log(&"CreateProcessW \"pwsh.exe\" failed: Falscher Parameter. (os error 87)");
     let body = std::fs::read_to_string(log_path()).expect("log file must exist after call");
@@ -48,7 +50,7 @@ fn writes_a_log_file_with_the_error_message() {
 
 #[test]
 fn log_includes_environment_diagnostics() {
-    let _g = SERIAL.lock().unwrap();
+    let _g = crate::util::lock_test_env();
     cleanup();
     write_startup_error_log(&"any error");
     let body = std::fs::read_to_string(log_path()).unwrap();
@@ -67,7 +69,7 @@ fn log_includes_environment_diagnostics() {
 
 #[test]
 fn log_includes_workaround_instructions() {
-    let _g = SERIAL.lock().unwrap();
+    let _g = crate::util::lock_test_env();
     cleanup();
     write_startup_error_log(&"any");
     let body = std::fs::read_to_string(log_path()).unwrap();
@@ -85,7 +87,7 @@ fn log_includes_workaround_instructions() {
 
 #[test]
 fn log_includes_psmux_version() {
-    let _g = SERIAL.lock().unwrap();
+    let _g = crate::util::lock_test_env();
     cleanup();
     write_startup_error_log(&"err");
     let body = std::fs::read_to_string(log_path()).unwrap();
@@ -99,7 +101,7 @@ fn log_includes_psmux_version() {
 
 #[test]
 fn log_overwrites_previous_runs() {
-    let _g = SERIAL.lock().unwrap();
+    let _g = crate::util::lock_test_env();
     cleanup();
     write_startup_error_log(&"old error message");
     write_startup_error_log(&"NEW_MARKER_xyz_789");
@@ -114,7 +116,7 @@ fn log_overwrites_previous_runs() {
 
 #[test]
 fn log_call_does_not_panic_when_home_is_missing() {
-    let _g = SERIAL.lock().unwrap();
+    let _g = crate::util::lock_test_env();
     // Simulate a degenerate environment where neither USERPROFILE nor HOME
     // is set.  The helper must NOT panic; it should swallow and return.
     let saved_up = std::env::var("USERPROFILE").ok();
