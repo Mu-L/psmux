@@ -110,6 +110,33 @@ pub(crate) fn json_escape_string(s: &str) -> String {
     out
 }
 
+/// Inject the status-bar style options that were dropped when the monolithic
+/// `app.rs` renderer was split into the modular client (regression from the
+/// modularization refactor, issue #451). The client only ever received
+/// `ws_style`/`wsc_style`, so `status-left-style`, `status-right-style`, and
+/// `window-status-{activity,bell,last}-style` never reached the renderer and had
+/// no effect. These are appended to the already-built render-state JSON object
+/// the same way `clock_colour` and the pane-border extras are (pop the trailing
+/// `}`, add fields, re-close), so the giant format-string arg list is untouched.
+pub(crate) fn append_extra_style_json(buf: &mut String, app: &AppState) {
+    if !buf.ends_with('}') { return; }
+    buf.pop();
+    for (key, raw) in [
+        ("status_left_style", &app.status_left_style),
+        ("status_right_style", &app.status_right_style),
+        ("wsa_style", &app.window_status_activity_style),
+        ("wsb_style", &app.window_status_bell_style),
+        ("wsl_style", &app.window_status_last_style),
+    ] {
+        buf.push_str(",\"");
+        buf.push_str(key);
+        buf.push_str("\":\"");
+        buf.push_str(&json_escape_string(&crate::format::expand_format(raw, app)));
+        buf.push('"');
+    }
+    buf.push('}');
+}
+
 /// Build windows JSON with pre-expanded tab_text for each window.
 /// The tab_text is the fully expanded window-status-format / window-status-current-format.
 pub(crate) fn list_windows_json_with_tabs(app: &AppState) -> io::Result<String> {
@@ -127,6 +154,8 @@ pub(crate) fn list_windows_json_with_tabs(app: &AppState) -> io::Result<String> 
             name: w.name.clone(),
             active: is_active,
             activity: w.activity_flag,
+            bell: w.bell_flag,
+            last: i == app.last_window_idx,
             tab_text: tab,
             idx: app.win_display_index(i),
         });
@@ -547,3 +576,7 @@ pub(crate) const TMUX_COMMANDS: &[&str] = &[
     "unlink-window (unlinkw)",
     "wait-for (wait)",
 ];
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue451_status_styles.rs"]
+mod tests_issue451_status_styles;

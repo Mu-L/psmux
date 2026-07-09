@@ -1511,7 +1511,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut srv_customize_options: Vec<CustomizeOption> = Vec::new();
 
     #[derive(serde::Deserialize, Default)]
-    struct WinStatus { id: usize, name: String, active: bool, #[serde(default)] activity: bool, #[serde(default)] tab_text: String, #[serde(default)] idx: usize }
+    struct WinStatus { id: usize, name: String, active: bool, #[serde(default)] activity: bool, #[serde(default)] bell: bool, #[serde(default)] last: bool, #[serde(default)] tab_text: String, #[serde(default)] idx: usize }
     
     fn default_base_index() -> usize { 1 }
     fn default_prediction_dimming() -> bool { dim_predictions_enabled() }
@@ -1620,6 +1620,21 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// window-status-current-style
         #[serde(default)]
         wsc_style: Option<String>,
+        /// #451: status-left-style (was dropped in modularization)
+        #[serde(default)]
+        status_left_style: Option<String>,
+        /// #451: status-right-style
+        #[serde(default)]
+        status_right_style: Option<String>,
+        /// #451: window-status-activity-style
+        #[serde(default)]
+        wsa_style: Option<String>,
+        /// #451: window-status-bell-style
+        #[serde(default)]
+        wsb_style: Option<String>,
+        /// #451: window-status-last-style
+        #[serde(default)]
+        wsl_style: Option<String>,
         /// clock-mode active
         #[serde(default)]
         clock_mode: bool,
@@ -5387,7 +5402,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 client_log("status", &format!("parsing left_prefix ({} chars): [{}]",
                     left_prefix.len(), left_prefix.chars().take(100).collect::<String>()));
             }
-            let mut left_spans: Vec<Span> = crate::rendering::parse_inline_styles(&left_prefix, sb_base);
+            // #451: status-left-style is layered over the base status style so
+            // inline #[...] overrides in status-left still win. Dropped in the
+            // app.rs->client.rs modularization; restored here.
+            let left_base = match state.status_left_style.as_deref() {
+                Some(s) if !s.is_empty() => sb_base.patch(crate::rendering::parse_tmux_style(s)),
+                _ => sb_base,
+            };
+            let mut left_spans: Vec<Span> = crate::rendering::parse_inline_styles(&left_prefix, left_base);
 
             // Window tabs (the window list)
             let mut tab_spans_all: Vec<Span> = Vec::new();
@@ -5410,6 +5432,30 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     tab_spans_all.extend(sep_spans);
                     tab_cursor += sep_w;
                 }
+                // Normal (non-current) window-status-style, used as the base for
+                // flagged windows and the fallback for plain ones.
+                let normal_style = if let Some((fg, bg, bold)) = win_status_style {
+                    let mut s = Style::default();
+                    if let Some(c) = fg { s = s.fg(c); }
+                    if let Some(c) = bg { s = s.bg(c); }
+                    if bold { s = s.add_modifier(Modifier::BOLD); }
+                    s
+                } else {
+                    sb_base
+                };
+                // #451: restore the tmux flag-style priority that the monolithic
+                // app.rs renderer had (current > bell > activity > last > normal).
+                // The modularization dropped bell/last entirely and hard-coded the
+                // activity colour, so window-status-{activity,bell,last}-style had
+                // no effect. Each flagged style is layered over the normal style so
+                // an option that only sets fg keeps the normal bg, and full
+                // attributes like `reverse` (the activity/bell default) work.
+                let flag_style = |raw: &Option<String>| -> Option<Style> {
+                    match raw.as_deref() {
+                        Some(s) if !s.is_empty() => Some(normal_style.patch(crate::rendering::parse_tmux_style(s))),
+                        _ => None,
+                    }
+                };
                 let fallback_style = if w.active {
                     if let Some((fg, bg, bold)) = win_status_current_style {
                         let mut s = Style::default();
@@ -5420,21 +5466,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     } else {
                         sb_base
                     }
+                } else if w.bell {
+                    flag_style(&state.wsb_style).unwrap_or(normal_style)
                 } else if w.activity {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::White)
-                        .add_modifier(Modifier::BOLD)
+                    flag_style(&state.wsa_style).unwrap_or(normal_style)
+                } else if w.last {
+                    flag_style(&state.wsl_style).unwrap_or(normal_style)
                 } else {
-                    if let Some((fg, bg, bold)) = win_status_style {
-                        let mut s = Style::default();
-                        if let Some(c) = fg { s = s.fg(c); }
-                        if let Some(c) = bg { s = s.bg(c); }
-                        if bold { s = s.add_modifier(Modifier::BOLD); }
-                        s
-                    } else {
-                        sb_base
-                    }
+                    normal_style
                 };
                 let parsed = crate::rendering::parse_inline_styles(&tab_text, fallback_style);
                 let tab_start = tab_cursor;
@@ -5450,7 +5489,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 client_log("status", &format!("parsing right_text ({} chars): [{}]",
                     right_text.len(), right_text.chars().take(100).collect::<String>()));
             }
-            let mut right_spans = crate::rendering::parse_inline_styles(&right_text, sb_base);
+            // #451: status-right-style, layered like status-left-style above.
+            let right_base = match state.status_right_style.as_deref() {
+                Some(s) if !s.is_empty() => sb_base.patch(crate::rendering::parse_tmux_style(s)),
+                _ => sb_base,
+            };
+            let mut right_spans = crate::rendering::parse_inline_styles(&right_text, right_base);
 
             // Enforce status-left-length / status-right-length truncation (tmux parity)
             crate::style::truncate_spans_to_width(&mut left_spans, state.status_left_length);

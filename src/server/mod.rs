@@ -1897,6 +1897,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.scroll_enter_copy_mode,
                         app.bold_is_bright,
                     ));
+                    // #451: append status-bar style options dropped in the
+                    // app.rs->client.rs modularization.
+                    helpers::append_extra_style_json(&mut combined_buf, &app);
                     // Inject overlay state (popup, menu, confirm, display_panes)
                     {
                         // Inject clock_colour if set
@@ -5301,6 +5304,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 app.scroll_enter_copy_mode,
                 app.bold_is_bright,
             ));
+            // #451: append status-bar style options dropped in the
+            // app.rs->client.rs modularization.
+            helpers::append_extra_style_json(&mut combined_buf, &app);
             // Inject overlay state (popup, menu, confirm, display_panes)
             {
                 // Inject clock_colour if set
