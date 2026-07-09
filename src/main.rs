@@ -584,6 +584,15 @@ fn run_main() -> io::Result<()> {
                                     } else {
                                         if base.contains("__") { continue; }
                                     }
+                                    // PID-anchor fast path: a dead entry would
+                                    // otherwise cost a full TCP connect timeout
+                                    // here (dead loopback ports can time out
+                                    // rather than refuse on Windows). Reap it
+                                    // and move on without touching the network.
+                                    if crate::session::registry_pid_anchor_alive(base) == Some(false) {
+                                        crate::session::remove_session_registry(base);
+                                        continue;
+                                    }
                                     if let Ok(port_str) = std::fs::read_to_string(e.path()) {
                                         if let Ok(_p) = port_str.trim().parse::<u16>() {
                                             let addr = format!("127.0.0.1:{}", port_str.trim());

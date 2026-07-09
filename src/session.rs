@@ -372,6 +372,71 @@ fn reap_orphaned_servers_in(psmux_dir: &Path) {
     }
 }
 
+/// Windows FILETIME ticks (100ns since 1601-01-01) for a `SystemTime`.
+/// Used to compare a process creation time against a registry file mtime.
+fn system_time_to_filetime_ticks(t: SystemTime) -> Option<u64> {
+    const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+    let since_unix = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(UNIX_EPOCH_AS_FILETIME.saturating_add((since_unix.as_nanos() / 100) as u64))
+}
+
+/// Slack allowed between a `.pid` file's last write and the recorded process's
+/// creation time before the PID is considered recycled. A legitimate server is
+/// always created BEFORE it writes its `.pid`, so its creation time can never
+/// exceed the file mtime; the margin only absorbs filesystem/clock jitter.
+const PID_REUSE_MARGIN_TICKS: u64 = 60 * 10_000_000; // 60s in 100ns ticks
+
+/// Definitive liveness verdict from the `.pid` sentinel written next to every
+/// `.port` file (issue #448) — no network round-trip.
+///
+/// This is what keeps CLI startup O(microseconds) per registry entry: a TCP
+/// probe of a dead port can burn its full connect timeout on Windows (stealth
+/// firewall behavior never sends RST on loopback for some configurations) and
+/// then classify as Inconclusive, leaving the stale file to tax EVERY future
+/// invocation. The process table answers instantly and definitively.
+///
+/// Returns:
+///   Some(true)  - recorded PID is a live psmux-image process created no later
+///                 than the `.pid` file was written -> genuinely our server.
+///   Some(false) - PID gone, recycled by a non-psmux image, or recycled by a
+///                 psmux process created long after the file -> server is dead.
+///   None        - no usable `.pid` anchor (pre-#448 registry) -> caller must
+///                 fall back to the network probe.
+fn pid_anchor_verdict(port_path: &Path) -> Option<bool> {
+    // The process-table queries below are Windows-only; other platforms fall
+    // back to the network probe rather than misreading stub returns as "dead".
+    if !cfg!(windows) {
+        return None;
+    }
+    let pid_path = port_path.with_extension("pid");
+    let pid: u32 = std::fs::read_to_string(&pid_path).ok()?.trim().parse().ok()?;
+    let name = match crate::platform::process_info::get_process_name(pid) {
+        // No such process (a same-user psmux server is always openable with
+        // QUERY_LIMITED_INFORMATION, so an unopenable PID is not our server).
+        None => return Some(false),
+        Some(n) => n.to_ascii_lowercase(),
+    };
+    if !PSMUX_SERVER_IMAGE_NAMES.contains(&name.as_str()) {
+        // PID recycled by an unrelated application; our server is gone.
+        return Some(false);
+    }
+    // PID-reuse guard (same idea as the #447 reaper guard): a psmux process
+    // created well AFTER the .pid file was last written cannot be the server
+    // that wrote it. When either timestamp is unavailable, err towards alive.
+    if let Some(created_ft) = crate::platform::process_kill::process_creation_time(pid) {
+        if let Some(mtime_ft) = std::fs::metadata(&pid_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(system_time_to_filetime_ticks)
+        {
+            if created_ft > mtime_ft.saturating_add(PID_REUSE_MARGIN_TICKS) {
+                return Some(false);
+            }
+        }
+    }
+    Some(true)
+}
+
 /// Resolve the session key stored alongside a `.port` file (the sibling
 /// `.key`). Returns an empty string when the key file is missing, which the
 /// identity probe treats as "cannot verify" (Inconclusive) rather than dead.
@@ -440,6 +505,26 @@ where
                             continue;
                         }
                     }
+                }
+                // PID-anchor fast path (issue #448 sentinel): the process table
+                // answers liveness instantly and definitively, so registry
+                // entries with a `.pid` sibling never pay a network probe.
+                // Dead-port probes are not just slow (they can burn the full
+                // connect timeout per attempt on Windows loopback) - they are
+                // also inconclusive, so stale files were never reaped and the
+                // probe tax repeated on every subsequent CLI invocation.
+                match pid_anchor_verdict(&path) {
+                    Some(true) => continue, // live server; nothing to clean
+                    Some(false) => {
+                        if crate::debug_log::session_log_enabled() {
+                            crate::debug_log::session_log("cleanup", &format!(
+                                "reaping '{}': recorded server PID is dead or recycled",
+                                registry_base(&path)));
+                        }
+                        remove_session_registry_files(&path);
+                        continue;
+                    }
+                    None => {} // no .pid anchor; fall through to the network probe
                 }
                 if let Ok(port_str) = std::fs::read_to_string(&path) {
                     if let Ok(port) = port_str.trim().parse::<u16>() {
@@ -984,6 +1069,16 @@ pub fn classify_sessions_parallel(
     })
 }
 
+/// PID-anchor liveness for the session registered under `base`, for
+/// enumeration paths (e.g. CLI `list-sessions`) that would otherwise pay a
+/// TCP connect timeout per dead entry. Some(false) = definitively dead
+/// (reap + skip), Some(true) = live, None = no anchor (probe as usual).
+pub fn registry_pid_anchor_alive(base: &str) -> Option<bool> {
+    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).ok()?;
+    let port_path = format!("{}\\.psmux\\{}.port", home, base);
+    pid_anchor_verdict(Path::new(&port_path))
+}
+
 /// Reap a single session's registry files (`.port`/`.key`/`.sid`) by base name.
 ///
 /// Used when a probe proves the session is dead. Safe against a live server:
@@ -1402,3 +1497,7 @@ mod tests_session_id_alloc_race;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue448_orphan_reaper.rs"]
 mod tests_issue448_orphan_reaper;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_startup_stale_port_tax.rs"]
+mod tests_startup_stale_port_tax;
