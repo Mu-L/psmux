@@ -575,6 +575,87 @@ fn collect_layout_borders(
     }
 }
 
+pub fn border_mask_from_layout(
+    node: &LayoutJson,
+    area: Rect,
+    buf_area: Rect,
+    zoomed: bool,
+) -> Vec<usize> {
+    let mut cells = Vec::new();
+    mark_layout_borders(node, area, buf_area, zoomed, &mut cells);
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+}
+
+fn mark_layout_borders(
+    node: &LayoutJson,
+    area: Rect,
+    buf_area: Rect,
+    zoomed: bool,
+    cells: &mut Vec<usize>,
+) {
+    let LayoutJson::Split {
+        kind,
+        sizes,
+        children,
+    } = node
+    else {
+        return;
+    };
+    let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
+        sizes.clone()
+    } else {
+        vec![(100 / children.len().max(1)) as u16; children.len()]
+    };
+    let is_horizontal = kind == "Horizontal";
+
+    if zoomed {
+        // Match render_layout_json's zoom early-return exactly: no separator
+        // drawn for this split, recurse into the chosen child at the SAME area.
+        if let Some(i) = effective_sizes.iter().position(|&s| s != 0) {
+            if let Some(child) = children.get(i) {
+                mark_layout_borders(child, area, buf_area, zoomed, cells);
+            }
+        }
+        return;
+    }
+
+    let rects = split_with_gaps(is_horizontal, &effective_sizes, area);
+    let w = buf_area.width as usize;
+    for i in 0..children.len().saturating_sub(1) {
+        if i >= rects.len() {
+            break;
+        }
+        if is_horizontal {
+            // Vertical separator line at column `pos`, spanning this split's own area height.
+            let pos = rects[i].x + rects[i].width;
+            if pos >= buf_area.x && pos < buf_area.x + buf_area.width {
+                for y in area.y..area.y + area.height {
+                    if y >= buf_area.y && y < buf_area.y + buf_area.height {
+                        cells.push((y - buf_area.y) as usize * w + (pos - buf_area.x) as usize);
+                    }
+                }
+            }
+        } else {
+            // Horizontal separator line at row `pos`, spanning this split's own area width.
+            let pos = rects[i].y + rects[i].height;
+            if pos >= buf_area.y && pos < buf_area.y + buf_area.height {
+                for x in area.x..area.x + area.width {
+                    if x >= buf_area.x && x < buf_area.x + buf_area.width {
+                        cells.push((pos - buf_area.y) as usize * w + (x - buf_area.x) as usize);
+                    }
+                }
+            }
+        }
+    }
+    for (i, child) in children.iter().enumerate() {
+        if i < rects.len() {
+            mark_layout_borders(child, rects[i], buf_area, zoomed, cells);
+        }
+    }
+}
+
 /// Check if any leaf in a LayoutJson subtree is the active pane.
 /// Compute the rectangle of the active pane by searching the LayoutJson tree.
 pub fn compute_active_rect_json(node: &LayoutJson, area: Rect) -> Option<Rect> {
@@ -4768,34 +4849,31 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 } else { None }
             };
             render_layout_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed, border_status, border_format, total_panes, bchars, copy_ln);
-            fix_border_intersections(f.buffer_mut(), bchars);
+            let border_mask = border_mask_from_layout(&root, content_chunk, f.buffer_mut().area, state.zoomed);
+            fix_border_intersections(f.buffer_mut(), bchars, &border_mask);
             // render_json and fix_border_intersections can leave inconsistent styles
             // at intersections and along edges shared by nested splits.
             if let Some(ar) = active_rect {
                 let buf = f.buffer_mut();
                 let w = buf.area.width as usize;
-                let h = buf.area.height as usize;
                 let border_style = Style::default().fg(pane_border_fg);
                 let active_style = Style::default().fg(pane_active_border_fg);
-                for row in 0..h {
-                    for col in 0..w {
-                        let idx = row * w + col;
-                        if idx >= buf.content.len() { continue; }
-                        let ch = buf.content[idx].symbol().chars().next().unwrap_or(' ');
-                        // Only re-color junction characters. The straight │ and ─ separators
-                        // are now already colored correctly per-cell by render_layout_json based
-                        // on adjacency, so re-coloring them here would clobber that work for
-                        // 3+ pane layouts where a separator borders both active and inactive panes.
-                        if !matches!(ch, '┼' | '├' | '┤' | '┬' | '┴') { continue; }
-                        let x = buf.area.x + col as u16;
-                        let y = buf.area.y + row as u16;
-                        let adj = (x + 1 == ar.x && y >= ar.y && y < ar.y + ar.height)
-                            || (x == ar.x + ar.width && y >= ar.y && y < ar.y + ar.height)
-                            || (y + 1 == ar.y && x >= ar.x && x < ar.x + ar.width)
-                            || (y == ar.y + ar.height && x >= ar.x && x < ar.x + ar.width)
-                            || ((x + 1 == ar.x || x == ar.x + ar.width) && (y + 1 == ar.y || y == ar.y + ar.height));
-                        buf.content[idx].set_style(if adj { active_style } else { border_style });
-                    }
+                for &idx in &border_mask {
+                    if idx >= buf.content.len() { continue; }
+                    let ch = buf.content[idx].symbol().chars().next().unwrap_or(' ');
+                    // Only re-color junction characters. The straight │ and ─ separators
+                    // are now already colored correctly per-cell by render_layout_json based
+                    // on adjacency, so re-coloring them here would clobber that work for
+                    // 3+ pane layouts where a separator borders both active and inactive panes.
+                    if !matches!(ch, '┼' | '├' | '┤' | '┬' | '┴') { continue; }
+                    let x = buf.area.x + (idx % w) as u16;
+                    let y = buf.area.y + (idx / w) as u16;
+                    let adj = (x + 1 == ar.x && y >= ar.y && y < ar.y + ar.height)
+                        || (x == ar.x + ar.width && y >= ar.y && y < ar.y + ar.height)
+                        || (y + 1 == ar.y && x >= ar.x && x < ar.x + ar.width)
+                        || (y == ar.y + ar.height && x >= ar.x && x < ar.x + ar.width)
+                        || ((x + 1 == ar.x || x == ar.x + ar.width) && (y + 1 == ar.y || y == ar.y + ar.height));
+                    buf.content[idx].set_style(if adj { active_style } else { border_style });
                 }
             }
 
