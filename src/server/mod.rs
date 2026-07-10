@@ -962,11 +962,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             Err(e) => { eprintln!("psmux: warm pane pre-spawn failed: {e}"); }
         }
     }
-    // Fire client-attached hooks once at startup so plugins populate initial
-    // data (e.g. CPU/battery) even for detached sessions (tppanel previews).
-    crate::commands::fire_hooks(&mut app, "client-attached");
-    // Fire session-created hook at startup
-    crate::commands::fire_hooks(&mut app, "session-created");
+    // Fire client-attached and session-created hooks once at startup so plugins
+    // populate initial data (e.g. CPU/battery) even for detached sessions
+    // (tppanel previews). Skip the warm server: firing here would double-fire
+    // every client/session hook (e.g. a duplicate continuum auto-save loop). A
+    // claimed warm server gets them once it becomes real (see CtrlReq::ClaimSession).
+    if !app.is_warm_server() {
+        crate::commands::fire_hooks(&mut app, "client-attached");
+        crate::commands::fire_hooks(&mut app, "session-created");
+    }
     // Spawn a warm server for the NEXT new-session when the current session
     // is allowed to keep background state alive.
     if should_spawn_warm_server(&app) {
@@ -2941,6 +2945,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // user's session-creation time — reset on claim or list-sessions /
                     // session_created / uptime would report the warm pool's age.
                     app.created_at = chrono::Local::now();
+                    // Same reason for the status-interval phase: the warm server skips
+                    // the timer (see should_run_status_interval_timer), so its last-fire
+                    // stamp is the warm start time — reset it so a claimed session fires
+                    // one interval after creation, not immediately.
+                    app.last_status_interval_fire = std::time::Instant::now();
                     // Update env so run-shell/hooks from this server target the new name
                     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     // Honour the client's working directory: the warm server
@@ -2995,7 +3004,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // its own startup, but the user may have changed their
                     // config since then (or the warm server was spawned by a
                     // different session with a different PSMUX_CONFIG_FILE).
+                    // Clear config-derived state first so the reload is authoritative:
+                    // hooks removed from the config drop out, and `set-hook -a`
+                    // append hooks don't stack a second copy onto the warm server's.
                     app.key_tables.clear();
+                    app.hooks.clear();
                     app.defaults_suppressed = false;
                     crate::config::populate_default_bindings(&mut app);
                     load_config(&mut app);
@@ -3007,6 +3020,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Ok(mut w) = shared_aliases_main.write() {
                         *w = app.command_aliases.clone();
                     }
+                    // Fire client-attached/session-created for the now-real session:
+                    // the startup path skips these while warm, so this is where a
+                    // claimed session gets them - exactly once - starting plugins
+                    // like continuum's auto-save and auto-restore.
+                    crate::commands::fire_hooks(&mut app, "client-attached");
+                    crate::commands::fire_hooks(&mut app, "session-created");
                     // Fire client-session-changed hook (warm server claimed by new session)
                     if let Some(cmds) = app.hooks.get("client-session-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     meta_dirty = true;
@@ -5414,7 +5433,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             crate::types::push_frame(&combined_buf);
         }
         // ── Status-interval timer: fire hooks periodically ──
-        if app.status_interval > 0 {
+        if app.should_run_status_interval_timer() {
             let elapsed = app.last_status_interval_fire.elapsed().as_secs();
             if elapsed >= app.status_interval {
                 app.last_status_interval_fire = std::time::Instant::now();
