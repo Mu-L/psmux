@@ -3400,18 +3400,18 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             // forwards it here as `send-key C-Break` so it interrupts the running
             // program instead of tearing down the client / session.
             //
-            // We deliver it as an interrupt via the SAME reliable path as Ctrl+C:
-            // the raw 0x03 byte on the ConPTY input pipe plus a CTRL_C_EVENT for
-            // cooked console apps.  A *real* CTRL_BREAK_EVENT cannot be used here:
-            // GenerateConsoleCtrlEvent does not relay into a ConPTY child console,
-            // and broadcasting it to process group 0 only kills the server that
-            // hosts the pane (proven empirically) without ever reaching the child.
+            // We deliver a GENUINE CTRL_BREAK_EVENT to the pane's ConPTY child,
+            // exactly like Windows Terminal.  Ctrl+Break exists to stop a program
+            // that *ignores* Ctrl+C, so the old Ctrl+C path (raw 0x03 + a
+            // CTRL_C_EVENT) was not enough — a Ctrl+C-immune program survived it.
+            // Attaching to the child's console places us in its process group and
+            // the broadcast reaches the child (proven to kill a Ctrl+C-immune
+            // program); the server survives via its own CTRL_BREAK-surviving
+            // console handler.  See platform::mouse_inject::send_ctrl_break_event.
             "break" | "Break" | "C-Break" | "c-break" | "C-break" => {
-                let _ = p.writer.write_all(&[0x03]);
-                let _ = p.writer.flush();
                 #[cfg(windows)]
                 if let Some(pid) = p.child_pid {
-                    crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                    crate::platform::mouse_inject::send_ctrl_break_event(pid, false);
                 }
             }
             s if s.starts_with("C-") && s.len() == 3 => {

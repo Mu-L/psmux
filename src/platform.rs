@@ -1344,6 +1344,102 @@ pub mod mouse_inject {
         }
     }
 
+    /// Send a genuine CTRL_BREAK_EVENT to the pane's ConPTY child (issue #454).
+    ///
+    /// Ctrl+Break exists precisely to stop a program that ignores Ctrl+C, so it
+    /// must deliver a REAL break signal — not the Ctrl+C path a program can trap
+    /// and swallow.  We briefly FreeConsole()/AttachConsole() onto the child's
+    /// hidden ConPTY console and broadcast CTRL_BREAK_EVENT to process group 0,
+    /// exactly what a terminal emulator does when the user presses Ctrl+Break.
+    ///
+    /// This DOES reach the ConPTY child: attaching to the child's console places
+    /// us in its process group, and the broadcast reaches every process on it
+    /// (proven to kill a Ctrl+C-immune program while the session survives). The
+    /// temporarily-attached server survives because its own process-wide console
+    /// control handler returns TRUE for CTRL_BREAK_EVENT (see
+    /// `install_console_ctrl_handler`).
+    ///
+    /// Unlike Ctrl+C there is no copy-vs-interrupt negotiation: Ctrl+Break is an
+    /// unconditional break in a native console, so we deliver it regardless of
+    /// the foreground app's console input mode — its delivery is not gated by
+    /// ENABLE_PROCESSED_INPUT.
+    pub fn send_ctrl_break_event(child_pid: u32, reattach: bool) -> bool {
+        const CTRL_BREAK_EVENT: u32 = 1;
+
+        type HandlerRoutine = unsafe extern "system" fn(u32) -> i32;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<HandlerRoutine>,
+                add: i32,
+            ) -> i32;
+            fn GenerateConsoleCtrlEvent(
+                ctrl_event: u32,
+                process_group_id: u32,
+            ) -> i32;
+        }
+
+        fn log(msg: &str) {
+            debug_log(&format!("ctrl_break: {}", msg));
+        }
+
+        // A handler that SURVIVES both Ctrl+C and Ctrl+Break.  We attach to the
+        // child's console and broadcast CTRL_BREAK to group 0, which also targets
+        // us (the server) since we are momentarily on that console.  Returning
+        // TRUE for CTRL_BREAK_EVENT is what keeps the server — and therefore every
+        // other session — alive through our own broadcast.  Registered AFTER
+        // AttachConsole and torn down immediately after, exactly like a terminal
+        // emulator's Ctrl+Break sender.  (The startup handler alone did not
+        // protect the server here; a freshly-registered handler does.)
+        unsafe extern "system" fn survive_break(ctrl_type: u32) -> i32 {
+            match ctrl_type {
+                0 | 1 => 1, // CTRL_C_EVENT | CTRL_BREAK_EVENT -> handled, survive
+                _ => 0,
+            }
+        }
+
+        unsafe {
+            let had_console = reattach && GetConsoleWindow() != 0;
+
+            FreeConsole();
+
+            log(&format!("called: pid={} reattach={} had_console={}", child_pid, reattach, had_console));
+
+            if AttachConsole(child_pid) == 0 {
+                let err = GetLastError();
+                log(&format!("AttachConsole({}) FAILED err={}", child_pid, err));
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return false;
+            }
+
+            // Install the survive-break handler now that we share the child's
+            // console, so the broadcast below cannot terminate the server.
+            SetConsoleCtrlHandler(Some(survive_break), 1);
+
+            let ok = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
+            let err = GetLastError();
+            log(&format!("GenerateConsoleCtrlEvent(CTRL_BREAK) => ok={} err={}", ok, err));
+
+            // GenerateConsoleCtrlEvent dispatches asynchronously via a system
+            // thread pool.  Sleep while still attached AND still protected so the
+            // signal propagates through the console subsystem before we detach.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+
+            // Detach from the child's console first, then remove our temporary
+            // handler so a late async break can only target processes that remain
+            // on the console.  The server's permanent startup handler remains.
+            FreeConsole();
+            SetConsoleCtrlHandler(Some(survive_break), 0);
+
+            if had_console {
+                AttachConsole(ATTACH_PARENT_PROCESS);
+            }
+
+            ok != 0
+        }
+    }
+
     pub fn char_to_vk(ch: char) -> u16 {
         match ch {
             '\x1b' => 0x1B,  // VK_ESCAPE — VkKeyScanW returns -1 for non-printable
@@ -1649,6 +1745,7 @@ pub mod mouse_inject {
     pub fn send_vt_sequence(_pid: u32, _sequence: &[u8]) -> bool { false }
     pub fn query_vti_enabled(_pid: u32) -> Option<bool> { None }
     pub fn send_ctrl_c_event(_pid: u32, _reattach: bool) -> bool { false }
+    pub fn send_ctrl_break_event(_pid: u32, _reattach: bool) -> bool { false }
     pub fn query_mouse_input_enabled(_pid: u32) -> Option<bool> { None }
     pub fn send_bracketed_paste(_pid: u32, _text: &str, _bracket: bool) -> bool { false }
     pub fn send_modified_key_event(_pid: u32, _ch: char, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
