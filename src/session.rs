@@ -1141,6 +1141,13 @@ pub fn resolve_last_session_name_ns_in(dir: &std::path::Path, ns: Option<&str>) 
 /// Resolve the routing target session (the port-file base name) for a CLI
 /// command that did not name an explicit `-t session`.
 ///
+/// Socket-selection precedence follows tmux: `-L`/`-S` take precedence over
+/// `$TMUX`, which tmux consults only when neither is given (tmux.c `main()`:
+/// `if (path == NULL && label == NULL)`). psmux has no single socket, so this
+/// maps to: adopt the current server named by `$TMUX` only when its session is
+/// in the requested `-L` namespace; otherwise resolve within the namespace (the
+/// most-recent session, else the namespaced `X__default`).
+///
 /// `$TMUX` (set inside every psmux pane, formatted `<socketpath>,<port>,<idx>`)
 /// identifies the current server via its control `<port>`; `psmux_dir` is the
 /// `.psmux` registry directory of `<base>.port` files; `l_socket_name` is the
@@ -1150,12 +1157,25 @@ pub fn resolve_routing_target(
     tmux_env: Option<&str>,
     psmux_dir: &std::path::Path,
 ) -> Option<String> {
+    // Adopt the current server (named by `$TMUX`) only when it is in-namespace.
     if let Some(tmux_val) = tmux_env {
         if let Some(base) = session_base_owning_tmux_port(tmux_val, psmux_dir) {
-            return Some(base);
+            let in_namespace = match l_socket_name {
+                Some(ns) => base.starts_with(&format!("{}__", ns)),
+                None => true,
+            };
+            if in_namespace {
+                return Some(base);
+            }
         }
     }
-    resolve_last_session_name_ns_in(psmux_dir, l_socket_name)
+    // Otherwise the most recent real session in the namespace,
+    if let Some(name) = resolve_last_session_name_ns_in(psmux_dir, l_socket_name) {
+        return Some(name);
+    }
+    // else a namespaced `X__default` so `-L X` never leaks to the un-namespaced
+    // `default` server. With no `-L`, stay unresolved (the caller keeps "default").
+    l_socket_name.map(|ns| format!("{}__default", ns))
 }
 
 /// Find the session port-file base whose control port matches the one encoded
@@ -1446,3 +1466,7 @@ mod tests_session_id_alloc_race;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue448_orphan_reaper.rs"]
 mod tests_issue448_orphan_reaper;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_l_socket_tmux_precedence.rs"]
+mod tests_l_socket_tmux_precedence;
