@@ -1193,8 +1193,14 @@ pub fn resolve_last_session_name() -> Option<String> {
 /// When `ns` is None, only non-namespaced sessions (no "__" in name) are considered.
 pub fn resolve_last_session_name_ns(ns: Option<&str>) -> Option<String> {
     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).ok()?;
-    let dir = format!("{}\\.psmux", home);
-    let last = std::fs::read_to_string(format!("{}\\last_session", dir)).ok();
+    resolve_last_session_name_ns_in(std::path::Path::new(&format!("{}\\.psmux", home)), ns)
+}
+
+/// Registry-directory-parameterized variant of [`resolve_last_session_name_ns`]:
+/// the most recent real (non-warm) session base in namespace `ns`. Taking the
+/// dir explicitly lets routing be unit-tested without mutating `USERPROFILE`/`HOME`.
+pub fn resolve_last_session_name_ns_in(dir: &std::path::Path, ns: Option<&str>) -> Option<String> {
+    let last = std::fs::read_to_string(dir.join("last_session")).ok();
     if let Some(name) = last {
         let name = name.trim().to_string();
         // Only accept the cached last_session if it matches the namespace filter
@@ -1202,13 +1208,12 @@ pub fn resolve_last_session_name_ns(ns: Option<&str>) -> Option<String> {
             Some(n) => name.starts_with(&format!("{}__", n)),
             None => !name.contains("__"),
         };
-        if ns_ok {
-            let p = format!("{}\\{}.port", dir, name);
-            if std::path::Path::new(&p).exists() { return Some(name); }
+        if ns_ok && dir.join(format!("{}.port", name)).exists() {
+            return Some(name);
         }
     }
     let mut picks: Vec<(String, std::time::SystemTime)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             if let Some(fname) = e.file_name().to_str() {
                 if let Some((base, ext)) = fname.rsplit_once('.') {
@@ -1226,6 +1231,65 @@ pub fn resolve_last_session_name_ns(ns: Option<&str>) -> Option<String> {
     });
     picks.sort_by_key(|(_, t)| *t);
     picks.last().map(|(n, _)| n.clone())
+}
+
+/// Resolve the routing target session (the port-file base name) for a CLI
+/// command that did not name an explicit `-t session`.
+///
+/// Socket-selection precedence follows tmux: `-L`/`-S` take precedence over
+/// `$TMUX`, which tmux consults only when neither is given (tmux.c `main()`:
+/// `if (path == NULL && label == NULL)`). psmux has no single socket, so this
+/// maps to: adopt the current server named by `$TMUX` only when its session is
+/// in the requested `-L` namespace; otherwise resolve within the namespace (the
+/// most-recent session, else the namespaced `X__default`).
+///
+/// `$TMUX` (set inside every psmux pane, formatted `<socketpath>,<port>,<idx>`)
+/// identifies the current server via its control `<port>`; `psmux_dir` is the
+/// `.psmux` registry directory of `<base>.port` files; `l_socket_name` is the
+/// `-L` namespace, if any. Returns the base to route to, or `None`.
+pub fn resolve_routing_target(
+    l_socket_name: Option<&str>,
+    tmux_env: Option<&str>,
+    psmux_dir: &std::path::Path,
+) -> Option<String> {
+    // Adopt the current server (named by `$TMUX`) only when it is in-namespace.
+    if let Some(tmux_val) = tmux_env {
+        if let Some(base) = session_base_owning_tmux_port(tmux_val, psmux_dir) {
+            let in_namespace = match l_socket_name {
+                Some(ns) => base.starts_with(&format!("{}__", ns)),
+                None => true,
+            };
+            if in_namespace {
+                return Some(base);
+            }
+        }
+    }
+    // Otherwise the most recent real session in the namespace,
+    if let Some(name) = resolve_last_session_name_ns_in(psmux_dir, l_socket_name) {
+        return Some(name);
+    }
+    // else a namespaced `X__default` so `-L X` never leaks to the un-namespaced
+    // `default` server. With no `-L`, stay unresolved (the caller keeps "default").
+    l_socket_name.map(|ns| format!("{}__default", ns))
+}
+
+/// Find the session port-file base whose control port matches the one encoded
+/// in a `$TMUX` value (`<socketpath>,<port>,<idx>`). Warm (standby) sessions are
+/// internal-only and never adopted.
+fn session_base_owning_tmux_port(tmux_val: &str, psmux_dir: &std::path::Path) -> Option<String> {
+    let port: u16 = tmux_val.split(',').nth(1)?.trim().parse().ok()?;
+    for entry in std::fs::read_dir(psmux_dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "port").unwrap_or(false) {
+            if let Ok(port_str) = std::fs::read_to_string(&path) {
+                if port_str.trim().parse::<u16>().ok() == Some(port) {
+                    let base = path.file_stem().and_then(|s| s.to_str())?;
+                    return if is_warm_session(base) { None } else { Some(base.to_string()) };
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn resolve_default_session_name() -> Option<String> {
@@ -1501,3 +1565,7 @@ mod tests_issue448_orphan_reaper;
 #[cfg(test)]
 #[path = "../tests-rs/test_startup_stale_port_tax.rs"]
 mod tests_startup_stale_port_tax;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_l_socket_tmux_precedence.rs"]
+mod tests_l_socket_tmux_precedence;

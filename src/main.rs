@@ -281,46 +281,18 @@ fn run_main() -> io::Result<()> {
         }
     }
     if env::var("PSMUX_TARGET_SESSION").is_err() {
-        // No explicit session from -t: try to resolve from TMUX env var (set inside psmux panes)
-        // TMUX format: /tmp/psmux-<pid>/<socket_name>,<port>,<session_idx>
-        if let Ok(tmux_val) = env::var("TMUX") {
-            // Extract the port from the TMUX value
-            let parts: Vec<&str> = tmux_val.split(',').collect();
-            if parts.len() >= 2 {
-                if let Ok(port) = parts[1].trim().parse::<u16>() {
-                    // Look up which session owns this port (port file base
-                    // already includes -L namespace prefix if applicable)
-                    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                    let psmux_dir = format!("{}\\.psmux", home);
-                    if let Ok(entries) = std::fs::read_dir(&psmux_dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.extension().map(|e| e == "port").unwrap_or(false) {
-                                if let Ok(port_str) = std::fs::read_to_string(&path) {
-                                    if let Ok(file_port) = port_str.trim().parse::<u16>() {
-                                        if file_port == port {
-                                            if let Some(port_file_base) = path.file_stem().and_then(|s| s.to_str()) {
-                                                // Skip warm (standby) sessions — they are internal-only
-                                                if !crate::session::is_warm_session(port_file_base) {
-                                                    env::set_var("PSMUX_TARGET_SESSION", port_file_base);
-                                                }
-                                            }
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // Fallback: if no -t flag and session still not resolved (e.g. TMUX pointed
-    // to a warm session, or no TMUX at all), pick the most recent real session.
-    // When -L namespace is active, only resolve within that namespace.
-    if env::var("PSMUX_TARGET_SESSION").is_err() {
-        if let Some(name) = crate::session::resolve_last_session_name_ns(l_socket_name.as_deref()) {
+        // No explicit `-t session`: resolve which server to route to. `$TMUX`
+        // (set inside every psmux pane) names the current server; the `-L`
+        // namespace and the most-recent-session fallback are applied inside
+        // resolve_routing_target.
+        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+        let psmux_dir = std::path::PathBuf::from(format!("{}\\.psmux", home));
+        let tmux_env = env::var("TMUX").ok();
+        if let Some(name) = crate::session::resolve_routing_target(
+            l_socket_name.as_deref(),
+            tmux_env.as_deref(),
+            &psmux_dir,
+        ) {
             env::set_var("PSMUX_TARGET_SESSION", &name);
         }
     }
