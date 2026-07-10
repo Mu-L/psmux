@@ -290,6 +290,65 @@ pub fn process_is_alive(_pid: u32) -> bool {
     true
 }
 
+/// Single-server-per-session-name lock (RAII). Holding the guard means this
+/// process owns the right to be THE server for a given session name. Dropping it
+/// (or the process exiting) releases the underlying Windows named mutex, which
+/// the OS also auto-releases on a crash — so there is no stale-lock to reap.
+#[cfg(windows)]
+pub struct SessionMutex { handle: *mut std::ffi::c_void }
+#[cfg(windows)]
+unsafe impl Send for SessionMutex {}
+#[cfg(windows)]
+impl Drop for SessionMutex {
+    fn drop(&mut self) {
+        #[link(name = "kernel32")]
+        extern "system" { fn CloseHandle(h: isize) -> i32; }
+        if !self.handle.is_null() { unsafe { CloseHandle(self.handle as isize); } }
+    }
+}
+
+/// Acquire the single-server lock for session `name` (P0: kill the duplicate-
+/// same-name-server race). Returns `Some(guard)` when this process MAY run as
+/// the server — because it now owns the mutex, or a previous owner died and left
+/// it abandoned, or the FFI was unavailable (**fail-open**, so a legitimate start
+/// is never blocked). Returns `None` ONLY when another LIVE process already owns
+/// the name, i.e. this is a duplicate cold-spawn that must exit.
+#[cfg(windows)]
+pub fn acquire_session_mutex(name: &str) -> Option<SessionMutex> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(attrs: *const std::ffi::c_void, initial_owner: i32, name: *const u16) -> *mut std::ffi::c_void;
+        fn WaitForSingleObject(h: *mut std::ffi::c_void, ms: u32) -> u32;
+        fn CloseHandle(h: isize) -> i32;
+    }
+    const WAIT_OBJECT_0: u32 = 0x0000_0000;
+    const WAIT_ABANDONED: u32 = 0x0000_0080; // prior owner died holding it -> ours now
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;   // another live process owns it
+    // Backslash is the kernel-object namespace separator and must not appear in
+    // the leaf name; map path chars out. `Local\` scopes it to this session.
+    let sanitized: String = name.chars().map(|c| if c == '\\' || c == '/' { '_' } else { c }).collect();
+    let obj = format!("Local\\psmux-session-{sanitized}");
+    let wide: Vec<u16> = obj.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let h = CreateMutexW(std::ptr::null(), 0, wide.as_ptr());
+        if h.is_null() {
+            return Some(SessionMutex { handle: std::ptr::null_mut() }); // fail-open
+        }
+        match WaitForSingleObject(h, 0) {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => Some(SessionMutex { handle: h }),
+            WAIT_TIMEOUT => { CloseHandle(h as isize); None }
+            _ => Some(SessionMutex { handle: h }), // unknown -> fail-open
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub struct SessionMutex;
+/// Non-Windows: no cross-process named mutex plumbed; fail-open (never block a
+/// legitimate start). psmux's duplicate-server race is a Windows-only concern.
+#[cfg(not(windows))]
+pub fn acquire_session_mutex(_name: &str) -> Option<SessionMutex> { Some(SessionMutex) }
+
 /// Enable virtual terminal processing on Windows Console Host.
 /// This is required for ANSI color codes to work in conhost.exe (legacy console).
 #[cfg(windows)]
