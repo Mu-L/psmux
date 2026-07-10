@@ -828,10 +828,13 @@ pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press
 
 /// Forward bare mouse motion (hover) to the child PTY.
 ///
-/// Only forwarded when the active pane explicitly wants mouse input
-/// (`pane_wants_mouse`).  Shell prompts and ClaudeCode-style inputs are
-/// excluded because they do not enable mouse tracking, and sending raw SGR
-/// motion bytes (ESC[<35;...) would appear as visible garbage.
+/// Only forwarded when the child has EXPLICITLY enabled mouse motion
+/// tracking (`pane_wants_hover`, DECSET 1002/1003).  Do NOT use the
+/// permissive pane_wants_mouse() heuristic here: its is_fullscreen_tui
+/// tier false-positives on a filled screen with a NON-shell foreground
+/// (podman/docker interactive containers, discussion #349), spraying raw
+/// SGR motion bytes (35;x;yM...) into the container tty as visible garbage.
+/// This matches the local input path, which was fixed the same way in #296.
 ///
 /// SGR button 35 = bare motion with no button held (WT parity).
 /// Windows Terminal encodes hover as WM_MOUSEMOVE -> button 3 + 0x20 = 35.
@@ -850,16 +853,16 @@ pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) {
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
 
-    // Forward hover only when the active pane explicitly wants mouse input.
+    // Forward hover only when the child explicitly enabled motion tracking.
     // This avoids leaking raw SGR motion bytes (ESC[<35;...) into shell-style
-    // prompts such as claudecode input boxes.
+    // prompts such as claudecode input boxes and container ttys (#349).
     mouse_log(&format!("remote_mouse_motion: x={} y={}", x, y));
 
     if let Some(area) = rects.iter().find(|(path, _)| *path == win.active_path).map(|(_, a)| *a) {
         let (col, row) = pane_inner_cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-            if pane_wants_mouse(active) {
+            if pane_wants_hover(active) {
                 inject_mouse_combined(active, col, row, 35, true,
                     0, mouse_inject::MOUSE_MOVED, &win_name);
             }
@@ -1052,11 +1055,21 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
         return;
     }
 
-    // Forward mouse event to PTY if pane wants it
+    // Forward mouse event to PTY if pane wants it.
+    //
+    // Bare motion (SGR button 35, no button held) requires the child to have
+    // EXPLICITLY enabled motion tracking (pane_wants_hover, DECSET 1002/1003).
+    // The permissive pane_wants_mouse() heuristic false-positives on a filled
+    // screen with a non-shell foreground (podman/docker interactive containers,
+    // discussion #349), which sprayed "35;x;yM" as visible garbage into the
+    // container tty on every mouse move.  Clicks/drags/wheel keep the
+    // permissive gate so TUI mouse support on ConPTY builds that strip the
+    // DECSETs keeps working (#285).
     let win = &mut app.windows[app.active_idx];
     let win_name = win.name.clone();
     if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
-        if pane_wants_mouse(pane) {
+        let wants = if button == 35 { pane_wants_hover(pane) } else { pane_wants_mouse(pane) };
+        if wants {
             let button_state = match (button, press) {
                 (0, true) => mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED,
                 (1, true) => mouse_inject::FROM_LEFT_2ND_BUTTON_PRESSED,
@@ -1726,3 +1739,7 @@ mod test_issue400_swap_pane_index_order;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue442_swap_pane_source.rs"]
 mod test_issue442_swap_pane_source;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_discussion349_podman_motion_leak.rs"]
+mod test_discussion349_podman_motion_leak;

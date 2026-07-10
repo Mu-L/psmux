@@ -138,13 +138,17 @@ Test "Code uses SGR button 35 for bare hover" $uses35
 # ── Test 4: Hover gating check ──
 Write-Host "`n=== Test Group 4: Hover gating for mouse-aware panes ==="
 
-# Hover should only be forwarded when the active pane explicitly wants mouse
-# input. In psmux this is unified behind pane_wants_mouse().
+# Hover (bare motion, SGR 35) must only be forwarded when the child has
+# EXPLICITLY enabled motion tracking (DECSET 1002/1003) — the STRICT
+# pane_wants_hover() gate.  The permissive pane_wants_mouse() heuristic
+# false-positives on a filled screen with a non-shell foreground and sprayed
+# raw "35;x;yM" into container ttys (#296 for the local path, discussion #349
+# for the client/server remote_mouse_motion / pane-mouse 35 paths).
 $movedBlockInput = [regex]::Match($inputRs, '(?s)MouseEventKind::Moved\s*=>\s*\{(.+?)(?=MouseEventKind::Scroll)').Groups[1].Value
-$gatedInput = $movedBlockInput -match 'pane_wants_mouse'
+$gatedInput = $movedBlockInput -match 'pane_wants_hover'
 $movedBlockWinOps = [regex]::Match($winOps, '(?s)fn remote_mouse_motion\(.*?\{(.+?)(?=fn\s)').Groups[1].Value
-$gatedWinOps = $movedBlockWinOps -match 'pane_wants_mouse'
-Test "Hover uses pane_wants_mouse gate" ($gatedInput -and $gatedWinOps)
+$gatedWinOps = $movedBlockWinOps -match 'pane_wants_hover'
+Test "Hover uses strict pane_wants_hover gate (296/349)" ($gatedInput -and $gatedWinOps)
 
 # Verify ConPTY-awareness: must NOT use raw alternate_screen() in hover path
 $rawAltInHover = $movedBlockInput -match 'parser\.screen\(\)\.alternate_screen' -or
