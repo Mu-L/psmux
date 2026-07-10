@@ -122,6 +122,7 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `visual-activity` | Bool | `off` | Visual indicator for activity |
 | `synchronize-panes` | Bool | `off` | Send input to all panes |
 | `remain-on-exit` | Bool | `off` | Keep panes after process exits |
+| `@kill-descendants` | Bool | `on` | Terminate a self-exited pane shell's background children (psmux extension) |
 | `aggressive-resize` | Bool | `off` | Resize to smallest client |
 | `window-size` | Str | `latest` | `largest`, `smallest`, `manual`, `latest` |
 | `destroy-unattached` | Bool | `off` | Exit server when no clients attached |
@@ -630,6 +631,23 @@ psmux respawn-pane -- python app.py
 ```
 
 This is useful for monitoring: if a long-running process crashes, you can see its final output and restart it without losing the pane layout.
+
+### Background Processes and `@kill-descendants`
+
+On Unix, tmux relies on the kernel's SIGHUP delivery when a pane's terminal closes, so a process that was deliberately detached (for example with `nohup`) survives its pane. Windows has no SIGHUP and no pty process groups, so psmux instead walks the pane's process tree. By default, when a pane's shell exits on its own, psmux terminates any child processes the shell left behind (for example something launched with `Start-Process`), because otherwise those processes and their `conhost.exe` hosts accumulate invisibly and can exhaust the desktop heap.
+
+If you intentionally launch background processes from a pane and want them to outlive the shell, opt out (psmux extension):
+
+```tmux
+# Let background children survive when their pane's shell exits on its own
+set -g @kill-descendants off
+```
+
+Notes:
+
+- This only affects panes whose shell exits on its own. Explicit `kill-pane`, `kill-window`, and `kill-session` always terminate the pane's full process tree.
+- With `remain-on-exit on` the pane is kept instead of pruned, so no sweep happens either way until the pane is actually closed.
+- Recognized off values: `off`, `0`, `false`, `no`. Anything else, including unset, keeps the sweep enabled.
 
 ## Session Environment Variables
 

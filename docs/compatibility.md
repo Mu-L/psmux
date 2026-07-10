@@ -197,6 +197,18 @@ psmux -L work kill-server    # kills ONLY the "work" socket; other sockets keep 
 
 So if you rely on isolated `-L` instances, always pass `-L <name>` to `kill-server` to limit the blast radius. Reach for bare `kill-server` only when you genuinely want a clean slate.
 
+### Background Processes When a Pane Exits
+
+On Unix, tmux leans on the kernel: closing a pane's terminal sends SIGHUP to its foreground process group, and anything deliberately detached (`nohup`, daemons, most GUI apps) survives. Windows has no SIGHUP and no pty process groups, so psmux walks the pane's process tree instead. By default, when a pane's shell exits on its own, psmux terminates the background children that shell left behind; without the sweep they leak invisibly along with a `conhost.exe` each, which in bulk can exhaust the desktop heap.
+
+To get tmux-style survival for intentionally backgrounded processes, opt out with the `@kill-descendants` user option:
+
+```tmux
+set -g @kill-descendants off
+```
+
+Explicit `kill-pane`, `kill-window`, and `kill-session` always terminate the pane's full process tree regardless of this option. See the Dead Panes section in [configuration.md](configuration.md) for details.
+
 ## Format Variables
 
 psmux supports 140+ format variables with full modifier support, including:

@@ -771,6 +771,26 @@ impl AppState {
         self.status_interval > 0 && !self.is_warm_server()
     }
 
+    /// Whether a pane whose shell exited on its own should have its surviving
+    /// descendant processes (backgrounded children) force-terminated when the
+    /// pane is pruned. Controlled by the `@kill-descendants` user option;
+    /// defaults to on because Windows has no SIGHUP/pty process groups, so
+    /// without the sweep those descendants (and their conhosts) leak.
+    ///
+    /// `set -g @kill-descendants off` restores tmux-on-Unix semantics, where a
+    /// deliberately backgrounded process outlives its pane's shell. Explicit
+    /// kill-pane/kill-window/kill-session paths always kill the full tree,
+    /// matching psmux's long-standing behavior, and are not affected by this.
+    pub fn kill_descendants_on_exit(&self) -> bool {
+        match self.user_options.get("@kill-descendants") {
+            Some(v) => !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "off" | "0" | "false" | "no"
+            ),
+            None => true,
+        }
+    }
+
     /// Reap a dead client's `client_registry` entry exactly once, keeping the
     /// `attached_clients` counter in lock-step with the registry.
     ///
@@ -1762,3 +1782,7 @@ mod tests_pr267_backpressure;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue434_reap_client.rs"]
 mod tests_issue434_reap_client;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_kill_descendants_option.rs"]
+mod tests_kill_descendants_option;

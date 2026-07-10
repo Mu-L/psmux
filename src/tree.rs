@@ -413,7 +413,7 @@ pub fn get_split_mut<'a>(node: &'a mut Node, path: &Vec<usize>) -> Option<&'a mu
 /// - `newly_dead_count` tracks panes that transitioned alive→dead in this call
 ///   (remain-on-exit case), so callers can fire hooks even when the tree shape
 ///   doesn't change.
-pub fn prune_exited(n: Node, remain_on_exit: bool) -> (Option<Node>, usize) {
+pub fn prune_exited(n: Node, remain_on_exit: bool, kill_descendants: bool) -> (Option<Node>, usize) {
     match n {
         Node::Leaf(mut p) => {
             if p.dead { return (Some(Node::Leaf(p)), 0); }
@@ -428,7 +428,12 @@ pub fn prune_exited(n: Node, remain_on_exit: bool) -> (Option<Node>, usize) {
                         // Closing the ConPTY alone does NOT terminate grandchildren,
                         // so without this they leak. Mirrors the explicit kill-pane
                         // path and the reaper case kill_process_tree documents.
-                        crate::platform::process_kill::kill_process_tree(&mut p.child);
+                        // `set -g @kill-descendants off` opts out, restoring
+                        // tmux-on-Unix survival for deliberately backgrounded
+                        // processes (see AppState::kill_descendants_on_exit).
+                        if kill_descendants {
+                            crate::platform::process_kill::kill_process_tree(&mut p.child);
+                        }
                         (None, 0)
                     }
                 }
@@ -440,7 +445,7 @@ pub fn prune_exited(n: Node, remain_on_exit: bool) -> (Option<Node>, usize) {
             let mut new_sizes: Vec<u16> = Vec::new();
             let mut newly_dead = 0;
             for (i, child) in children.into_iter().enumerate() {
-                let (pruned, dead_count) = prune_exited(child, remain_on_exit);
+                let (pruned, dead_count) = prune_exited(child, remain_on_exit, kill_descendants);
                 newly_dead += dead_count;
                 if let Some(c) = pruned {
                     new_children.push(c);
@@ -861,6 +866,7 @@ fn has_any_exited(node: &mut Node) -> bool {
 
 pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
     let remain = app.remain_on_exit;
+    let kill_descendants = app.kill_descendants_on_exit();
     let mut any_pruned = false;
     let mut any_newly_dead = false;
     for i in (0..app.windows.len()).rev() {
@@ -871,7 +877,7 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
         let leaves_before = count_panes(&app.windows[i].root);
         let active_pane_id = get_active_pane_id(&app.windows[i].root, &app.windows[i].active_path);
         let root = std::mem::replace(&mut app.windows[i].root, Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
-        let (pruned_result, newly_dead_count) = prune_exited(root, remain);
+        let (pruned_result, newly_dead_count) = prune_exited(root, remain, kill_descendants);
         if newly_dead_count > 0 {
             any_newly_dead = true;
         }
