@@ -1880,7 +1880,11 @@ match cmd {
     "session-info" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::SessionInfo(rtx));
-        if let Ok(line) = rrx.recv() {
+        // Bounded wait: session-info doubles as the Tier 2 execution barrier for
+        // send_control, so it must never block the connection thread forever if
+        // the event loop is momentarily wedged — that would leak the thread and
+        // hold the socket open. 3s is far longer than a healthy loop cycle.
+        if let Ok(line) = rrx.recv_timeout(Duration::from_secs(3)) {
             if persistent {
                 let _ = tx.send(CtrlReq::ShowTextPopup("session-info".to_string(), line));
             } else {
