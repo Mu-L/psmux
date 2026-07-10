@@ -74,6 +74,24 @@ pub fn send_mouse_enable() {
     //   1006 = SGR extended mouse format
     const MOUSE_ENABLE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
 
+    // Issue #457: on builds whose ConPTY cannot round-trip VT mouse over SSH,
+    // enabling mouse reporting is actively dangerous.  The bypass WriteFile
+    // below reaches the client terminal even when ConPTY would otherwise have
+    // swallowed the DECSET, so the terminal starts reporting mouse; the first
+    // click/drag sends an SGR mouse report (`\x1b[<…M`) back through sshd into
+    // ConPTY input, where the old conhost VT parser fast-fails (0xc0000409)
+    // and takes the pane process down with it.  A non-working mouse is fine;
+    // a dead session is not — so do not enable mouse on these builds at all.
+    if !conpty_mouse_supported() {
+        ssh_debug_log(&format!(
+            "send_mouse_enable: SUPPRESSED — Windows build {} < {} cannot accept \
+             mouse over SSH (issue #457); leaving mouse reporting disabled",
+            windows_build_number().map_or_else(|| "unknown".to_string(), |b| b.to_string()),
+            CONPTY_MOUSE_MIN_BUILD,
+        ));
+        return;
+    }
+
     ssh_debug_log("send_mouse_enable: writing mouse-enable VT sequences to stdout");
 
     // Approach 1: WriteFile on the raw output handle.
@@ -211,6 +229,14 @@ pub fn needs_vt_input() -> bool {
 /// Win11 23H2).  Returns `None` on non-Windows or if the query fails.
 #[cfg(windows)]
 pub fn windows_build_number() -> Option<u32> {
+    // Test/escape-hatch override: force a specific build number so mouse-over-SSH
+    // gating (issue #457) can be exercised on any host, and so a user on a build
+    // with a broken ConPTY mouse path can pin it low to keep mouse disabled.
+    if let Ok(v) = std::env::var("PSMUX_FAKE_WIN_BUILD") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            return Some(n);
+        }
+    }
     #[repr(C)]
     struct OSVERSIONINFOW {
         os_version_info_size: u32,
@@ -233,6 +259,22 @@ pub fn windows_build_number() -> Option<u32> {
 #[cfg(not(windows))]
 pub fn windows_build_number() -> Option<u32> {
     None
+}
+
+/// Minimum Windows build whose ConPTY safely round-trips VT mouse over SSH.
+///
+/// Builds below this (Win10 and early Win11) either drop SGR mouse DECSET on
+/// the way out or, worse, fast-fail conhost's input VT parser when an SGR
+/// mouse report (`\x1b[<…M`) arrives — a 0xc0000409 stack-buffer-overrun that
+/// tears down the ConPTY and kills the pane process (issue #457).
+pub const CONPTY_MOUSE_MIN_BUILD: u32 = 22523;
+
+/// Returns `true` only when this host's ConPTY can safely accept VT mouse
+/// input over SSH.  When the build is unknown we err on the side of **not**
+/// enabling mouse: a non-functional mouse is acceptable, a crashed session is
+/// not (issue #457).
+pub fn conpty_mouse_supported() -> bool {
+    windows_build_number().map_or(false, |b| b >= CONPTY_MOUSE_MIN_BUILD)
 }
 
 /// Unified input source — abstracts over crossterm (local) and SSH VT (remote).
@@ -1352,40 +1394,28 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
 
     // ── Startup diagnostics ──────────────────────────────────────────────
     ssh_debug_log("=== psmux SSH input module starting ===");
-    // Log Windows version
+    // Log Windows version (honours PSMUX_FAKE_WIN_BUILD via windows_build_number).
     {
-        #[repr(C)]
-        struct OSVERSIONINFOW {
-            os_version_info_size: u32,
-            major: u32,
-            minor: u32,
-            build: u32,
-            platform_id: u32,
-            sz_csd_version: [u16; 128],
-        }
-        #[link(name = "ntdll")]
-        extern "system" {
-            fn RtlGetVersion(info: *mut OSVERSIONINFOW) -> i32;
-        }
-        let mut info: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
-        info.os_version_info_size = std::mem::size_of::<OSVERSIONINFOW>() as u32;
-        unsafe { RtlGetVersion(&mut info) };
+        let build = windows_build_number();
         ssh_debug_log(&format!(
-            "Windows {}.{} build {}",
-            info.major, info.minor, info.build,
+            "Windows build {}",
+            build.map_or_else(|| "unknown".to_string(), |b| b.to_string()),
         ));
         // ConPTY mouse support requires Windows 11 build 22523+.
         // On older builds, ConPTY's VT parser discards SGR mouse input
-        // sequences and does not forward DECSET to the SSH client.
-        if info.build < 22523 {
-            ssh_debug_log(&format!(
-                "WARNING: Windows build {} < 22523 — ConPTY does NOT support \
-                 mouse over SSH. Mouse clicks will not work. \
-                 Upgrade to Windows 11 22H2+ for SSH mouse support.",
-                info.build,
-            ));
-        } else {
+        // sequences and does not forward DECSET to the SSH client — and an
+        // inbound SGR mouse report can fast-fail conhost (issue #457), so we
+        // must not enable mouse there at all (see send_mouse_enable).
+        if conpty_mouse_supported() {
             ssh_debug_log("ConPTY build >= 22523 — mouse over SSH should be supported");
+        } else {
+            ssh_debug_log(&format!(
+                "WARNING: Windows build {} < {} — ConPTY does NOT support \
+                 mouse over SSH. Mouse reporting stays disabled (issue #457). \
+                 Upgrade to Windows 11 22H2+ for SSH mouse support.",
+                build.map_or_else(|| "unknown".to_string(), |b| b.to_string()),
+                CONPTY_MOUSE_MIN_BUILD,
+            ));
         }
     }
     // Log SSH env vars
@@ -1675,3 +1705,7 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
 #[cfg(test)]
 #[path = "../tests-rs/test_ssh_vt_paste.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue457_ssh_mouse_build_gate.rs"]
+mod tests_issue457_ssh_mouse_build_gate;
