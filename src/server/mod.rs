@@ -754,6 +754,30 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // Server starts detached with a reasonable default window size
     app.attached_clients = 0;
 
+    // ── P0: single-server-per-name guard (issue #2) ─────────────────────────
+    // Hold a named mutex keyed on this session's base name for the server's whole
+    // life. If another LIVE server already owns the name, we are a duplicate from
+    // a cold-spawn race (has-session false-negatived under load, or two
+    // `new-session -s X` raced) — exit cleanly so the winner stays the single
+    // source of truth. Two servers on one name desync the .port/.key files and
+    // wedge the session ("appears lost"). Warm (standby) servers are exempt (the
+    // warm pool intentionally runs several). Fail-open: any FFI hiccup yields a
+    // live guard, never a blocked legitimate start.
+    let _session_guard = {
+        let base = app.port_file_base();
+        if crate::session::is_warm_session(&base) {
+            None
+        } else {
+            match crate::platform::acquire_session_mutex(&base) {
+                Some(g) => Some(g),
+                None => {
+                    warm_debug(&format!("server STARTUP: session '{}' already owned by a live server — exiting duplicate", base));
+                    return Ok(()); // do NOT touch the winner's .port/.key/.sid
+                }
+            }
+        }
+    };
+
     // Bind the control listener BEFORE loading config so that run-shell
     // commands spawned by load_config can connect back to the server.
     let (tx, rx) = mpsc::channel::<CtrlReq>();
