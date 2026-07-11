@@ -1106,20 +1106,34 @@ pub fn send_control(line: String) -> io::Result<()> {
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok()).ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("no server running on session '{}'", target)))?.clone();
     let session_key = read_session_key(&target).unwrap_or_default();
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
-    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100))?;
+    // 1s connect timeout: a busy-but-alive server must not be mistaken for a
+    // dead one. The old 100ms falsely tripped callers' stale-port cleanup,
+    // deleting the port file of a server that was merely slow to accept.
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(1000))?;
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
     let _ = write!(stream, "AUTH {}\n", session_key);
     if let Some(ref ft) = full_target {
         let _ = write!(stream, "TARGET {}\n", ft);
     }
     let _ = write!(stream, "{}", line);
     let _ = stream.flush();
-    // Read the "OK" response to drain the receive buffer before closing.
-    // This prevents Windows from sending RST (due to unread data) which
-    // could cause the server to lose the command.
-    let mut buf = [0u8; 64];
-    let _ = std::io::Read::read(&mut stream, &mut buf);
+    // Half-close the write side so the server observes EOF *after* our bytes.
+    // TCP guarantees all sent data is delivered before the FIN, so the server's
+    // read_line always sees the full command before its loop ends — eliminating
+    // the RST-on-close race that used to silently drop fire-and-forget commands
+    // (the old 50ms "drain" read was only a partial mitigation).
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    // Drain to EOF (bounded by the read timeout): confirms the server stayed up
+    // and consumed the command before we drop the socket.
+    let mut buf = [0u8; 256];
+    loop {
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
     Ok(())
 }
 
@@ -1135,25 +1149,42 @@ pub fn send_control_with_response(line: String) -> io::Result<String> {
     let path = format!("{}\\.psmux\\{}.port", home, target);
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok()).ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("no server running on session '{}'", target)))?.clone();
     let session_key = read_session_key(&target).unwrap_or_default();
-    let addr = format!("127.0.0.1:{}", port);
-    let mut stream = std::net::TcpStream::connect(&addr)?;
+    // Bounded connect: against a saturated listen backlog, a bare connect()
+    // fails only after the ~21s Windows SYN-retransmit and surfaces as the
+    // notorious `os error 10060`. A 1s timeout turns that into a fast, retryable
+    // error instead of a multi-second hang printed to the user.
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, "bad server address"))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(1000))?;
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
     let _ = write!(stream, "AUTH {}\n", session_key);
     if let Some(ref ft) = full_target {
         let _ = write!(stream, "TARGET {}\n", ft);
     }
     let _ = write!(stream, "{}", line);
     let _ = stream.flush();
+    // Half-close so the server sees EOF after our request and closes the socket
+    // once the reply is complete — giving a definitive Ok(0) end-of-response
+    // instead of relying on an idle-gap timeout to guess the reply is done.
+    let _ = stream.shutdown(std::net::Shutdown::Write);
     let mut buf = Vec::new();
     let mut temp = [0u8; 4096];
+    let mut timed_out = false;
     loop {
         match std::io::Read::read(&mut stream, &mut temp) {
             Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&temp[..n]),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => break,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => { timed_out = true; break; }
             Err(_) => break,
         }
+    }
+    // A timeout with zero bytes received is a FAILED round-trip, not an empty
+    // result set. Returning Ok("") here made `list-windows`/`ls` report zero
+    // windows on a merely-slow server (silent wrong answer). Surface it as a
+    // retryable error so the caller can retry or report honestly.
+    if timed_out && buf.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "no response from server (timed out)"));
     }
     let result = String::from_utf8_lossy(&buf).to_string();
     // Strip the "OK\n" AUTH response prefix if present

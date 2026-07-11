@@ -1286,13 +1286,23 @@ struct ClientDragState {
 /// thread, and return a (writer, frame_rx) pair ready for the event loop.
 /// Sets a 5-second write timeout so blocked writes never freeze the client.
 fn establish_connection(addr: &str, key: &str) -> io::Result<Connection> {
-    let stream = std::net::TcpStream::connect(addr)?;
+    // Bounded connect: a wedged/backlogged server otherwise makes `attach` hang
+    // until the ~21s Windows SYN-retransmit and surface as `os error 10060`.
+    // A 2s timeout turns that into a fast, clear failure the caller can report
+    // (and lets try_reconnect back off promptly instead of stalling).
+    let sockaddr: std::net::SocketAddr = addr.parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::Other, format!("bad server address: {addr}")))?;
+    let stream = std::net::TcpStream::connect_timeout(&sockaddr, Duration::from_secs(2))?;
     stream.set_nodelay(true)?;
     let mut writer = stream.try_clone()?;
     writer.set_nodelay(true)?;
     writer.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = BufReader::new(stream);
 
+    // Bound the AUTH read too: a wedged server that accepts the socket but never
+    // answers would otherwise block the attach forever with no feedback. The
+    // persistent read timeout is (re)set to 2s just below, after auth.
+    let _ = reader.get_ref().set_read_timeout(Some(Duration::from_secs(3)));
     let _ = writer.write_all(format!("AUTH {}\n", key).as_bytes());
     let _ = writer.flush();
     let mut auth_line = String::new();

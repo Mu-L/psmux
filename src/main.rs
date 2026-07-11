@@ -160,6 +160,40 @@ fn cli_pane_index_exists(idx_spec: &str) -> Option<bool> {
     if any { Some(false) } else { None }
 }
 
+/// Probe whether a session's server is still alive and responding.
+/// Returns true only if we can connect+auth (server is up); a connection
+/// refusal or a missing port file means the session is gone. A *timeout*
+/// returns true — conservative on purpose, so a busy server is never wrongly
+/// declared dead (used by kill-session to decide when the kill has landed).
+fn probe_session_alive(session_name: &str) -> bool {
+    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+    let path = format!("{}\\.psmux\\{}.port", home, session_name);
+    let port = match std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok()) {
+        Some(p) => p,
+        None => return false, // no port file → gone
+    };
+    let addr: std::net::SocketAddr = match format!("127.0.0.1:{}", port).parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let key = read_session_key(session_name).unwrap_or_default();
+    match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
+        Ok(mut s) => {
+            let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+            let _ = write!(s, "AUTH {}\n", key);
+            let _ = write!(s, "session-info\n");
+            let _ = s.flush();
+            let mut buf = [0u8; 256];
+            match std::io::Read::read(&mut s, &mut buf) {
+                Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n]).contains("OK"),
+                _ => true, // connected but silent → assume alive
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => false, // gone
+        Err(_) => true, // timeout/other → can't confirm dead, assume alive
+    }
+}
+
 fn main() {
     if let Err(e) = run_main() {
         // Print a user-friendly error message instead of Rust's Debug format
@@ -568,10 +602,14 @@ fn run_main() -> io::Result<()> {
                                     if let Ok(port_str) = std::fs::read_to_string(e.path()) {
                                         if let Ok(_p) = port_str.trim().parse::<u16>() {
                                             let addr = format!("127.0.0.1:{}", port_str.trim());
-                                            if let Ok(mut s) = std::net::TcpStream::connect_timeout(
+                                            let conn = std::net::TcpStream::connect_timeout(
                                                 &addr.parse().unwrap(),
                                                 Duration::from_millis(200)
-                                            ) {
+                                            );
+                                            // Only prune a session that ACTIVELY refused (truly dead);
+                                            // a timeout means busy-but-alive and must not be deleted.
+                                            let refused = matches!(&conn, Err(e) if e.kind() == io::ErrorKind::ConnectionRefused);
+                                            if let Ok(mut s) = conn {
                                                 // Format expansion for variables like
                                                 // pane_current_command/pane_current_path can
                                                 // take 40+ ms each (OS process queries), so
@@ -653,8 +691,8 @@ fn run_main() -> io::Result<()> {
                                                     }
                                                     println!("{}", display_name); 
                                                 }
-                                            } else {
-                                                // stale port file - remove it along with matching key
+                                            } else if refused {
+                                                // Actively refused → truly dead; remove stale port + key.
                                                 let _ = std::fs::remove_file(e.path());
                                                 let key_path = e.path().with_extension("key");
                                                 let _ = std::fs::remove_file(&key_path);
@@ -1761,10 +1799,14 @@ fn run_main() -> io::Result<()> {
                                     if let Ok(port_str) = std::fs::read_to_string(e.path()) {
                                         if let Ok(_p) = port_str.trim().parse::<u16>() {
                                             let addr = format!("127.0.0.1:{}", port_str.trim());
-                                            if let Ok(mut s) = std::net::TcpStream::connect_timeout(
+                                            let conn = std::net::TcpStream::connect_timeout(
                                                 &addr.parse().unwrap(),
                                                 Duration::from_millis(500),
-                                            ) {
+                                            );
+                                            // Only prune a session that ACTIVELY refused (truly dead);
+                                            // a timeout means busy-but-alive and must not be deleted.
+                                            let refused = matches!(&conn, Err(e) if e.kind() == io::ErrorKind::ConnectionRefused);
+                                            if let Ok(mut s) = conn {
                                                 let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
                                                 let key_path = format!("{}\\.psmux\\{}.key", home, base);
                                                 if let Ok(key) = std::fs::read_to_string(&key_path) {
@@ -1802,7 +1844,7 @@ fn run_main() -> io::Result<()> {
                                                         Err(_) => break,
                                                     }
                                                 }
-                                            } else {
+                                            } else if refused {
                                                 let _ = std::fs::remove_file(e.path());
                                                 let key_path = e.path().with_extension("key");
                                                 let _ = std::fs::remove_file(&key_path);
@@ -1877,10 +1919,14 @@ fn run_main() -> io::Result<()> {
                                     if let Ok(port_str) = std::fs::read_to_string(e.path()) {
                                         if let Ok(_p) = port_str.trim().parse::<u16>() {
                                             let addr = format!("127.0.0.1:{}", port_str.trim());
-                                            if let Ok(mut s) = std::net::TcpStream::connect_timeout(
+                                            let conn = std::net::TcpStream::connect_timeout(
                                                 &addr.parse().unwrap(),
                                                 Duration::from_millis(500),
-                                            ) {
+                                            );
+                                            // Only prune a session that ACTIVELY refused (truly dead);
+                                            // a timeout means busy-but-alive and must not be deleted.
+                                            let refused = matches!(&conn, Err(e) if e.kind() == io::ErrorKind::ConnectionRefused);
+                                            if let Ok(mut s) = conn {
                                                 let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
                                                 let key_path = format!("{}\\.psmux\\{}.key", home, base);
                                                 if let Ok(key) = std::fs::read_to_string(&key_path) {
@@ -1919,7 +1965,7 @@ fn run_main() -> io::Result<()> {
                                                         Err(_) => break,
                                                     }
                                                 }
-                                            } else {
+                                            } else if refused {
                                                 let _ = std::fs::remove_file(e.path());
                                                 let key_path = e.path().with_extension("key");
                                                 let _ = std::fs::remove_file(&key_path);
@@ -2088,14 +2134,41 @@ fn run_main() -> io::Result<()> {
                 if let Some(ref t) = target {
                     env::set_var("PSMUX_TARGET_SESSION", t);
                 }
-                // Try to send kill command to server
-                if send_control("kill-session\n".to_string()).is_err() {
-                    // Server not responding - clean up stale port file
-                    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                    let port_path = format!("{}\\.psmux\\{}.port", home, session_name);
-                    let _ = std::fs::remove_file(&port_path);
+                // Send the kill, then VERIFY the session is actually gone,
+                // retrying within a deadline. psmux's loopback IPC intermittently
+                // drops or defers a single command, so a one-shot send is not
+                // reliable. Crucially, a mere timeout must NOT be treated as
+                // "server dead" — that used to delete a live-but-busy server's
+                // port file, orphaning it and triggering relaunch storms.
+                let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                let port_path = format!("{}\\.psmux\\{}.port", home, session_name);
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut gone = !probe_session_alive(&session_name);
+                let mut refused = false;
+                while !gone {
+                    match send_control("kill-session\n".to_string()) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => { refused = true; break; }
+                        Err(_) => {} // busy/timeout — keep trying until the deadline
+                    }
+                    std::thread::sleep(Duration::from_millis(150));
+                    if !probe_session_alive(&session_name) { gone = true; break; }
+                    if std::time::Instant::now() >= deadline { break; }
                 }
-                return Ok(());
+                if gone || refused {
+                    // Server is down (killed or actively refused) → remove the
+                    // now-stale port file. (Idempotent: the server also removes
+                    // its own on a clean exit.)
+                    let _ = std::fs::remove_file(&port_path);
+                    return Ok(());
+                }
+                // Still alive after the deadline → genuine failure. Exit non-zero
+                // so scripts (and the watchdog) can trust $? instead of seeing a
+                // false success on a command that silently did nothing.
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("kill-session: session '{}' still present after 5s", session_name),
+                ));
             }
             // has-session - Check if session exists (for scripting)
             "has-session" | "has" => {
