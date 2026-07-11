@@ -1164,18 +1164,23 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
             // Tries:  ~/.psmux/plugins/<full-value>/plugin.conf
             //   then: ~/.psmux/plugins/<last-component>/plugin.conf
             if key == "@plugin" && !value.is_empty() {
-                let plugin_name = value.rsplit('/').next().unwrap_or(value);
+                // Strip an optional '#branch' suffix before deriving the plugin
+                // path. Branch names may contain '/' (e.g. 'temp/integration'),
+                // so splitting the raw value on '/' would treat the branch tail
+                // as the plugin name and never find the installed directory.
+                let base = value.split('#').next().unwrap_or(value);
+                let plugin_name = base.rsplit('/').next().unwrap_or(base);
                 if plugin_name != "ppm" {
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                     let xdg_config = env::var("XDG_CONFIG_HOME")
                         .unwrap_or_else(|_| format!("{}\\.config", home));
                     let candidates = [
                         // Classic paths: ~/.psmux/plugins/
-                        format!("{}\\.psmux\\plugins\\{}\\plugin.conf", home, value.replace('/', "\\")),
+                        format!("{}\\.psmux\\plugins\\{}\\plugin.conf", home, base.replace('/', "\\")),
                         format!("{}\\.psmux\\plugins\\{}\\plugin.conf", home, plugin_name),
                         format!("{}\\.psmux\\plugins\\psmux-plugins\\{}\\plugin.conf", home, plugin_name),
                         // XDG paths: ~/.config/psmux/plugins/
-                        format!("{}\\psmux\\plugins\\{}\\plugin.conf", xdg_config, value.replace('/', "\\")),
+                        format!("{}\\psmux\\plugins\\{}\\plugin.conf", xdg_config, base.replace('/', "\\")),
                         format!("{}\\psmux\\plugins\\{}\\plugin.conf", xdg_config, plugin_name),
                         format!("{}\\psmux\\plugins\\psmux-plugins\\{}\\plugin.conf", xdg_config, plugin_name),
                     ];
@@ -1196,11 +1201,11 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
                     if !found {
                         let ps1_candidates = [
                             // Classic paths
-                            format!("{}\\.psmux\\plugins\\{}\\{}.ps1", home, value.replace('/', "\\"), plugin_name),
+                            format!("{}\\.psmux\\plugins\\{}\\{}.ps1", home, base.replace('/', "\\"), plugin_name),
                             format!("{}\\.psmux\\plugins\\{}\\{}.ps1", home, plugin_name, plugin_name),
                             format!("{}\\.psmux\\plugins\\psmux-plugins\\{}\\{}.ps1", home, plugin_name, plugin_name),
                             // XDG paths
-                            format!("{}\\psmux\\plugins\\{}\\{}.ps1", xdg_config, value.replace('/', "\\"), plugin_name),
+                            format!("{}\\psmux\\plugins\\{}\\{}.ps1", xdg_config, base.replace('/', "\\"), plugin_name),
                             format!("{}\\psmux\\plugins\\{}\\{}.ps1", xdg_config, plugin_name, plugin_name),
                             format!("{}\\psmux\\plugins\\psmux-plugins\\{}\\{}.ps1", xdg_config, plugin_name, plugin_name),
                         ];
