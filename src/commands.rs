@@ -1816,7 +1816,13 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         non_flag[1..].join(" ")
                     };
                     if has_append {
-                        app.hooks.entry(hook_name.to_string()).or_default().push(hook_cmd);
+                        // Dedup identical handlers so a re-sourced config does
+                        // not accumulate duplicate hooks that fire every tick
+                        // (issue #459); mirrors the replace path's #133 guard.
+                        let entry = app.hooks.entry(hook_name.to_string()).or_default();
+                        if !entry.contains(&hook_cmd) {
+                            entry.push(hook_cmd);
+                        }
                     } else {
                         app.hooks.insert(hook_name.to_string(), vec![hook_cmd]);
                     }

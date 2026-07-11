@@ -717,8 +717,14 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
                 }
             };
             if append {
-                // -a/-ga: append to existing hook list (tmux multi-handler)
-                app.hooks.entry(hook).or_insert_with(Vec::new).push(cmd);
+                // -a/-ga: append to existing hook list (tmux multi-handler).
+                // Dedup identical commands so a re-sourced config does not
+                // accumulate duplicate handlers that fire every tick (issue
+                // #459); mirrors the replace path's issue #133 guard.
+                let entry = app.hooks.entry(hook).or_insert_with(Vec::new);
+                if !entry.contains(&cmd) {
+                    entry.push(cmd);
+                }
             } else {
                 // Replace (not append) to match tmux – prevents duplicates on
                 // config reload (issue #133).
@@ -2142,3 +2148,7 @@ mod tests_issue416_inline_comments;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue425_bold_is_bright_option.rs"]
 mod tests_issue425_bold_is_bright_option;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue459_hook_accumulation.rs"]
+mod tests_issue459_hook_accumulation;

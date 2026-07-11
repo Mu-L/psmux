@@ -4443,7 +4443,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::AppendHook(hook, cmd) => {
                     // -a/-ga: append to existing hook list so multiple
                     // plugins can register separate handlers (tmux semantics).
-                    app.hooks.entry(hook).or_insert_with(Vec::new).push(cmd);
+                    // Skip an identical command that is already registered: a
+                    // config re-sourced N times (e.g. a plugin panel firing
+                    // "Configuration reloaded" repeatedly) would otherwise
+                    // accumulate N copies of the same handler and fire all of
+                    // them every tick, spawning a runaway of processes for a
+                    // status-interval run-shell hook (issue #459). This mirrors
+                    // the replace path's dedup guard for issue #133.
+                    let entry = app.hooks.entry(hook).or_insert_with(Vec::new);
+                    if !entry.contains(&cmd) {
+                        entry.push(cmd);
+                    }
                 }
                 CtrlReq::ShowHooks(resp) => {
                     let mut output = String::new();
