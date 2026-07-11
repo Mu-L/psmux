@@ -1717,3 +1717,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue457_ssh_mouse_build_gate.rs"]
 mod tests_issue457_ssh_mouse_build_gate;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pr468_wezterm_vt_input.rs"]
+mod tests_pr468_wezterm_vt_input;
