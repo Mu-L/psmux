@@ -1113,6 +1113,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let mut temp_focus_restore: Option<(usize, usize)> = None;
 
     loop {
+        // Tier 3 — keep warm-pane spawning OFF the command path. A warm pane is a
+        // fresh shell + ConPTY; spawning one can block the single event loop for
+        // 100ms–seconds under load. Doing it inline after every new-window/split
+        // stalled *other* clients' commands, surfacing as the intermittent
+        // `os error 10060` timeouts. Instead replenish only during a quiet gap
+        // (no command processed in the last 20ms), so window-create bursts
+        // transplant the ready pane instantly and the blocking spawn lands in idle
+        // time. If no warm pane is ready when a new-window arrives, create_window
+        // still spawns one synchronously — correctness is unchanged.
+        if app.warm_pane.is_none() && last_client_activity.elapsed() >= Duration::from_millis(20) {
+            if let Ok(wp) = spawn_warm_pane(&*pty_system, &mut app) {
+                app.warm_pane = Some(wp);
+            }
+        }
         if last_registry_check.elapsed() >= Duration::from_secs(5) {
             last_registry_check = Instant::now();
             ensure_session_registry_files(&home, &app);
@@ -1359,12 +1373,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     if detached { app.active_idx = prev_idx; }
                     // Replenish warm pane pool for next new-window
-                    if app.warm_pane.is_none() {
-                        match spawn_warm_pane(&*pty_system, &mut app) {
-                            Ok(wp) => { app.warm_pane = Some(wp); }
-                            Err(_) => {}
-                        }
-                    }
+                    // Warm-pane replenish is deferred OFF the command path — it
+                    // runs at the loop top during an idle gap (Tier 3), so a burst
+                    // of window-creates never chains blocking spawns that stall
+                    // other clients' commands.
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
                 CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp, title, empty) => {
@@ -1393,12 +1405,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if detached { app.active_idx = prev_idx; }
                     let _ = resp.send(pane_info);
                     // Replenish warm pane pool for next new-window
-                    if app.warm_pane.is_none() {
-                        match spawn_warm_pane(&*pty_system, &mut app) {
-                            Ok(wp) => { app.warm_pane = Some(wp); }
-                            Err(_) => {}
-                        }
-                    }
+                    // Warm-pane replenish is deferred OFF the command path — it
+                    // runs at the loop top during an idle gap (Tier 3), so a burst
+                    // of window-creates never chains blocking spawns that stall
+                    // other clients' commands.
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
                 CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp, title) => {
@@ -1494,12 +1504,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     // Replenish warm pane for the next new-window/split
-                    if app.warm_pane.is_none() {
-                        match spawn_warm_pane(&*pty_system, &mut app) {
-                            Ok(wp) => { app.warm_pane = Some(wp); }
-                            Err(_) => {}
-                        }
-                    }
+                    // Warm-pane replenish is deferred OFF the command path — it
+                    // runs at the loop top during an idle gap (Tier 3), so a burst
+                    // of window-creates never chains blocking spawns that stall
+                    // other clients' commands.
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                     }
                 }
@@ -1560,12 +1568,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(pane_info);
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     // Replenish warm pane
-                    if app.warm_pane.is_none() {
-                        match spawn_warm_pane(&*pty_system, &mut app) {
-                            Ok(wp) => { app.warm_pane = Some(wp); }
-                            Err(_) => {}
-                        }
-                    }
+                    // Warm-pane replenish is deferred OFF the command path — it
+                    // runs at the loop top during an idle gap (Tier 3), so a burst
+                    // of window-creates never chains blocking spawns that stall
+                    // other clients' commands.
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                 }
                 CtrlReq::KillPane => {
