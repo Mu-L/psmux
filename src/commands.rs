@@ -1202,19 +1202,29 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "display-popup" | "popup" => {
+            // Re-tokenize with a quote-aware parser (#470). The raw `parts` above
+            // come from `split_whitespace()`, which does NOT strip shell quotes.
+            // When this command arrives from a display-menu item, the inner popup
+            // command is still quoted (e.g. `display-popup -E 'lazygit'`), so a
+            // naive split leaves the literal quotes on the command (`'lazygit'`),
+            // which is not a runnable executable. The popup shell then exits
+            // immediately and close-on-exit tears the popup back down before the
+            // user ever sees it. parse_command_line() strips the quotes so the
+            // command matches what the CLI/TCP path (connection.rs) already does.
+            let qparts = parse_command_line(cmd);
             // Parse -w width, -h height, -E close-on-exit, -d start-dir flags
             let mut width_spec = "80".to_string();
             let mut height_spec = "24".to_string();
             let mut start_dir: Option<String> = None;
-            let close_on_exit = parts.iter().any(|p| *p == "-E");
+            let close_on_exit = qparts.iter().any(|p| p == "-E");
             let mut skip_indices = std::collections::HashSet::new();
             skip_indices.insert(0); // skip the command name itself
             let mut i = 1;
-            while i < parts.len() {
-                match parts[i] {
-                    "-w" => { if let Some(v) = parts.get(i + 1) { width_spec = v.to_string(); skip_indices.insert(i); skip_indices.insert(i + 1); i += 1; } }
-                    "-h" => { if let Some(v) = parts.get(i + 1) { height_spec = v.to_string(); skip_indices.insert(i); skip_indices.insert(i + 1); i += 1; } }
-                    "-d" | "-c" => { if let Some(v) = parts.get(i + 1) { start_dir = Some(v.to_string()); skip_indices.insert(i); skip_indices.insert(i + 1); i += 1; } }
+            while i < qparts.len() {
+                match qparts[i].as_str() {
+                    "-w" => { if let Some(v) = qparts.get(i + 1) { width_spec = v.to_string(); skip_indices.insert(i); skip_indices.insert(i + 1); i += 1; } }
+                    "-h" => { if let Some(v) = qparts.get(i + 1) { height_spec = v.to_string(); skip_indices.insert(i); skip_indices.insert(i + 1); i += 1; } }
+                    "-d" | "-c" => { if let Some(v) = qparts.get(i + 1) { start_dir = Some(v.to_string()); skip_indices.insert(i); skip_indices.insert(i + 1); i += 1; } }
                     "-E" | "-K" => { skip_indices.insert(i); }
                     _ => {}
                 }
@@ -1224,13 +1234,13 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             let (term_w, term_h) = crossterm::terminal::size().unwrap_or((120, 40));
             let width = parse_popup_dim_local(&width_spec, term_w, 80);
             let height = parse_popup_dim_local(&height_spec, term_h, 24);
-            // Collect remaining args as the command
-            let rest: String = parts.iter().enumerate()
+            // Collect remaining args as the command (quotes already stripped)
+            let rest: String = qparts.iter().enumerate()
                 .filter(|(idx, _)| !skip_indices.contains(idx))
-                .map(|(_, a)| *a)
+                .map(|(_, a)| a.as_str())
                 .collect::<Vec<&str>>()
                 .join(" ");
-            
+
             // Spawn popup as a real Pane via the popup module
             let pane_result = if !rest.is_empty() {
                 crate::popup::create_popup_pane(
@@ -1243,7 +1253,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     &app.environment,
                 )
             } else { None };
-            
+
             app.mode = Mode::PopupMode {
                 command: rest,
                 output: String::new(),
@@ -2595,3 +2605,7 @@ mod tests_issue402_parse;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue426_split_pane_alias.rs"]
 mod tests_issue426_split_pane_alias;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue470_menu_popup.rs"]
+mod tests_issue470_menu_popup;
