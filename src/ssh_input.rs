@@ -223,6 +223,14 @@ pub fn needs_vt_input() -> bool {
     is_ssh_session()
         || std::env::var("TERMINAL_EMULATOR")
             .map_or(false, |v| v.contains("JetBrains"))
+        // WezTerm on Windows is a ConPTY-based VT terminal that writes VT mouse
+        // escape sequences to the ConPTY input pipe, exactly like JediTerm.
+        // ConPTY does not translate these into MOUSE_EVENT records, so without
+        // the VT input parser the raw SGR bytes (e.g. "\x1b[<35;..M") leak
+        // through as KEY_EVENT text into the active pane. Detect WezTerm via the
+        // env vars it always sets and route it through the VT input path.
+        || std::env::var("TERM_PROGRAM").map_or(false, |v| v == "WezTerm")
+        || std::env::var_os("WEZTERM_PANE").is_some()
 }
 
 /// Returns the Windows build number (e.g. 19045 for Win10 22H2, 22631 for
@@ -1709,3 +1717,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue457_ssh_mouse_build_gate.rs"]
 mod tests_issue457_ssh_mouse_build_gate;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pr468_wezterm_vt_input.rs"]
+mod tests_pr468_wezterm_vt_input;
