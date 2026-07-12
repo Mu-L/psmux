@@ -1956,25 +1956,25 @@ pub mod process_kill {
         descendants
     }
 
-    /// Force-terminate a single process by PID, but ONLY if its creation time is
-    /// no later than `max_creation_ft` (issue #447 PID-reuse guard).
+    /// Force-terminate a single process by PID, guarded against PID reuse by
+    /// process creation time (issue #447).
     ///
-    /// The caller captures `max_creation_ft` (via `now_filetime()`) immediately
-    /// BEFORE taking the process snapshot that identified `pid`. Any process
-    /// that was legitimately enumerated in that snapshot must have been created
-    /// at or before the cutoff. If the PID has since been reused by an unrelated
-    /// process, that new process was created AFTER the cutoff, so its creation
-    /// time exceeds `max_creation_ft` and we refuse to terminate it.
+    /// `max_creation_ft` is `Some(cutoff)` for callers that identified `pid` from
+    /// a process snapshot: they capture the cutoff (via `now_filetime()`)
+    /// immediately BEFORE snapshotting, so any legitimately enumerated process
+    /// was created at or before it. A pid since reused by an unrelated process
+    /// was created AFTER the cutoff, so its creation time exceeds it and we refuse
+    /// to kill; a pid we cannot query is skipped too (fail safe).
     ///
-    /// Pass `u64::MAX` to disable the guard (unconditional kill) for callers that
-    /// terminate a process they hold a first-class reference to rather than a
-    /// snapshot-derived PID.
-    fn terminate_pid(pid: u32, max_creation_ft: u64) {
+    /// `None` is for callers that have already settled identity another way — an
+    /// exact creation-time match (kill-server's `confirms_identity`) or a
+    /// first-class child handle — so no snapshot cutoff applies.
+    fn terminate_pid(pid: u32, max_creation_ft: Option<u64>) {
         // PID-reuse guard: verify identity by creation time before killing.
-        if max_creation_ft != u64::MAX {
+        if let Some(cutoff) = max_creation_ft {
             match process_creation_filetime(pid) {
                 // Created after our snapshot cutoff -> PID was reused. Do NOT kill.
-                Some(created) if created > max_creation_ft => return,
+                Some(created) if created > cutoff => return,
                 // Could not confirm identity (gone / foreign context). Skip to
                 // stay on the safe side of the false-kill race.
                 None => return,
@@ -2032,8 +2032,8 @@ pub mod process_kill {
             if ppid == 0 || ppid == 4 { return false; }
             // detach-client -P intentionally targets the caller's own parent
             // shell; there is no snapshot cutoff to verify against, so kill
-            // unconditionally (u64::MAX disables the PID-reuse guard).
-            terminate_pid(ppid, u64::MAX);
+            // unconditionally.
+            terminate_pid(ppid, None);
             true
         } else {
             false
@@ -2070,12 +2070,12 @@ pub mod process_kill {
                 }
                 descs.reverse();
                 for &dpid in &descs {
-                    terminate_pid(dpid, cutoff);
+                    terminate_pid(dpid, Some(cutoff));
                 }
             }
             // Kill the root process last. Its PID also gets the reuse guard,
             // gated on the entry cutoff captured while root was still alive.
-            terminate_pid(root_pid, entry_cutoff);
+            terminate_pid(root_pid, Some(entry_cutoff));
         }
 
         // Fallback: tell portable_pty to kill the direct child process.
@@ -2108,9 +2108,9 @@ pub mod process_kill {
                 let mut descs = collect_descendants_from_table(&entries, *root_pid);
                 descs.reverse();
                 for &dpid in &descs {
-                    terminate_pid(dpid, cutoff);
+                    terminate_pid(dpid, Some(cutoff));
                 }
-                terminate_pid(*root_pid, cutoff);
+                terminate_pid(*root_pid, Some(cutoff));
             }
             let _ = children[i].kill();
         }
@@ -2250,10 +2250,13 @@ pub mod process_kill {
         process_creation_filetime(pid)
     }
 
-    /// Terminate an orphaned server PID, guarded by the #447 PID-reuse check:
-    /// the process is killed only if its creation time is no later than
-    /// `max_creation_ft` (captured before the enumeration that found it).
-    pub fn terminate_server_pid(pid: u32, max_creation_ft: u64) {
+    /// Terminate a psmux server PID, guarded against PID reuse by process
+    /// creation time (issue #447). Pass `Some(cutoff)` (the reaper's path) to
+    /// reject a pid reused by a process created after the snapshot that found it;
+    /// pass `None` when the caller has already matched creation time exactly
+    /// (kill-server's `confirms_identity` against the stored `.pid` value), which
+    /// settles identity and makes the cutoff heuristic redundant.
+    pub fn terminate_server_pid(pid: u32, max_creation_ft: Option<u64>) {
         terminate_pid(pid, max_creation_ft);
     }
 
@@ -2280,7 +2283,7 @@ pub mod process_kill {
     pub fn loopback_listener_pids() -> Vec<(u32, u16)> { Vec::new() }
     pub fn now_process_filetime() -> u64 { 0 }
     pub fn process_creation_time(_pid: u32) -> Option<u64> { None }
-    pub fn terminate_server_pid(_pid: u32, _max_creation_ft: u64) {}
+    pub fn terminate_server_pid(_pid: u32, _max_creation_ft: Option<u64>) {}
 }
 
 // ---------------------------------------------------------------------------

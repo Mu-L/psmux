@@ -165,7 +165,10 @@ pub fn remove_session_id_file(port_file_base: &str) {
 /// process anchor.
 pub fn write_session_pid_file(port_file_base: &str, pid: u32) {
     let pid_path = crate::paths::pid_file(port_file_base);
-    let _ = std::fs::write(&pid_path, pid.to_string());
+    // `pid:creation_filetime` — same body as ensure_session_registry_files, so a
+    // freshly renamed session is force-kill-identifiable before the next re-ensure.
+    let creation = crate::platform::process_kill::process_creation_time(pid).unwrap_or(0);
+    let _ = std::fs::write(&pid_path, format_pid_file_contents(pid, creation));
 }
 
 /// Remove the `.pid` file for a session.
@@ -293,7 +296,8 @@ fn read_tracked_registry(psmux_dir: &Path)
                     let port_sibling = path.with_extension("port");
                     if port_sibling.exists() {
                         if let Ok(s) = std::fs::read_to_string(&path) {
-                            if let Ok(pid) = s.trim().parse::<u32>() { tracked_pids.insert(pid); }
+                            // Tolerate both `pid` and `pid:creation_filetime` bodies.
+                            if let Some((pid, _)) = parse_pid_file_contents(&s) { tracked_pids.insert(pid); }
                         }
                     }
                 }
@@ -302,6 +306,82 @@ fn read_tracked_registry(psmux_dir: &Path)
         }
     }
     (tracked_ports, tracked_pids)
+}
+
+// --- kill-server force-kill fallback: data-dir-scoped, identity-checked -------
+// tmux's kill-server is socket-scoped. psmux's bare kill-server sends a graceful
+// kill-server to every session in scope; a wedged server that ignores it must be
+// force-killed. The old fallback scanned every process on the machine by image
+// name (psmux/pmux/tmux) and TerminateProcess'd them — machine-wide, reaching
+// unrelated servers and other namespaces. These helpers replace that with a
+// selection scoped by construction to this data dir's `.pid` files, gated by an
+// exact process-creation-time match so a recycled pid is never killed.
+
+/// A force-kill target read from a data dir's registry: the recorded server pid
+/// and the creation FILETIME it had when it wrote the pid file. The pair is what
+/// defeats pid reuse — a recycled pid will not carry the same creation time.
+#[derive(Debug, PartialEq)]
+pub struct PidTarget {
+    pub pid: u32,
+    pub creation_time: u64,
+}
+
+/// Parse a `.pid` file body. Two forms are accepted: a bare `pid` (the #448
+/// liveness anchor as first written) and `pid:creation_filetime` (extended so
+/// kill-server can verify identity). Returns `(pid, Option<creation_time>)`, or
+/// `None` when the pid itself is unparseable. One parser so every reader
+/// (`force_kill_targets`, the orphan reaper, the pid anchor) stays in step.
+pub fn parse_pid_file_contents(s: &str) -> Option<(u32, Option<u64>)> {
+    let s = s.trim();
+    match s.split_once(':') {
+        Some((pid_str, time_str)) => Some((pid_str.trim().parse().ok()?, time_str.trim().parse().ok())),
+        None => Some((s.parse().ok()?, None)),
+    }
+}
+
+/// The `.pid` body the server writes: `pid:creation_filetime`. Kept as one
+/// function so the producer and `parse_pid_file_contents` cannot drift apart.
+pub fn format_pid_file_contents(pid: u32, creation_time: u64) -> String {
+    format!("{pid}:{creation_time}")
+}
+
+/// Force-kill candidates for `kill-server`'s fallback, scoped by construction to
+/// a single data dir: the `pid:creation_filetime` `.pid` files in `dir`. When
+/// `ns_prefix` is `Some`, only files whose base starts with it are considered —
+/// mirroring the graceful pass's `-L` filter, so a namespaced kill-server never
+/// reaches another namespace. Bare-pid and malformed files are skipped (no
+/// recorded creation time means no identity gate, so they are not force-kill
+/// candidates). This selects targets; it does not kill.
+pub fn force_kill_targets(dir: &std::path::Path, ns_prefix: Option<&str>) -> Vec<PidTarget> {
+    let mut targets = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return targets; };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e == "pid").unwrap_or(false) {
+            if let Some(pfx) = ns_prefix {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if !stem.starts_with(pfx) { continue; }
+            }
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                // A recorded creation time is required: it is the identity gate.
+                // Bare-pid files carry none, so they are not force-kill candidates.
+                if let Some((pid, Some(creation_time))) = parse_pid_file_contents(&contents) {
+                    targets.push(PidTarget { pid, creation_time });
+                }
+            }
+        }
+    }
+    targets
+}
+
+/// The exact-match identity gate for the force-kill fallback: terminate only when
+/// the live process at the pid still carries the creation time recorded in the
+/// pid file. `queried` is the process's current creation FILETIME (None if it
+/// could not be read); `expected` is the value from the pid file. A recycled pid
+/// carries a different creation time and is rejected; an unreadable process is
+/// rejected too, so the fallback fails safe and never kills on uncertainty.
+pub fn confirms_identity(queried: Option<u64>, expected: u64) -> bool {
+    queried == Some(expected)
 }
 
 /// Terminate live psmux *server* processes that no registry entry accounts for
@@ -356,7 +436,7 @@ fn reap_orphaned_servers_in(psmux_dir: &Path) {
             crate::debug_log::session_log("reaper", &format!(
                 "terminating orphaned psmux server pid {} (no registry entry references it)", pid));
         }
-        process_kill::terminate_server_pid(pid, now_ft);
+        process_kill::terminate_server_pid(pid, Some(now_ft));
     }
 }
 
@@ -397,7 +477,9 @@ fn pid_anchor_verdict(port_path: &Path) -> Option<bool> {
         return None;
     }
     let pid_path = port_path.with_extension("pid");
-    let pid: u32 = std::fs::read_to_string(&pid_path).ok()?.trim().parse().ok()?;
+    // Tolerate both `pid` and `pid:creation_filetime` bodies (the latter written
+    // so kill-server can verify identity); the anchor only needs the pid.
+    let (pid, _creation) = parse_pid_file_contents(&std::fs::read_to_string(&pid_path).ok()?)?;
     let name = match crate::platform::process_info::get_process_name(pid) {
         // No such process (a same-user psmux server is always openable with
         // QUERY_LIMITED_INFORMATION, so an unopenable PID is not our server).
@@ -1468,93 +1550,6 @@ pub fn list_all_sessions_tree(current_session: &str, current_windows: &[(String,
         }
     }
     tree
-}
-
-/// Force-kill any remaining psmux/pmux/tmux server processes that didn't
-/// exit via the TCP kill-server command.  This is the nuclear fallback that
-/// guarantees kill-server always succeeds.
-///
-/// On Windows, uses CreateToolhelp32Snapshot to enumerate processes and
-/// TerminateProcess to kill them.  Skips the current process.
-#[cfg(windows)]
-pub fn kill_remaining_server_processes() {
-    const TH32CS_SNAPPROCESS: u32 = 0x00000002;
-    const PROCESS_TERMINATE: u32 = 0x0001;
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    const INVALID_HANDLE: isize = -1;
-
-    #[repr(C)]
-    struct PROCESSENTRY32W {
-        dw_size: u32,
-        cnt_usage: u32,
-        th32_process_id: u32,
-        th32_default_heap_id: usize,
-        th32_module_id: u32,
-        cnt_threads: u32,
-        th32_parent_process_id: u32,
-        pc_pri_class_base: i32,
-        dw_flags: u32,
-        sz_exe_file: [u16; 260],
-    }
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
-        fn Process32FirstW(h_snapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
-        fn Process32NextW(h_snapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
-        fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> isize;
-        fn TerminateProcess(h_process: isize, exit_code: u32) -> i32;
-        fn CloseHandle(handle: isize) -> i32;
-    }
-
-    let my_pid = std::process::id();
-
-    unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snap == INVALID_HANDLE || snap == 0 { return; }
-
-        let mut pe: PROCESSENTRY32W = std::mem::zeroed();
-        pe.dw_size = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-
-        let target_names: &[&str] = &["psmux.exe", "pmux.exe", "tmux.exe"];
-        let mut pids_to_kill: Vec<u32> = Vec::new();
-
-        if Process32FirstW(snap, &mut pe) != 0 {
-            loop {
-                let pid = pe.th32_process_id;
-                if pid != my_pid {
-                    // Extract exe name from wide string
-                    let len = pe.sz_exe_file.iter().position(|&c| c == 0).unwrap_or(260);
-                    let name = String::from_utf16_lossy(&pe.sz_exe_file[..len]);
-                    let name_lower = name.to_lowercase();
-                    for target in target_names {
-                        if name_lower == *target || name_lower.ends_with(&format!("\\{}", target)) {
-                            pids_to_kill.push(pid);
-                            break;
-                        }
-                    }
-                }
-                if Process32NextW(snap, &mut pe) == 0 { break; }
-            }
-        }
-        CloseHandle(snap);
-
-        for pid in &pids_to_kill {
-            let h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, *pid);
-            if h != 0 && h != INVALID_HANDLE {
-                let _ = TerminateProcess(h, 1);
-                CloseHandle(h);
-            }
-        }
-    }
-}
-
-#[cfg(not(windows))]
-pub fn kill_remaining_server_processes() {
-    // On non-Windows, use signal-based killing
-    let _ = std::process::Command::new("pkill")
-        .args(&["-f", "psmux|pmux"])
-        .status();
 }
 
 #[cfg(test)]

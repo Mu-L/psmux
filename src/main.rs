@@ -51,7 +51,7 @@ use crate::platform::enable_virtual_terminal_processing;
 use crate::cli::{print_help, print_version, print_commands};
 use crate::session::{cleanup_stale_port_files, reap_orphaned_servers, read_session_key, send_control,
     send_control_with_response, resolve_default_session_name,
-    kill_remaining_server_processes};
+    force_kill_targets, confirms_identity};
 use crate::rendering::apply_cursor_style;
 use crate::server::run_server;
 use crate::client::run_remote;
@@ -462,6 +462,11 @@ fn run_main() -> io::Result<()> {
             let psmux_dir = crate::paths::psmux_dir();
             // Compute namespace prefix for -L filtering (matches list-sessions behavior)
             let ns_prefix = l_socket_name.as_ref().map(|l| format!("{l}__"));
+            // Snapshot the force-kill candidates from this data dir's .pid files
+            // BEFORE the graceful pass removes them. Scoped to this dir and (with
+            // -L) this namespace, so the fallback can never reach another instance.
+            let fk_targets =
+                force_kill_targets(std::path::Path::new(&psmux_dir), ns_prefix.as_deref());
             let mut targets: Vec<(std::path::PathBuf, u16, String)> = Vec::new();
             let mut stale_ports: Vec<std::path::PathBuf> = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&psmux_dir) {
@@ -512,25 +517,31 @@ fn run_main() -> io::Result<()> {
                             }
                         }
                     }
-                    // Remove port/key files regardless
+                    // Remove port/key/pid files regardless
                     let _ = std::fs::remove_file(&path);
-                    let key_path = path.with_extension("key");
-                    let _ = std::fs::remove_file(&key_path);
+                    let _ = std::fs::remove_file(path.with_extension("key"));
+                    let _ = std::fs::remove_file(path.with_extension("pid"));
                 })
             }).collect();
             // Wait for all threads to complete
             for h in handles { let _ = h.join(); }
-            // Clean up stale port/key files
+            // Clean up stale port/key/pid files
             for path in &stale_ports {
                 let _ = std::fs::remove_file(path);
-                let key_path = path.with_extension("key");
-                let _ = std::fs::remove_file(&key_path);
+                let _ = std::fs::remove_file(path.with_extension("key"));
+                let _ = std::fs::remove_file(path.with_extension("pid"));
             }
-            // Brief wait then verify no processes remain; if any do, force-kill them.
-            // Only do the nuclear fallback when not using -L namespace filtering.
+            // Force-kill any wedged server that ignored the graceful kill. The
+            // candidates were read from this data dir's (and, with -L, this
+            // namespace's) own .pid files before the graceful pass removed them,
+            // so nothing outside this instance is ever reached. The identity gate
+            // (exact process-creation-time match) skips any pid that has already
+            // exited or been recycled — no machine-wide, name-based scan.
             std::thread::sleep(Duration::from_millis(50));
-            if ns_prefix.is_none() {
-                kill_remaining_server_processes();
+            for t in fk_targets {
+                if confirms_identity(crate::platform::process_kill::process_creation_time(t.pid), t.creation_time) {
+                    crate::platform::process_kill::terminate_server_pid(t.pid, None);
+                }
             }
             return Ok(());
         }
