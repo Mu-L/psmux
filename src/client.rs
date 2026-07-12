@@ -2378,7 +2378,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             if srv_popup_has_pty {
                                 // PTY popup: forward all keys to server
                                 match key.code {
-                                    KeyCode::Esc => { cmd_batch.push("overlay-close\n".into()); }
+                                    KeyCode::Esc => {
+                                        // Forward Esc to the popup PTY, not to the overlay (#471).
+                                        // A PTY popup runs a real interactive app (nvim, fzf, a
+                                        // shell); Esc belongs to that app. tmux forwards it too and
+                                        // only closes the popup when its child process exits (e.g.
+                                        // `:q` in nvim), which close-on-exit already handles. The
+                                        // previous overlay-close swallowed Esc and killed the popup.
+                                        let encoded = crate::util::base64_encode("\x1b");
+                                        cmd_batch.push(format!("popup-input {}\n", encoded));
+                                    }
                                     KeyCode::Char(c) => {
                                         let bytes = if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
                                             vec![(c as u8) & 0x1F]
