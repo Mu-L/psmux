@@ -112,8 +112,16 @@ fn ensure_session_registry_files(app: &AppState) {
     // port/key/sid so a live server is never listening without a PID anchor, and
     // re-ensured periodically so the entry self-heals after rename/claim. This is
     // what lets startup reap live-but-orphaned duplicate servers by identity.
+    //
+    // The body is `pid:creation_filetime`: the creation time lets kill-server's
+    // force-kill fallback confirm identity (exact match) before terminating, so a
+    // recycled pid is never killed. Readers tolerate a bare pid too.
     let pid_path = crate::paths::pid_file(&base);
-    let pid_value = std::process::id().to_string();
+    let self_pid = std::process::id();
+    let pid_value = crate::session::format_pid_file_contents(
+        self_pid,
+        crate::platform::process_kill::process_creation_time(self_pid).unwrap_or(0),
+    );
     if std::fs::read_to_string(&pid_path)
         .map(|s| s.trim() != pid_value)
         .unwrap_or(true)
