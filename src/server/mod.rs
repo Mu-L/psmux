@@ -75,15 +75,15 @@ fn should_spawn_warm_server(app: &AppState) -> bool {
     app.warm_enabled && app.session_name != "__warm__" && !app.destroy_unattached
 }
 
-fn ensure_session_registry_files(home: &str, app: &AppState) {
+fn ensure_session_registry_files(app: &AppState) {
     let Some(port) = app.control_port else { return; };
-    let dir = format!("{}\\.psmux", home);
+    let dir = crate::paths::psmux_dir();
     let _ = std::fs::create_dir_all(&dir);
 
     let base = app.port_file_base();
-    let port_path = format!("{}\\{}.port", dir, base);
-    let key_path = format!("{}\\{}.key", dir, base);
-    let sid_path = format!("{}\\{}.sid", dir, base);
+    let port_path = crate::paths::port_file(&base);
+    let key_path = crate::paths::key_file(&base);
+    let sid_path = crate::paths::sid_file(&base);
     let port_value = port.to_string();
     let sid_value = app.session_id.to_string();
 
@@ -112,7 +112,7 @@ fn ensure_session_registry_files(home: &str, app: &AppState) {
     // port/key/sid so a live server is never listening without a PID anchor, and
     // re-ensured periodically so the entry self-heals after rename/claim. This is
     // what lets startup reap live-but-orphaned duplicate servers by identity.
-    let pid_path = format!("{}\\{}.pid", dir, base);
+    let pid_path = crate::paths::pid_file(&base);
     let pid_value = std::process::id().to_string();
     if std::fs::read_to_string(&pid_path)
         .map(|s| s.trim() != pid_value)
@@ -214,18 +214,17 @@ fn spawn_warm_server(app: &AppState) {
         return;
     }
     // Skip if a warm server already exists
-    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
     let warm_base = if let Some(ref sn) = app.socket_name {
         format!("{}____warm__", sn)
     } else {
         "__warm__".to_string()
     };
-    let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
+    let warm_port_path = crate::paths::port_file(&warm_base);
     warm_debug(&format!("spawn_warm_server entry base={} port_exists={}", warm_base, std::path::Path::new(&warm_port_path).exists()));
     // Serialize the check->spawn window: without this, two callers can both see
     // "no warm" (a freshly-spawned warm hasn't written its port yet) and each
     // spawn one, orphaning all but the last. This is the primary process-leak source.
-    let warm_lock_path = format!("{}\\.psmux\\{}.spawnlock", home, warm_base);
+    let warm_lock_path = crate::paths::spawnlock_file(&warm_base);
     let spawn_lock = match acquire_warm_spawn_lock(&warm_lock_path) {
         Some(g) => g,
         None => { warm_debug("another warm spawn in progress -- skipping"); return; }
@@ -246,7 +245,7 @@ fn spawn_warm_server(app: &AppState) {
                     Duration::from_millis(100),
                 ).is_ok() {
                     // TCP is up — verify the session name via AUTH.
-                    let warm_key_path = format!("{}\\.psmux\\{}.key", home, warm_base);
+                    let warm_key_path = crate::paths::key_file(&warm_base);
                     if let Ok(key) = std::fs::read_to_string(&warm_key_path) {
                         let key = key.trim().to_string();
                         if !key.is_empty() {
@@ -282,9 +281,9 @@ fn spawn_warm_server(app: &AppState) {
         // Stale or wrong-server port file — remove it (and matching key/sid files)
         warm_debug("removing STALE warm port/key/sid (unreachable or not a warm server)");
         let _ = std::fs::remove_file(&warm_port_path);
-        let warm_key_path = format!("{}\\.psmux\\{}.key", home, warm_base);
+        let warm_key_path = crate::paths::key_file(&warm_base);
         let _ = std::fs::remove_file(&warm_key_path);
-        let warm_sid_path = format!("{}\\.psmux\\{}.sid", home, warm_base);
+        let warm_sid_path = crate::paths::sid_file(&warm_base);
         let _ = std::fs::remove_file(&warm_sid_path);
     }
     warm_debug("SPAWNING new warm server");
@@ -526,13 +525,9 @@ fn drain_plugin_req(
 /// Best-effort: any error writing the log is swallowed (we are already
 /// reporting the original failure up the call chain).
 pub(crate) fn write_startup_error_log(err: &dyn std::fmt::Display) {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_default();
-    if home.is_empty() {
+    let Some(dir) = crate::paths::psmux_dir_opt() else {
         return;
-    }
-    let dir = format!("{}\\.psmux", home);
+    };
     let _ = std::fs::create_dir_all(&dir);
     let path = format!("{}\\server-startup.log", dir);
 
@@ -603,13 +598,7 @@ pub(crate) fn write_startup_error_log(err: &dyn std::fmt::Display) {
 
 /// Absolute path to `~/.psmux/server-startup.log`, or None if no home dir.
 pub(crate) fn startup_error_log_path() -> Option<String> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_default();
-    if home.is_empty() {
-        return None;
-    }
-    Some(format!("{}\\.psmux\\server-startup.log", home))
+    Some(format!("{}\\server-startup.log", crate::paths::psmux_dir_opt()?))
 }
 
 /// Read the real failure reason out of a *fresh* `server-startup.log`.
@@ -669,13 +658,7 @@ fn read_fresh_startup_error_at(path: &str, since_epoch: u64) -> Option<(String, 
 
 /// Absolute path to `~/.psmux/config-warnings.log`, or None if no home dir.
 pub(crate) fn config_warnings_log_path() -> Option<String> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_default();
-    if home.is_empty() {
-        return None;
-    }
-    Some(format!("{}\\.psmux\\config-warnings.log", home))
+    Some(format!("{}\\config-warnings.log", crate::paths::psmux_dir_opt()?))
 }
 
 /// Persist non-fatal config parse warnings so the attaching client can echo
@@ -728,8 +711,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let panic_session_name = session_name.clone();
     let panic_socket_name = socket_name.clone();
     std::panic::set_hook(Box::new(move |info| {
-        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
-        let path = format!("{}\\.psmux\\crash.log", home);
+        let path = crate::paths::psmux_dir_file("crash.log");
         let bt = std::backtrace::Backtrace::force_capture();
         let _ = std::fs::write(&path, format!("{info}\n\nBacktrace:\n{bt}"));
         // Remove port/key files to prevent stale entries after a panic
@@ -738,10 +720,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         } else {
             panic_session_name.clone()
         };
-        let _ = std::fs::remove_file(format!("{}\\.psmux\\{}.port", home, base));
-        let _ = std::fs::remove_file(format!("{}\\.psmux\\{}.key", home, base));
-        let _ = std::fs::remove_file(format!("{}\\.psmux\\{}.sid", home, base));
-        let _ = std::fs::remove_file(format!("{}\\.psmux\\{}.pid", home, base));
+        let _ = std::fs::remove_file(crate::paths::port_file(&base));
+        let _ = std::fs::remove_file(crate::paths::key_file(&base));
+        let _ = std::fs::remove_file(crate::paths::sid_file(&base));
+        let _ = std::fs::remove_file(crate::paths::pid_file(&base));
     }));
     // Install console control handler to prevent termination on client detach
     install_console_ctrl_handler();
@@ -791,8 +773,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // config or creating windows.  run-shell scripts (e.g. PPM) need the
     // port file to discover the server, and the client polls for it to know
     // the server is ready.
-    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-    let dir = format!("{}\\.psmux", home);
+    let dir = crate::paths::psmux_dir();
     let _ = std::fs::create_dir_all(&dir);
 
     // Generate a random session key for security
@@ -824,7 +805,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
     }
 
-    ensure_session_registry_files(&home, &app);
+    ensure_session_registry_files(&app);
 
     // TEST-ONLY fault injection — compiled out of release builds entirely.
     // Simulates the server dying AFTER writing its .port file but WITHOUT the
@@ -838,8 +819,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
     }
 
-    let regpath = format!("{}\\{}.port", dir, app.port_file_base());
-    let keypath = format!("{}\\{}.key", dir, app.port_file_base());
+    let regpath = crate::paths::port_file(&app.port_file_base());
+    let keypath = crate::paths::key_file(&app.port_file_base());
 
     // Expose the server identity via env var so that child processes spawned
     // by run-shell (from hooks, keybindings, etc.) can find this server when
@@ -1129,7 +1110,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
         if last_registry_check.elapsed() >= Duration::from_secs(5) {
             last_registry_check = Instant::now();
-            ensure_session_registry_files(&home, &app);
+            ensure_session_registry_files(&app);
         }
 
         // Adaptive timeout: ramps from 1ms (active typing/echo) through
@@ -1814,9 +1795,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         hook_event = Some("client-detached");
                         if app.attached_clients == 0 && app.destroy_unattached {
-                            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                            let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
-                            let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                            let regpath = crate::paths::port_file(&app.port_file_base());
+                            let keypath = crate::paths::key_file(&app.port_file_base());
                             let _ = std::fs::remove_file(&regpath);
                             let _ = std::fs::remove_file(&keypath);
                             crate::session::remove_session_id_file(&app.port_file_base());
@@ -2925,9 +2905,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(cmds) = app.hooks.get("session-closed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // Remove port/key/sid files FIRST so clients see the session
                     // as gone immediately, then kill processes.
-                    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                    let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
-                    let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                    let regpath = crate::paths::port_file(&app.port_file_base());
+                    let keypath = crate::paths::key_file(&app.port_file_base());
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
                     crate::session::remove_session_id_file(&app.port_file_base());
@@ -2948,17 +2927,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::RenameSession(name) => {
                     if let Some(cmds) = app.hooks.get("before-rename-session") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
-                    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                    let old_path = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
-                    let old_keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                    let old_path = crate::paths::port_file(&app.port_file_base());
+                    let old_keypath = crate::paths::key_file(&app.port_file_base());
                     // Compute new port file base with socket_name prefix
                     let new_base = if let Some(ref sn) = app.socket_name {
                         format!("{}__{}" , sn, name)
                     } else {
                         name.clone()
                     };
-                    let new_path = format!("{}\\.psmux\\{}.port", home, new_base);
-                    let new_keypath = format!("{}\\.psmux\\{}.key", home, new_base);
+                    let new_path = crate::paths::port_file(&new_base);
+                    let new_keypath = crate::paths::key_file(&new_base);
                     if let Some(port) = app.control_port {
                         let _ = std::fs::remove_file(&old_path);
                         let _ = std::fs::write(&new_path, port.to_string());
@@ -2999,16 +2977,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     warm_debug(&format!("CLAIM ACCEPT: __warm__ (port={:?}) -> '{}'", app.control_port, name));
                     // Same as RenameSession but with a synchronous response
                     // so the CLI knows the rename completed before attaching.
-                    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                    let old_path = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
-                    let old_keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                    let old_path = crate::paths::port_file(&app.port_file_base());
+                    let old_keypath = crate::paths::key_file(&app.port_file_base());
                     let new_base = if let Some(ref sn) = app.socket_name {
                         format!("{}__{}" , sn, name)
                     } else {
                         name.clone()
                     };
-                    let new_path = format!("{}\\.psmux\\{}.port", home, new_base);
-                    let new_keypath = format!("{}\\.psmux\\{}.key", home, new_base);
+                    let new_path = crate::paths::port_file(&new_base);
+                    let new_keypath = crate::paths::key_file(&new_base);
                     if let Some(port) = app.control_port {
                         let _ = std::fs::remove_file(&old_path);
                         let _ = std::fs::write(&new_path, port.to_string());
@@ -4138,9 +4115,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     });
                     hook_event = Some("client-detached");
                     if app.attached_clients == 0 && app.destroy_unattached {
-                        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                        let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
-                        let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                        let regpath = crate::paths::port_file(&app.port_file_base());
+                        let keypath = crate::paths::key_file(&app.port_file_base());
                         let _ = std::fs::remove_file(&regpath);
                         let _ = std::fs::remove_file(&keypath);
                         crate::session::remove_session_id_file(&app.port_file_base());
@@ -4225,9 +4201,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         hook_event = Some("client-detached");
                     }
                     if app.attached_clients == 0 && app.destroy_unattached {
-                        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                        let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
-                        let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                        let regpath = crate::paths::port_file(&app.port_file_base());
+                        let keypath = crate::paths::key_file(&app.port_file_base());
                         let _ = std::fs::remove_file(&regpath);
                         let _ = std::fs::remove_file(&keypath);
                         crate::session::remove_session_id_file(&app.port_file_base());
@@ -4276,9 +4251,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         hook_event = Some("client-detached");
                     }
                     if app.attached_clients == 0 && app.destroy_unattached {
-                        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                        let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
-                        let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                        let regpath = crate::paths::port_file(&app.port_file_base());
+                        let keypath = crate::paths::key_file(&app.port_file_base());
                         let _ = std::fs::remove_file(&regpath);
                         let _ = std::fs::remove_file(&keypath);
                         crate::session::remove_session_id_file(&app.port_file_base());
@@ -4327,8 +4301,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         'l' => {
                             // Last session (read from last_session file)
-                            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                            let last_path = format!("{}\\.psmux\\last_session", home);
+                            let last_path = crate::paths::psmux_dir_file("last_session");
                             std::fs::read_to_string(&last_path).ok()
                                 .map(|s| s.trim().to_string())
                                 .filter(|s| !s.is_empty() && s != &current && all_sessions.contains(s))
@@ -4492,9 +4465,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     // Remove port/key files FIRST so clients see the session
                     // as gone immediately, then kill processes.
-                    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                    let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
-                    let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                    let regpath = crate::paths::port_file(&app.port_file_base());
+                    let keypath = crate::paths::key_file(&app.port_file_base());
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
                     crate::types::send_directive_to_all_clients("DETACH");
@@ -4775,8 +4747,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.windows.len(),
                         (chrono::Local::now() - app.created_at).num_seconds(),
                         {
-                            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                            format!("{}\\.psmux\\{}.port", home, app.port_file_base())
+                            crate::paths::port_file(&app.port_file_base())
                         }
                     );
                     let _ = resp.send(info);
@@ -5782,9 +5753,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // the DCS stream before we tear down the process.
                     std::thread::sleep(std::time::Duration::from_millis(80));
                 }
-                let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-                let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
-                let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
+                let regpath = crate::paths::port_file(&app.port_file_base());
+                let keypath = crate::paths::key_file(&app.port_file_base());
                 let _ = std::fs::remove_file(&regpath);
                 let _ = std::fs::remove_file(&keypath);
                 crate::types::send_directive_to_all_clients("DETACH");

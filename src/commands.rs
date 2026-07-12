@@ -2175,8 +2175,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             };
 
             // Check if session already exists
-            let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
-            let port_path = format!("{}\\.psmux\\{}.port", home, port_file_base);
+            let port_path = crate::paths::port_file(&port_file_base);
             if std::path::Path::new(&port_path).exists() {
                 if let Ok(port_str) = std::fs::read_to_string(&port_path) {
                     if let Ok(port) = port_str.trim().parse::<u16>() {
@@ -2203,7 +2202,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 } else {
                     "__warm__".to_string()
                 };
-                let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
+                let warm_port_path = crate::paths::port_file(&warm_base);
                 if std::path::Path::new(&warm_port_path).exists() {
                     if let Ok(warm_port_str) = std::fs::read_to_string(&warm_port_path) {
                         if let Ok(warm_port) = warm_port_str.trim().parse::<u16>() {
