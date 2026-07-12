@@ -62,6 +62,10 @@ path = "tests-rs/test_issue299_osc_command_state.rs"
 name = "test_issue299_pwsh_snippet_integration"
 path = "tests-rs/test_issue299_pwsh_snippet_integration.rs"
 
+[[test]]
+name = "test_pr469_osc_command_safety"
+path = "tests-rs/test_pr469_osc_command_safety.rs"
+
 # Windows only
 [target.'cfg(not(windows))'.dependencies]
 [target.'cfg(windows)'.dependencies]
