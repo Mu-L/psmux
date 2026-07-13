@@ -2632,8 +2632,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             prefix_armed = true; prefix_armed_at = Instant::now(); prefix_repeating = false; cmd_batch.push("prefix-begin\n".into());
                         }
                         // Check root-table bindings (bind-key -n / bind-key -T root)
-                        // These fire without prefix, before keys are forwarded to PTY
-                        else if !command_input && !renaming && !pane_renaming && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
+                        // These fire without prefix, before keys are forwarded to PTY.
+                        // Skip them entirely when the prefix is armed so the prefix
+                        // table takes exclusive priority, matching tmux: once the prefix
+                        // is pressed a key bound in both tables must fire its prefix
+                        // binding, not its root binding (issue #472).
+                        else if !prefix_armed && !command_input && !renaming && !pane_renaming && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             synced_bindings.iter().any(|b| {
                                 b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
