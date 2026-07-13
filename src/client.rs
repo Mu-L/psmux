@@ -2624,13 +2624,20 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             rsel_end = None;
                             selection_changed = true;
                         }
-                        else if is_prefix {
+                        else if is_prefix && !prefix_armed {
                             // Suppress IME while in prefix mode so command keys
                             // are not intercepted by the input method (issue #286).
                             #[cfg(windows)]
                             { ime_was_open = crate::platform::ime_disable(); }
                             prefix_armed = true; prefix_armed_at = Instant::now(); prefix_repeating = false; cmd_batch.push("prefix-begin\n".into());
                         }
+                        // NOTE: when the prefix key is pressed while the prefix is
+                        // ALREADY armed we deliberately do NOT re-arm here. Falling
+                        // through lets the prefix-table dispatch below handle it, so
+                        // `bind -T prefix C-b send-prefix` fires and a literal prefix
+                        // byte is forwarded to the active pane. This is what lets a
+                        // nested multiplexer (e.g. tmux over SSH) receive its own
+                        // prefix via prefix+prefix (discussion #310).
                         // Check root-table bindings (bind-key -n / bind-key -T root)
                         // These fire without prefix, before keys are forwarded to PTY.
                         // Skip them entirely when the prefix is armed so the prefix
