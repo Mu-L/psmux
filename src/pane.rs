@@ -35,13 +35,57 @@ pub fn conpty_preemptive_dsr_response(_writer: &mut dyn std::io::Write) {
 /// Resolved once on first use, reused for all subsequent pane spawns.
 static CACHED_SHELL_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
+/// Swap an MSIX package-interior executable path for its app execution alias.
+///
+/// Store/MSIX packages (e.g. PowerShell installed from the Microsoft Store)
+/// put their package-interior directory (`C:\Program Files\WindowsApps\<pkg>`)
+/// on PATH, so `which` resolves `pwsh` to the exe INSIDE the package.
+/// Launching that exe directly is unsupported: the MSIX activation that
+/// CreateProcessW performs for a package-identity exe depends on the calling
+/// process's environment, and under ConPTY with a redirected `USERPROFILE`
+/// (test isolation, roaming setups) it fails with ACCESS_DENIED, so the pane
+/// child never spawns.  The supported launch surface is the app execution
+/// alias under `%LOCALAPPDATA%\Microsoft\WindowsApps`, which the loader
+/// resolves in-kernel regardless of environment.  `which` cannot return the
+/// alias itself: it is a zero-length APPEXECLINK reparse point that normal
+/// metadata traversal cannot follow, so `which` skips it as invalid — hence
+/// this post-resolution swap (probed with `symlink_metadata`, which does not
+/// follow the reparse point).
+#[cfg(windows)]
+pub fn prefer_app_execution_alias(resolved: String) -> String {
+    let lower = resolved.to_ascii_lowercase();
+    // Package interior lives under `...\WindowsApps\<pkg>\...`; the alias dir
+    // is `...\Microsoft\WindowsApps\` — only rewrite the former.
+    if !lower.contains("\\windowsapps\\") || lower.contains("\\microsoft\\windowsapps\\") {
+        return resolved;
+    }
+    let Some(file_name) = std::path::Path::new(&resolved).file_name() else {
+        return resolved;
+    };
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let alias = std::path::Path::new(&local)
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join(file_name);
+        if std::fs::symlink_metadata(&alias).is_ok() {
+            return alias.to_string_lossy().into_owned();
+        }
+    }
+    resolved
+}
+
+#[cfg(not(windows))]
+pub fn prefer_app_execution_alias(resolved: String) -> String {
+    resolved
+}
+
 /// Get the cached shell path, resolving via `which` only on first call.
 pub fn cached_shell() -> Option<&'static str> {
     CACHED_SHELL_PATH.get_or_init(|| {
         which::which("pwsh").ok()
             .or_else(|| which::which("powershell").ok())
             .or_else(|| which::which("cmd").ok())
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|p| prefer_app_execution_alias(p.to_string_lossy().into_owned()))
     }).as_deref()
 }
 
@@ -1223,7 +1267,7 @@ fn cached_which(program: &str) -> String {
         return cached.clone();
     }
     let resolved = which::which(program).ok()
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| prefer_app_execution_alias(p.to_string_lossy().into_owned()))
         .unwrap_or_else(|| program.to_string());
     map.insert(program.to_string(), resolved.clone());
     resolved
@@ -1814,6 +1858,10 @@ mod test_cpr_responder;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue473_color_queries.rs"]
 mod test_issue473_color_queries;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_windowsapps_alias_shell.rs"]
+mod test_windowsapps_alias_shell;
 
 #[cfg(test)]
 mod test_parser_audible_bell {
