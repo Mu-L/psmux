@@ -276,6 +276,7 @@ pub fn handle_pane_forward_inject(
         proxy_pane.cursor_shape.clone(),
         proxy_pane.bell_pending.clone(),
         proxy_pane.cpr_pending.clone(),
+        proxy_pane.color_query_pending.clone(),
         proxy_pane.output_ring.clone(),
         pane_id,
     );

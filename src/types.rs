@@ -146,6 +146,13 @@ pub struct Pane {
     /// the case where pwsh re-issues the CPR after lock/unlock — the single
     /// preemptive write at spawn time is no longer in the pipe at that point.
     pub cpr_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Issue #473: bitmask of terminal color queries detected by the PTY
+    /// reader thread in the child's output.  Bits 0-15 = OSC 4;<i>;? palette
+    /// queries, bit 16 = OSC 10;? (foreground), bit 17 = OSC 11;? (background),
+    /// bit 18 = CSI ?996n (light/dark scheme).  Consumed by the server loop,
+    /// which injects the corresponding color responses so pane applications
+    /// (GitHub Copilot CLI, vim, etc.) can detect the terminal palette.
+    pub color_query_pending: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Per-pane copy mode state (tmux-style pane-local copy mode).
     /// Some(_) when this pane is in copy mode, None otherwise.
     pub copy_state: Option<CopyModeState>,
@@ -184,6 +191,8 @@ pub struct WarmPane {
     pub cursor_shape: std::sync::Arc<std::sync::atomic::AtomicU8>,
     pub bell_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub cpr_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Issue #473: color query bitmask (see `Pane::color_query_pending`).
+    pub color_query_pending: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub child_pid: Option<u32>,
     pub pane_id: usize,
     pub rows: u16,
@@ -434,6 +443,10 @@ pub struct AppState {
     /// which keeps explicit 256-indexed low colors byte-accurate at the cost of
     /// losing bold-is-bright on basic colors.
     pub bold_is_bright: bool,
+    /// Issue #473: the host terminal's colors as reported by the most recently
+    /// attached client (or the PSMUX_HOST_COLORS override).  None until a
+    /// client reports; the responder then falls back to the Campbell palette.
+    pub host_colors: Option<HostColors>,
     /// scroll-enter-copy-mode: when off, mouse scroll at a shell prompt does NOT
     /// auto-enter copy mode.  Default: on (tmux parity).
     pub scroll_enter_copy_mode: bool,
@@ -984,6 +997,9 @@ impl AppState {
             last_window_area: Rect { x: 0, y: 0, width: 120, height: 30 },
             mouse_enabled: true,
             bold_is_bright: true,
+            host_colors: std::env::var("PSMUX_HOST_COLORS").ok()
+                .map(|s| HostColors::from_spec(&s))
+                .filter(|hc| hc.has_any() || hc.dark.is_some()),
             scroll_enter_copy_mode: true,
             pwsh_mouse_selection: false,
             mouse_selection: true,
@@ -1278,6 +1294,10 @@ pub enum CtrlReq {
     CopyYank,
     CopyRectToggle,
     ClientSize(u64, u16, u16),
+    /// Issue #473: a client reporting its host terminal's colors (spec string
+    /// in `HostColors::to_spec` form), gathered by querying the host terminal
+    /// at attach time.
+    HostColors(String),
     FocusPaneCmd(usize),
     FocusWindowCmd(usize),
     MouseDown(u64,u16,u16),
@@ -1594,6 +1614,149 @@ pub static PTY_DATA_READY: std::sync::atomic::AtomicBool = std::sync::atomic::At
 /// Set by the parser thread when any pane's `cpr_pending` flag is raised.
 /// Lets the server loop skip the tree walk when no CPR response is needed.
 pub static CPR_DATA_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Issue #473: set by the parser thread when any pane's `color_query_pending`
+/// bitmask is raised.  Lets the server loop skip the tree walk when no color
+/// query response is needed.
+pub static COLOR_QUERY_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Issue #473: the host terminal color spec captured by the client at startup
+/// (before the input pump starts), consumed by `establish_connection` which
+/// reports it to the server on every (re)connect.  `None` inside means the
+/// query ran but the host reported nothing usable.
+pub static HOST_COLORS_SPEC: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Bit assignments for `Pane::color_query_pending` (issue #473).
+/// Bits 0-15 are the OSC 4 palette indexes.
+pub const COLOR_QUERY_FG: u32 = 1 << 16;   // OSC 10;?
+pub const COLOR_QUERY_BG: u32 = 1 << 17;   // OSC 11;?
+pub const COLOR_QUERY_SCHEME: u32 = 1 << 18; // CSI ?996n
+
+/// Issue #473: the host terminal's colors, as reported by an attached client
+/// (which queries its host terminal with OSC 10/11/4 at attach time), or the
+/// `PSMUX_HOST_COLORS` environment override.  Used to answer terminal color
+/// queries issued by pane applications.  All values are RGB triples.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HostColors {
+    pub fg: Option<(u8, u8, u8)>,
+    pub bg: Option<(u8, u8, u8)>,
+    pub palette: [Option<(u8, u8, u8)>; 16],
+    /// Some(true) = dark scheme, Some(false) = light. None = derive from bg.
+    pub dark: Option<bool>,
+}
+
+impl HostColors {
+    pub fn empty() -> Self {
+        Self { fg: None, bg: None, palette: [None; 16], dark: None }
+    }
+
+    /// True when enough colors are known to be worth reporting.
+    pub fn has_any(&self) -> bool {
+        self.fg.is_some() || self.bg.is_some() || self.palette.iter().any(|p| p.is_some())
+    }
+
+    /// Windows Terminal "Campbell" defaults, used when no host colors are known.
+    /// A valid (if generic) palette beats no reply: applications at least get a
+    /// well-formed response instead of timing out.
+    pub fn campbell() -> Self {
+        Self {
+            fg: Some((0xCC, 0xCC, 0xCC)),
+            bg: Some((0x0C, 0x0C, 0x0C)),
+            palette: [
+                Some((0x0C, 0x0C, 0x0C)), Some((0xC5, 0x0F, 0x1F)),
+                Some((0x13, 0xA1, 0x0E)), Some((0xC1, 0x9C, 0x00)),
+                Some((0x00, 0x37, 0xDA)), Some((0x88, 0x17, 0x98)),
+                Some((0x3A, 0x96, 0xDD)), Some((0xCC, 0xCC, 0xCC)),
+                Some((0x76, 0x76, 0x76)), Some((0xE7, 0x48, 0x56)),
+                Some((0x16, 0xC6, 0x0C)), Some((0xF9, 0xF1, 0xA5)),
+                Some((0x3B, 0x78, 0xFF)), Some((0xB4, 0x00, 0x9E)),
+                Some((0x61, 0xD6, 0xD6)), Some((0xF2, 0xF2, 0xF2)),
+            ],
+            dark: Some(true),
+        }
+    }
+
+    /// True when the scheme is dark.  Uses the explicit `dark` flag when the
+    /// host reported one (CSI ?997 response), else relative luminance of bg.
+    pub fn is_dark(&self) -> bool {
+        if let Some(d) = self.dark { return d; }
+        match self.bg {
+            Some((r, g, b)) => {
+                // ITU-R BT.709 relative luminance, 0-255 scale.
+                let lum = 0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64;
+                lum < 128.0
+            }
+            None => true,
+        }
+    }
+
+    /// Serialize to the compact single-token wire form used by the client's
+    /// `host-colors` control line: `fg=RRGGBB,bg=RRGGBB,0=RRGGBB,...,dark=1`.
+    pub fn to_spec(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some((r, g, b)) = self.fg { parts.push(format!("fg={:02x}{:02x}{:02x}", r, g, b)); }
+        if let Some((r, g, b)) = self.bg { parts.push(format!("bg={:02x}{:02x}{:02x}", r, g, b)); }
+        for (i, p) in self.palette.iter().enumerate() {
+            if let Some((r, g, b)) = p { parts.push(format!("{}={:02x}{:02x}{:02x}", i, r, g, b)); }
+        }
+        if let Some(d) = self.dark { parts.push(format!("dark={}", if d { 1 } else { 0 })); }
+        parts.join(",")
+    }
+
+    /// Parse the wire form produced by `to_spec`.  Unknown keys are ignored.
+    pub fn from_spec(spec: &str) -> Self {
+        let mut hc = Self::empty();
+        for part in spec.split(',') {
+            let Some((key, val)) = part.split_once('=') else { continue };
+            if key == "dark" {
+                hc.dark = match val { "1" => Some(true), "0" => Some(false), _ => None };
+                continue;
+            }
+            let Some(rgb) = parse_hex_rgb(val) else { continue };
+            match key {
+                "fg" => hc.fg = Some(rgb),
+                "bg" => hc.bg = Some(rgb),
+                _ => {
+                    if let Ok(i) = key.parse::<usize>() {
+                        if i < 16 { hc.palette[i] = Some(rgb); }
+                    }
+                }
+            }
+        }
+        hc
+    }
+}
+
+/// Parse `RRGGBB` (6 hex digits, no `#`).
+pub fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
+    if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+/// Parse an X11-style color reply payload: `rgb:RR/GG/BB`, `rgb:RRRR/GGGG/BBBB`
+/// (1-4 hex digits per channel, scaled to 8-bit), or `#RRGGBB`.
+pub fn parse_x11_color(s: &str) -> Option<(u8, u8, u8)> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        return parse_hex_rgb(hex);
+    }
+    let body = s.strip_prefix("rgb:")?;
+    let mut chans = body.split('/');
+    let mut out = [0u8; 3];
+    for slot in out.iter_mut() {
+        let c = chans.next()?;
+        if c.is_empty() || c.len() > 4 || !c.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+        let v = u16::from_str_radix(c, 16).ok()?;
+        // Scale to 8-bit based on the number of digits given.
+        let max = (16u32.pow(c.len() as u32) - 1) as u32;
+        *slot = ((v as u32 * 255 + max / 2) / max) as u8;
+    }
+    if chans.next().is_some() { return None; }
+    Some((out[0], out[1], out[2]))
+}
 
 /// Issue #440: `pipe-pane` output routing.
 ///

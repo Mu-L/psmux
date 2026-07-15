@@ -3951,6 +3951,12 @@ fn run_main() -> io::Result<()> {
     enable_virtual_terminal_processing();
     enable_raw_mode()?;
 
+    // Issue #473: ask the host terminal for its colors (OSC 10/11/4, ?996n)
+    // BEFORE the input pump starts, so the replies cannot be misread as
+    // keystrokes.  The client reports the result to the server on attach,
+    // letting the server answer the same queries from pane applications.
+    let _ = crate::types::HOST_COLORS_SPEC.set(crate::platform::query_host_terminal_colors());
+
     // Detect terminal type for input handling.
     // Use VT input parsing for SSH sessions and terminals that send VT mouse
     // sequences through ConPTY (e.g. JetBrains JediTerm).

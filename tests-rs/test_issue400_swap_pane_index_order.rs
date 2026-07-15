@@ -58,6 +58,7 @@ fn make_pane(id: usize, rows: u16, cols: u16) -> crate::types::Pane {
         cursor_shape: Arc::new(AtomicU8::new(0)),
         bell_pending: Arc::new(AtomicBool::new(false)),
         cpr_pending: Arc::new(AtomicBool::new(false)),
+        color_query_pending: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         copy_state: None,
         pane_style: None,
         squelch_until: None,

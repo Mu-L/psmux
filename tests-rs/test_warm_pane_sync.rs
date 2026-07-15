@@ -126,6 +126,7 @@ fn resize_to_same_size_is_noop() {
         cursor_shape: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
         bell_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cpr_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        color_query_pending: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         child_pid: None,
         pane_id: 0,
         rows: 40,

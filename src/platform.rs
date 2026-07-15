@@ -387,6 +387,200 @@ pub fn enable_virtual_terminal_processing() {
     // No-op on non-Windows platforms
 }
 
+/// Issue #473: query the HOST terminal for its colors (OSC 10/11 fg/bg, the
+/// OSC 4 16-color palette, and the CSI ?996n light/dark scheme) at client
+/// attach time, so the server can answer the same queries when pane
+/// applications (GitHub Copilot CLI, vim, ...) issue them.
+///
+/// Writes the queries plus a DA1 (`CSI c`) sentinel to stdout and drains
+/// console input until the DA1 reply arrives (every terminal answers DA1) or
+/// a 500ms deadline passes.  Runs BEFORE the client's input pump starts, so
+/// the replies cannot be misparsed as keystrokes.  Returns the colors in
+/// `HostColors::to_spec` wire form, or None when stdin is not a console or
+/// the host reported nothing useful.
+///
+/// The `PSMUX_HOST_COLORS` environment variable short-circuits the query and
+/// is also the escape hatch for hosts that misreport.
+pub fn query_host_terminal_colors() -> Option<String> {
+    if let Ok(v) = std::env::var("PSMUX_HOST_COLORS") {
+        let hc = crate::types::HostColors::from_spec(&v);
+        if hc.has_any() || hc.dark.is_some() {
+            return Some(hc.to_spec());
+        }
+    }
+    query_host_terminal_colors_impl()
+}
+
+#[cfg(not(windows))]
+fn query_host_terminal_colors_impl() -> Option<String> { None }
+
+#[cfg(windows)]
+fn query_host_terminal_colors_impl() -> Option<String> {
+    use std::io::Write as _;
+
+    const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+    const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+    const ENABLE_LINE_INPUT: u32 = 0x0002;
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+    const KEY_EVENT: u16 = 0x0001;
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct KeyEventRecord {
+        key_down: i32,
+        repeat_count: u16,
+        virtual_key_code: u16,
+        virtual_scan_code: u16,
+        u_char: u16,
+        control_key_state: u32,
+    }
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct InputRecord {
+        event_type: u16,
+        _padding: u16,
+        event: KeyEventRecord,
+        // KEY_EVENT_RECORD is the largest union member; no extra space needed.
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+        fn GetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, lpMode: *mut u32) -> i32;
+        fn SetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, dwMode: u32) -> i32;
+        fn GetNumberOfConsoleInputEvents(hConsoleInput: *mut std::ffi::c_void, lpcNumberOfEvents: *mut u32) -> i32;
+        fn ReadConsoleInputW(hConsoleInput: *mut std::ffi::c_void, lpBuffer: *mut InputRecord, nLength: u32, lpNumberOfEventsRead: *mut u32) -> i32;
+    }
+
+    unsafe {
+        let h_in = GetStdHandle(STD_INPUT_HANDLE);
+        if h_in.is_null() || h_in == (-1isize) as *mut std::ffi::c_void {
+            return None;
+        }
+        let mut orig_mode: u32 = 0;
+        if GetConsoleMode(h_in, &mut orig_mode) == 0 {
+            return None; // stdin is not a console (e.g. SSH pipe)
+        }
+        // Raw + VTI: the host's reply bytes must arrive verbatim as KEY_EVENT
+        // u_char records; without VTI conhost tries to translate the OSC
+        // sequences into key encodings and mangles them.
+        let raw_mode = (orig_mode & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
+            | ENABLE_VIRTUAL_TERMINAL_INPUT;
+        SetConsoleMode(h_in, raw_mode);
+
+        let mut queries = String::from("\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
+        for i in 0..16 {
+            queries.push_str(&format!("\x1b]4;{};?\x1b\\", i));
+        }
+        queries.push_str("\x1b[?996n");
+        queries.push_str("\x1b[c"); // DA1 sentinel: always answered, marks the end
+        {
+            let mut out = std::io::stdout();
+            if out.write_all(queries.as_bytes()).is_err() || out.flush().is_err() {
+                SetConsoleMode(h_in, orig_mode);
+                return None;
+            }
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let mut buf: Vec<u8> = Vec::with_capacity(1024);
+        let mut records: [InputRecord; 64] = [InputRecord {
+            event_type: 0, _padding: 0,
+            event: KeyEventRecord { key_down: 0, repeat_count: 0, virtual_key_code: 0, virtual_scan_code: 0, u_char: 0, control_key_state: 0 },
+        }; 64];
+        'read: while std::time::Instant::now() < deadline {
+            let mut avail: u32 = 0;
+            if GetNumberOfConsoleInputEvents(h_in, &mut avail) == 0 { break; }
+            if avail == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            let mut read: u32 = 0;
+            if ReadConsoleInputW(h_in, records.as_mut_ptr(), 64, &mut read) == 0 { break; }
+            for rec in records.iter().take(read as usize) {
+                if rec.event_type != KEY_EVENT || rec.event.key_down == 0 { continue; }
+                let wch = rec.event.u_char;
+                if wch == 0 { continue; }
+                if wch < 0x80 {
+                    buf.push(wch as u8);
+                } else if let Some(c) = char::from_u32(wch as u32) {
+                    let mut utf8 = [0u8; 4];
+                    buf.extend_from_slice(c.encode_utf8(&mut utf8).as_bytes());
+                }
+            }
+            // Stop as soon as the DA1 reply (CSI ? ... c) is present.
+            if find_csi_terminated(&buf, b'c') { break 'read; }
+        }
+        SetConsoleMode(h_in, orig_mode);
+
+        let hc = parse_host_color_replies(&buf);
+        if hc.has_any() || hc.dark.is_some() {
+            Some(hc.to_spec())
+        } else {
+            None
+        }
+    }
+}
+
+/// True when `buf` contains a complete `CSI ? ... <final>` sequence with the
+/// given final byte (used to spot the DA1 `\x1b[?...c` sentinel reply).
+#[cfg(windows)]
+fn find_csi_terminated(buf: &[u8], final_byte: u8) -> bool {
+    let mut i = 0;
+    while i + 2 < buf.len() {
+        if buf[i] == 0x1b && buf[i + 1] == b'[' && buf[i + 2] == b'?' {
+            let mut j = i + 3;
+            while j < buf.len() {
+                let b = buf[j];
+                if b.is_ascii_alphabetic() {
+                    if b == final_byte { return true; }
+                    break;
+                }
+                j += 1;
+            }
+            i = j;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Parse the host terminal's replies to the color queries issued by
+/// `query_host_terminal_colors`: OSC 10/11/4 color reports (BEL- or
+/// ST-terminated) and the CSI ?997;1n / ?997;2n dark/light report.
+pub fn parse_host_color_replies(buf: &[u8]) -> crate::types::HostColors {
+    let mut hc = crate::types::HostColors::empty();
+    let text = String::from_utf8_lossy(buf);
+    // OSC replies: \x1b]<num>;[<idx>;]<color> terminated by BEL or ESC \
+    let mut rest: &str = &text;
+    while let Some(start) = rest.find("\x1b]") {
+        let body_start = start + 2;
+        let body = &rest[body_start..];
+        let end = body.find('\x07')
+            .into_iter()
+            .chain(body.find("\x1b\\"))
+            .min();
+        let Some(end) = end else { break };
+        let seq = &body[..end];
+        if let Some(payload) = seq.strip_prefix("10;") {
+            if let Some(rgb) = crate::types::parse_x11_color(payload) { hc.fg = Some(rgb); }
+        } else if let Some(payload) = seq.strip_prefix("11;") {
+            if let Some(rgb) = crate::types::parse_x11_color(payload) { hc.bg = Some(rgb); }
+        } else if let Some(p) = seq.strip_prefix("4;") {
+            if let Some((idx, payload)) = p.split_once(';') {
+                if let (Ok(i), Some(rgb)) = (idx.parse::<usize>(), crate::types::parse_x11_color(payload)) {
+                    if i < 16 { hc.palette[i] = Some(rgb); }
+                }
+            }
+        }
+        rest = &body[end..];
+    }
+    if text.contains("\x1b[?997;1n") { hc.dark = Some(true); }
+    else if text.contains("\x1b[?997;2n") { hc.dark = Some(false); }
+    hc
+}
+
 /// Clear `ENABLE_VIRTUAL_TERMINAL_INPUT` (VTI, 0x0200) from the console stdin.
 ///
 /// crossterm 0.28's `enable_raw_mode()` sets VTI.  When psmux runs inside a
@@ -1228,6 +1422,19 @@ pub mod mouse_inject {
         }
     }
 
+    /// Issue #473: deliver a VT response string (e.g. OSC color-query replies)
+    /// into a child's console input buffer via WriteConsoleInputW.
+    ///
+    /// ConPTY consumes complete OSC sequences written to the pseudoconsole
+    /// input pipe before the child can read them, so `pane.writer` cannot
+    /// carry OSC 4/10/11 replies.  Injecting the bytes as KEY_EVENT records
+    /// bypasses ConPTY's VT input filter entirely — the same transport that
+    /// makes bracketed paste work (`send_bracketed_paste`), which this reuses
+    /// without the paste brackets.
+    pub fn send_vt_response(child_pid: u32, text: &str) -> bool {
+        send_bracketed_paste(child_pid, text, false)
+    }
+
     /// Send a CTRL_C_EVENT to all processes on the child's console.
     ///
     /// TUI applications (pstop, btop, etc.) often disable ENABLE_PROCESSED_INPUT
@@ -1819,6 +2026,7 @@ pub mod mouse_inject {
     pub fn send_ctrl_break_event(_pid: u32, _reattach: bool) -> bool { false }
     pub fn query_mouse_input_enabled(_pid: u32) -> Option<bool> { None }
     pub fn send_bracketed_paste(_pid: u32, _text: &str, _bracket: bool) -> bool { false }
+    pub fn send_vt_response(_pid: u32, _text: &str) -> bool { false }
     pub fn send_modified_key_event(_pid: u32, _ch: char, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
     pub fn send_alt_key_event(_pid: u32, _ch: char) -> bool { false }
     pub fn send_modified_enter_event(_pid: u32, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }

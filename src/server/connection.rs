@@ -1080,6 +1080,11 @@ match cmd {
     "client-size" => {
         if args.len() >= 2 { if let (Ok(w), Ok(h)) = (args[0].parse::<u16>(), args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::ClientSize(client_id, w, h)); } }
     }
+    "host-colors" => {
+        // Issue #473: client reports its host terminal's colors (queried at
+        // attach time) so the server can answer pane color queries.
+        if let Some(spec) = args.get(0) { let _ = tx.send(CtrlReq::HostColors(spec.to_string())); }
+    }
     "focus-pane" => {
         if let Some(pid) = args.get(0).and_then(|s| s.parse::<usize>().ok()) { let _ = tx.send(CtrlReq::FocusPaneCmd(pid)); }
     }

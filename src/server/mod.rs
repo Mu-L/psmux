@@ -1239,6 +1239,29 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
             }
+            // Issue #473: answer terminal color queries (OSC 4/10/11, CSI ?996n)
+            // detected in pane output, so pane applications can discover the
+            // terminal palette.  Colors come from the attached client's report
+            // of its host terminal, else the Campbell defaults.
+            if crate::types::COLOR_QUERY_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                let colors = app.host_colors.clone()
+                    .unwrap_or_else(crate::types::HostColors::campbell);
+                for win in &mut app.windows {
+                    helpers::drain_color_queries(&mut win.root, &colors);
+                    for fp in win.floating.iter_mut() {
+                        let bits = fp.pane.color_query_pending.swap(0, std::sync::atomic::Ordering::AcqRel);
+                        if bits != 0 {
+                            helpers::answer_color_queries(bits, &mut *fp.pane.writer, fp.pane.child_pid, &colors);
+                        }
+                    }
+                }
+                if let Mode::PopupMode { popup_pane: Some(ref mut pane), .. } = app.mode {
+                    let bits = pane.color_query_pending.swap(0, std::sync::atomic::Ordering::AcqRel);
+                    if bits != 0 {
+                        helpers::answer_color_queries(bits, &mut *pane.writer, pane.child_pid, &colors);
+                    }
+                }
+            }
         }
         // When a popup PTY or a floating pane is active, always push frames so
         // interactive content (fzf, shell prompts) updates in real-time.
@@ -2174,6 +2197,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let sync = crate::warm_pane_sync::for_resize(&app, eh, ew);
                     crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                     hook_event = Some("client-resized");
+                }
+                CtrlReq::HostColors(spec) => {
+                    // Issue #473: a client reported its host terminal's colors.
+                    // Keep the most recent report — the newest attached client
+                    // is what the user is actually looking at.
+                    let hc = crate::types::HostColors::from_spec(&spec);
+                    if hc.has_any() || hc.dark.is_some() {
+                        app.host_colors = Some(hc);
+                    }
                 }
                 CtrlReq::FocusPaneCmd(pid) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();

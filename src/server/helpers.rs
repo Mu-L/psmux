@@ -481,6 +481,87 @@ pub(crate) fn drain_cpr_pending(node: &mut crate::types::Node) {
     }
 }
 
+/// Issue #473: format an RGB triple as the xterm 16-bit-per-channel reply
+/// payload (`rgb:RRRR/GGGG/BBBB`), scaling 8-bit values by duplication.
+fn x11_rgb((r, g, b): (u8, u8, u8)) -> String {
+    format!("rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}")
+}
+
+/// Issue #473: answer terminal color queries detected in a pane's output.
+///
+/// `bits` is the pane's drained `color_query_pending` bitmask.  Delivery is
+/// split by sequence type because ConPTY treats them differently on the
+/// child-input path (verified on Win11 26200, WT 1.24):
+///   * CSI replies (`?997;Nn`) pass through a normal pipe write intact — the
+///     same path the ESC[6n CPR responder uses.
+///   * Complete OSC replies written to the pseudoconsole input pipe are
+///     consumed by ConPTY before the child sees them, so they are injected
+///     as console KEY_EVENT records via WriteConsoleInputW instead
+///     (`send_vt_response`), falling back to the pipe if injection fails
+///     (e.g. no child pid, or non-Windows where the pipe is not filtered).
+///
+/// ConPTY also consumes the OSC 10;?/11;? QUERIES on the output path, so they
+/// normally never reach psmux.  Applications that need the full picture
+/// (GitHub Copilot CLI) issue fg/bg/palette queries as one burst; when the
+/// palette burst is observed (index 0 queried), the fg/bg replies they are
+/// simultaneously waiting for are included as well.
+pub(crate) fn answer_color_queries(
+    bits: u32,
+    writer: &mut dyn std::io::Write,
+    child_pid: Option<u32>,
+    colors: &crate::types::HostColors,
+) {
+    if bits == 0 { return; }
+    // Light/dark scheme query: CSI ?996n → CSI ?997;1n (dark) / ?997;2n (light).
+    if bits & crate::types::COLOR_QUERY_SCHEME != 0 {
+        let n = if colors.is_dark() { 1 } else { 2 };
+        let _ = writer.write_all(format!("\x1b[?997;{}n", n).as_bytes());
+        let _ = writer.flush();
+    }
+    let mut osc = String::new();
+    let burst = bits & 1 != 0; // palette index 0 queried → full-burst app
+    if (bits & crate::types::COLOR_QUERY_FG != 0 || burst) && colors.fg.is_some() {
+        osc.push_str(&format!("\x1b]10;{}\x1b\\", x11_rgb(colors.fg.unwrap())));
+    }
+    if (bits & crate::types::COLOR_QUERY_BG != 0 || burst) && colors.bg.is_some() {
+        osc.push_str(&format!("\x1b]11;{}\x1b\\", x11_rgb(colors.bg.unwrap())));
+    }
+    for i in 0..16usize {
+        if bits & (1u32 << i) != 0 {
+            if let Some(rgb) = colors.palette[i] {
+                osc.push_str(&format!("\x1b]4;{};{}\x1b\\", i, x11_rgb(rgb)));
+            }
+        }
+    }
+    if osc.is_empty() { return; }
+    let mut delivered = false;
+    if let Some(pid) = child_pid {
+        delivered = crate::platform::mouse_inject::send_vt_response(pid, &osc);
+    }
+    if !delivered {
+        let _ = writer.write_all(osc.as_bytes());
+        let _ = writer.flush();
+    }
+}
+
+/// Issue #473: walk a pane tree and answer any pending terminal color queries.
+/// Mirrors `drain_cpr_pending`.
+pub(crate) fn drain_color_queries(node: &mut crate::types::Node, colors: &crate::types::HostColors) {
+    match node {
+        crate::types::Node::Leaf(p) => {
+            let bits = p.color_query_pending.swap(0, std::sync::atomic::Ordering::AcqRel);
+            if bits != 0 {
+                answer_color_queries(bits, &mut *p.writer, p.child_pid, colors);
+            }
+        }
+        crate::types::Node::Split { children, .. } => {
+            for c in children {
+                drain_color_queries(c, colors);
+            }
+        }
+    }
+}
+
 /// Complete list of supported tmux-compatible commands (for list-commands).
 pub(crate) const TMUX_COMMANDS: &[&str] = &[
     "attach-session (attach)",

@@ -162,7 +162,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
             }
             let epoch = std::time::Instant::now() - Duration::from_secs(2);
             let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
-            let mut pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
+            let mut pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
             // Honour `-c <dir>`: silently re-home the transplanted warm shell.
             if let Some(dir) = start_dir {
                 silent_rehome(&mut pane, dir);
@@ -227,13 +227,15 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     let bell_writer = bell_pending.clone();
     let cpr_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cpr_writer = cpr_pending.clone();
+    let color_query_pending = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let cq_writer = color_query_pending.clone();
     let reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
 
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone(), app.next_pane_id);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id);
 
     let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
@@ -242,7 +244,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let pane_id = app.next_pane_id;
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, cpr_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
     app.next_pane_id += 1;
     let win_name = command.map(|c| default_shell_name(Some(c), None)).unwrap_or_else(|| default_shell_name(None, configured_shell));
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
@@ -305,16 +307,18 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
     let bell_writer = bell_pending.clone();
     let cpr_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cpr_writer = cpr_pending.clone();
+    let color_query_pending = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let cq_writer = color_query_pending.clone();
     let reader = pair.master
         .try_clone_reader()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone(), pane_id);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id);
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
     let mut pty_writer = pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
-    Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, bell_pending, cpr_pending, child_pid, pane_id, rows, cols, output_ring })
+    Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, bell_pending, cpr_pending, color_query_pending, child_pid, pane_id, rows, cols, output_ring })
 }
 
 pub fn split_active(app: &mut AppState, kind: LayoutKind) -> io::Result<()> {
@@ -354,13 +358,15 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     let bell_writer = bell_pending.clone();
     let cpr_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cpr_writer = cpr_pending.clone();
+    let color_query_pending = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let cq_writer = color_query_pending.clone();
     let reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
 
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone(), app.next_pane_id);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id);
 
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
     let mut pty_writer = pair.master.take_writer()
@@ -368,7 +374,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let raw_pane_id = app.next_pane_id;
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, cpr_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
     app.next_pane_id += 1;
     let win_name = std::path::Path::new(&raw_args[0]).file_stem().and_then(|s| s.to_str()).unwrap_or(&raw_args[0]).to_string();
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![raw_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
@@ -477,7 +483,7 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
             }
             let epoch = std::time::Instant::now() - Duration::from_secs(2);
             let new_pane_id = wp.pane_id;
-            let mut new_pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
+            let mut new_pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
             // Honour `-c <dir>`: silently re-home the transplanted warm shell.
             if let Some(dir) = start_dir {
                 silent_rehome(&mut new_pane, dir);
@@ -530,15 +536,17 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     let bell_writer = bell_pending.clone();
     let cpr_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cpr_writer = cpr_pending.clone();
+    let color_query_pending = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let cq_writer = color_query_pending.clone();
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, output_ring.clone(), app.next_pane_id);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id);
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
     let mut pty_writer = pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let split_pane_id = app.next_pane_id;
-    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, cpr_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) });
+    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) });
     app.next_pane_id += 1;
     let win = &mut app.windows[app.active_idx];
     replace_leaf_with_split(&mut win.root, &win.active_path, kind, new_leaf);
@@ -1423,7 +1431,102 @@ impl CprScanner {
     }
 }
 
-// TODO: The 7 Arc parameters below should be grouped into a `ReaderSignals`
+/// Issue #473: scan a byte region for terminal color queries emitted by the
+/// pane's child and return the matching `color_query_pending` bitmask.
+/// Recognized queries (all observed passing through ConPTY's output pipe):
+///   OSC 4;<i>;?  → bit i (0-15)      palette entry query
+///   OSC 10;?     → COLOR_QUERY_FG    foreground query
+///   OSC 11;?     → COLOR_QUERY_BG    background query
+///   CSI ?996n    → COLOR_QUERY_SCHEME light/dark query
+/// Only matches whose final byte lands at offset >= `min_end` are counted —
+/// the boundary rescan uses this so a match fully inside the carried tail
+/// (already reported last batch) is not double-counted, which would trigger
+/// a duplicate response after the first one was drained.
+fn scan_color_queries(data: &[u8], min_end: usize) -> u32 {
+    if !data.contains(&0x1b) { return 0; }
+    let mut bits: u32 = 0;
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] != 0x1b { i += 1; continue; }
+        let rest = &data[i..];
+        // CSI ?996n  (light/dark scheme query)
+        const SCHEME: &[u8] = b"\x1b[?996n";
+        if rest.starts_with(SCHEME) {
+            if i + SCHEME.len() > min_end { bits |= crate::types::COLOR_QUERY_SCHEME; }
+            i += SCHEME.len();
+            continue;
+        }
+        // OSC 10;? / OSC 11;?  (fg/bg query)
+        for (pat, bit) in [(&b"\x1b]10;?"[..], crate::types::COLOR_QUERY_FG),
+                           (&b"\x1b]11;?"[..], crate::types::COLOR_QUERY_BG)] {
+            if rest.starts_with(pat) && i + pat.len() > min_end {
+                bits |= bit;
+            }
+        }
+        // OSC 4;<index>;?  (palette query)
+        const OSC4: &[u8] = b"\x1b]4;";
+        if rest.starts_with(OSC4) {
+            let mut j = OSC4.len();
+            let mut idx: u32 = 0;
+            let mut digits = 0;
+            while j < rest.len() && rest[j].is_ascii_digit() && digits < 3 {
+                idx = idx * 10 + (rest[j] - b'0') as u32;
+                j += 1;
+                digits += 1;
+            }
+            if digits > 0 && j + 1 < rest.len() && rest[j] == b';' && rest[j + 1] == b'?' {
+                if idx < 16 && i + j + 2 > min_end {
+                    bits |= 1 << idx;
+                }
+                i += j + 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    bits
+}
+
+/// Cross-batch detector for color queries, same rationale as `CprScanner`:
+/// a query split across two coalesced batches is invisible to a per-batch
+/// scan.  Carries the last KEEP bytes and rescans the boundary, counting only
+/// matches that end inside the new batch.
+struct ColorQueryScanner {
+    tail: Vec<u8>,
+}
+
+impl ColorQueryScanner {
+    /// One less than the longest query (`\x1b]4;15;?` = 9 bytes).
+    const KEEP: usize = 8;
+
+    fn new() -> Self {
+        Self { tail: Vec::with_capacity(Self::KEEP) }
+    }
+
+    fn scan(&mut self, batch: &[u8]) -> u32 {
+        let mut bits = scan_color_queries(batch, 0);
+        if !self.tail.is_empty() {
+            let mut boundary = self.tail.clone();
+            let tail_len = boundary.len();
+            boundary.extend_from_slice(&batch[..batch.len().min(Self::KEEP)]);
+            // Only count matches that END past the carried tail — anything
+            // fully inside the tail was already reported last batch.  A match
+            // ends past the tail when its exclusive end exceeds tail_len.
+            bits |= scan_color_queries(&boundary, tail_len);
+        }
+        if batch.len() >= Self::KEEP {
+            self.tail.clear();
+            self.tail.extend_from_slice(&batch[batch.len() - Self::KEEP..]);
+        } else {
+            self.tail.extend_from_slice(batch);
+            let excess = self.tail.len().saturating_sub(Self::KEEP);
+            self.tail.drain(..excess);
+        }
+        bits
+    }
+}
+
+// TODO: The 8 Arc parameters below should be grouped into a `ReaderSignals`
 // struct the next time a new signal is added, to keep the call-site manageable.
 pub fn spawn_reader_thread(
     mut reader: Box<dyn std::io::Read + Send>,
@@ -1432,6 +1535,7 @@ pub fn spawn_reader_thread(
     cursor_shape: Arc<std::sync::atomic::AtomicU8>,
     bell_pending: Arc<std::sync::atomic::AtomicBool>,
     cpr_pending: Arc<std::sync::atomic::AtomicBool>,
+    color_query_pending: Arc<std::sync::atomic::AtomicU32>,
     output_ring: Arc<Mutex<std::collections::VecDeque<u8>>>,
     pane_id: usize,
 ) {
@@ -1573,6 +1677,7 @@ pub fn spawn_reader_thread(
     // ── Parser thread: coalesces staged bytes, processes under one lock ──
     thread::spawn(move || {
         let mut cpr_scanner = CprScanner::new();
+        let mut color_scanner = ColorQueryScanner::new();
         loop {
             // Wait for at least one byte (or shutdown).
             {
@@ -1645,6 +1750,7 @@ pub fn spawn_reader_thread(
             }
             let rmcup = scan_rmcup(&bytes);
             let has_cpr_query = cpr_scanner.scan(&bytes);
+            let color_query_bits = color_scanner.scan(&bytes);
 
             if let Ok(mut parser) = term_reader.lock() {
                 parser.process(&bytes);
@@ -1663,6 +1769,13 @@ pub fn spawn_reader_thread(
             if has_cpr_query {
                 cpr_pending.store(true, Ordering::Release);
                 crate::types::CPR_DATA_PENDING.store(true, Ordering::Release);
+            }
+            // Issue #473: signal the server loop to answer terminal color
+            // queries (OSC 4/10/11, CSI ?996n) so pane applications can
+            // detect the terminal palette.
+            if color_query_bits != 0 {
+                color_query_pending.fetch_or(color_query_bits, Ordering::AcqRel);
+                crate::types::COLOR_QUERY_PENDING.store(true, Ordering::Release);
             }
             dv_writer.fetch_add(1, Ordering::Release);
             crate::types::PTY_DATA_READY.store(true, Ordering::Release);
@@ -1697,6 +1810,10 @@ mod test_issue88_alt_screen_toggle;
 #[cfg(test)]
 #[path = "../tests-rs/test_cpr_responder.rs"]
 mod test_cpr_responder;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue473_color_queries.rs"]
+mod test_issue473_color_queries;
 
 #[cfg(test)]
 mod test_parser_audible_bell {

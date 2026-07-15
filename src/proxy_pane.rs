@@ -273,6 +273,7 @@ pub fn create_proxy_pane(
         // CPR responses written via this field are TCP-forwarded to the source
         // ConPTY via the ProxyMasterPty writer.
         cpr_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        color_query_pending: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         copy_state: None,
         pane_style: None,
         squelch_until: None,

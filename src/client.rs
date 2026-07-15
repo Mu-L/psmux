@@ -1313,6 +1313,12 @@ fn establish_connection(addr: &str, key: &str) -> io::Result<Connection> {
 
     let _ = writer.write_all(b"PERSISTENT\n");
     let _ = writer.write_all(b"client-attach\n");
+    // Issue #473: report the host terminal's colors (queried once at client
+    // startup) so the server can answer pane color queries (OSC 4/10/11,
+    // CSI ?996n) with the real palette instead of the Campbell fallback.
+    if let Some(Some(spec)) = crate::types::HOST_COLORS_SPEC.get() {
+        let _ = writer.write_all(format!("host-colors {}\n", spec).as_bytes());
+    }
     let _ = writer.flush();
 
     // 2-second read timeout keeps the thread from blocking forever on process exit.
