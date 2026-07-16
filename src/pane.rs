@@ -841,10 +841,18 @@ const ENV_SHIM_PS: &str = concat!(
     // above in set_tmux_env).  This wrapper auto-injects --teammate-mode when
     // PSMUX_CLAUDE_TEAMMATE_MODE is set (via `set -g claude-code-fix-tty on`).
     // Disable with: set -g claude-code-fix-tty off
+    //
+    // The real claude command is resolved at call time via Get-Command instead
+    // of hardcoding claude.exe, because npm/nvm4w installs ship only claude.cmd
+    // and claude.ps1 with no exe (psmux#475).  The CommandType filter
+    // (Application = .exe/.cmd, ExternalScript = .ps1) excludes this wrapper
+    // function itself, so there is no self-recursion.
     "if($env:PSMUX_CLAUDE_TEAMMATE_MODE){ ",
     "function Global:claude { ",
-    "if($args -contains '--teammate-mode'){ & claude.exe @args } ",
-    "else{ & claude.exe --teammate-mode $env:PSMUX_CLAUDE_TEAMMATE_MODE @args } } }",
+    "$c=Get-Command claude -CommandType Application,ExternalScript -EA 0 | Select-Object -First 1; ",
+    "if(-not $c){ $c='claude.exe' }; ",
+    "if($args -contains '--teammate-mode'){ & $c @args } ",
+    "else{ & $c --teammate-mode $env:PSMUX_CLAUDE_TEAMMATE_MODE @args } } }",
 );
 
 /// PSReadLine prediction fix — disables predictions that crash with
@@ -1914,6 +1922,10 @@ mod test_issue473_color_queries;
 #[cfg(test)]
 #[path = "../tests-rs/test_windowsapps_alias_shell.rs"]
 mod test_windowsapps_alias_shell;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue475_claude_wrapper.rs"]
+mod test_issue475_claude_wrapper;
 
 #[cfg(test)]
 mod test_parser_audible_bell {
