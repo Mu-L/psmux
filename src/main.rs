@@ -40,6 +40,7 @@ use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
 use std::time::Duration;
 use std::env;
 
+#[allow(unused_imports)]
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use crossterm::terminal::{enable_raw_mode, disable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -3924,10 +3925,18 @@ fn run_main() -> io::Result<()> {
         return run_control_mode(control_mode);
     }
 
+    // Cygwin/MSYS pty detection (issue #474): under mintty (Git Bash, MSYS2)
+    // stdin/stdout are pty pipes, not a console. The client then reads VT
+    // bytes from the pipe and writes UTF-8 frames back to it instead of
+    // using console APIs (which fail with ERROR_INVALID_FUNCTION there).
+    let pipe_vt = crate::ssh_input::stdin_is_cygwin_pty();
+
     // If stdin is not a terminal (headless/non-interactive environment, e.g.
     // winget validation pipeline), print version and exit cleanly — starting
-    // a TUI session would fail without an interactive console.
-    if !std::io::stdin().is_terminal() {
+    // a TUI session would fail without an interactive console. A Cygwin pty
+    // IS a terminal (a human sits on the mintty side) even though it is
+    // technically a pipe.
+    if !std::io::stdin().is_terminal() && !pipe_vt {
         print_version();
         return Ok(());
     }
@@ -3949,13 +3958,28 @@ fn run_main() -> io::Result<()> {
 
     let mut stdout = crate::platform::create_writer();
     enable_virtual_terminal_processing();
-    enable_raw_mode()?;
+    if pipe_vt {
+        // A Cygwin pty is already raw from the native side (no console line
+        // discipline in the path); enable_raw_mode would call SetConsoleMode
+        // on the pipe handle and fail with ERROR_INVALID_FUNCTION.
+        // crossterm's ANSI detection needs TERM set to take the pure-ANSI
+        // path on Windows — mintty always sets it, but make sure.
+        if env::var("TERM").is_err() {
+            env::set_var("TERM", "xterm-256color");
+        }
+        let _ = enable_raw_mode();
+    } else {
+        enable_raw_mode()?;
+    }
 
     // Issue #473: ask the host terminal for its colors (OSC 10/11/4, ?996n)
     // BEFORE the input pump starts, so the replies cannot be misread as
     // keystrokes.  The client reports the result to the server on attach,
     // letting the server answer the same queries from pane applications.
-    let _ = crate::types::HOST_COLORS_SPEC.set(crate::platform::query_host_terminal_colors());
+    // Skipped in pipe mode: the query/reply machinery is console-based.
+    if !pipe_vt {
+        let _ = crate::types::HOST_COLORS_SPEC.set(crate::platform::query_host_terminal_colors());
+    }
 
     // Detect terminal type for input handling.
     // Use VT input parsing for SSH sessions and terminals that send VT mouse
@@ -3965,16 +3989,41 @@ fn run_main() -> io::Result<()> {
     // For standard terminals (not SSH), clear VTI flag from stdin if
     // crossterm or another layer set it. Keeps normal ReadConsoleInputW
     // behavior via proper INPUT_RECORDs.
-    if !use_vt_input {
+    if !use_vt_input && !pipe_vt {
         crate::platform::disable_vti_on_stdin();
     }
 
     execute!(stdout, EnterAlternateScreen, EnableBlinking, EnableMouseCapture, EnableBracketedPaste)?;
     apply_cursor_style(&mut stdout)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
 
-    let input = InputSource::new(use_vt_input)?;
+    let input = if pipe_vt {
+        InputSource::new_pipe()?
+    } else {
+        InputSource::new(use_vt_input)?
+    };
+
+    if pipe_vt {
+        // Learn the real terminal size over the pty (XTWINOPS) before the
+        // first draw; the reader thread records the reply for the backend.
+        // Also enable SGR mouse / focus / bracketed paste directly — mintty
+        // handles these natively.
+        crate::ssh_input::pipe_send_modes_enable();
+        crate::ssh_input::request_pipe_terminal_size();
+        for _ in 0..50 {
+            if crate::platform::pipe_term_size().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if crate::platform::pipe_term_size().is_none() {
+            // No reply (terminal doesn't speak XTWINOPS) — a sane default
+            // beats failing; a later reply corrects it live.
+            crate::platform::set_pipe_term_size(120, 30);
+        }
+    }
+
+    let backend = crate::platform::PsmuxBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
 
     // For VT input mode (SSH / JetBrains), explicitly (re-)send mouse-enable
     // escape sequences.  ConPTY may have consumed crossterm's

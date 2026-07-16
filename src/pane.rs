@@ -1298,11 +1298,52 @@ fn resolve_shell_program(shell_path: &str) -> (String, Vec<String>) {
     (program, extra)
 }
 
+/// Shell executable stems that are POSIX-style shells. When one of these is
+/// the configured `default-shell` it is spawned as a login shell (`-l`),
+/// matching tmux, so Git-Bash/MSYS2 profile scripts run and set up PATH
+/// (`/usr/bin` and friends). Without this an MSYS2 bash/zsh pane starts with
+/// only the inherited Windows PATH and the whole Unix toolchain is
+/// unreachable (issue #474).
+const POSIX_SHELL_STEMS: &[&str] = &["bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh"];
+
+/// True when `path`'s file stem names a POSIX-style shell.
+pub(crate) fn is_posix_shell_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| POSIX_SHELL_STEMS.contains(&s.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// `git-bash.exe` is a GUI launcher that spawns its own mintty window — as a
+/// pane shell it produces a dead blank pane plus stray terminal windows
+/// (issue #474). Substitute the real console `bash.exe` that ships beside it.
+pub(crate) fn remap_git_bash_launcher(program: String) -> String {
+    let path = std::path::Path::new(&program);
+    let is_launcher = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("git-bash"))
+        .unwrap_or(false);
+    if is_launcher {
+        if let Some(dir) = path.parent() {
+            for candidate in [dir.join("bin").join("bash.exe"), dir.join("usr").join("bin").join("bash.exe")] {
+                if candidate.is_file() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+    program
+}
+
 /// Build a CommandBuilder that launches the given shell path interactively.
 /// Used when `default-shell` / `default-command` is configured.
-/// Supports pwsh, powershell, cmd, and any arbitrary executable.
+/// Supports pwsh, powershell, cmd, bash/zsh (spawned as login shells), and
+/// any arbitrary executable.
 pub fn build_default_shell(shell_path: &str, env_shim: bool, allow_predictions: bool) -> CommandBuilder {
     let (program, extra_args) = resolve_shell_program(shell_path);
+    let program = remap_git_bash_launcher(program);
 
     // Resolve bare names via cached `which` — avoids repeated PATH scans.
     let resolved = cached_which(&program);
@@ -1325,7 +1366,18 @@ pub fn build_default_shell(shell_path: &str, env_shim: bool, allow_predictions: 
         builder.args(extra_args.clone());
     }
 
-    if lower.contains("pwsh") || lower.contains("powershell") {
+    if is_posix_shell_path(&resolved) {
+        // Keep the pane's working directory: Git-Bash and MSYS2 login shells
+        // otherwise `cd $HOME` from /etc/profile.
+        builder.env("CHERE_INVOKING", "1");
+        // tmux parity: the default shell runs as a login shell so profile
+        // scripts set up PATH (/usr/bin under MSYS2) and oh-my-zsh style
+        // configs load. Skipped when the user passed their own args — they
+        // control the invocation then.
+        if extra_args.is_empty() {
+            builder.args(["-l"]);
+        }
+    } else if lower.contains("pwsh") || lower.contains("powershell") {
         // Issue #109: -NoProfile + manual profile sourcing to prevent
         // PSReadLine GetHistoryItems NullReferenceException.
         // If the user already passed -NoProfile in extra_args, we still
@@ -1971,3 +2023,7 @@ mod tests_issue450_dead_warm_pane;
 #[cfg(test)]
 #[path = "../tests-rs/test_warm_pane_start_dir.rs"]
 mod tests_warm_pane_start_dir;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue474_unix_shells.rs"]
+mod tests_issue474_unix_shells;

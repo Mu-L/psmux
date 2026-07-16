@@ -400,6 +400,15 @@ pub fn reap_orphaned_servers() {
 fn reap_orphaned_servers_in(psmux_dir: &Path) {
     use crate::platform::process_kill;
 
+    // Issue #474: no registry, no reaping. When the data dir does not exist,
+    // this invocation cannot see the files that track live servers (an MSYS2
+    // login shell that unset USERPROFILE resolves home elsewhere, for
+    // example). Proceeding with an empty view would classify every live
+    // server on the machine as an orphan and terminate them all.
+    if !psmux_dir.is_dir() {
+        return;
+    }
+
     let (tracked_ports, tracked_pids) = read_tracked_registry(psmux_dir);
     let self_pid = std::process::id();
 

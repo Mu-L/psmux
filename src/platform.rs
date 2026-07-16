@@ -3014,6 +3014,11 @@ pub mod process_info {
 #[cfg(windows)]
 pub struct Utf16ConsoleWriter {
     handle: *mut std::ffi::c_void,
+    /// True when stdout is NOT a console (a Cygwin/MSYS pty pipe under
+    /// mintty, issue #474). `WriteConsoleW` fails with ERROR_INVALID_FUNCTION
+    /// on a pipe handle; flush() writes raw UTF-8 via `WriteFile` instead so
+    /// the byte stream reaches the terminal emulator on the other side.
+    pipe_output: bool,
     /// Frame buffer: accumulates all `write()` output so that `flush()`
     /// can emit the complete frame as a single `WriteConsoleW` call.
     /// This eliminates the visible top-to-bottom "curtain" repaint that
@@ -3034,9 +3039,56 @@ impl Utf16ConsoleWriter {
         }
         const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
         let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetConsoleMode(h: *mut std::ffi::c_void, mode: *mut u32) -> i32;
+        }
+        let mut mode: u32 = 0;
+        let pipe_output = handle.is_null()
+            || handle == (-1isize) as *mut std::ffi::c_void
+            || unsafe { GetConsoleMode(handle, &mut mode) } == 0;
         // Pre-allocate ~128KB for the frame buffer — large enough for a
         // typical full-screen frame's escape sequences without reallocation.
-        Self { handle, frame_buf: Vec::with_capacity(131072) }
+        Self { handle, pipe_output, frame_buf: Vec::with_capacity(131072) }
+    }
+
+    /// Write raw UTF-8 bytes via `WriteFile` — the output path when stdout is
+    /// a pipe (mintty / Cygwin pty) rather than a console.
+    fn write_raw(&self, bytes: &[u8]) -> std::io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn WriteFile(
+                h: *mut std::ffi::c_void,
+                buf: *const u8,
+                len: u32,
+                written: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+        let mut total: usize = 0;
+        while total < bytes.len() {
+            let mut written: u32 = 0;
+            let ok = unsafe {
+                WriteFile(
+                    self.handle,
+                    bytes.as_ptr().add(total),
+                    (bytes.len() - total) as u32,
+                    &mut written,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if written == 0 {
+                break;
+            }
+            total += written as usize;
+        }
+        Ok(())
     }
 
     /// Write a valid UTF-8 string via `WriteConsoleW`.
@@ -3312,9 +3364,15 @@ impl std::io::Write for Utf16ConsoleWriter {
         };
 
         if valid > 0 {
-            // Safety: we just validated this range is valid UTF-8.
-            let s = unsafe { std::str::from_utf8_unchecked(&processed[..valid]) };
-            self.write_wide(s)?;
+            if self.pipe_output {
+                // Pipe (Cygwin pty) output: the terminal on the other side
+                // consumes raw UTF-8; WriteConsoleW would fail on this handle.
+                self.write_raw(&processed[..valid])?;
+            } else {
+                // Safety: we just validated this range is valid UTF-8.
+                let s = unsafe { std::str::from_utf8_unchecked(&processed[..valid]) };
+                self.write_wide(s)?;
+            }
         }
 
         // Rebuild the frame buffer: any pending UTF-8 tail first, then the
@@ -3698,3 +3756,122 @@ mod tests_char_to_vk;
 #[cfg(windows)]
 #[path = "../tests-rs/test_ctrlc_shell_classify.rs"]
 mod tests_ctrlc_shell_classify;
+
+// ─── Cygwin/MSYS pty (pipe) client support — issue #474 ─────────────────────
+//
+// When the psmux client runs under mintty (Git Bash, MSYS2) or any other
+// Cygwin-style pty, stdin/stdout are named pipes, not a console. Console
+// size APIs cannot see the real terminal there; the size instead comes from
+// XTWINOPS (`CSI 18 t` query → `CSI 8 ; rows ; cols t` reply) parsed by the
+// VT input reader, which stores it here for the TUI backend to consume.
+
+/// Terminal size override for pipe-mode clients, packed as `cols << 16 | rows`.
+/// Zero means "not in pipe mode / not yet known" and the backend falls through
+/// to the console size APIs.
+static PIPE_TERM_SIZE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Record the real terminal size reported over the pty (issue #474).
+pub fn set_pipe_term_size(cols: u16, rows: u16) {
+    if cols == 0 || rows == 0 {
+        return;
+    }
+    PIPE_TERM_SIZE.store(((cols as u32) << 16) | rows as u32, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The pipe-mode terminal size, when one has been reported.
+pub fn pipe_term_size() -> Option<(u16, u16)> {
+    let v = PIPE_TERM_SIZE.load(std::sync::atomic::Ordering::SeqCst);
+    if v == 0 {
+        None
+    } else {
+        Some(((v >> 16) as u16, (v & 0xFFFF) as u16))
+    }
+}
+
+/// TUI backend for the psmux client: [`ratatui::backend::CrosstermBackend`]
+/// over [`PsmuxWriter`], with one twist — `size()`/`window_size()` consult the
+/// pipe-mode override first so a client attached over a Cygwin pty (mintty,
+/// issue #474) renders at the real terminal size even though the console
+/// size APIs cannot see that terminal. Outside pipe mode the override is
+/// never set and every call delegates.
+pub struct PsmuxBackend {
+    inner: ratatui::backend::CrosstermBackend<PsmuxWriter>,
+}
+
+impl PsmuxBackend {
+    pub fn new(writer: PsmuxWriter) -> Self {
+        Self { inner: ratatui::backend::CrosstermBackend::new(writer) }
+    }
+}
+
+// The client's shutdown path drives the backend directly as an `io::Write`
+// (crossterm `execute!` for SGR/cursor resets) — delegate to the inner
+// CrosstermBackend, which forwards to the writer.
+impl std::io::Write for PsmuxBackend {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(&mut self.inner, buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut self.inner)
+    }
+}
+
+impl ratatui::backend::Backend for PsmuxBackend {
+    type Error = std::io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+    {
+        ratatui::backend::Backend::draw(&mut self.inner, content)
+    }
+
+    fn hide_cursor(&mut self) -> std::io::Result<()> {
+        ratatui::backend::Backend::hide_cursor(&mut self.inner)
+    }
+
+    fn show_cursor(&mut self) -> std::io::Result<()> {
+        ratatui::backend::Backend::show_cursor(&mut self.inner)
+    }
+
+    fn get_cursor_position(&mut self) -> std::io::Result<ratatui::layout::Position> {
+        ratatui::backend::Backend::get_cursor_position(&mut self.inner)
+    }
+
+    fn set_cursor_position<P: Into<ratatui::layout::Position>>(&mut self, position: P) -> std::io::Result<()> {
+        ratatui::backend::Backend::set_cursor_position(&mut self.inner, position)
+    }
+
+    fn clear(&mut self) -> std::io::Result<()> {
+        ratatui::backend::Backend::clear(&mut self.inner)
+    }
+
+    fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> std::io::Result<()> {
+        ratatui::backend::Backend::clear_region(&mut self.inner, clear_type)
+    }
+
+    fn append_lines(&mut self, n: u16) -> std::io::Result<()> {
+        ratatui::backend::Backend::append_lines(&mut self.inner, n)
+    }
+
+    fn size(&self) -> std::io::Result<ratatui::layout::Size> {
+        if let Some((cols, rows)) = pipe_term_size() {
+            return Ok(ratatui::layout::Size::new(cols, rows));
+        }
+        ratatui::backend::Backend::size(&self.inner)
+    }
+
+    fn window_size(&mut self) -> std::io::Result<ratatui::backend::WindowSize> {
+        if let Some((cols, rows)) = pipe_term_size() {
+            return Ok(ratatui::backend::WindowSize {
+                columns_rows: ratatui::layout::Size::new(cols, rows),
+                pixels: ratatui::layout::Size::new(0, 0),
+            });
+        }
+        ratatui::backend::Backend::window_size(&mut self.inner)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        ratatui::backend::Backend::flush(&mut self.inner)
+    }
+}

@@ -352,7 +352,15 @@ impl InputSource {
             InputSource::Ssh { rx } => match rx.recv_timeout(timeout) {
                 Ok(evt) => Ok(Some(evt)),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+                // Reader thread gone = stdin is gone (pty closed, SSH stream
+                // ended). Returning Ok(None) here would leave the client
+                // spinning forever on a dead terminal (recv on a disconnected
+                // channel returns immediately, so the loop also burns CPU).
+                // Surface it as an error so the client detaches and exits.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "terminal input stream closed",
+                )),
             },
         }
     }
@@ -868,6 +876,17 @@ impl VtParser {
             'Z' => emit(make_key(KeyCode::BackTab, KeyModifiers::SHIFT)),
             'I' if self.pidx <= 1 && self.params[0] == 0 => emit(Event::FocusGained),
             'O' if self.pidx <= 1 && self.params[0] == 0 => emit(Event::FocusLost),
+            // XTWINOPS text-area size report `\x1b[8;rows;cols t` — the reply
+            // to our `\x1b[18t` query. This is how the client learns (and
+            // tracks) the terminal size when attached over a Cygwin/MSYS pty
+            // (mintty, issue #474), where no console resize events exist.
+            't' if self.pidx >= 3 && self.params[0] == 8 => {
+                let rows = self.params[1];
+                let cols = self.params[2];
+                if rows > 0 && cols > 0 {
+                    emit(Event::Resize(cols, rows));
+                }
+            }
             '~' => self.dispatch_tilde(mods, emit),
             _ => {} // Unknown — silently discard.
         }
@@ -1721,3 +1740,257 @@ mod tests_issue457_ssh_mouse_build_gate;
 #[cfg(test)]
 #[path = "../tests-rs/test_pr468_wezterm_vt_input.rs"]
 mod tests_pr468_wezterm_vt_input;
+
+// ─── Cygwin/MSYS pty (pipe) client input — issue #474 ───────────────────────
+//
+// Under mintty (Git Bash, MSYS2) the client's stdin is a Cygwin pty: a named
+// pipe carrying raw VT bytes, not a console. Console input APIs fail on it
+// (`ReadConsoleInputW`/`SetConsoleMode` → ERROR_INVALID_FUNCTION), which used
+// to kill the client with "psmux: Incorrect function". This reader consumes
+// the pipe directly with `ReadFile` and feeds the same `VtParser` the SSH
+// path uses, so keys, mouse, paste, and focus events all decode identically.
+
+/// True when the client's stdin is a Cygwin/MSYS pty pipe. The NT pipe name
+/// carries a recognizable pattern: `msys-<hex>-pty<N>-{from,to}-master` (or
+/// `cygwin-…`). `PSMUX_PIPE_VT=1|0` forces the answer for tests.
+#[cfg(windows)]
+pub fn stdin_is_cygwin_pty() -> bool {
+    match std::env::var("PSMUX_PIPE_VT").ok().as_deref() {
+        Some("1") => return true,
+        Some("0") => return false,
+        _ => {}
+    }
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n: u32) -> *mut c_void;
+        fn GetFileType(h: *mut c_void) -> u32;
+        fn GetFileInformationByHandleEx(
+            h: *mut c_void,
+            class: u32,
+            info: *mut c_void,
+            size: u32,
+        ) -> i32;
+    }
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const FILE_TYPE_PIPE: u32 = 3;
+    const FILE_NAME_INFO: u32 = 2;
+    unsafe {
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        if h.is_null() || h == (-1isize) as *mut c_void {
+            return false;
+        }
+        if GetFileType(h) != FILE_TYPE_PIPE {
+            return false;
+        }
+        // FILE_NAME_INFO: u32 byte length followed by the UTF-16 name.
+        let mut buf = [0u8; 1024];
+        if GetFileInformationByHandleEx(h, FILE_NAME_INFO, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) == 0 {
+            return false;
+        }
+        let byte_len = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        let units = (byte_len / 2).min((buf.len() - 4) / 2);
+        let name_utf16: Vec<u16> = buf[4..4 + units * 2]
+            .chunks_exact(2)
+            .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+            .collect();
+        let name = String::from_utf16_lossy(&name_utf16).to_ascii_lowercase();
+        (name.contains("msys-") || name.contains("cygwin-")) && name.contains("-pty")
+    }
+}
+
+#[cfg(not(windows))]
+pub fn stdin_is_cygwin_pty() -> bool {
+    false
+}
+
+/// Marks the client as running in pipe (Cygwin pty) mode so other client
+/// code — the periodic size query in the render loop — can key off it.
+static PIPE_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn pipe_mode_active() -> bool {
+    PIPE_MODE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Write raw bytes straight to the stdout pipe, bypassing the TUI writer.
+/// Used for out-of-band queries (XTWINOPS size, DECSET mouse) in pipe mode.
+/// Called only from the client render thread, so writes never interleave
+/// with a frame flush.
+#[cfg(windows)]
+pub fn pipe_stdout_write(bytes: &[u8]) {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n: u32) -> *mut c_void;
+        fn WriteFile(h: *mut c_void, buf: *const u8, len: u32, written: *mut u32, ovl: *mut c_void) -> i32;
+    }
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if h.is_null() || h == (-1isize) as *mut c_void {
+            return;
+        }
+        let mut written: u32 = 0;
+        let _ = WriteFile(h, bytes.as_ptr(), bytes.len() as u32, &mut written, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(windows))]
+pub fn pipe_stdout_write(_bytes: &[u8]) {}
+
+/// Ask the terminal for its text-area size (XTWINOPS `CSI 18 t`). The reply
+/// (`CSI 8 ; rows ; cols t`) arrives on stdin and is handled by the VT
+/// parser, which updates the backend size override and emits a Resize event.
+pub fn request_pipe_terminal_size() {
+    pipe_stdout_write(b"\x1b[18t");
+}
+
+/// Enable the VT modes psmux needs from a pipe-mode terminal: SGR mouse
+/// reporting, focus events, and bracketed paste. mintty handles these
+/// natively (no ConPTY in the path), so the issue #457 build gating that
+/// applies to SSH-over-ConPTY does not apply here.
+pub fn pipe_send_modes_enable() {
+    pipe_stdout_write(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[?2004h");
+}
+
+/// Spawn the pipe-mode VT reader: raw `ReadFile` on the stdin pipe, streamed
+/// through incremental UTF-8 decoding into the shared [`VtParser`]. Size
+/// reports (`CSI 8;r;c t`) additionally update the pipe size override before
+/// the Resize event is forwarded, so the next `terminal.autoresize()` sees
+/// the new dimensions.
+#[cfg(windows)]
+fn start_pipe_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
+    use std::ffi::c_void;
+    use std::sync::mpsc;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n: u32) -> *mut c_void;
+        fn ReadFile(h: *mut c_void, buf: *mut u8, len: u32, read: *mut u32, ovl: *mut c_void) -> i32;
+        fn PeekNamedPipe(
+            h: *mut c_void,
+            buf: *mut c_void,
+            len: u32,
+            read: *mut u32,
+            avail: *mut u32,
+            left: *mut u32,
+        ) -> i32;
+    }
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) } as isize;
+    if handle == 0 || handle == -1 {
+        return Err(io::Error::new(io::ErrorKind::Other, "GetStdHandle(STDIN) failed"));
+    }
+
+    PIPE_MODE.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (tx, rx) = mpsc::sync_channel::<Event>(1024);
+    ssh_debug_log("pipe reader starting (cygwin pty mode)");
+
+    std::thread::spawn(move || {
+        let handle = handle as *mut c_void;
+        let mut parser = VtParser::new();
+        let mut pending = Vec::<u8>::new(); // incomplete UTF-8 tail
+        let mut buf = [0u8; 4096];
+        let mut emit = |evt: Event| {
+            if let Event::Resize(cols, rows) = evt {
+                crate::platform::set_pipe_term_size(cols, rows);
+            }
+            if ssh_verbose() {
+                ssh_debug_log(&format!("pipe event: {:?}", evt));
+            }
+            let _ = tx.try_send(evt);
+        };
+        let mut esc_since: Option<std::time::Instant> = None;
+        loop {
+            // Blocking ReadFile is the primary wait — PeekNamedPipe polling
+            // proved unreliable on MSYS pty pipes (it reported no data after
+            // the first read even as bytes queued, wedging all input). Peek
+            // is used only transiently, while the parser holds state that
+            // must be able to time out: a pending lone ESC (a real Escape
+            // keypress) or an open bracketed paste missing its terminator.
+            if parser.has_pending_escape() || parser.is_in_paste() {
+                let mut avail: u32 = 0;
+                let peek_ok = unsafe {
+                    PeekNamedPipe(handle, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, std::ptr::null_mut())
+                };
+                if peek_ok == 0 {
+                    ssh_debug_log(&format!("pipe reader: PeekNamedPipe failed ({}), exiting", io::Error::last_os_error()));
+                    break;
+                }
+                if avail == 0 {
+                    if parser.has_pending_escape() {
+                        let since = esc_since.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed().as_millis() >= 50 {
+                            parser.flush_escape(&mut emit);
+                            esc_since = None;
+                        }
+                    }
+                    parser.flush_stale_paste(&mut emit);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
+                }
+            }
+            esc_since = None;
+            let mut read: u32 = 0;
+            let ok = unsafe { ReadFile(handle, buf.as_mut_ptr(), buf.len() as u32, &mut read, std::ptr::null_mut()) };
+            if ok == 0 || read == 0 {
+                ssh_debug_log(&format!("pipe reader: ReadFile ended (ok={} read={}), exiting", ok, read));
+                break;
+            }
+            if ssh_verbose() {
+                ssh_debug_log(&format!("pipe reader: {} bytes: {:?}", read, String::from_utf8_lossy(&buf[..read.min(64) as usize])));
+            }
+            pending.extend_from_slice(&buf[..read as usize]);
+            // Decode as much complete UTF-8 as possible; keep the tail.
+            let consumed = match std::str::from_utf8(&pending) {
+                Ok(s) => {
+                    for ch in s.chars() {
+                        parser.feed(ch, &mut emit);
+                    }
+                    pending.len()
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    if valid > 0 {
+                        let s = unsafe { std::str::from_utf8_unchecked(&pending[..valid]) };
+                        for ch in s.chars() {
+                            parser.feed(ch, &mut emit);
+                        }
+                    }
+                    match e.error_len() {
+                        // Genuinely invalid bytes: skip them.
+                        Some(bad) => valid + bad,
+                        // Incomplete sequence: wait for more bytes.
+                        None => valid,
+                    }
+                }
+            };
+            pending.drain(..consumed);
+        }
+    });
+
+    Ok(rx)
+}
+
+impl InputSource {
+    /// Input source for a client attached over a Cygwin/MSYS pty (issue
+    /// #474): VT byte stream from the stdin pipe. Falls back to crossterm if
+    /// the reader cannot start (the client then fails the same way it did
+    /// before pipe mode existed).
+    pub fn new_pipe() -> io::Result<Self> {
+        #[cfg(windows)]
+        {
+            match start_pipe_reader() {
+                Ok(rx) => Ok(InputSource::Ssh { rx }),
+                Err(e) => {
+                    ssh_debug_log(&format!("pipe VT input init failed: {}; falling back to crossterm", e));
+                    Ok(InputSource::Crossterm)
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(InputSource::Crossterm)
+        }
+    }
+}

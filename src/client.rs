@@ -1370,7 +1370,7 @@ fn try_reconnect(addr: &str, key: &str) -> Option<Connection> {
     None
 }
 
-pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::PsmuxWriter>>, input: &crate::ssh_input::InputSource) -> io::Result<()> {
+pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input: &crate::ssh_input::InputSource) -> io::Result<()> {
     let name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let path = crate::paths::port_file(&name);
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok())
@@ -1948,6 +1948,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // sequences through ConPTY instead of native MOUSE_EVENT records).
     let is_ssh_mode = crate::ssh_input::needs_vt_input();
     let mut last_mouse_enable = Instant::now();
+    // Cygwin pty (issue #474): cadence for the XTWINOPS size poll.
+    let mut last_pipe_size_query = Instant::now();
     // ── Cursor blink stabilisation ──────────────────────────────────
     // Cache the last-sent DECSCUSR code so we only write it when it
     // actually changes (avoids resetting WT's blink timer every frame).
@@ -6156,6 +6158,18 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         if is_ssh_mode && last_mouse_enable.elapsed().as_secs() >= 30 {
             crate::ssh_input::send_mouse_enable();
             last_mouse_enable = Instant::now();
+        }
+
+        // ── Cygwin pty: periodic terminal-size poll (issue #474) ─────
+        // A pipe carries no resize notifications, so ask the terminal for
+        // its text-area size (XTWINOPS). The reply flows through the VT
+        // reader, which updates the backend size override; an unchanged
+        // size is a no-op for terminal.autoresize().
+        if crate::ssh_input::pipe_mode_active()
+            && last_pipe_size_query.elapsed().as_millis() >= 1000
+        {
+            crate::ssh_input::request_pipe_terminal_size();
+            last_pipe_size_query = Instant::now();
         }
 
         // ── Post-draw: atomic cursor write ──────────────────────────
