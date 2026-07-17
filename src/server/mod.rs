@@ -1782,33 +1782,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(format!("{}\n", line));
                 }
                 CtrlReq::ClientAttach(cid) => {
-                    app.attached_clients = app.attached_clients.saturating_add(1);
-                    app.latest_client_id = Some(cid);
-                    // Register in client registry if not already present
-                    app.client_registry.entry(cid).or_insert_with(|| {
-                        let tty = format!("/dev/pts/{}", cid);
-                        crate::types::ClientInfo {
-                            id: cid,
-                            width: app.last_window_area.width,
-                            height: app.last_window_area.height,
-                            connected_at: std::time::Instant::now(),
-                            last_activity: std::time::Instant::now(),
-                            tty_name: tty,
-                            is_control: false,
-                        }
-                    });
-                    hook_event = Some("client-attached");
-                    // update-environment: refresh env vars from the attaching client's environment
-                    let update_vars = app.update_environment.clone();
-                    for var_spec in &update_vars {
-                        let remove = var_spec.starts_with('-');
-                        let name = if remove { &var_spec[1..] } else { var_spec.as_str() };
-                        if remove {
-                            app.environment.remove(name);
-                        } else if let Ok(val) = std::env::var(name) {
-                            app.environment.insert(name.to_string(), val);
-                        } else {
-                            app.environment.remove(name);
+                    // Registration and the attached counter are one idempotent
+                    // operation. A duplicate attach for the same connection
+                    // must not leave the session permanently ghost-attached.
+                    if app.register_client(cid, false) {
+                        hook_event = Some("client-attached");
+                        // update-environment: refresh env vars from the attaching client's environment
+                        let update_vars = app.update_environment.clone();
+                        for var_spec in &update_vars {
+                            let remove = var_spec.starts_with('-');
+                            let name = if remove { &var_spec[1..] } else { var_spec.as_str() };
+                            if remove {
+                                app.environment.remove(name);
+                            } else if let Ok(val) = std::env::var(name) {
+                                app.environment.insert(name.to_string(), val);
+                            } else {
+                                app.environment.remove(name);
+                            }
                         }
                     }
                 }
@@ -5028,18 +5018,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         output_paused_panes: std::collections::HashSet::new(),
                         pane_last_output: std::collections::HashMap::new(),
                     });
-                    // Register control client in the client registry
-                    let tty = format!("/dev/pts/{}", client_id);
-                    app.client_registry.insert(client_id, crate::types::ClientInfo {
-                        id: client_id,
-                        width: app.last_window_area.width,
-                        height: app.last_window_area.height,
-                        connected_at: std::time::Instant::now(),
-                        last_activity: std::time::Instant::now(),
-                        tty_name: tty,
-                        is_control: true,
-                    });
-                    app.attached_clients = app.attached_clients.saturating_add(1);
+                    // Register control clients with the same idempotent
+                    // counter/registry invariant as normal TUI clients.
+                    app.register_client(client_id, true);
                     // Real tmux fires server hooks (session-changed, window-add,
                     // etc.) as side effects of the initial attach-session command.
                     // iTerm2 depends on %session-changed to enable writes
