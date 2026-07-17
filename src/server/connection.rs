@@ -128,6 +128,32 @@ fn shell_quote_bytes(b: &[u8]) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Re-join already-tokenized command args into a single command string,
+/// re-quoting any token that held whitespace or quote characters so the
+/// grouping survives a later re-parse by `parse_command_line` (#476).
+/// `parse_command_line` consumes the quotes during tokenization, so a plain
+/// `join(" ")` flattens `if-shell -F '1' 'set -g @r A' 'set -g @r B'` into
+/// ungrouped words and the stored binding silently dispatches garbage.
+/// Tokens with embedded single quotes use double quotes (single-quoted
+/// content is fully literal in `parse_command_line`, so `'\''` cannot work);
+/// everything else uses single quotes. Chain separators (`;`, `\;`) are left
+/// bare so command chaining still splits.
+fn requote_command_tail(args: &[&str]) -> String {
+    args.iter().map(|t| {
+        if t.is_empty() {
+            "''".to_string()
+        } else if *t == ";" || *t == "\\;" {
+            t.to_string()
+        } else if t.contains('\'') {
+            format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
+        } else if t.chars().any(|c| c.is_whitespace() || c == '"') {
+            format!("'{}'", t)
+        } else {
+            t.to_string()
+        }
+    }).collect::<Vec<String>>().join(" ")
+}
+
 /// Walk the sub-commands produced by `split_top_level_semicolons` and merge
 /// any consecutive run of `send`/`send-keys` commands targeting the same
 /// pane into a single synthesized `send -lt <target> <bytes>` command.
@@ -1922,7 +1948,7 @@ match cmd {
         }
         if i < args.len() && i + 1 < args.len() {
             let key = args[i].to_string();
-            let command = args[i + 1..].join(" ");
+            let command = requote_command_tail(&args[i + 1..]);
             let _ = tx.send(CtrlReq::BindKey(table, key, command, repeatable));
         }
     }
@@ -3654,7 +3680,7 @@ fn dispatch_control_command(
             }
             if i < args.len() && i + 1 < args.len() {
                 let key = args[i].to_string();
-                let command = args[i + 1..].join(" ");
+                let command = requote_command_tail(&args[i + 1..]);
                 let _ = tx.send(CtrlReq::BindKey(table_name, key, command, repeat));
             }
             let _ = resp_tx.send(String::new());
@@ -3987,3 +4013,7 @@ fn dispatch_control_command(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue476_bindkey_quoting.rs"]
+mod tests_issue476_bindkey_quoting;
