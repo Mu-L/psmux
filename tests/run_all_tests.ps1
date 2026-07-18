@@ -460,11 +460,13 @@ function Run-TestFile {
         # suites; without it their results recorded as 0P/0F despite real outcomes.
         $passCount = ([regex]::Matches($output, '\[PASS\]')).Count
         $passCount += ([regex]::Matches($output, '(?m)^PASS\s')).Count
-        $passCount += ([regex]::Matches($output, '(?m)^\s*PASS:')).Count
+        $passCount += ([regex]::Matches($output, '(?m)^\s*PASS:(?!\s*\d+\s*$)')).Count
         $passCount += ([regex]::Matches($output, '=> PASS$', [System.Text.RegularExpressions.RegexOptions]::Multiline)).Count
         $failCount = ([regex]::Matches($output, '\[FAIL\]')).Count
         $failCount += ([regex]::Matches($output, '(?m)^FAIL\s')).Count
-        $failCount += ([regex]::Matches($output, '(?m)^\s*FAIL:')).Count
+        # Negative lookahead: a bare number after the colon is a summary line
+        # ("FAIL: 0"), not an assertion result, and must not be counted.
+        $failCount += ([regex]::Matches($output, '(?m)^\s*FAIL:(?!\s*\d+\s*$)')).Count
         $failCount += ([regex]::Matches($output, '=> FAIL$', [System.Text.RegularExpressions.RegexOptions]::Multiline)).Count
         $skipCount = ([regex]::Matches($output, '\[SKIP\]')).Count
 

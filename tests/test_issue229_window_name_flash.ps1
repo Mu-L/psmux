@@ -202,7 +202,24 @@ if (-not (Wait-Session $SESSION)) {
 # === TEST 3: new-session with 'findstr' (fast-spawning child) ===
 Write-Host "`n[Test 3] new-session with 'findstr /R . NUL' (fast-spawning child)" -ForegroundColor Yellow
 $SESSION = "issue229_findstr"
-& $PSMUX new-session -d -s $SESSION 'findstr /R "." NUL'
+# findstr reading from NUL hits EOF and exits almost instantly. With the
+# tmux-parity default `remain-on-exit off`, the pane (and its only window
+# and session) is destroyed the moment that fast command exits -- before
+# this script's 3s Start-Sleep even returns -- which made "Session creation
+# failed" fire even though the session WAS created correctly (root cause:
+# the test raced its own default teardown, not a product bug).
+#
+# `set-option -g` on an already-running session cannot fix this: psmux is
+# one-server-per-session (each `new-session` spawns its own independent
+# server process with its own AppState), so a global option set on an
+# EXISTING session's server never reaches the NEW server this line spawns
+# (confirmed: that was tried first and the failure persisted identically).
+# Instead, chain a long-running keep-alive after findstr so the pane never
+# goes empty long enough to trigger the default teardown. The test only
+# checks that the window name never flashed to 'pwsh' during the sampling
+# window below, so which command ends up owning the window afterward
+# (findstr, then the keep-alive) does not affect what is being verified.
+& $PSMUX new-session -d -s $SESSION 'findstr /R "." NUL; timeout /T 300 /nobreak > $null'
 Start-Sleep -Seconds 3
 if (-not (Wait-Session $SESSION)) {
     Write-Fail "Session creation failed for $SESSION"

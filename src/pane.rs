@@ -80,12 +80,44 @@ pub fn prefer_app_execution_alias(resolved: String) -> String {
 }
 
 /// Get the cached shell path, resolving via `which` only on first call.
+///
+/// MSIX/Store-packaged executables (anywhere under `\WindowsApps\`, whether
+/// the app-execution alias or the package-interior exe) cannot be activated
+/// from a non-interactive SSH-spawned process: confirmed by a bare
+/// `CreateProcessW` of the alias failing with ACCESS_DENIED under sshd with
+/// no psmux code involved at all -- Windows' AppModel/MSIX activation
+/// requires a proper interactive user session, which sshd's non-interactive
+/// command execution does not provide. When this server process was itself
+/// spawned from an SSH command (`SSH_CONNECTION`/`SSH_CLIENT` inherited from
+/// sshd), skip a WindowsApps-hosted shell and fall back to the classic
+/// (non-MSIX) `powershell.exe`, which every Windows install ships outside
+/// the package store and which activates fine in any process context. This
+/// turns a hard "psmux: failed to create session" for Store-only-pwsh users
+/// attaching over SSH into a graceful degrade instead (issue #167 class).
 pub fn cached_shell() -> Option<&'static str> {
     CACHED_SHELL_PATH.get_or_init(|| {
-        which::which("pwsh").ok()
+        let resolved = which::which("pwsh").ok()
             .or_else(|| which::which("powershell").ok())
             .or_else(|| which::which("cmd").ok())
-            .map(|p| prefer_app_execution_alias(p.to_string_lossy().into_owned()))
+            .map(|p| prefer_app_execution_alias(p.to_string_lossy().into_owned()));
+        if let Some(ref path) = resolved {
+            let is_store = path.to_ascii_lowercase().contains("\\windowsapps\\");
+            let is_ssh_spawned = std::env::var("SSH_CONNECTION").is_ok()
+                || std::env::var("SSH_CLIENT").is_ok();
+            if is_store && is_ssh_spawned {
+                if let Ok(classic) = which::which("powershell") {
+                    let classic = classic.to_string_lossy().into_owned();
+                    if !classic.to_ascii_lowercase().contains("\\windowsapps\\") {
+                        return Some(classic);
+                    }
+                }
+                // No classic PowerShell found; cmd.exe is never MSIX-packaged.
+                if let Ok(cmd) = which::which("cmd") {
+                    return Some(cmd.to_string_lossy().into_owned());
+                }
+            }
+        }
+        resolved
     }).as_deref()
 }
 

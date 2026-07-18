@@ -939,6 +939,19 @@ Send-PsmuxCommand "set-option -g mouse on"
 Write-Host "`n=== 19. SHOW-OPTIONS VIA TUI ===" -ForegroundColor Cyan
 
 # show-options via TUI: verify server still responds after each
+#
+# NOTE: `show-options` / `show-options -g` with NO specific option name,
+# run from the interactive TUI command prompt (a persistent connection),
+# opens a `ShowTextPopup` overlay (src/server/connection.rs ~2172-2202) to
+# display the full option list -- unlike `show-options -g <name>` below,
+# which returns a single value directly with no popup. That overlay was
+# never dismissed here, so it stayed on screen and swallowed every
+# keystroke Section 20 sent afterward (Ctrl+B/colon/text/Enter all landed
+# on the popup instead of opening a fresh command prompt), which is what
+# made "RAPID SEQUENTIAL SETS" silently fail 4 of 5 checks -- the psmux
+# window was simply not focused on the command prompt anymore. Send
+# Escape after each bare show-options call to close the popup before
+# moving on.
 Write-Test "TUI show-options"
 Send-PsmuxCommand "show-options"
 Start-Sleep -Milliseconds 300
@@ -948,6 +961,12 @@ if ($r.ok -and $r.resp -match 'mouse') {
 } else {
     Write-Fail "TUI show-options (server not responding)"
 }
+Focus-PsmuxWindow | Out-Null
+Start-Sleep -Milliseconds 300
+[Win32Cfg]::SendEscape()
+Start-Sleep -Milliseconds 300
+[Win32Cfg]::SendEscape()
+Start-Sleep -Milliseconds 500
 
 Write-Test "TUI show-options -g"
 Send-PsmuxCommand "show-options -g"
@@ -958,6 +977,12 @@ if ($r.ok -and $r.resp -match 'mouse') {
 } else {
     Write-Fail "TUI show-options -g (server not responding)"
 }
+Focus-PsmuxWindow | Out-Null
+Start-Sleep -Milliseconds 300
+[Win32Cfg]::SendEscape()
+Start-Sleep -Milliseconds 300
+[Win32Cfg]::SendEscape()
+Start-Sleep -Milliseconds 500
 
 Write-Test "TUI show-options -g mouse"
 Send-PsmuxCommand "show-options -g mouse"

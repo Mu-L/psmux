@@ -900,14 +900,14 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
     match key {
         "status-left" => app.status_left = value.to_string(),
         "status-right" => app.status_right = value.to_string(),
-        "mouse" => app.mouse_enabled = matches!(value, "on" | "true" | "1"),
-        "scroll-enter-copy-mode" => app.scroll_enter_copy_mode = matches!(value, "on" | "true" | "1"),
-        "pwsh-mouse-selection" => app.pwsh_mouse_selection = matches!(value, "on" | "true" | "1"),
-        "mouse-selection" => app.mouse_selection = matches!(value, "on" | "true" | "1"),
-        "paste-detection" => app.paste_detection = matches!(value, "on" | "true" | "1"),
-        "choose-tree-preview" => app.choose_tree_preview = matches!(value, "on" | "true" | "1"),
+        "mouse" => app.mouse_enabled = matches!(value, "on" | "true" | "1" | "yes"),
+        "scroll-enter-copy-mode" => app.scroll_enter_copy_mode = matches!(value, "on" | "true" | "1" | "yes"),
+        "pwsh-mouse-selection" => app.pwsh_mouse_selection = matches!(value, "on" | "true" | "1" | "yes"),
+        "mouse-selection" => app.mouse_selection = matches!(value, "on" | "true" | "1" | "yes"),
+        "paste-detection" => app.paste_detection = matches!(value, "on" | "true" | "1" | "yes"),
+        "choose-tree-preview" => app.choose_tree_preview = matches!(value, "on" | "true" | "1" | "yes"),
         "bold-is-bright" => {
-            app.bold_is_bright = matches!(value, "on" | "true" | "1");
+            app.bold_is_bright = matches!(value, "on" | "true" | "1" | "yes");
             crate::platform::set_bold_is_bright(app.bold_is_bright);
         }
         "prefix" => {
@@ -997,34 +997,34 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
             app.word_separators = value.to_string();
         }
         "renumber-windows" => {
-            app.renumber_windows = matches!(value, "on" | "true" | "1");
+            app.renumber_windows = matches!(value, "on" | "true" | "1" | "yes");
         }
         "mode-keys" => {
             app.mode_keys = value.to_string();
         }
         "focus-events" => {
-            app.focus_events = matches!(value, "on" | "true" | "1");
+            app.focus_events = matches!(value, "on" | "true" | "1" | "yes");
         }
         "monitor-activity" => {
-            app.monitor_activity = matches!(value, "on" | "true" | "1");
+            app.monitor_activity = matches!(value, "on" | "true" | "1" | "yes");
         }
         "visual-activity" => {
-            app.visual_activity = matches!(value, "on" | "true" | "1");
+            app.visual_activity = matches!(value, "on" | "true" | "1" | "yes");
         }
         "remain-on-exit" => {
-            app.remain_on_exit = matches!(value, "on" | "true" | "1");
+            app.remain_on_exit = matches!(value, "on" | "true" | "1" | "yes");
         }
         "destroy-unattached" => {
-            app.destroy_unattached = matches!(value, "on" | "true" | "1");
+            app.destroy_unattached = matches!(value, "on" | "true" | "1" | "yes");
         }
         "exit-empty" => {
-            app.exit_empty = matches!(value, "on" | "true" | "1");
+            app.exit_empty = matches!(value, "on" | "true" | "1" | "yes");
         }
         "aggressive-resize" => {
-            app.aggressive_resize = matches!(value, "on" | "true" | "1");
+            app.aggressive_resize = matches!(value, "on" | "true" | "1" | "yes");
         }
         "set-titles" => {
-            app.set_titles = matches!(value, "on" | "true" | "1");
+            app.set_titles = matches!(value, "on" | "true" | "1" | "yes");
         }
         "set-titles-string" => {
             app.set_titles_string = value.to_string();
@@ -1037,16 +1037,16 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "window-status-current-format" => { app.window_status_current_format = value.to_string(); }
         "window-status-separator" => { app.window_status_separator = value.to_string(); }
         "automatic-rename" => {
-            app.automatic_rename = matches!(value, "on" | "true" | "1");
+            app.automatic_rename = matches!(value, "on" | "true" | "1" | "yes");
         }
         "synchronize-panes" => {
-            app.sync_input = matches!(value, "on" | "true" | "1");
+            app.sync_input = matches!(value, "on" | "true" | "1" | "yes");
         }
         "allow-rename" => {
-            app.allow_rename = matches!(value, "on" | "true" | "1");
+            app.allow_rename = matches!(value, "on" | "true" | "1" | "yes");
         }
         "allow-set-title" => {
-            app.allow_set_title = matches!(value, "on" | "true" | "1");
+            app.allow_set_title = matches!(value, "on" | "true" | "1" | "yes");
         }
         "terminal-overrides" => { /* tmux terminfo override — accepted for compatibility, no-op on Windows */ }
         "default-terminal" => {
@@ -1058,7 +1058,7 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
             app.update_environment = value.split_whitespace().map(|s| s.to_string()).collect();
         }
         "bell-action" => { app.bell_action = value.to_string(); }
-        "visual-bell" => { app.visual_bell = matches!(value, "on" | "true" | "1"); }
+        "visual-bell" => { app.visual_bell = matches!(value, "on" | "true" | "1" | "yes"); }
         "activity-action" => {
             app.activity_action = value.to_string();
         }
@@ -1101,19 +1101,19 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "copy-command" => { app.copy_command = value.to_string(); }
         "set-clipboard" => { app.set_clipboard = value.to_string(); }
         "env-shim" => {
-            app.env_shim = matches!(value, "on" | "true" | "1");
+            app.env_shim = matches!(value, "on" | "true" | "1" | "yes");
         }
         "allow-predictions" => {
-            app.allow_predictions = matches!(value, "on" | "true" | "1");
+            app.allow_predictions = matches!(value, "on" | "true" | "1" | "yes");
         }
         "claude-code-fix-tty" => {
-            app.claude_code_fix_tty = matches!(value, "on" | "true" | "1");
+            app.claude_code_fix_tty = matches!(value, "on" | "true" | "1" | "yes");
         }
         "claude-code-force-interactive" => {
-            app.claude_code_force_interactive = matches!(value, "on" | "true" | "1");
+            app.claude_code_force_interactive = matches!(value, "on" | "true" | "1" | "yes");
         }
         "warm" => {
-            app.warm_enabled = matches!(value, "on" | "true" | "1");
+            app.warm_enabled = matches!(value, "on" | "true" | "1" | "yes");
             if !app.warm_enabled {
                 if let Some(mut wp) = app.warm_pane.take() {
                     wp.child.kill().ok();
