@@ -862,6 +862,38 @@ impl AppState {
         }
     }
 
+    /// Register a newly attached client exactly once.
+    ///
+    /// A persistent connection can deliver more than one attach command for
+    /// the same server-assigned client id.  Treating each command as a new
+    /// client desynchronizes `attached_clients` from `client_registry`, because
+    /// the registry entry is naturally unique while the counter is not.
+    /// Returns `true` only when a new registry entry was inserted.
+    pub fn register_client(&mut self, cid: u64, is_control: bool) -> bool {
+        if self.client_registry.contains_key(&cid) {
+            return false;
+        }
+
+        let tty = format!("/dev/pts/{}", cid);
+        self.client_registry.insert(cid, ClientInfo {
+            id: cid,
+            width: self.last_window_area.width,
+            height: self.last_window_area.height,
+            connected_at: std::time::Instant::now(),
+            last_activity: std::time::Instant::now(),
+            tty_name: tty,
+            is_control,
+        });
+        self.attached_clients = self.attached_clients.saturating_add(1);
+        // Preserve the existing distinction between an interactive TUI client
+        // and a control-mode client: only the former becomes the latest client
+        // used for terminal sizing/input routing.
+        if !is_control {
+            self.latest_client_id = Some(cid);
+        }
+        true
+    }
+
     /// Reap a dead client's `client_registry` entry exactly once, keeping the
     /// `attached_clients` counter in lock-step with the registry.
     ///
