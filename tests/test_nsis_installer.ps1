@@ -48,6 +48,12 @@ foreach ($path in @(
         break
     }
 }
+if (-not $makensis) {
+    # Missing NSIS = missing prerequisite, not a psmux defect: skip the whole
+    # suite cleanly so unattended sweeps count only real failures.
+    Write-Host "[SKIP] NSIS (makensis) not installed - install NSIS to run the installer suite" -ForegroundColor Yellow
+    exit 0
+}
 
 Write-Host "=" * 60
 Write-Host "PSMUX NSIS INSTALLER TEST"

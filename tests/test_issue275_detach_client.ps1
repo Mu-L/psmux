@@ -11,7 +11,7 @@
 #   - detach is GRACEFUL: client-detached hook fires; ClientDetached notification sent
 
 $ErrorActionPreference = "Continue"
-$PSMUX = (Resolve-Path '.\target\release\psmux.exe').Path
+$PSMUX = (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe").Path
 $psmuxDir = "$env:USERPROFILE\.psmux"
 $SESSION = "issue275"
 $script:Passed = 0

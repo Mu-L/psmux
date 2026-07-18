@@ -123,27 +123,37 @@ if (Test-Path $mouseInjector) {
     $state = Get-Dump $conn
     $conn.tcp.Close()
     
+    # dump-state's "NC" (no-change) short-circuit is a server-wide dirty
+    # flag, not per-connection: with a live attached client in the same
+    # session (this test's own $proc, continuously polling dump-state to
+    # redraw), the client's own poll loop almost always wins the race and
+    # consumes the dirty flag before this separate TCP connection's request
+    # lands, so $state legitimately comes back null/"NC" here on a healthy
+    # server. That's a race in *this test's* verification method, not
+    # evidence scroll is broken — so the capture-pane fallback must run
+    # unconditionally instead of being gated behind a successful dump-state.
+    $sawCopyModeInState = $false
     if ($state) {
-        $json = $state | ConvertFrom-Json
-        # Check if copy mode was entered (scroll should trigger copy mode in normal terminal)
-        # The layout object should have copy_mode info
         $stateStr = $state
         if ($stateStr -match '"copy_mode"\s*:\s*true' -or $stateStr -match '"in_copy_mode"\s*:\s*true') {
-            Write-Pass "Mouse wheel UP entered copy mode (scroll works with mouse-selection ON)"
-        } else {
-            # Capture pane to see if content changed (scrolled)
-            $captureAfter = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-            $lastLinesAfter = ($captureAfter -split "`n" | Where-Object { $_ -match "LINE_\d+" }) | Select-Object -Last 3
-            Write-Host "  [INFO] After scroll, last lines: $($lastLinesAfter -join ', ')" -ForegroundColor DarkGray
-            
-            if ($captureAfter -ne $captureBefore) {
-                Write-Pass "Mouse wheel UP changed pane content (scroll works)"
-            } else {
-                Write-Fail "Mouse wheel UP had no effect - SCROLL NOT WORKING with mouse-selection ON"
-            }
+            $sawCopyModeInState = $true
         }
     } else {
-        Write-Fail "Could not get dump-state"
+        Write-Host "  [INFO] dump-state unavailable (client-poll race) - falling back to capture-pane" -ForegroundColor DarkGray
+    }
+    if ($sawCopyModeInState) {
+        Write-Pass "Mouse wheel UP entered copy mode (scroll works with mouse-selection ON)"
+    } else {
+        # Capture pane to see if content changed (scrolled)
+        $captureAfter = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+        $lastLinesAfter = ($captureAfter -split "`n" | Where-Object { $_ -match "LINE_\d+" }) | Select-Object -Last 3
+        Write-Host "  [INFO] After scroll, last lines: $($lastLinesAfter -join ', ')" -ForegroundColor DarkGray
+
+        if ($captureAfter -ne $captureBefore) {
+            Write-Pass "Mouse wheel UP changed pane content (scroll works)"
+        } else {
+            Write-Fail "Mouse wheel UP had no effect - SCROLL NOT WORKING with mouse-selection ON"
+        }
     }
     
     # Exit copy mode if entered
@@ -181,17 +191,26 @@ if (Test-Path $mouseInjector) {
     $state2 = Get-Dump $conn2
     $conn2.tcp.Close()
     
+    # Same dump-state client-poll race as Test 1 (see comment above) - fall
+    # back to capture-pane unconditionally instead of silently skipping the
+    # assertion when $state2 is null.
+    $sawCopyModeInState2 = $false
     if ($state2) {
         $stateStr2 = $state2
         if ($stateStr2 -match '"copy_mode"\s*:\s*true' -or $stateStr2 -match '"in_copy_mode"\s*:\s*true') {
-            Write-Pass "Mouse wheel UP entered copy mode with mouse-selection OFF"
+            $sawCopyModeInState2 = $true
+        }
+    } else {
+        Write-Host "  [INFO] dump-state unavailable (client-poll race) - falling back to capture-pane" -ForegroundColor DarkGray
+    }
+    if ($sawCopyModeInState2) {
+        Write-Pass "Mouse wheel UP entered copy mode with mouse-selection OFF"
+    } else {
+        $captureAfter2 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+        if ($captureAfter2 -ne $captureBefore2) {
+            Write-Pass "Mouse wheel UP changed content with mouse-selection OFF"
         } else {
-            $captureAfter2 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-            if ($captureAfter2 -ne $captureBefore2) {
-                Write-Pass "Mouse wheel UP changed content with mouse-selection OFF"
-            } else {
-                Write-Fail "Mouse wheel UP had NO EFFECT with mouse-selection OFF - BUG CONFIRMED (#245)"
-            }
+            Write-Fail "Mouse wheel UP had NO EFFECT with mouse-selection OFF - BUG CONFIRMED (#245)"
         }
     }
     

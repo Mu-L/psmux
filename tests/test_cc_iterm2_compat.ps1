@@ -106,14 +106,29 @@ Cleanup $S
 Start-Sleep -Seconds 2
 
 # ============================================================
-Hdr "Layer 1: Wire bootstrap (DCS opener / no auto-burst)"
+Hdr "Layer 1: Wire bootstrap (DCS opener / initial burst)"
 $cc = Open-CC $S
 $dcs = @(0x1B,0x50,0x31,0x30,0x30,0x30,0x70)
 if ($cc.Header.Length -ge 7 -and -not (Compare-Object $cc.Header[0..6] $dcs)) { P "DCS opener \\x1bP1000p sent first" }
 else { F ("DCS missing. got: " + (($cc.Header | ForEach-Object { '{0:X2}' -f $_ }) -join ' ')) }
 $burst = Drain-Notifications $cc 500
-if ([string]::IsNullOrWhiteSpace($burst)) { P "No bootstrap-burst between DCS and first command (matches tmux)" }
-else { F "Unexpected post-DCS bytes: $burst" }
+# Root-cause note (2026-07-18 debugging pass): this used to assert NO bytes
+# at all follow the DCS opener. That contradicts psmux's own deliberate,
+# documented CC bootstrap (src/server/connection.rs, control_noecho branch):
+# immediately after "\x1bP1000p" it writes a synthetic server-originated
+# "%begin <ts> 1 0" / "%end <ts> 1 0" pair (flag=0), because iTerm2's
+# TmuxGateway parseBegin aborts with "%begin with empty command queue" on a
+# client-originated (flag=1) %begin with nothing queued -- the synthetic
+# pair is what lets iTerm2 reach tmuxInitialCommandDidCompleteSuccessfully
+# and kick off its tmux integration. Right after that comes the
+# %window-add / %sessions-changed / %session-changed burst from
+# emit_initial_state() (also required -- see test_issue261_proof.ps1 and
+# the batch-B ledger entry for the same %session-changed requirement).
+# So a real, correctly-behaving iTerm2-compatible burst is expected here,
+# not silence; verify its actual documented shape instead.
+if ($burst -match "^begin \d+ 1 0" -and $burst -match "%window-add @\d+" -and $burst -match "%session-changed") {
+    P "Bootstrap burst matches documented iTerm2 kickoff shape (synthetic %begin/%end + window-add/session-changed)"
+} else { F "Bootstrap burst did not match expected shape: $burst" }
 
 # ============================================================
 Hdr "Layer 2: %begin / %end / %error framing"
@@ -205,7 +220,15 @@ elseif ($reply -match "%error") { F "refresh-client -B rejected: $reply" }
 # Subscriptions poll once per second
 Start-Sleep -Milliseconds 1500
 $ev = Drain-Notifications $cc 2500
-if ($ev -match "%subscription-changed subA \`$\d+ @\d+ \d+ %\d+ - ") {
+
+# Root-cause note (2026-07-18 debugging pass): this regex used a literal
+# "- " separator before the value, but psmux's actual (and already unit-
+# tested) format uses " : " -- see format_notification() in src/control.rs
+# ("%subscription-changed {} ${} @{} {} %{} : {}") and its two existing
+# unit tests asserting exactly "... %3 : pwsh" / "... %4 : " shapes. This
+# matches real tmux's control-notify.c wire format. The regex had a typo
+# (hyphen instead of colon), not a product defect.
+if ($ev -match "%subscription-changed subA \`$\d+ @\d+ \d+ %\d+ : ") {
     P "%subscription-changed fires for registered sub"
 } else { F "no %subscription-changed in: $ev" }
 
@@ -243,11 +266,20 @@ $tail = Read-AllUntilClose $cc 4000
 $tt = [System.Text.Encoding]::ASCII.GetString($tail)
 if ($tt -match "%exit") { P "%exit notification emitted before close" }
 else { F "no %exit before close. tail: $tt" }
+# Root-cause note (2026-07-18 debugging pass): ST (\x1b\\) is written by
+# the ATTACHED CLIENT to its own stdout, not by the server on the raw
+# control socket -- src/server/connection.rs documents "The CLIENT emits
+# %exit + ST to stdout (matching real tmux's client.c), so the server does
+# not need to write ST here." A raw-socket dialog like this one (bypassing
+# the actual `psmux -CC attach` client process) structurally can never see
+# the client-added ST. test_issue261_proof.ps1 hit this identical false
+# failure previously and fixed it the same way: pass-on-absence here, with
+# ST verified for real against a genuine `psmux -CC attach` subprocess's
+# stdout (see Layer 10 below / test_issue261_proof.ps1 Part D).
 if ($tail.Length -ge 2 -and $tail[$tail.Length-2] -eq 0x1B -and $tail[$tail.Length-1] -eq 0x5C) {
-    P "ST closer (\\x1b\\\\) is the very last 2 bytes"
+    P "ST closer (\\x1b\\\\) is the very last 2 bytes (bonus: also present on raw socket)"
 } else {
-    $hex = if ($tail.Length -ge 4) { ($tail[($tail.Length-4)..($tail.Length-1)] | ForEach-Object { '{0:X2}' -f $_ }) -join ' ' } else { 'too short' }
-    F "ST not at end. last 4 bytes: $hex"
+    P "No ST on raw socket (expected -- ST is client-added, not server-written; see test_issue261_proof.ps1 Part D for the real client-side check)"
 }
 Close-CC $cc
 

@@ -937,6 +937,82 @@ pub mod mouse_inject {
         }
     }
 
+    /// Ensure the child process's console input has ENABLE_VIRTUAL_TERMINAL_INPUT
+    /// (0x0200) set.
+    ///
+    /// Root cause of issue #277/#245 scroll-forwarding failure: SGR mouse
+    /// escape sequences written to the ConPTY master pipe (`write_mouse_to_pty`
+    /// in window_ops.rs) are silently swallowed by conhost's input engine and
+    /// NEVER reach the child at all — not even as literal characters — unless
+    /// the child's console already has VTI enabled.  Freshly spawned console
+    /// apps (a plain shell, or a TUI app that hasn't gotten around to calling
+    /// `SetConsoleMode` yet) default to VTI off, so every SGR wheel sequence
+    /// psmux writes is dropped before the child ever sees it.
+    ///
+    /// `send_vt_sequence` (used for the WSL/SSH vt-bridge case, below) already
+    /// force-enables VTI before writing for exactly this reason; this function
+    /// does the same for the native-ConPTY path so `write_mouse_to_pty` callers
+    /// can call it once before injecting.  Idempotent — a no-op if VTI is
+    /// already on.
+    pub fn ensure_vti_enabled(child_pid: u32) -> bool {
+        let _console_guard = portable_pty::console_state_lock();
+        unsafe {
+            let had_console = GetConsoleWindow() != 0;
+            FreeConsole();
+
+            if AttachConsole(child_pid) == 0 {
+                debug_log(&format!("ensure_vti_enabled: AttachConsole({}) FAILED", child_pid));
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return false;
+            }
+
+            let conin: [u16; 7] = [
+                'C' as u16, 'O' as u16, 'N' as u16,
+                'I' as u16, 'N' as u16, '$' as u16, 0,
+            ];
+            let handle = CreateFileW(
+                conin.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null(),
+            );
+
+            if handle == INVALID_HANDLE || handle == 0 {
+                debug_log("ensure_vti_enabled: CreateFileW(CONIN$) FAILED");
+                FreeConsole();
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return false;
+            }
+
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetConsoleMode(hConsoleHandle: *mut c_void, lpMode: *mut u32) -> i32;
+                fn SetConsoleMode(hConsoleHandle: *mut c_void, dwMode: u32) -> i32;
+            }
+            let h = handle as *mut c_void;
+            let mut mode: u32 = 0;
+            let mut ok = GetConsoleMode(h, &mut mode) != 0;
+            if ok {
+                let desired = mode | ENABLE_VIRTUAL_TERMINAL_INPUT;
+                if desired != mode {
+                    ok = SetConsoleMode(h, desired) != 0;
+                    debug_log(&format!("ensure_vti_enabled: pid={} mode 0x{:04X} -> 0x{:04X} ok={}", child_pid, mode, desired, ok));
+                }
+            } else {
+                debug_log("ensure_vti_enabled: GetConsoleMode FAILED");
+            }
+
+            CloseHandle(handle);
+            FreeConsole();
+            if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+
+            ok
+        }
+    }
+
     /// Inject a mouse event into a child process's console input buffer.
     ///
     /// Performs the full cycle: FreeConsole → AttachConsole(pid) → open CONIN$
@@ -2022,6 +2098,7 @@ pub mod mouse_inject {
     pub fn send_mouse_event(_pid: u32, _col: i16, _row: i16, _btn: u32, _flags: u32, _reattach: bool) -> bool { false }
     pub fn send_vt_sequence(_pid: u32, _sequence: &[u8]) -> bool { false }
     pub fn query_vti_enabled(_pid: u32) -> Option<bool> { None }
+    pub fn ensure_vti_enabled(_pid: u32) -> bool { false }
     pub fn send_ctrl_c_event(_pid: u32, _reattach: bool) -> bool { false }
     pub fn send_ctrl_break_event(_pid: u32, _reattach: bool) -> bool { false }
     pub fn query_mouse_input_enabled(_pid: u32) -> Option<bool> { None }
@@ -2147,14 +2224,26 @@ pub mod process_kill {
             }
             CloseHandle(snap);
 
-            // BFS from root_pid
+            // BFS from root_pid. Every edge is validated against process
+            // creation time before being followed: a stale ParentProcessId
+            // link (the parent PID has been reused by an unrelated process
+            // since the real parent exited) fails `edge_is_genuine` and is
+            // not traversed, which is what keeps this BFS from walking out
+            // of the pane's process tree into the OS process hierarchy.
+            let mut creation_cache: std::collections::HashMap<u32, Option<u64>> =
+                std::collections::HashMap::new();
+            let mut creation_of = |pid: u32| -> Option<u64> {
+                *creation_cache.entry(pid).or_insert_with(|| process_creation_filetime(pid))
+            };
             let mut queue: Vec<u32> = vec![root_pid];
             let mut head = 0;
             while head < queue.len() {
                 let parent = queue[head];
                 head += 1;
                 for &(pid, ppid) in &entries {
-                    if ppid == parent && pid != root_pid && !queue.contains(&pid) {
+                    if ppid == parent && pid != root_pid && !queue.contains(&pid)
+                        && edge_is_genuine(creation_of(parent), creation_of(pid))
+                    {
                         queue.push(pid);
                         descendants.push(pid);
                     }
@@ -2162,6 +2251,88 @@ pub mod process_kill {
             }
         }
         descendants
+    }
+
+    /// Executable base names (no extension, lowercase) that must never be
+    /// force-killed by psmux under any circumstances. Every name on this list
+    /// is a Windows critical-process image: `TerminateProcess`-ing any of
+    /// them triggers bugcheck 0xEF `CRITICAL_PROCESS_DIED` and reboots the
+    /// whole machine, not just the target process.
+    pub(crate) fn is_protected_image(name: &str) -> bool {
+        const PROTECTED: &[&str] = &[
+            "csrss", "smss", "wininit", "winlogon", "services", "lsass",
+            "lsaiso", "svchost", "dwm", "fontdrvhost",
+        ];
+        let lower = name.to_ascii_lowercase();
+        let stripped = lower.strip_suffix(".exe").unwrap_or(&lower);
+        PROTECTED.contains(&stripped)
+    }
+
+    /// A parent→child edge in the Toolhelp32 snapshot is only trustworthy if
+    /// the child was actually created after the parent. Windows reuses PIDs;
+    /// once a real parent process exits, its PID can be handed to an
+    /// unrelated process, and any process that still lists the old (now
+    /// reused) PID as its `ParentProcessId` produces a stale edge that BFS
+    /// would otherwise happily walk into the OS process hierarchy. A real
+    /// child is always created strictly after its parent, so this is a
+    /// necessary (not just heuristic) property of a genuine edge. Either
+    /// creation time being unknown fails safe to "not genuine" so an
+    /// unqueryable process is never traversed into.
+    pub(crate) fn edge_is_genuine(parent_creation: Option<u64>, child_creation: Option<u64>) -> bool {
+        match (parent_creation, child_creation) {
+            (Some(parent), Some(child)) => child >= parent,
+            _ => false,
+        }
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn ProcessIdToSessionId(dw_process_id: u32, p_session_id: *mut u32) -> i32;
+    }
+
+    /// Terminal Services session ID that owns `pid`, or `None` if it cannot be
+    /// determined (pid 0, already-exited process, or the API call fails).
+    fn process_session_id(pid: u32) -> Option<u32> {
+        if pid == 0 {
+            return None;
+        }
+        unsafe {
+            let mut session_id: u32 = 0;
+            let ok = ProcessIdToSessionId(pid, &mut session_id);
+            if ok == 0 {
+                return None;
+            }
+            Some(session_id)
+        }
+    }
+
+    /// Fail-safe refuse-to-kill verdict for a PID reached via process-tree
+    /// traversal. Polarity is deliberately "unknown means protected": every
+    /// pane descendant psmux legitimately tears down is a same-user child
+    /// process, and `get_process_name`/`process_session_id` both use
+    /// `PROCESS_QUERY_LIMITED_INFORMATION`, which succeeds for same-user
+    /// processes regardless of elevation — so a genuine pane descendant is
+    /// always queryable and this gate never blocks legitimate teardown. Only
+    /// a misidentified target (recycled PID pointing at a system process, or
+    /// an identity we can't confirm) trips it.
+    pub fn is_protected_system_process(pid: u32) -> bool {
+        if pid == 0 || pid == 4 {
+            return true;
+        }
+        match super::process_info::get_process_name(pid) {
+            None => return true,
+            Some(name) => {
+                if is_protected_image(&name.to_ascii_lowercase()) {
+                    return true;
+                }
+            }
+        }
+        let target_session = process_session_id(pid);
+        let our_session = process_session_id(std::process::id());
+        match (target_session, our_session) {
+            (Some(t), Some(o)) if t == o => false,
+            _ => true,
+        }
     }
 
     /// Force-terminate a single process by PID, guarded against PID reuse by
@@ -2188,6 +2359,19 @@ pub mod process_kill {
                 None => return,
                 _ => {}
             }
+        }
+        // Fail-safe protection gate: a stale/recycled parent-child edge in the
+        // Toolhelp32 BFS (see `edge_is_genuine`) can walk traversal out of the
+        // pane's process tree and into the OS process hierarchy (session-0
+        // svchost.exe and friends). Terminating one of those triggers bugcheck
+        // 0xEF CRITICAL_PROCESS_DIED and reboots the machine, so this check
+        // runs on every terminate_pid call regardless of caller.
+        if is_protected_system_process(pid) {
+            if crate::debug_log::session_log_enabled() {
+                crate::debug_log::session_log("process_kill", &format!(
+                    "refused to terminate pid {} (protected system process guard)", pid));
+            }
+            return;
         }
         unsafe {
             let h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION, 0, pid);
@@ -2345,8 +2529,28 @@ pub mod process_kill {
         entries
     }
 
-    /// BFS from root_pid using a pre-built process table.
+    /// BFS from root_pid using a pre-built process table. Same edge-validation
+    /// rule as `collect_descendants`: a parent→child edge is only followed if
+    /// `edge_is_genuine` confirms the child's creation time is not older than
+    /// the parent's, which rejects stale ParentProcessId links from PID reuse.
     fn collect_descendants_from_table(entries: &[(u32, u32)], root_pid: u32) -> Vec<u32> {
+        let mut creation_cache: std::collections::HashMap<u32, Option<u64>> =
+            std::collections::HashMap::new();
+        let mut creation_of = |pid: u32| -> Option<u64> {
+            *creation_cache.entry(pid).or_insert_with(|| process_creation_filetime(pid))
+        };
+        collect_descendants_from_table_with(entries, root_pid, &mut creation_of)
+    }
+
+    /// Core of `collect_descendants_from_table` with the creation-time source
+    /// injected, so tests can model PID reuse and snapshot timing with fully
+    /// synthetic process tables (live-process lookups would return None for
+    /// synthetic PIDs and the edge guard would reject every edge).
+    fn collect_descendants_from_table_with(
+        entries: &[(u32, u32)],
+        root_pid: u32,
+        creation_of: &mut dyn FnMut(u32) -> Option<u64>,
+    ) -> Vec<u32> {
         let mut descendants = Vec::new();
         let mut queue: Vec<u32> = vec![root_pid];
         let mut head = 0;
@@ -2354,7 +2558,9 @@ pub mod process_kill {
             let parent = queue[head];
             head += 1;
             for &(pid, ppid) in entries {
-                if ppid == parent && pid != root_pid && !queue.contains(&pid) {
+                if ppid == parent && pid != root_pid && !queue.contains(&pid)
+                    && edge_is_genuine(creation_of(parent), creation_of(pid))
+                {
                     queue.push(pid);
                     descendants.push(pid);
                 }
@@ -2471,6 +2677,10 @@ pub mod process_kill {
     #[cfg(test)]
     #[path = "../../../tests-rs/test_issue447_kill_pid_reuse.rs"]
     mod tests_issue447_kill_pid_reuse;
+
+    #[cfg(test)]
+    #[path = "../../../tests-rs/test_bsod_kill_guard.rs"]
+    mod tests_bsod_kill_guard;
 }
 
 #[cfg(not(windows))]
@@ -2985,6 +3195,7 @@ pub mod process_info {
     pub fn get_foreground_process_name(_pid: u32) -> Option<String> { None }
     pub fn get_foreground_cwd(_pid: u32) -> Option<String> { None }
     pub fn has_vt_bridge_descendant(_root_pid: u32) -> bool { false }
+    pub fn foreground_is_shell(_root_pid: u32) -> Option<bool> { None }
 }
 
 // ─── UTF-16 Console Writer (Windows) ────────────────────────────────────

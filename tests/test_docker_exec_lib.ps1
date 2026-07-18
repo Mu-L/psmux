@@ -34,7 +34,13 @@ $script:DockerExe     = $null
 function Resolve-DockerEnv {
     $cmd = Get-Command docker -EA SilentlyContinue
     $script:DockerExe = if ($cmd) { $cmd.Source } else { "C:\Program Files\Docker\Docker\resources\bin\docker.exe" }
-    if (-not (Test-Path $script:DockerExe)) { throw "docker CLI not found" }
+    # An absent docker environment is a missing PREREQUISITE, not a psmux
+    # failure: skip the suite (exit 0) so unattended sweeps count only real
+    # defects. Mid-test docker errors below still throw/fail as before.
+    if (-not (Test-Path $script:DockerExe)) {
+        Write-Host "[SKIP] docker CLI not found - docker suites need docker\Run-PsmuxDev.ps1 environment" -ForegroundColor Yellow
+        exit 0
+    }
     $candidates = @(
         $env:DOCKER_HOST,
         "npipe:////./pipe/docker_engine",
@@ -49,7 +55,8 @@ function Resolve-DockerEnv {
             return
         }
     }
-    throw "container '$($script:ContainerName)' not running on any docker endpoint - run docker\Run-PsmuxDev.ps1 first (and build/install psmux inside)"
+    Write-Host "[SKIP] container '$($script:ContainerName)' not running on any docker endpoint - run docker\Run-PsmuxDev.ps1 first (and build/install psmux inside)" -ForegroundColor Yellow
+    exit 0
 }
 
 # Run a cmd.exe one-liner inside the container. Exit code in $script:CExecExit.

@@ -18,6 +18,13 @@ $ErrorActionPreference = "Stop"
 
 $ctx = New-PsmuxTestEnv -Tag 'rdy'
 $PSMUX = $ctx.PsmuxExe
+# The PSMUX_TEST_* fault-injection hooks are compiled only into debug builds;
+# against a release binary the scenario can never fire, so skip cleanly
+# instead of reporting phantom failures.
+if ($PSMUX -notmatch '\\debug\\') {
+    Write-Host "[SKIP] fault-injection test requires a debug build (binary: $PSMUX)" -ForegroundColor Yellow
+    exit 0
+}
 $ns = Register-PsmuxNamespace -Ctx $ctx -Namespace "rdy"
 $session = "rdy"; $base = "${ns}__${session}"
 $pass = 0; $fail = 0

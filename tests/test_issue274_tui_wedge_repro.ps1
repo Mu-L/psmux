@@ -223,7 +223,7 @@ Write-Host "`n=== PART B: TUI Client + Keystroke Navigation ===" -ForegroundColo
 $injectorExe = "$env:TEMP\psmux_injector.exe"
 $injectorSrc = Join-Path (Split-Path $PSMUX -Parent) "..\Documents\workspace\psmux\tests\injector.cs"
 if (-not (Test-Path $injectorSrc)) {
-    $injectorSrc = "C:\Users\uniqu\Documents\workspace\psmux\tests\injector.cs"
+    $injectorSrc = "$PSScriptRoot\injector.cs"
 }
 $needCompile = (-not (Test-Path $injectorExe)) -or ((Test-Path $injectorSrc) -and (Get-Item $injectorSrc).LastWriteTime -gt (Get-Item $injectorExe -EA SilentlyContinue).LastWriteTime)
 if ($needCompile -and (Test-Path $injectorSrc)) {

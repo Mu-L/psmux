@@ -10,6 +10,18 @@
 # renderer is dropping per-cell colors.
 
 $ErrorActionPreference = "Continue"
+# This test's OWN pipeline decodes capture-pane's stdout (via `& $PSMUX ... |
+# Out-String`) and then does a literal-character IndexOf() against the U+2502
+# box-drawing glyph. Without forcing this process's own console/pipeline
+# encoding to UTF-8, PowerShell decodes the external process's UTF-8 bytes
+# for that multi-byte glyph using the ambient system codepage (e.g. CP437),
+# mangling it into bytes that never equal the literal char below — even
+# though the actual bytes captured from psmux are correct UTF-8 (verified
+# independently via a raw-byte read, which shows `\e[0;90m|SGR90\e[0m` with
+# the correct SGR immediately before the box char). Set it the same way the
+# embedded repro script already does for its own (inner) process.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $OUTER = "issue263_outer"
 $INNER = "issue263_inner"
@@ -135,7 +147,14 @@ foreach ($e in $expected) {
     }
     $beforeBar = $matchLine.Substring(0, $barIndex)
     $sgrRx = [regex]::new("$ESC\[([^m]*)m")
-    $sgrs = $sgrRx.Matches($beforeBar) | ForEach-Object { $_.Groups[1].Value }
+    # Force an array with @(...): when Matches() returns exactly one hit,
+    # `| ForEach-Object` unwraps the pipeline to a bare string scalar instead
+    # of a 1-element array. Indexing a *string* with [-1] returns its last
+    # CHARACTER (e.g. "0;90"[-1] -> '0'), not "the last regex match" — so
+    # every single-match case silently compared against a stray trailing
+    # digit instead of the real SGR value. That, not a rendering defect,
+    # is why this looked like a live-render color bug (issue #263 DECIDE).
+    $sgrs = @($sgrRx.Matches($beforeBar) | ForEach-Object { $_.Groups[1].Value })
     if (-not $sgrs) { $sgrs = @() }
     $lastSgr = if ($sgrs.Count -gt 0) { $sgrs[-1] } else { "(none)" }
 

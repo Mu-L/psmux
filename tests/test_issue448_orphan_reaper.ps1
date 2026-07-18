@@ -24,12 +24,22 @@ $script:TestsFailed = 0
 function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
 
+# .pid registry bodies are "pid" OR "pid:creation_filetime" (PR #404 format).
+# Always strip the creation-time suffix before handing the value to Get-Process.
+function Parse-Pid($raw) {
+    if ($null -eq $raw) { return $null }
+    return ([string]$raw).Trim().Split(':')[0]
+}
 function Is-PidAlive($procId) {
-    $p = Get-Process -Id $procId -EA SilentlyContinue
+    $procId = Parse-Pid $procId
+    if (-not ($procId -match '^\d+$')) { return $false }
+    $p = Get-Process -Id ([int]$procId) -EA SilentlyContinue
     return ($null -ne $p -and -not $p.HasExited)
 }
 function Is-PsmuxPid($procId) {
-    $p = Get-Process -Id $procId -EA SilentlyContinue
+    $procId = Parse-Pid $procId
+    if (-not ($procId -match '^\d+$')) { return $false }
+    $p = Get-Process -Id ([int]$procId) -EA SilentlyContinue
     return ($null -ne $p -and $p.ProcessName -eq 'psmux')
 }
 function ListenPid($port) {
@@ -56,7 +66,7 @@ $pidFile  = "$psmuxDir\reap_pidproof.pid"
 $portFile = "$psmuxDir\reap_pidproof.port"
 if (Test-Path $pidFile) {
     Write-Pass ".pid file exists for the session"
-    $recordedPid = (Get-Content $pidFile -Raw).Trim()
+    $recordedPid = Parse-Pid (Get-Content $pidFile -Raw)
     $port        = (Get-Content $portFile -Raw).Trim()
     $listenPid   = ListenPid $port
     if ($recordedPid -eq $listenPid) { Write-Pass ".pid ($recordedPid) matches the PID listening on port $port" }

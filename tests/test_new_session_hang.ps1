@@ -24,6 +24,13 @@ $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\psmux_test_helpers.ps1"
 
 $PSMUX = Get-PsmuxExe
+# The PSMUX_TEST_* fault-injection hooks are compiled only into debug builds;
+# against a release binary the scenarios can never fire, so skip cleanly
+# instead of reporting phantom failures.
+if ($PSMUX -notmatch '\\debug\\') {
+    Write-Host "[SKIP] fault-injection test requires a debug build (binary: $PSMUX)" -ForegroundColor Yellow
+    exit 0
+}
 $pass = 0; $fail = 0
 function Write-Result($name, $ok, $msg) {
     if ($ok) { Write-Host "  [PASS] $name" -ForegroundColor Green; $script:pass++ }

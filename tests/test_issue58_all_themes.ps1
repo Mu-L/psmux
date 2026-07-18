@@ -5,6 +5,13 @@
 $ErrorActionPreference="Continue"
 $PSMUX=(Get-Command psmux).Source
 $base="$env:LOCALAPPDATA\Temp\psmux-plugins-check"
+# The theme .ps1 fixtures are external psmux-plugins checkouts (cloned into a
+# Temp dir by hand); when they are absent there is nothing real to test, so
+# skip instead of reporting one phantom failure per theme.
+if(-not(Test-Path "$base\psmux-theme-everforest")){
+  Write-Host "[SKIP] psmux-plugins theme checkouts not present at $base (clone psmux-plugins there to run this suite)" -ForegroundColor Yellow
+  exit 0
+}
 $S="issue58_all"
 $psmuxDir="$env:USERPROFILE\.psmux"
 $pass=0;$fail=0

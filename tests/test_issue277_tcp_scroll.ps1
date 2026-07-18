@@ -127,9 +127,16 @@ if ($capCopy2 -ne $capCopy1) {
     Write-Fail "pane-scroll down had no effect in copy mode"
 }
 
-# Exit copy mode
-& $PSMUX send-keys -t $SESSION "q" 2>&1 | Out-Null
-Start-Sleep -Seconds 1
+# Exit copy mode -- ONLY if still in it.  Scrolling up 3 then back down 3
+# returns copy_scroll_offset to 0, which auto-exits copy mode already (tmux
+# parity, see handle_pane_scroll in window_ops.rs).  Blindly sending "q"
+# here without checking would type a literal 'q' into the live shell prompt
+# and corrupt every test that runs after this one.
+$stillInCopy = (& $PSMUX display-message -t $SESSION -p '#{pane_in_mode}' 2>&1 | Out-String).Trim()
+if ($stillInCopy -eq "1") {
+    & $PSMUX send-keys -t $SESSION "q" 2>&1 | Out-Null
+    Start-Sleep -Seconds 1
+}
 
 # ============================================================
 # TEST 4: scroll with mouse-selection OFF still works

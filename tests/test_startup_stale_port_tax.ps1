@@ -40,9 +40,12 @@ function Make-StaleRegistries($n) {
     foreach ($i in 1..$n) {
         $pidFile = "$psmuxDir\taxstale$i.pid"
         if (Test-Path $pidFile) {
-            $p = (Get-Content $pidFile -Raw).Trim()
-            $proc = Get-Process -Id $p -EA SilentlyContinue
-            if ($proc -and $proc.ProcessName -eq "psmux") { Stop-Process -Id $p -Force }
+            # .pid body is "pid" or "pid:creation_filetime" (PR #404); keep the pid part
+            $p = ((Get-Content $pidFile -Raw).Trim().Split(':'))[0]
+            if ($p -match '^\d+$') {
+                $proc = Get-Process -Id ([int]$p) -EA SilentlyContinue
+                if ($proc -and $proc.ProcessName -eq "psmux") { Stop-Process -Id ([int]$p) -Force }
+            }
         }
     }
     Start-Sleep -Seconds 1

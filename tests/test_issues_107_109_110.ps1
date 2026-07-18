@@ -82,7 +82,9 @@ try {
     $cap = Capture-Pane $S107
     $dirName = Split-Path $testDir -Leaf
 
-    if ($cap -match [regex]::Escape($dirName)) {
+    # Flatten line-breaks first: the console wraps long paths mid-name (same
+    # fix 107.4 already carries), so a raw match false-fails on wrapped output.
+    if (($cap -replace "`r?`n", "") -match [regex]::Escape($dirName)) {
         Write-Pass "107.1: split-window -h -c sets CWD (found $dirName)"
     } else {
         Write-Fail "107.1: CWD not set. Expected '$dirName' in output. Got:`n$cap"
@@ -112,7 +114,7 @@ try {
     $cap = Capture-Pane $S107
     $dirName = Split-Path $testDir -Leaf
 
-    if ($cap -match [regex]::Escape($dirName)) {
+    if (($cap -replace "`r?`n", "") -match [regex]::Escape($dirName)) {
         Write-Pass "107.2: split-window -v -c sets CWD (found $dirName)"
     } else {
         Write-Fail "107.2: CWD not set. Expected '$dirName'. Got:`n$cap"
@@ -142,7 +144,7 @@ try {
     $cap = Capture-Pane $S107
     $dirName = Split-Path $testDir -Leaf
 
-    if ($cap -match [regex]::Escape($dirName)) {
+    if (($cap -replace "`r?`n", "") -match [regex]::Escape($dirName)) {
         Write-Pass "107.3: new-window -c sets CWD (found $dirName)"
     } else {
         Write-Fail "107.3: CWD not set. Expected '$dirName'. Got:`n$cap"

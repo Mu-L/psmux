@@ -28,7 +28,7 @@ function Cleanup {
 # Compile the injector
 $injectorExe = "$env:TEMP\psmux_injector.exe"
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-if (Test-Path "tests\injector.cs") {
+if (Test-Path "$PSScriptRoot\injector.cs") {
     & $csc /nologo /optimize /out:$injectorExe tests\injector.cs 2>&1 | Out-Null
     if (-not (Test-Path $injectorExe)) {
         Write-Host "FATAL: injector compilation failed" -ForegroundColor Red

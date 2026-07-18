@@ -12,6 +12,17 @@ function Write-Pass($m){ Write-Host "  [PASS] $m" -ForegroundColor Green; $scrip
 function Write-Fail($m){ Write-Host "  [FAIL] $m" -ForegroundColor Red; $script:Fail++ }
 function Cleanup { & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null; Start-Sleep -Milliseconds 400; Remove-Item "$psmuxDir\$SESSION.*" -Force -EA SilentlyContinue }
 
+# The theme .ps1 fixture is an external psmux-plugins checkout (cloned by
+# hand into a Temp dir, same fixture test_issue58_all_themes.ps1 depends
+# on); when it's absent there is nothing real to test -- every "got NONE"
+# below would just be this file not being found, not a separator-wiring
+# regression -- so skip instead of reporting phantom failures, matching
+# test_issue58_all_themes.ps1's existing guard for the identical fixture.
+if (-not (Test-Path $PLUGIN)) {
+    Write-Host "[SKIP] psmux-plugins theme checkout not present at $PLUGIN (clone psmux-plugins there to run this suite)" -ForegroundColor Yellow
+    exit 0
+}
+
 Cleanup
 & $PSMUX new-session -d -s $SESSION
 Start-Sleep -Seconds 3

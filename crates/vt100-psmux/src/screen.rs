@@ -719,9 +719,21 @@ impl Screen {
     }
 
     /// Returns whether the alternate screen is currently in use.
+    ///
+    /// Gated on `allow_alternate_screen` (#88): when the option is off,
+    /// `enter_alternate_grid`/`exit_alternate_grid` still use the alt grid
+    /// internally as scratch space so `exit_alternate_grid` can flush its
+    /// visible rows into the main grid's scrollback (see that function),
+    /// so `MODE_ALTERNATE_SCREEN` still gets set for that bookkeeping.
+    /// But from the caller's point of view `alternate-screen off` means
+    /// psmux deliberately does not honour/expose DEC 1049 at all, so every
+    /// consumer of this flag (`#{alternate_on}`, mouse-forwarding-to-child,
+    /// zoom/dim decisions) should see "not in alt screen" the whole time,
+    /// matching the option's documented contract instead of leaking the
+    /// internal scratch-buffer implementation detail.
     #[must_use]
     pub fn alternate_screen(&self) -> bool {
-        self.mode(MODE_ALTERNATE_SCREEN)
+        self.allow_alternate_screen && self.mode(MODE_ALTERNATE_SCREEN)
     }
 
     /// Returns whether the terminal should be in application keypad mode.

@@ -961,11 +961,14 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
 
     // Restore original scrollback offset (no side effects on user view)
     parser.screen_mut().set_scrollback(saved_sb);
-    // Trim trailing all-empty lines: prevents iTerm2 from advancing its
-    // cursor past the actual content on initial attach, which would
-    // otherwise place the first prompt arriving via %output at the
-    // bottom of the window instead of the top.
-    while text.ends_with("\n\n") { text.pop(); }
+    // Do NOT trim trailing blank lines here: this function is only reached
+    // for an explicit -S/-E range (see connection.rs dispatch), and per the
+    // sibling fast-path above (no-scrollback branch), an explicit range must
+    // be honored line for line, including trailing blank rows inside the
+    // range (e.g. `-S -5` on a fresh session with no scrollback should
+    // return the full visible screen, not just the non-blank prefix).
+    // The no-range attach path (capture_active_pane_text) has its own
+    // trim for the iTerm2-initial-attach concern; it is never routed here.
     if text == "\n" { text.clear(); }
     Ok(Some(text))
 }

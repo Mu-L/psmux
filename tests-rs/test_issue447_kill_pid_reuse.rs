@@ -169,10 +169,24 @@ fn creation_filetime_ordering_is_monotonic() {
 /// absent from the pre-snapshot descendant set.
 #[test]
 fn collect_descendants_misses_children_spawned_after_snapshot() {
+    // Synthetic PIDs have no live process to query creation times from, so use
+    // the injectable variant with a synthetic clock where every edge is
+    // genuine (each child created after its parent). Without this, the
+    // BSOD-guard edge validation would (correctly) refuse to traverse
+    // unverifiable PIDs and mask what this test is actually about: one-shot
+    // snapshot timing.
+    let mut clock = |pid: u32| -> Option<u64> {
+        match pid {
+            1000 => Some(100),
+            1001 => Some(200),
+            1002 => Some(300),
+            _ => None,
+        }
+    };
     // Simulated process table AT snapshot time: root 1000 has one child 1001.
     let root = 1000u32;
     let table_at_snapshot: Vec<(u32, u32)> = vec![(root, 1), (1001, root)];
-    let descs_before = collect_descendants_from_table(&table_at_snapshot, root);
+    let descs_before = collect_descendants_from_table_with(&table_at_snapshot, root, &mut clock);
     assert!(
         descs_before.contains(&1001),
         "existing child must be found in the snapshot"
@@ -185,7 +199,7 @@ fn collect_descendants_misses_children_spawned_after_snapshot() {
     // Later, root spawns grandchild 1002 (child of 1001). The kill loop only
     // ever iterates descs_before, so 1002 is NEVER swept -> orphan leak.
     let table_later: Vec<(u32, u32)> = vec![(root, 1), (1001, root), (1002, 1001)];
-    let descs_after = collect_descendants_from_table(&table_later, root);
+    let descs_after = collect_descendants_from_table_with(&table_later, root, &mut clock);
     assert!(
         descs_after.contains(&1002),
         "a fresh snapshot WOULD have found 1002"

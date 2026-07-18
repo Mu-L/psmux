@@ -256,6 +256,7 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
         }
         "base-index" => {
             if let Ok(idx) = value.parse::<usize>() {
+                app.rebase_window_indices(idx);
                 app.window_base_index = idx;
             }
         }

@@ -1065,7 +1065,7 @@ match cmd {
     }
     "dump-state" | "dump" => {
         let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::DumpState(rtx, persistent));
+        let _ = tx.send(CtrlReq::DumpState(rtx, persistent, client_id));
         if let Some(ref rtx_bg) = resp_tx_opt {
             // Persistent mode: hand off to writer thread (non-blocking).
             // This lets the read loop keep processing keys immediately.
@@ -1586,31 +1586,56 @@ match cmd {
     "paste-buffer" | "pasteb" => {
         let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
         let paste_mode = args.iter().any(|a| *a == "-p");
-        let (rtx, rrx) = mpsc::channel::<String>();
         if let Some(ref name) = buf_name {
-            // Try numeric index first for backward compat, else named buffer
+            // Issue #264: an explicitly-named/-indexed buffer that does not
+            // exist must error (matching real tmux's "no buffer <name>"),
+            // not silently no-op. ShowBufferAt/ShowNamedBuffer return `None`
+            // when the buffer is missing, distinct from an empty-but-present
+            // buffer's `Some(String::new())`.
+            let (rtx, rrx) = mpsc::channel::<Option<String>>();
             if let Ok(idx) = name.parse::<usize>() {
                 let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
             } else {
                 let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name.clone()));
             }
-        } else {
-            let _ = tx.send(CtrlReq::ShowBuffer(rtx));
-        }
-        if let Ok(mut text) = rrx.recv() {
-            // Issue #428: when no explicit buffer is named and the internal
-            // paste-buffer stack is empty, fall back to the OS clipboard so
-            // prefix+] pastes externally-copied text (matching Ctrl+Shift+V).
-            if text.is_empty() && buf_name.is_none() {
-                if let Some(clip) = crate::clipboard::read_from_system_clipboard() {
-                    text = clip;
+            match rrx.recv() {
+                Ok(Some(text)) => {
+                    if !text.is_empty() {
+                        if paste_mode {
+                            let _ = tx.send(CtrlReq::SendPaste(text));
+                        } else {
+                            let _ = tx.send(CtrlReq::SendText(text));
+                        }
+                    }
+                }
+                _ => {
+                    let err = format!("no buffer {}\n", name);
+                    if persistent {
+                        let _ = tx.send(CtrlReq::ShowTextPopup("paste-buffer".to_string(), format!("ERROR: {}", err.trim_end())));
+                    } else {
+                        let _ = write!(write_stream, "ERROR: {}", err);
+                        let _ = write_stream.flush();
+                    }
                 }
             }
-            if !text.is_empty() {
-                if paste_mode {
-                    let _ = tx.send(CtrlReq::SendPaste(text));
-                } else {
-                    let _ = tx.send(CtrlReq::SendText(text));
+        } else {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ShowBuffer(rtx));
+            if let Ok(mut text) = rrx.recv() {
+                // Issue #428: when no explicit buffer is named and the internal
+                // paste-buffer stack is empty, fall back to the OS clipboard so
+                // prefix+] pastes externally-copied text (matching Ctrl+Shift+V).
+                if text.is_empty() {
+                    if let Some(clip) = crate::clipboard::read_from_system_clipboard() {
+                        text = clip;
+                    }
+                }
+                if !text.is_empty() {
+                    if paste_mode {
+                        let _ = tx.send(CtrlReq::SendPaste(text));
+                    } else {
+                        let _ = tx.send(CtrlReq::SendText(text));
+                    }
                 }
             }
         }
@@ -1634,22 +1659,23 @@ match cmd {
     }
     "show-buffer" | "showb" => {
         let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
-        let (rtx, rrx) = mpsc::channel::<String>();
-        if let Some(name) = buf_name {
+        let text: String = if let Some(name) = buf_name {
+            let (rtx, rrx) = mpsc::channel::<Option<String>>();
             if let Ok(idx) = name.parse::<usize>() {
                 let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
             } else {
                 let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name));
             }
+            rrx.recv().ok().flatten().unwrap_or_default()
         } else {
+            let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ShowBuffer(rtx));
-        }
-        if let Ok(text) = rrx.recv() {
-            if persistent {
-                let _ = tx.send(CtrlReq::ShowTextPopup("show-buffer".to_string(), text));
-            } else {
-                let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
-            }
+            rrx.recv().unwrap_or_default()
+        };
+        if persistent {
+            let _ = tx.send(CtrlReq::ShowTextPopup("show-buffer".to_string(), text));
+        } else {
+            let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush();
         }
         if !persistent { break; }
     }
@@ -2118,10 +2144,18 @@ match cmd {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name.to_string()));
                 }
                 if let Ok(text) = rrx.recv() {
-                    let resolved = if text.is_empty() && window_scope {
-                        // Fall back to global options when window-scope
-                        // lookup returns empty. Options like pane-base-index
-                        // may only exist at the global level in psmux.
+                    // Options with no real per-window meaning that libtmux/tmuxp
+                    // nonetheless probe via `-w` (issue #321); always resolve these
+                    // to the global value even without `-A`.
+                    const ALWAYS_GLOBAL_FALLBACK: &[&str] = &["pane-base-index", "base-index", "mouse"];
+                    let should_fallback = window_scope
+                        && (has_a || ALWAYS_GLOBAL_FALLBACK.contains(&name));
+                    let resolved = if text.is_empty() && should_fallback {
+                        // Fall back to global/session options. Without -A this only
+                        // applies to the allowlist above; with -A it applies to any
+                        // option so `show-window-options -A -v prefix` still works
+                        // (session-only options must stay empty without -A so they
+                        // don't leak through show-window-options, see #showw_sendkeys_p).
                         let (frtx, frrx) = mpsc::channel::<String>();
                         let _ = tx.send(CtrlReq::ShowOptionValue(frtx, name.to_string()));
                         frrx.recv().unwrap_or_default()
@@ -2672,7 +2706,17 @@ match cmd {
     }
     "run-shell" | "run" => {
         let background = args.iter().any(|a| *a == "-b");
-        let cmd_parts: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        // Only strip run-shell's OWN "-b" flag. A blind `!a.starts_with('-')`
+        // filter here also deleted flags belonging to the wrapped shell
+        // command itself (e.g. `run-shell psmux new-window -n X -c 'dir'`
+        // lost both -n and -c, `run-shell psmux set-option -g @o v` lost
+        // -g), silently mangling the command into positional garbage. This
+        // was the root cause of #402's "[A] command-prompt single-quoted -c
+        // FAILS" case: the interactive command-prompt/TCP path reaches this
+        // arm directly, while the stored-bind path (fixed in eb5bee1) goes
+        // through commands.rs::execute_command_string_single, which already
+        // does an exact "-b" match instead of a starts_with prefix filter.
+        let cmd_parts: Vec<&str> = args.iter().filter(|a| **a != "-b").copied().collect();
         let shell_cmd = cmd_parts.join(" ");
         // Strip only a BALANCED pair of outer wrapping quotes, e.g.
         // run-shell "'~/plugins/foo.tmux'" -> ~/plugins/foo.tmux.
@@ -3511,17 +3555,20 @@ fn dispatch_control_command(
         }
         "show-buffer" | "showb" => {
             let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
-            let (rtx, rrx) = mpsc::channel::<String>();
-            if let Some(name) = buf_name {
+            let text: Option<String> = if let Some(name) = buf_name {
+                let (rtx, rrx) = mpsc::channel::<Option<String>>();
                 if let Ok(idx) = name.parse::<usize>() {
                     let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
                 } else {
                     let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name));
                 }
+                rrx.recv_timeout(Duration::from_secs(5)).ok().flatten()
             } else {
+                let (rtx, rrx) = mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::ShowBuffer(rtx));
-            }
-            if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
+                rrx.recv_timeout(Duration::from_secs(5)).ok()
+            };
+            if let Some(text) = text {
                 let _ = resp_tx.send(text);
             }
             true
@@ -3804,7 +3851,7 @@ fn dispatch_control_command(
         }
         "dump-state" | "dump" => {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::DumpState(rtx, false));
+            let _ = tx.send(CtrlReq::DumpState(rtx, false, client_id));
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);
             }

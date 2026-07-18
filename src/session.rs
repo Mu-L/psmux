@@ -704,16 +704,35 @@ fn probe_auth_identity(addr: std::net::SocketAddr, key: &str) -> Result<AuthProb
 /// that grabbed the same port after a crash or reboot — that false "alive"
 /// is exactly what left dead sessions showing `(not responding)` in the
 /// picker. This probe instead requires the AUTH key to match:
-///   - connection refused on every attempt        -> `Stale`
+///   - connection refused (or a full timeout with zero response) on every
+///     attempt                                    -> `Stale`
 ///   - server accepts our key (`OK`)              -> `Alive`
 ///   - server rejects our key (`ERROR`, reused port) -> `Stale`
 ///   - anything ambiguous (no reply, slow, foreign process) -> `Inconclusive`
 ///
 /// Only definitive signals delete a file; ambiguous ones are left for the
 /// boot-time guard, so a live-but-busy server is never reaped by mistake.
+///
+/// Issue #7 batch D: some environments (confirmed on this host via a raw
+/// `TcpClient.BeginConnect`/`WaitOne` probe against several unbound loopback
+/// ports) never return an immediate ECONNREFUSED for a closed loopback
+/// port — the SYN is silently dropped and the connect attempt runs the full
+/// `STALE_PORT_CONNECT_TIMEOUT` before giving up, surfacing as
+/// `ErrorKind::TimedOut` rather than `ConnectionRefused`. The original code
+/// treated any `TimedOut` as ambiguous ("maybe a live-but-slow server"),
+/// which on such a host means the network probe can NEVER return `Stale` —
+/// orphaned `.port`/`.key` files with no `.pid` anchor (the only registry
+/// shape old enough to still reach this probe) are kept forever. A real
+/// live server on loopback completes the AUTH handshake in well under a
+/// millisecond; three full timeouts in a row with no byte of response ever
+/// received is just as definitive a "nothing is there" signal as an
+/// instant refusal, so treat it the same — but ONLY when every attempt saw
+/// refused/timed-out and nothing else (any actual response, however
+/// unparseable, still keeps the conservative `Inconclusive` verdict).
 fn probe_session_for_cleanup(key: &str, port: u16) -> PortProbeResult {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut saw_refused = false;
+    let mut saw_timed_out = false;
     let mut saw_inconclusive = false;
 
     for attempt in 0..STALE_PORT_PROBE_ATTEMPTS {
@@ -734,6 +753,7 @@ fn probe_session_for_cleanup(key: &str, port: u16) -> PortProbeResult {
             }
             Ok(AuthProbe::Unknown) => saw_inconclusive = true,
             Err(ErrorKind::ConnectionRefused) => saw_refused = true,
+            Err(ErrorKind::TimedOut) => saw_timed_out = true,
             Err(_) => saw_inconclusive = true,
         }
 
@@ -742,10 +762,11 @@ fn probe_session_for_cleanup(key: &str, port: u16) -> PortProbeResult {
         }
     }
 
-    if saw_refused && !saw_inconclusive {
+    if (saw_refused || saw_timed_out) && !saw_inconclusive {
         if crate::debug_log::session_log_enabled() {
-            crate::debug_log::session_log("probe",
-                &format!("port {}: connection refused on all attempts -> stale", port));
+            crate::debug_log::session_log("probe", &format!(
+                "port {}: refused/timed-out on every attempt (refused={}, timed_out={}) -> stale",
+                port, saw_refused, saw_timed_out));
         }
         PortProbeResult::Stale
     } else {

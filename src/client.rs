@@ -3005,6 +3005,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         }
                                     }
                                 }
+                                // Issue #259 (batch D): sort by label so the picker's order is
+                                // deterministic, matching the tree_chooser's established
+                                // convention (session.rs::list_all_sessions_tree sorts by name)
+                                // and the g/G Home/End contract. Without this, order followed
+                                // raw directory-enumeration order, which the Win32 API
+                                // explicitly does not guarantee to be stable or alphabetical.
+                                targets.sort_by(|a, b| a.0.cmp(&b.0));
                                 let verdicts = crate::session::classify_sessions_parallel(
                                     targets,
                                     Duration::from_millis(50),

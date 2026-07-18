@@ -2358,7 +2358,14 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // Issue #264: paste-buffer -b <missing> must error (matching
+                // real tmux's "no buffer <name>"), so read the server's
+                // response instead of firing-and-forgetting.
+                let resp = send_control_with_response(cmd)?;
+                if let Some(msg) = resp.strip_prefix("ERROR: ") {
+                    eprintln!("psmux: {}", msg.trim_end());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // set-buffer - Set buffer contents
@@ -2914,11 +2921,17 @@ fn run_main() -> io::Result<()> {
                 // Validate that known integer-valued options receive a numeric value,
                 // erroring (nonzero exit) like tmux instead of silently accepting junk.
                 {
+                    // NOTE: "lock-after-time" is intentionally excluded. Unlike the
+                    // options below, psmux has no real numeric business logic for it
+                    // anywhere server-side -- config.rs stores it as an opaque
+                    // user_options passthrough (locking isn't implemented), so gating
+                    // it here just made the CLI reject values the server itself
+                    // accepts unchecked, breaking round-trip (task #7 batch A bug 1).
                     const INT_OPTS: &[&str] = &[
                         "history-limit", "escape-time", "display-time", "display-panes-time",
                         "repeat-time", "message-limit", "status-interval", "base-index",
                         "pane-base-index", "status-left-length", "status-right-length",
-                        "lock-after-time", "history-file-limit",
+                        "history-file-limit",
                     ];
                     // Collect positional (non-flag) args, skipping -t's value.
                     let mut positionals: Vec<&str> = Vec::new();

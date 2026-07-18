@@ -134,6 +134,15 @@ pub struct Pane {
     /// When false, the child expects VT SGR mouse sequences (nvim, vim).
     /// Refreshed every 2 seconds.
     pub mouse_input_cache: Option<(Instant, bool)>,
+    /// Cached foreground-process classification for the scroll-wheel
+    /// alternate-scroll decision (issue #277): `(timestamp, is_shell,
+    /// foreground_exe_name)`. `is_shell` mirrors
+    /// `platform::process_info::foreground_is_shell`'s tri-state contract
+    /// (only a confirmed non-shell foreground enables alternate-scroll);
+    /// `foreground_exe_name` is used to special-case legacy DOS-heritage
+    /// pagers (`more.com`) that don't consume arrow keys. Refreshed every
+    /// 2 seconds, same TTL as the other mouse-inject detectors above.
+    pub scroll_fg_cache: Option<(Instant, bool, Option<String>)>,
     /// Last cursor shape requested by the child process via DECSCUSR (`\x1b[N q`).
     /// 0 = no override (use PSMUX_CURSOR_STYLE default), 1-6 = DECSCUSR values.
     pub cursor_shape: std::sync::Arc<std::sync::atomic::AtomicU8>,
@@ -926,6 +935,24 @@ impl AppState {
         }
     }
 
+    /// Shift every existing window's display index by the delta between the
+    /// old and new `base-index` value. Without this, `window_indices` (baked
+    /// in at window-creation time) keeps showing the base-index that was in
+    /// effect when each window was created, so `set-option base-index` after
+    /// session start silently had no visible effect on #I / find-window
+    /// (task #7 batch A bug 3). Real tmux applies base-index the same way:
+    /// existing gaps between window numbers are preserved, only the origin
+    /// moves.
+    pub fn rebase_window_indices(&mut self, new_base: usize) {
+        let old_base = self.window_base_index;
+        if !self.window_indices_valid() || new_base == old_base { return; }
+        let delta = new_base as isize - old_base as isize;
+        for wi in self.window_indices.iter_mut() {
+            let shifted = *wi as isize + delta;
+            *wi = shifted.max(0) as usize;
+        }
+    }
+
     /// Keep `windows` and `window_indices` sorted ascending by index, preserving
     /// which window is active by re-resolving `active_idx` via the window id.
     fn resort_windows_by_index(&mut self) {
@@ -1280,7 +1307,7 @@ pub enum CtrlReq {
     ClientAttach(u64),
     ClientDetach(u64),
     DumpLayout(mpsc::Sender<String>),
-    DumpState(mpsc::Sender<String>, bool),  // (resp, allow_nc)
+    DumpState(mpsc::Sender<String>, bool, u64),  // (resp, allow_nc, client_id)
     SendText(String),
     SendKey(String),
     SendPaste(String),
@@ -1377,9 +1404,11 @@ pub enum CtrlReq {
     ListBuffers(mpsc::Sender<String>),
     ListBuffersFormat(mpsc::Sender<String>, String),
     ShowBuffer(mpsc::Sender<String>),
-    ShowBufferAt(mpsc::Sender<String>, usize),
-    /// Show a named buffer by name
-    ShowNamedBuffer(mpsc::Sender<String>, String),
+    /// `None` means no buffer exists at that index (issue #264: lets callers
+    /// like paste-buffer distinguish "buffer not found" from "empty buffer").
+    ShowBufferAt(mpsc::Sender<Option<String>>, usize),
+    /// Show a named buffer by name. `None` means no such named buffer exists.
+    ShowNamedBuffer(mpsc::Sender<Option<String>>, String),
     DeleteBuffer,
     DeleteBufferAt(usize),
     /// Delete a named buffer by name
@@ -1985,3 +2014,7 @@ mod tests_kill_descendants_option;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue450_heal_option.rs"]
 mod tests_issue450_heal_option;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_base_index_rebase.rs"]
+mod tests_base_index_rebase;

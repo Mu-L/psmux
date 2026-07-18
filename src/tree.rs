@@ -249,14 +249,25 @@ pub fn resize_all_panes(app: &mut AppState) {
         _ => 0,
     };
     
-    fn resize_node(node: &mut Node, rects: &[(Vec<usize>, Rect)], path: &mut Vec<usize>, border_rows: u16) {
+    fn resize_node(node: &mut Node, rects: &[(Vec<usize>, Rect)], path: &mut Vec<usize>, border_rows: u16, zoom_active_path: Option<&Vec<usize>>) {
         match node {
             Node::Leaf(pane) => {
+                // Skip resize for panes hidden by zoom. `split_with_gaps`'s
+                // minimum-1-cell steal (added for window-preview thumbnails)
+                // means a hidden sibling's computed rect is NOT reliably 0x0
+                // any more — it can be stolen up to 1-2 cells — so checking
+                // `rect.width == 0 || rect.height == 0` alone no longer
+                // detects every zoomed-out pane. Compare against the actual
+                // zoom invariant instead: any leaf whose path isn't exactly
+                // the zoomed window's active_path is on a hidden branch
+                // (fixes #44, #45 — resizing a hidden pane corrupts its
+                // terminal buffer: lines get reflowed to 1-2 column width
+                // and the cursor position is lost).
+                if let Some(ap) = zoom_active_path {
+                    if path != ap { return; }
+                }
                 if let Some((_, rect)) = rects.iter().find(|(p, _)| p == path) {
-                    // Skip resize for panes hidden by zoom (size 0 in either
-                    // dimension).  Resizing a hidden pane to 1x1 corrupts its
-                    // terminal buffer — lines get reflowed to 1-column width
-                    // and the cursor position is lost.  (fixes #44, #45)
+                    // Fallback/legacy guard: also skip on a literal 0x0 rect.
                     if rect.width == 0 || rect.height == 0 {
                         return;
                     }
@@ -283,7 +294,7 @@ pub fn resize_all_panes(app: &mut AppState) {
             Node::Split { children, .. } => {
                 for (i, child) in children.iter_mut().enumerate() {
                     path.push(i);
-                    resize_node(child, rects, path, border_rows);
+                    resize_node(child, rects, path, border_rows, zoom_active_path);
                     path.pop();
                 }
             }
@@ -303,14 +314,17 @@ pub fn resize_all_panes(app: &mut AppState) {
         // The client renders the zoomed pane using the full area, so the PTY
         // must also be sized to the full area — otherwise the bottom/right
         // edge shows blank rows/columns.
-        if win.zoom_saved.is_some() {
+        let zoom_active_path = if win.zoom_saved.is_some() {
             let active_path = win.active_path.clone();
             if let Some((_, rect)) = rects.iter_mut().find(|(p, _)| *p == active_path) {
                 *rect = area;
             }
-        }
+            Some(active_path)
+        } else {
+            None
+        };
         let mut path = Vec::new();
-        resize_node(&mut win.root, &rects, &mut path, border_status_rows);
+        resize_node(&mut win.root, &rects, &mut path, border_status_rows, zoom_active_path.as_ref());
     }
 }
 

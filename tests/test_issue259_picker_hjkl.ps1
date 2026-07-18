@@ -217,12 +217,23 @@ function Test-NavViaInjection {
     # Inject:  Ctrl+B  pause  s  pause  <NavKey>  pause  Enter
     & $injectorExe $proc.Id "^b{SLEEP:400}s{SLEEP:600}$NavKey{SLEEP:300}{ENTER}" | Out-Null
 
-    # The PSMUX_SWITCH_TO handshake needs a moment to detach + reconnect.
-    Start-Sleep -Seconds 4
-
-    $infoExpect = Query-Attached $ExpectSession
-    $infoStartAfter = Query-Attached $StartSession
-    $switched = ($infoExpect -match "\(attached\)") -and -not ($infoStartAfter -match "\(attached\)")
+    # The PSMUX_SWITCH_TO handshake needs a moment to detach + reconnect
+    # (client-detach on the old server, then run_remote re-attaches to the
+    # new one). A single point-in-time check after a fixed sleep is flaky
+    # under system load (observed: both origin and target briefly showing
+    # detached mid-handshake) -- poll for up to 8s instead of a one-shot
+    # check at 4s, matching the Wait-Session retry pattern used elsewhere
+    # in this file for the same class of async-completion race.
+    $infoExpect = $null
+    $infoStartAfter = $null
+    $switched = $false
+    for ($i = 0; $i -lt 16; $i++) {
+        Start-Sleep -Milliseconds 500
+        $infoExpect = Query-Attached $ExpectSession
+        $infoStartAfter = Query-Attached $StartSession
+        $switched = ($infoExpect -match "\(attached\)") -and -not ($infoStartAfter -match "\(attached\)")
+        if ($switched) { break }
+    }
 
     Add-Result "$NavKey live: client moved $StartSession -> $ExpectSession" $switched ("after: target=`"$infoExpect`" origin=`"$infoStartAfter`"")
 

@@ -203,10 +203,27 @@ function Send-TcpCommand {
 }
 
 function Focus-PsmuxWindow {
-    $hwnd = [Win32Cfg]::FindWindow($null, $SESSION)
+    # Root-cause note: FindWindow(null, $SESSION) and the MainWindowTitle
+    # regex fallback both assume the console window's title equals the
+    # session name -- but psmux (matching real tmux's default `set-titles
+    # off`) never renames the host console window unless the user explicitly
+    # runs `set-titles on`, which this test never does. Confirmed live: a
+    # freshly-launched session's MainWindowTitle is just the exe path (e.g.
+    # "C:\...\psmux.exe"), never the session name, so both title-based
+    # lookups always returned zero. The launching Start-Process call already
+    # gave us the exact process (script-scope $proc) -- use its
+    # MainWindowHandle directly instead of re-discovering it by title.
+    $hwnd = [IntPtr]::Zero
+    if ($script:proc -and -not $script:proc.HasExited) {
+        $script:proc.Refresh()
+        $hwnd = $script:proc.MainWindowHandle
+    }
     if ($hwnd -eq [IntPtr]::Zero) {
-        $proc = Get-Process psmux -EA SilentlyContinue | Where-Object { $_.MainWindowTitle -match $SESSION } | Select-Object -First 1
-        if ($proc) { $hwnd = $proc.MainWindowHandle }
+        $hwnd = [Win32Cfg]::FindWindow($null, $SESSION)
+    }
+    if ($hwnd -eq [IntPtr]::Zero) {
+        $p = Get-Process psmux -EA SilentlyContinue | Where-Object { $_.MainWindowTitle -match $SESSION } | Select-Object -First 1
+        if ($p) { $hwnd = $p.MainWindowHandle }
     }
     if ($hwnd -ne [IntPtr]::Zero) {
         [Win32Cfg]::ShowWindow($hwnd, 9) | Out-Null

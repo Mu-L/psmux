@@ -115,6 +115,20 @@ fn default_shell_name(command: Option<&str>, configured_shell: Option<&str>) -> 
     }
 }
 
+/// Does this `default-shell`/`default-command` string need to be evaluated
+/// fresh at consume time rather than transplanted from a pre-spawned warm
+/// pane? True when it contains a format token (e.g. `#{pane_current_path}`):
+/// that value depends on which pane is active *right now*, at the moment
+/// new-window/split-window runs, so only a cold spawn's `expand_format` call
+/// (which runs then, not at warm-pane pre-spawn time) can resolve it
+/// correctly. A static command with no format tokens is fine to transplant —
+/// `warm_pane_sync` already respawns the pool with that exact command on
+/// change, so the pre-spawned process already matches what a cold spawn
+/// would produce.
+pub(crate) fn default_shell_needs_fresh_eval(default_shell: &str) -> bool {
+    default_shell.contains("#{")
+}
+
 /// Build the command injected to silently re-home a pane's shell to `dir`.
 ///
 /// The trailing clear (`cls` on Windows, `clear` elsewhere) wipes the visible
@@ -122,10 +136,29 @@ fn default_shell_name(command: Option<&str>, configured_shell: Option<&str>) -> 
 /// stays well-formed; the trailing `\r` submits it as one command line. The
 /// leading space asks shells that ignore space-prefixed commands to skip the
 /// history entry (best-effort — not every shell honours it).
+///
+/// Also explicitly syncs the OS-level current directory via
+/// `[System.IO.Directory]::SetCurrentDirectory` (PowerShell only). PowerShell's
+/// `cd`/`Set-Location` updates its own `$PWD` provider location but does NOT
+/// call Win32 `SetCurrentDirectory()`, so the process's PEB — which is what
+/// `#{pane_current_path}` reads via a PEB walk — keeps reporting the
+/// directory the shell was originally spawned in. Normally psmux's own
+/// CWD_SYNC profile hook (`build_psrl_init`) papers over this by wrapping
+/// `Set-Location`, but that hook is skipped whenever `-NoProfile` is in
+/// effect (see `build_default_shell`). Embedding the sync directly in the
+/// injected command keeps the rehome correct regardless of whether that
+/// hook is installed.
 pub(crate) fn rehome_command(dir: &str) -> String {
     let escaped = dir.replace('\'', "''");
     let clear = if cfg!(windows) { "cls" } else { "clear" };
-    format!(" cd '{}'; {}\r", escaped, clear)
+    if cfg!(windows) {
+        format!(
+            " cd '{}'; try {{ [System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath) }} catch {{}}; {}\r",
+            escaped, clear
+        )
+    } else {
+        format!(" cd '{}'; {}\r", escaped, clear)
+    }
 }
 
 /// Silently re-home an already-running pane's shell to `dir`: inject
@@ -174,7 +207,21 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     // prompt appears instantly — matching wezterm's "instant tab" feel.
     // A `-c <dir>` is honoured by re-homing the transplanted shell (below), so
     // the warm pane is used even when start_dir is set (#107).
-    if command.is_none() && app.warm_pane.is_some() {
+    //
+    // Gated on `!default_shell_needs_fresh_eval(&app.default_shell)`: a
+    // *static* custom `default-shell`/`default-command` is fine to
+    // transplant — `for_post_config`/`for_option_change` already respawn the
+    // warm pane with that exact command, so the pre-spawned process is
+    // semantically identical to a fresh cold spawn (cwd correction still
+    // happens below via `silent_rehome`). But a *dynamic* one containing a
+    // format token like `#{pane_current_path}` cannot be satisfied by
+    // transplanting an already-running process at all — the value has to be
+    // resolved fresh, at consume time, against whichever pane is currently
+    // active, which only the cold path's `expand_format` call does. Bypass
+    // to cold-spawn in that case; mirrors new-session's own warm-claim gate,
+    // which likewise skips warm entirely when a custom config is in play
+    // (see `has_custom_config` in main.rs).
+    if command.is_none() && !default_shell_needs_fresh_eval(&app.default_shell) && app.warm_pane.is_some() {
         let mut wp = app.warm_pane.take().unwrap();
         // Resize to current terminal dimensions if they changed since pre-spawn
         let area = app.last_window_area;
@@ -206,7 +253,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
             }
             let epoch = std::time::Instant::now() - Duration::from_secs(2);
             let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
-            let mut pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
+            let mut pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
             // Honour `-c <dir>`: silently re-home the transplanted warm shell.
             if let Some(dir) = start_dir {
                 silent_rehome(&mut pane, dir);
@@ -288,7 +335,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let pane_id = app.next_pane_id;
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
     app.next_pane_id += 1;
     let win_name = command.map(|c| default_shell_name(Some(c), None)).unwrap_or_else(|| default_shell_name(None, configured_shell));
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
@@ -418,7 +465,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let raw_pane_id = app.next_pane_id;
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
     app.next_pane_id += 1;
     let win_name = std::path::Path::new(&raw_args[0]).file_stem().and_then(|s| s.to_str()).unwrap_or(&raw_args[0]).to_string();
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![raw_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
@@ -505,7 +552,12 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     // cold spawn (~500ms).  Net result: split feels nearly instant.
     // A `-c <dir>` is honoured by re-homing the transplanted shell (below), so
     // the warm pane is used even when start_dir is set (#107).
-    if command.is_none() && app.warm_pane.is_some() {
+    //
+    // Gated on `!default_shell_needs_fresh_eval(...)` — see the matching
+    // comment in `create_window` for why only a *dynamic* default-command
+    // (format-variable-bearing) must bypass the transplant and cold-spawn
+    // instead; a static custom default-shell is safe to transplant.
+    if command.is_none() && !default_shell_needs_fresh_eval(&app.default_shell) && app.warm_pane.is_some() {
         let mut wp = app.warm_pane.take().unwrap();
         let need_resize = rows != wp.rows || cols != wp.cols;
         // #450: never transplant a spare whose shell died in the pool —
@@ -527,7 +579,7 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
             }
             let epoch = std::time::Instant::now() - Duration::from_secs(2);
             let new_pane_id = wp.pane_id;
-            let mut new_pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
+            let mut new_pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
             // Honour `-c <dir>`: silently re-home the transplanted warm shell.
             if let Some(dir) = start_dir {
                 silent_rehome(&mut new_pane, dir);
@@ -590,7 +642,7 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let split_pane_id = app.next_pane_id;
-    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) });
+    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) });
     app.next_pane_id += 1;
     let win = &mut app.windows[app.active_idx];
     replace_leaf_with_split(&mut win.root, &win.active_path, kind, new_leaf);

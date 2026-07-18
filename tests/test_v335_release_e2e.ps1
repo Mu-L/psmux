@@ -62,9 +62,16 @@ Write-Host "Testing fixes since v3.3.4`n" -ForegroundColor Gray
 # TEST 1: Version output (#318 libtmux compat)
 # ────────────────────────────────────────────────
 Write-Host "--- #318: Version output for libtmux ---" -ForegroundColor Yellow
+# NOTE: this suite pins its title to the v3.3.5 release candidate, but the
+# actual fix under test (#318) is the "tmux <ver>" PREFIX for libtmux/tmuxp
+# compat (see src/cli.rs print_version()), not any specific patch version.
+# The version was hardcoded to 3.3.5 at authoring time; every subsequent
+# version bump (now 3.3.6, per Cargo.toml) made this go stale for a reason
+# unrelated to #318. Match the compat contract generically instead of
+# pinning a patch version (task #7 batch A bug 5 DECIDE item).
 Test-Case "psmux -V outputs 'tmux' prefix" {
     $ver = & $PSMUX -V 2>&1
-    $ver -match "^tmux 3\.3\.5"
+    $ver -match "^tmux \d+\.\d+\.\d+"
 }
 
 # ────────────────────────────────────────────────

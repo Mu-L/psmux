@@ -265,10 +265,31 @@ try {
     $N = 30
     $conns = New-Object System.Collections.ArrayList
     $openedOk = 0
+    # Root-cause note: this used to open all N connections first (AUTH only)
+    # and query them for list-sessions in a SEPARATE later pass. The server
+    # enforces a 2000ms "first command must arrive soon after AUTH" read
+    # timeout per connection (server/connection.rs, to bound resources held
+    # by a client that authenticates and never sends anything) -- a real
+    # concurrent client always follows AUTH with PERSISTENT/its first command
+    # immediately, so this is not a resource-starvation bug, it is a
+    # legitimate anti-idle guard. But querying 30 connections sequentially,
+    # each with Read-Reply's up-to-250ms drain wait, means later connections
+    # in the query pass are queried 2000ms+ after THEIR OWN auth -- past the
+    # guard -- so the server had already closed them before their turn came.
+    # Confirmed via a standalone side-by-side repro: connections queried at
+    # ~2400ms+ age since their own AUTH got 0-length replies (exactly
+    # matching the "~8/30 sane" symptom), while issuing the command
+    # immediately after AUTH (this fix) leaves all 30 sane every time.
+    # Query immediately after AUTH (same real-world pattern as every other
+    # scenario in this file) while still keeping all N connections open
+    # simultaneously to exercise concurrent connection handling.
+    $saneReplies = 0
     for ($i = 0; $i -lt $N; $i++) {
         $c = Connect -session $MAIN
         if ($null -ne $c -and $c.AuthReply -match 'OK') {
             $openedOk++
+            $r = Send-OnConn $c 'list-sessions'
+            if ($r -match [regex]::Escape($MAIN)) { $saneReplies++ }
         }
         [void]$conns.Add($c)
     }
@@ -278,13 +299,6 @@ try {
         Write-Fail "CONCURRENT: only $openedOk/$N connections opened+authed"
     }
 
-    # Each open connection issues list-sessions and must get a sane reply.
-    $saneReplies = 0
-    foreach ($c in $conns) {
-        if ($null -eq $c -or $c.AuthReply -notmatch 'OK') { continue }
-        $r = Send-OnConn $c 'list-sessions'
-        if ($r -match [regex]::Escape($MAIN)) { $saneReplies++ }
-    }
     if ($saneReplies -eq $openedOk -and $openedOk -gt 0) {
         Write-Pass "CONCURRENT: all $saneReplies live connections returned a sane listing"
     } else {
@@ -327,12 +341,25 @@ try {
             Write-Fail "FLOOD: only sent $sentOk/$floodCount commands before failure"
         }
 
-        # Server should still be emitting data in response to the burst.
-        $burstReply = Read-Reply $flood 400
-        if ($burstReply -match [regex]::Escape($MAIN)) {
-            Write-Pass "FLOOD: server kept responding during/after the burst (saw $MAIN)"
+        # Server should still be responsive after the burst.
+        # Root-cause note: `list-sessions` on a PERSISTENT connection shows its
+        # result as a TUI popup (CtrlReq::ShowTextPopup -> Mode::PopupMode),
+        # and server/mod.rs deliberately forces state_dirty=true on every loop
+        # tick for as long as ANY popup is open ("always push frames so
+        # interactive content... updates in real-time") -- intentional, so a
+        # live fzf/shell popup redraws smoothly. But this flood never
+        # dismisses the resulting popup, so once it opens the server pushes a
+        # fresh frame to THIS connection roughly every 16ms forever. The old
+        # quiescence-based `Read-Reply` (loop until DataAvailable goes false)
+        # can therefore never return -- confirmed via a standalone repro that
+        # hung 60s+ waiting exactly here while a second, independent
+        # connection proved the server itself was still perfectly responsive.
+        # Verify responsiveness via a brand-new connection instead of reading
+        # from the one connection that will legitimately never go quiet.
+        if (Test-MainAlive) {
+            Write-Pass "FLOOD: server kept responding during/after the burst (fresh connection confirms $MAIN)"
         } else {
-            Write-Fail "FLOOD: server did not return a sane reply after burst (got len=$($burstReply.Length))"
+            Write-Fail "FLOOD: server did not respond via a fresh connection after the burst"
         }
         Close-Conn $flood
     }

@@ -1060,6 +1060,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let mut state_dirty = true;
     let mut cached_dump_state = String::new();
     let mut cached_data_version: u64 = 0;
+    // Issue #7 batch D: the "NC" (no-change) fast path below is a *global*
+    // cache shared by every connection. A brand-new persistent connection
+    // (e.g. a monitoring/test TCP client) that dials in *after* a real
+    // attached TUI client has already gone idle would otherwise receive
+    // "NC" as its very first-ever dump-state response — meaningless to a
+    // client with no prior frame to diff against, and since nothing then
+    // changes, no further response ever gets pushed, so the connection
+    // stalls until the writer thread's 5s timeout kills it. Track which
+    // client_ids have already been served at least one full frame; only
+    // those may receive the "NC" shortcut. Cleared on ClientDetach so this
+    // does not grow unbounded across client reconnects.
+    let mut dump_state_seen_full: std::collections::HashSet<u64> = std::collections::HashSet::new();
     // Cached metadata JSON — windows/tree/prefix change only on structural
     // mutations, so we rebuild them lazily via `meta_dirty`.
     let mut meta_dirty = true;
@@ -1813,6 +1825,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::ClientDetach(cid) => {
+                    // Issue #7 batch D: forget this client_id's dump-state
+                    // "has seen a full frame" bookkeeping so a future
+                    // reconnect (new TCP connection, same or different
+                    // client_id namespace) never wrongly inherits it.
+                    dump_state_seen_full.remove(&cid);
                     // Route through the idempotent reaper so a duplicate detach
                     // for one `cid` (e.g. reader-EOF and writer-teardown both
                     // observing the same dead connection) cannot over-decrement
@@ -1845,7 +1862,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let json = dump_layout_json(&mut app)?;
                     let _ = resp.send(json);
                 }
-                CtrlReq::DumpState(resp, allow_nc) => {
+                CtrlReq::DumpState(resp, allow_nc, dump_client_id) => {
                     // ── Activity / bell / silence detection ──
                     let alert_hooks = helpers::check_window_activity(&mut app);
                     for event in &alert_hooks {
@@ -1928,6 +1945,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         && !has_squelch
                         && !cached_dump_state.is_empty()
                         && cached_data_version == combined_data_version(&app)
+                        && dump_state_seen_full.contains(&dump_client_id)
                     {
                         let _ = resp.send("NC".to_string());
                         continue;
@@ -2002,6 +2020,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // #451: append status-bar style options dropped in the
                     // app.rs->client.rs modularization.
                     helpers::append_extra_style_json(&mut combined_buf, &app);
+                    // Issue #7 batch D: dump-state's JSON never identified which
+                    // session it belonged to (no consumer could tell two
+                    // sessions' dump-state responses apart without a separate
+                    // display-message round trip). Append it alongside the
+                    // other one-off top-level fields.
+                    if combined_buf.ends_with('}') {
+                        combined_buf.pop();
+                        combined_buf.push_str(",\"session_name\":\"");
+                        combined_buf.push_str(&json_escape_string(&app.session_name));
+                        combined_buf.push_str("\"}");
+                    }
                     // Inject overlay state (popup, menu, confirm, display_panes)
                     {
                         // Inject clock_colour if set
@@ -2141,6 +2170,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // The cached copy omits them for NC dedup safety.
                     crate::types::push_frame(&combined_buf);
                     let _ = resp.send(combined_buf.clone());
+                    dump_state_seen_full.insert(dump_client_id);
                 }
                 CtrlReq::SendText(s) => { app.status_message = None; send_text_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::SendKey(k) => { app.status_message = None; send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
@@ -3292,11 +3322,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(content);
                 }
                 CtrlReq::ShowBufferAt(resp, idx) => {
-                    let content = app.paste_buffers.get(idx).cloned().unwrap_or_default();
+                    let content = app.paste_buffers.get(idx).cloned();
                     let _ = resp.send(content);
                 }
                 CtrlReq::ShowNamedBuffer(resp, name) => {
-                    let content = app.named_buffers.get(&name).cloned().unwrap_or_default();
+                    let content = app.named_buffers.get(&name).cloned();
                     let _ = resp.send(content);
                 }
                 CtrlReq::DeleteBuffer => {

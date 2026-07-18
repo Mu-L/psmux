@@ -151,7 +151,7 @@ if ($keys -match "#.*list-buffers") {
 # === Test 6: Compile WriteConsoleInput injector and test prefix+= ===
 Write-Host "`n[Test 6] WriteConsoleInput: prefix + = (choose-buffer via keystroke)" -ForegroundColor Yellow
 $injectorExe = "$env:TEMP\psmux_injector.exe"
-$injectorSrc = "tests\injector.cs"
+$injectorSrc = "$PSScriptRoot\injector.cs"
 if (-not (Test-Path $injectorSrc)) {
     Write-Host "  [SKIP] injector.cs not found, skipping WriteConsoleInput tests" -ForegroundColor DarkYellow
 } else {

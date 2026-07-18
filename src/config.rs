@@ -966,6 +966,7 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "status-justify" => { app.status_justify = value.to_string(); }
         "base-index" => {
             if let Ok(idx) = value.parse::<usize>() {
+                app.rebase_window_indices(idx);
                 app.window_base_index = idx;
             }
         }

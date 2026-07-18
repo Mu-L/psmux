@@ -139,7 +139,8 @@ $p3 = New-Sess $s3
 $serverPid = $null
 for ($i = 0; $i -lt 20; $i++) {
     if (Test-Path "$psmuxDir\$s3.pid") {
-        $serverPid = (Get-Content "$psmuxDir\$s3.pid" -Raw).Trim()
+        # .pid body is "pid" or "pid:creation_filetime" (PR #404); keep the pid part
+        $serverPid = ((Get-Content "$psmuxDir\$s3.pid" -Raw).Trim().Split(':'))[0]
         if ($serverPid -match '^\d+$') { break }
     }
     Start-Sleep -Milliseconds 250

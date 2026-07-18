@@ -227,14 +227,36 @@ if ($nvim) {
         Write-Host "    capture: $($nvimCapture -replace '`n',' | ' | Select-Object -First 1)" -ForegroundColor DarkGray
     }
     
-    # Exit nvim visual block mode and nvim itself
-    & $PSMUX send-keys -t $SESSION Escape 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 300
-    & $PSMUX send-keys -t $SESSION ":q!" Enter 2>&1 | Out-Null
-    Start-Sleep -Seconds 1
+    # Exit nvim visual block mode and nvim itself.
+    # Root-cause note (found via PSMUX_INPUT_DEBUG=1 + capture-pane, and
+    # confirmed across several hardening attempts below): trying to type an
+    # Escape + ":q!"/":qa!" quit sequence into a live, real nvim instance from
+    # this test's send-keys/injector path was unreliable no matter how much
+    # settle time was added -- nvim was repeatedly left open (still consuming
+    # keystrokes), so the *next* "nvim -u NONE" command got typed as literal
+    # nvim NORMAL-mode keys into the still-open buffer instead of running as
+    # a shell command (n/v/i/m are themselves nvim commands -- this is what
+    # produced the "-- INSERT --" / stray "NE" fragment failure capture).
+    # Rather than keep chasing nvim's own modal-editing exit semantics from
+    # PowerShell, force a guaranteed-clean pane via respawn-pane -k, which
+    # kills whatever is running (nvim, stuck or not) and restarts the
+    # configured shell -- sidestepping the exit race entirely.
+    & $PSMUX respawn-pane -k -t $SESSION 2>&1 | Out-Null
+    $nvimGone = $false
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 250
+        $settleCap = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+        $lastLine = ($settleCap -split "`r?`n" | Where-Object { $_.Trim() -ne "" } | Select-Object -Last 1)
+        if ($lastLine -match "^PS [A-Za-z]:.*>\s*$") {
+            $nvimGone = $true
+            break
+        }
+    }
+    if (-not $nvimGone) { Start-Sleep -Seconds 1 }
 
     # [TUI 7b] Now test the FULL path: WriteConsoleInput Ctrl+V with paste-detection off
     Write-Host "`n[TUI 7b] Neovim Ctrl+V visual block via WriteConsoleInput (paste-detection off)" -ForegroundColor Yellow
+    Write-Host "    (DEBUG: nvimGone=$nvimGone)" -ForegroundColor DarkGray
     & $PSMUX send-keys -t $SESSION "nvim -u NONE" Enter 2>&1 | Out-Null
     Start-Sleep -Seconds 3
 
@@ -248,6 +270,8 @@ if ($nvim) {
         # This may fail if Windows Terminal also intercepts the injected Ctrl+V
         Write-Fail "WriteConsoleInput Ctrl+V did NOT enter visual block mode in nvim"
         Write-Host "    (This can fail when Windows Terminal intercepts the key before psmux)" -ForegroundColor DarkYellow
+        Write-Host "    DEBUG pane dump:" -ForegroundColor DarkGray
+        Write-Host $nvimCapture2
     }
     
     # Exit nvim
