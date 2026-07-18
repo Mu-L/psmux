@@ -418,6 +418,24 @@ fn active_pane_in_alt_screen(layout: &LayoutJson) -> bool {
     }
 }
 
+/// Check if the pane with `pane_id` has explicitly enabled a mouse protocol
+/// (DECSET 1000/1002/1003 — the server ships this per leaf as `wants_mouse`).
+/// Used on left-down to decide whether psmux may start its client-side drag
+/// selection: an app that asked for mouse tracking (gaviero, opencode, nvim
+/// with `set mouse=a`, …) implements its own selection and must receive the
+/// drags, not have psmux swallow them and paint an overlay on top.  This is
+/// the per-pane automatic version of the global `mouse-selection off` escape
+/// hatch (issue #245).  Alt-screen alone does NOT qualify, so alt-screen
+/// apps without mouse support (`less`, …) keep psmux selection.
+fn pane_wants_mouse_json(layout: &LayoutJson, pane_id: usize) -> bool {
+    match layout {
+        LayoutJson::Leaf { id, wants_mouse, .. } => *id == pane_id && *wants_mouse,
+        LayoutJson::Split { children, .. } => {
+            children.iter().any(|c| pane_wants_mouse_json(c, pane_id))
+        }
+    }
+}
+
 /// Check if the active pane is in server-side copy mode.
 /// When true, the client should NOT start its own text selection —
 /// the server handles cursor positioning and selection in copy mode.
@@ -880,6 +898,7 @@ pub fn render_layout_json(
             cursor_row,
             cursor_col,
             alternate_screen,
+            wants_mouse: _,
             hide_cursor: _,
             cursor_shape: _,
             active,
@@ -1943,9 +1962,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Issue #269: last OSC 9;4 (host terminal progress) value emitted.
     // Same debounce pattern as host_title.
     let mut last_emitted_host_progress: Option<String> = None;
-    // VT input mode: periodically re-send mouse-enable escape sequences.
-    // Covers SSH sessions and JetBrains JediTerm (which sends VT mouse
-    // sequences through ConPTY instead of native MOUSE_EVENT records).
+    // VT input mode (SSH / JediTerm / WezTerm): used to pick the Win32
+    // caret path below.  The periodic mouse-enable refresh keyed off
+    // last_mouse_enable runs in EVERY input mode via send_mouse_keepalive —
+    // Windows Terminal drops even a local client's mouse registration.
     let is_ssh_mode = crate::ssh_input::needs_vt_input();
     let mut last_mouse_enable = Instant::now();
     // Cygwin pty (issue #474): cadence for the XTWINOPS size poll.
@@ -4027,7 +4047,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                 // drag selection.  In-pane apps (opencode, nvim, etc.)
                                                 // can implement their own mouse selection without
                                                 // psmux drawing on top.  (issue #245)
-                                                if !client_mouse_selection {
+                                                //
+                                                // Per-pane: even with mouse-selection on, yield to a
+                                                // pane whose app explicitly enabled a mouse protocol
+                                                // — it handles its own selection, and the press was
+                                                // already forwarded above; with no client selection
+                                                // active, the Drag/Up arms forward mouse-drag /
+                                                // mouse-up so the app sees the full gesture.
+                                                let pane_handles_mouse =
+                                                    serde_json::from_str::<DumpState>(&prev_dump_buf)
+                                                        .map(|s| pane_wants_mouse_json(&s.layout, pane_id))
+                                                        .unwrap_or(false);
+                                                if !client_mouse_selection || pane_handles_mouse {
                                                     rsel_start = None;
                                                     rsel_end = None;
                                                     rsel_pane_rect = None;
@@ -4102,7 +4133,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                     rsel_dragged = false;
                                                     selection_changed = true;
                                                 }
-                                                } // end if client_mouse_selection
+                                                } // end client-side selection gate (mouse-selection + per-pane wants_mouse)
                                             }
                                         } else {
                                             cmd_batch.push(format!("mouse-down {} {}\n", me.column, me.row));
@@ -4511,12 +4542,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 if writer.write_all(format!("client-size {} {}\n", new_size.0, new_size.1).as_bytes()).is_err() {
                     break; // Connection lost
                 }
-                // SSH: re-send mouse-enable on resize — terminal may reset
-                // mouse reporting mode after a window size change.
-                if is_ssh_mode {
-                    crate::ssh_input::send_mouse_enable();
-                    last_mouse_enable = Instant::now();
-                }
+                // Re-send mouse-enable on resize — the terminal may reset
+                // mouse reporting after a window size change.  A resize is
+                // the known trigger for Windows Terminal dropping a local
+                // client's mouse registration, so this runs in every input
+                // mode (the keepalive routes per mode), not just SSH.
+                crate::ssh_input::send_mouse_keepalive();
+                last_mouse_enable = Instant::now();
             }
         }
 
@@ -6152,11 +6184,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             last_emitted_host_progress = host_progress_this_frame;
         }
 
-        // ── SSH: periodic mouse-enable refresh ───────────────────────
-        // ConPTY or terminal resize can silently disable mouse reporting.
-        // Re-send every 30 seconds to keep mouse working reliably.
-        if is_ssh_mode && last_mouse_enable.elapsed().as_secs() >= 30 {
-            crate::ssh_input::send_mouse_enable();
+        // ── Periodic mouse-enable refresh (ALL input modes) ──────────
+        // ConPTY or terminal resize can silently disable mouse reporting,
+        // and Windows Terminal additionally drops a LOCAL client's mouse
+        // registration outright (mouse dead, keys fine) until the DECSET
+        // bytes are re-sent.  This used to run only in SSH mode, leaving
+        // local sessions mouse-dead until detach/reattach; the keepalive
+        // routes per input mode so it is safe everywhere.
+        if last_mouse_enable.elapsed().as_secs() >= 30 {
+            crate::ssh_input::send_mouse_keepalive();
             last_mouse_enable = Instant::now();
         }
 
@@ -6436,3 +6472,7 @@ mod test_issue345_command_prompt_utf8;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue361_osc8_overlay.rs"]
 mod test_issue361_osc8_overlay;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_wants_mouse_selection.rs"]
+mod test_pane_wants_mouse_selection;

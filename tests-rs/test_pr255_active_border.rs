@@ -12,6 +12,7 @@ fn leaf(id: usize, active: bool) -> LayoutJson {
         cursor_row: 0,
         cursor_col: 0,
         alternate_screen: false,
+        wants_mouse: false,
         hide_cursor: false,
         cursor_shape: 0,
         active,
