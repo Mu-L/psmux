@@ -739,6 +739,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let pty_system = native_pty_system();
 
     let mut app = AppState::new(session_name);
+    // Preinitialize the async #(command) format-job channel (see the
+    // format_job_rx doc in types.rs).
+    {
+        let (fjtx, fjrx) = std::sync::mpsc::channel();
+        app.format_job_tx = Some(fjtx);
+        app.format_job_rx = Some(fjrx);
+    }
     app.socket_name = socket_name;
     app.session_group = group_target;
     // Server starts detached with a reasonable default window size
@@ -5369,6 +5376,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     state_dirty = true;
                 }
+            }
+        }
+        // Drain async #(command) format-job results (non-blocking): refresh the
+        // cache entry and repaint so the fresh output replaces the stale one.
+        if let Some(rx) = app.format_job_rx.as_ref() {
+            while let Ok((cmd, output)) = rx.try_recv() {
+                if let Ok(mut guard) = app.format_shell_cache.lock() {
+                    let now = std::time::Instant::now();
+                    guard.insert(cmd, crate::types::ShellEntry { at: now, value: output, running: false });
+                }
+                state_dirty = true;
             }
         }
         // ── Server-push: proactively send frames to attached clients ──

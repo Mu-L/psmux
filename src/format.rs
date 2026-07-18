@@ -246,53 +246,63 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
     result
 }
 
-/// Execute a shell command and return its stdout (trimmed).
-/// Used for `#(command)` expansion (tmux compatibility).
+/// Expand `#(command)` (tmux compatibility): return the last cached stdout and,
+/// when it is missing or older than the TTL, spawn a background worker to
+/// refresh it. The call never blocks the server loop; the worker's result is
+/// delivered over `format_job_tx` and applied by the drain in the server loop,
+/// which then repaints. Before the first result the expansion is empty.
 ///
-/// Results are cached in `app.format_shell_cache` keyed by the command
-/// string, with TTL = `status-interval` seconds (matching tmux's refresh
-/// semantics for `#(...)`). When `status-interval` is 0, a 1s floor is
-/// used so typing latency is bounded — tmux never repaints fast enough
-/// for the spawn cost to dominate, but our server-push path can fire
-/// ~30 times per second during active TUI redraws.
-///
-/// Cache miss / expiry path spawns a fresh subprocess synchronously.
-/// First call after expiry pays the spawn cost; subsequent calls within
-/// the TTL window return instantly. See issue #272.
+/// Cached in `app.format_shell_cache`, keyed by command string, TTL =
+/// `status-interval` seconds (1s floor). A command already in flight is not
+/// re-spawned, so a burst of pushes runs it at most once per TTL. See issue #272.
 fn run_shell_command(cmd: &str, app: &AppState) -> String {
     let ttl = std::time::Duration::from_secs(app.status_interval.max(1));
 
-    // Fast path: return cached value if still fresh.
-    if let Ok(guard) = app.format_shell_cache.lock() {
-        if let Some((stored_at, value)) = guard.get(cmd) {
-            if stored_at.elapsed() < ttl {
-                return value.clone();
+    let mut guard = match app.format_shell_cache.lock() {
+        Ok(g) => g,
+        Err(_) => return String::new(),
+    };
+
+    // Fast path: a fresh value, returned without spawning. Otherwise capture the
+    // last output + freshness base and decide whether to spawn a refresh worker.
+    let (last_value, base_at, should_spawn) = match guard.get(cmd) {
+        Some(e) => {
+            if e.at.elapsed() < ttl {
+                return e.value.clone();
             }
+            (e.value.clone(), e.at, !e.running)
+        }
+        None => (String::new(), std::time::Instant::now(), true),
+    };
+
+    if should_spawn {
+        if let Some(tx) = app.format_job_tx.as_ref() {
+            let tx = tx.clone();
+            let cmd_owned = cmd.to_string();
+            // Mark in-flight (keeping the old freshness base) before spawning so
+            // other #() expansions in the same push don't double-spawn.
+            guard.insert(cmd.to_string(), crate::types::ShellEntry { at: base_at, value: last_value.clone(), running: true });
+            drop(guard);
+            std::thread::spawn(move || {
+                use std::process::Command;
+                use crate::platform::HideWindowCommandExt;
+                let output = if cfg!(windows) {
+                    Command::new("cmd").args(["/C", &cmd_owned]).hide_window().output()
+                } else {
+                    Command::new("sh").args(["-c", &cmd_owned]).output()
+                };
+                let value = match output {
+                    Ok(o) if o.status.success() => {
+                        String::from_utf8_lossy(&o.stdout).trim().to_string()
+                    }
+                    _ => String::new(),
+                };
+                let _ = tx.send((cmd_owned, value));
+            });
         }
     }
 
-    // Cache miss or expired: spawn the subprocess.
-    use std::process::Command;
-    use crate::platform::HideWindowCommandExt;
-    let output = if cfg!(windows) {
-        Command::new("cmd").args(["/C", cmd]).hide_window().output()
-    } else {
-        Command::new("sh").args(["-c", cmd]).output()
-    };
-    let value = match output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
-        _ => String::new(),
-    };
-
-    // Insert/refresh the cache entry. Lock failures (poisoned) are
-    // ignored — the subprocess already ran, the user still gets output.
-    if let Ok(mut guard) = app.format_shell_cache.lock() {
-        guard.insert(cmd.to_string(), (std::time::Instant::now(), value.clone()));
-    }
-
-    value
+    last_value
 }
 
 /// Escape '%' to '%%' in expanded variable content so chrono's strftime

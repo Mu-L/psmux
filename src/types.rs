@@ -424,6 +424,18 @@ pub struct CopyModeState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FocusDir { Left, Right, Up, Down }
 
+/// One cached `#(command)` expansion: the last output plus the state of any
+/// in-flight background worker refreshing it.
+#[derive(Clone)]
+pub struct ShellEntry {
+    /// When `value` was last refreshed; the TTL base for re-running the command.
+    pub at: std::time::Instant,
+    /// Last run's stdout (trimmed); empty on failure or before the first result.
+    pub value: String,
+    /// A background worker for this command is currently in flight.
+    pub running: bool,
+}
+
 pub struct AppState {
     pub windows: Vec<Window>,
     pub active_idx: usize,
@@ -537,6 +549,12 @@ pub struct AppState {
     pub run_shell_rx: Option<mpsc::Receiver<(String, String)>>,
     /// Sender cloned into each run-shell background thread.
     pub run_shell_tx: Option<mpsc::Sender<(String, String)>>,
+    /// Receiver for async #(command) format-job results (cmd, output).
+    /// Preinitialized in the server loop (unlike run_shell_*) because
+    /// run_shell_command sees only &AppState and can't create it lazily.
+    pub format_job_rx: Option<mpsc::Receiver<(String, String)>>,
+    /// Sender cloned into each #() background worker.
+    pub format_job_tx: Option<mpsc::Sender<(String, String)>>,
     pub session_name: String,
     /// Numeric session ID (tmux-compatible: $0, $1, $2...).
     pub session_id: usize,
@@ -689,7 +707,7 @@ pub struct AppState {
     /// during active typing), which serializes a slow helper (e.g. pwsh
     /// at ~280 ms cold-start) onto the server main loop and lags echo.
     /// Keyed by command string; entries expire after `status_interval`.
-    pub format_shell_cache: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>,
+    pub format_shell_cache: std::sync::Mutex<std::collections::HashMap<String, ShellEntry>>,
     /// status-justify: left, centre, right, absolute-centre
     pub status_justify: String,
     /// main-pane-width: percentage for main pane in main-vertical layout (0 = use 60% heuristic)
@@ -1063,6 +1081,8 @@ impl AppState {
             session_key: String::new(),
             run_shell_rx: None,
             run_shell_tx: None,
+            format_job_rx: None,
+            format_job_tx: None,
             session_name,
             session_id: crate::session::allocate_session_id(),
             socket_name: None,
