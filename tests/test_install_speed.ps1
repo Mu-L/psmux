@@ -33,8 +33,15 @@ function Add-Benchmark {
 }
 
 function Kill-All-Psmux {
+    # psmux ships THREE binaries (psmux.exe, pmux.exe, tmux.exe -- the tmux-compat
+    # alias). A leftover tmux.exe process (e.g. from a tmux-compat test run, or
+    # any real tmux-alias usage) holds the same file the "Cargo: install time"
+    # scenario below tries to overwrite, and `cargo install --path .` fails with
+    # "Access is denied (os error 5)" trying to replace it -- confirmed via a
+    # real leftover tmux.exe process during this suite's own run. Kill it too.
     Get-Process psmux -ErrorAction SilentlyContinue | Stop-Process -Force 2>$null
     Get-Process pmux -ErrorAction SilentlyContinue | Stop-Process -Force 2>$null
+    Get-Process tmux -ErrorAction SilentlyContinue | Stop-Process -Force 2>$null
     Start-Sleep -Milliseconds 500
     Get-ChildItem "$env:USERPROFILE\.psmux\*.port" -ErrorAction SilentlyContinue | Remove-Item -Force
     Get-ChildItem "$env:USERPROFILE\.psmux\*.key" -ErrorAction SilentlyContinue | Remove-Item -Force

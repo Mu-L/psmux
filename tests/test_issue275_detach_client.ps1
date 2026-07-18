@@ -244,7 +244,7 @@ else {
     if ($LASTEXITCODE -eq 0) {
         Write-Pass "TUI: server preserved after client detach (panes still alive)"
     } else {
-        Write-Fail "TUI: server died — detach should not kill server"
+        Write-Fail "TUI: server died, detach should not kill server"
     }
 }
 

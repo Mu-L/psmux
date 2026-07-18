@@ -36,7 +36,8 @@ Start-Sleep -Seconds 3
 # Verify
 $sessions = ssh $SshHost "$PSMUX list-sessions"
 Write-Host "  Sessions: $sessions"
-if ($sessions -notmatch "vt_paste") {
+$sessionsStr = ($sessions | Out-String)
+if ($sessionsStr -notmatch "vt_paste") {
     Write-Host "[FATAL] Session not created" -ForegroundColor Red
     exit 1
 }

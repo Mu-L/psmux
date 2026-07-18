@@ -3,6 +3,13 @@
 # for arrow/rounded/slant, with the expected powerline codepoints.
 
 $ErrorActionPreference = "Continue"
+# Same encoding fix as test_issue58_all_themes.ps1 / test_issue263_nested.ps1:
+# without forcing this process's own console/pipeline encoding to UTF-8,
+# PowerShell mis-decodes psmux's UTF-8 output for the Private Use Area
+# powerline glyphs (U+E0Bx) checked below, producing "got NONE" for every
+# separator even though psmux stores/returns them correctly.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SESSION = "test_issue58_fix"
 $psmuxDir = "$env:USERPROFILE\.psmux"
