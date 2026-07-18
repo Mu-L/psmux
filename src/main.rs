@@ -3794,9 +3794,28 @@ fn run_main() -> io::Result<()> {
         };
         let port_path = crate::paths::port_file(&port_file_base);
 
+        // If a server is ALREADY alive under this exact name (e.g. PSMUX_SESSION_NAME
+        // was set to target an existing session rather than to request a fresh one —
+        // this is how -C/-CC control-mode clients attach), do NOT warm-claim or
+        // cold-spawn a replacement. Doing so unconditionally (as this block used to)
+        // clobbered the live session's port/key/sid files with those of a brand-new,
+        // empty-scrollback server on every single bare/control-mode connection,
+        // silently orphaning the running session. Mirrors the liveness check the
+        // explicit `new-session` command path already performs above.
+        let server_already_alive = std::fs::read_to_string(&port_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+            .map(|p| std::net::TcpStream::connect_timeout(
+                &format!("127.0.0.1:{}", p).parse().unwrap(),
+                Duration::from_millis(100),
+            ).is_ok())
+            .unwrap_or(false);
+
         // Try warm server claim first (fast path)
-        // Skipped when PSMUX_NO_WARM=1 is set or config has 'set -g warm off'.
-        let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false)
+        // Skipped when PSMUX_NO_WARM=1 is set or config has 'set -g warm off',
+        // or when the target session is already alive (see above).
+        let warm_disabled = server_already_alive
+            || std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false)
             || crate::config::is_warm_disabled_by_config();
         let warm_base = if let Some(ref l) = l_socket_name {
             format!("{}____warm__", l)
@@ -3888,7 +3907,7 @@ fn run_main() -> io::Result<()> {
         }
 
 
-        if !warm_claimed {
+        if !warm_claimed && !server_already_alive {
             // Cold path: spawn a new background server
             let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
             let mut server_args: Vec<String> = vec!["server".into(), "-s".into(), session_name.clone()];
