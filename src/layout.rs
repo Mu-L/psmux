@@ -146,6 +146,13 @@ pub enum LayoutJson {
         cursor_col: u16,
         #[serde(default)]
         alternate_screen: bool,
+        /// True when the pane's app EXPLICITLY enabled a mouse protocol
+        /// (DECSET 1000/1002/1003).  Strict on purpose — no alt-screen or
+        /// fullscreen heuristic — so the client only yields its drag
+        /// selection to apps that really consume mouse events; alt-screen
+        /// apps without mouse support (e.g. `less`) keep psmux selection.
+        #[serde(default)]
+        wants_mouse: bool,
         #[serde(default)]
         hide_cursor: bool,
         #[serde(default)]
@@ -241,6 +248,7 @@ fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) ->
                         return LayoutJson::Leaf {
                             id: p.id, rows: p.last_rows, cols: p.last_cols,
                             cursor_row: 0, cursor_col: 0, alternate_screen: false,
+                            wants_mouse: false,
                             hide_cursor: true,
                             cursor_shape: 0,
                             active: *cur_path == active_path, copy_mode: false,
@@ -261,6 +269,7 @@ fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) ->
                     return LayoutJson::Leaf {
                         id: p.id, rows: p.last_rows, cols: p.last_cols,
                         cursor_row: 0, cursor_col: 0, alternate_screen: false,
+                        wants_mouse: false,
                         hide_cursor: false,
                         cursor_shape: p.cursor_shape.load(std::sync::atomic::Ordering::Relaxed),
                         active: *cur_path == active_path, copy_mode: false,
@@ -292,6 +301,8 @@ fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) ->
                     }
                     has_content
                 };
+                let wants_mouse =
+                    screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
                 let need_full_content = include_full_content && *cur_path == active_path;
                 let mut lines: Vec<Vec<CellJson>> = if need_full_content {
                     Vec::with_capacity(p.last_rows as usize)
@@ -433,6 +444,7 @@ fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) ->
                     cursor_row: cr,
                     cursor_col: cc,
                     alternate_screen,
+                    wants_mouse,
                     hide_cursor: hide_cursor_flag,
                     cursor_shape: p.cursor_shape.load(std::sync::atomic::Ordering::Relaxed),
                     active: false,
@@ -657,6 +669,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 "\"rows\":{},\"cols\":{},",
                                 "\"cursor_row\":0,\"cursor_col\":0,",
                                 "\"alternate_screen\":false,",
+                                "\"wants_mouse\":false,",
                                 "\"hide_cursor\":true,",
                                 "\"cursor_shape\":0,",
                                 "\"active\":{},\"copy_mode\":false,",
@@ -683,6 +696,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 struct CopyCell { text: String, fg: vt100::Color, bg: vt100::Color, bold: bool, italic: bool, underline: bool, inverse: bool, dim: bool, blink: bool, hidden: bool, strikethrough: bool, width: u16 }
                 struct LeafSnap {
                     cr: u16, cc: u16, alt: bool,
+                    wants_mouse: bool,
                     hide_cursor: bool,
                     rows_v2: Vec<RowSnap>,
                     content: Vec<Vec<CopyCell>>,
@@ -691,7 +705,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 let snap = 'snap: {
                     let parser = match p.term.lock() {
                         Ok(g) => g,
-                        Err(_) => break 'snap LeafSnap { cr: 0, cc: 0, alt: false, hide_cursor: false, rows_v2: vec![], content: vec![] },
+                        Err(_) => break 'snap LeafSnap { cr: 0, cc: 0, alt: false, wants_mouse: false, hide_cursor: false, rows_v2: vec![], content: vec![] },
                     };
                     let screen = parser.screen();
                     let (cr, cc) = screen.cursor_position();
@@ -707,6 +721,9 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                             })
                         })
                     };
+                    // Strict — explicit mouse protocol only (see Leaf field doc).
+                    let wants_mouse =
+                        screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
 
                     // Snapshot rows_v2 (run-merged)
                     let mut snap_rows: Vec<RowSnap> = Vec::with_capacity(p.last_rows as usize);
@@ -797,7 +814,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         }
                     }
 
-                    LeafSnap { cr, cc, alt, hide_cursor, rows_v2: snap_rows, content: snap_content }
+                    LeafSnap { cr, cc, alt, wants_mouse, hide_cursor, rows_v2: snap_rows, content: snap_content }
                 };
                 // ── Parser mutex is now RELEASED ──
                 // All JSON string building below happens without holding the lock,
@@ -812,12 +829,13 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         "\"rows\":{},\"cols\":{},",
                         "\"cursor_row\":{},\"cursor_col\":{},",
                         "\"alternate_screen\":{},",
+                        "\"wants_mouse\":{},",
                         "\"hide_cursor\":{},",
                         "\"cursor_shape\":{},",
                         "\"active\":{},\"copy_mode\":{},",
                         "\"scroll_offset\":{},"),
                     p.id, p.last_rows, p.last_cols,
-                    snap.cr, snap.cc, snap.alt, snap.hide_cursor,
+                    snap.cr, snap.cc, snap.alt, snap.wants_mouse, snap.hide_cursor,
                     cs,
                     is_active, need_content, so,
                 ));

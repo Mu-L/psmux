@@ -65,15 +65,17 @@ use crossterm::event::{
 ///  2. A regular `write_all` to stdout (belt-and-suspenders).
 ///
 /// Call this **after** crossterm's `EnableMouseCapture` and `InputSource::new`.
+///
+/// The DEC private mode escape sequences for mouse reporting:
+///   1000 = basic mouse tracking
+///   1002 = button-event tracking (drag)
+///   1003 = any-event tracking (motion)
+///   1006 = SGR extended mouse format
+#[cfg(windows)]
+const MOUSE_ENABLE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+
 #[cfg(windows)]
 pub fn send_mouse_enable() {
-    // The DEC private mode escape sequences for mouse reporting:
-    //   1000 = basic mouse tracking
-    //   1002 = button-event tracking (drag)
-    //   1003 = any-event tracking (motion)
-    //   1006 = SGR extended mouse format
-    const MOUSE_ENABLE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
-
     // Issue #457: on builds whose ConPTY cannot round-trip VT mouse over SSH,
     // enabling mouse reporting is actively dangerous.  The bypass WriteFile
     // below reaches the client terminal even when ConPTY would otherwise have
@@ -196,6 +198,97 @@ pub fn send_mouse_enable() {
 #[cfg(not(windows))]
 pub fn send_mouse_enable() {
     // On Unix, crossterm's EnableMouseCapture already works correctly.
+}
+
+/// Keep-alive re-arm of mouse reporting, safe to call periodically in ANY
+/// input mode — unlike [`send_mouse_enable`], which is only safe in VT input
+/// mode (see the local-console branch below for why).
+///
+/// Windows Terminal can silently drop a ConPTY client's mouse registration
+/// (observed after window resizes and across long-lived local sessions):
+/// keys keep flowing but WT stops reporting mouse entirely until the DECSET
+/// 1000/1002/1003/1006 registration is re-written to the output stream.
+/// Historically psmux re-sent it only in SSH mode, so a local WT session
+/// stayed mouse-dead until the client restarted (detach/reattach).
+///
+/// Mode routing:
+///  * pipe mode (mintty / Cygwin pty) — re-send the curated pipe mode set
+///    (which deliberately excludes 1003 motion reporting).
+///  * VT input mode (SSH / JediTerm / WezTerm) — full [`send_mouse_enable`],
+///    including the stdin VTI restore and the DSR probe.
+///  * local Windows console — write ONLY the DECSET bytes and re-assert
+///    `ENABLE_MOUSE_INPUT`.  The full function must not run here: its stdin
+///    restore forces `ENABLE_VIRTUAL_TERMINAL_INPUT` on, which makes conhost
+///    deliver keystrokes as VT byte sequences that the crossterm
+///    INPUT_RECORD reader would surface as garbled text; and the DSR probe's
+///    `\x1b[0n` reply would leak into the active pane as ESC [ 0 n
+///    keystrokes.
+#[cfg(windows)]
+pub fn send_mouse_keepalive() {
+    if pipe_mode_active() {
+        pipe_send_modes_enable();
+        return;
+    }
+    if needs_vt_input() {
+        send_mouse_enable();
+        return;
+    }
+    // Same safety gate as send_mouse_enable (issue #457): builds whose
+    // conhost VT input parser fast-fails on SGR mouse reports must not have
+    // mouse reporting poked at all.  No-op there == pre-keepalive behavior.
+    if !conpty_mouse_supported() {
+        return;
+    }
+    // Belt-and-suspenders pair mirroring send_mouse_enable: raw WriteFile on
+    // the console output handle plus a buffered stdout write.  Both are
+    // idempotent for the terminal, so re-sending every refresh is harmless.
+    unsafe {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+            fn WriteFile(
+                hFile: *mut std::ffi::c_void,
+                lpBuffer: *const u8,
+                nNumberOfBytesToWrite: u32,
+                lpNumberOfBytesWritten: *mut u32,
+                lpOverlapped: *mut std::ffi::c_void,
+            ) -> i32;
+            fn GetConsoleMode(h: *mut std::ffi::c_void, mode: *mut u32) -> i32;
+            fn SetConsoleMode(h: *mut std::ffi::c_void, mode: u32) -> i32;
+        }
+        const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+        const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if !h.is_null() && h != (-1isize) as *mut std::ffi::c_void {
+            let mut written: u32 = 0;
+            let _ = WriteFile(
+                h,
+                MOUSE_ENABLE.as_ptr(),
+                MOUSE_ENABLE.len() as u32,
+                &mut written,
+                std::ptr::null_mut(),
+            );
+        }
+        // Re-assert ENABLE_MOUSE_INPUT if a console reset cleared it.  VTI
+        // (0x0200) is intentionally left alone — see the doc comment.
+        let hin = GetStdHandle(STD_INPUT_HANDLE);
+        if !hin.is_null() && hin != (-1isize) as *mut std::ffi::c_void {
+            let mut mode: u32 = 0;
+            if GetConsoleMode(hin, &mut mode) != 0 && mode & 0x0010 == 0 {
+                SetConsoleMode(hin, mode | 0x0010);
+            }
+        }
+    }
+    use std::io::Write;
+    let mut out = io::stdout().lock();
+    let _ = out.write_all(MOUSE_ENABLE);
+    let _ = out.flush();
+}
+
+#[cfg(not(windows))]
+pub fn send_mouse_keepalive() {
+    // Unix terminals keep the registration from crossterm's startup
+    // EnableMouseCapture; no keep-alive needed.
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
