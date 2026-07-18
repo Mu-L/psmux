@@ -4030,6 +4030,12 @@ fn run_main() -> io::Result<()> {
     // EnableMouseCapture output without forwarding it.
     if use_vt_input {
         send_mouse_enable();
+    } else {
+        // Local console: write the DECSET registration explicitly instead of
+        // relying solely on ConPTY synthesizing it from ENABLE_MOUSE_INPUT.
+        // Windows Terminal tracks this registration and can silently drop it
+        // later; the client re-arms it periodically with the same call.
+        crate::ssh_input::send_mouse_keepalive();
     }
 
     // Loop to handle session switching without spawning new processes
