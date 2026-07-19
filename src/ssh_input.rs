@@ -1831,10 +1831,14 @@ mod tests;
 mod tests_issue457_ssh_mouse_build_gate;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_windows10_ssh_mouse.rs"]
+mod tests_windows10_ssh_mouse;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_pr468_wezterm_vt_input.rs"]
 mod tests_pr468_wezterm_vt_input;
 
-// ─── Cygwin/MSYS pty (pipe) client input — issue #474 ───────────────────────
+// ─── Raw VT pipe client input — issue #474 / Windows 10 SSH ────────────────
 //
 // Under mintty (Git Bash, MSYS2) the client's stdin is a Cygwin pty: a named
 // pipe carrying raw VT bytes, not a console. Console input APIs fail on it
@@ -1842,12 +1846,19 @@ mod tests_pr468_wezterm_vt_input;
 // to kill the client with "psmux: Incorrect function". This reader consumes
 // the pipe directly with `ReadFile` and feeds the same `VtParser` the SSH
 // path uses, so keys, mouse, paste, and focus events all decode identically.
+//
+// `ssh -T windows-host psmux attach` also gives psmux anonymous stdin/stdout
+// pipes instead of a ConPTY. This is the reliable Win10 mouse path: ConPTY is
+// absent, so DECSET mouse registration reaches the client terminal and its SGR
+// reports reach this parser byte-for-byte. The SSH environment distinguishes
+// that interactive pipe from an unrelated redirected local stdin.
 
-/// True when the client's stdin is a Cygwin/MSYS pty pipe. The NT pipe name
-/// carries a recognizable pattern: `msys-<hex>-pty<N>-{from,to}-master` (or
-/// `cygwin-…`). `PSMUX_PIPE_VT=1|0` forces the answer for tests.
+/// True when stdin is a raw VT pipe supplied by Cygwin/MSYS or by an SSH
+/// session with remote PTY allocation disabled (`ssh -T`). The NT pipe name
+/// identifies Cygwin/MSYS; anonymous SSH pipes are selected only when SSH
+/// environment variables are present. `PSMUX_PIPE_VT=1|0` forces the answer.
 #[cfg(windows)]
-pub fn stdin_is_cygwin_pty() -> bool {
+pub fn stdin_is_vt_pipe() -> bool {
     match std::env::var("PSMUX_PIPE_VT").ok().as_deref() {
         Some("1") => return true,
         Some("0") => return false,
@@ -1876,6 +1887,9 @@ pub fn stdin_is_cygwin_pty() -> bool {
         if GetFileType(h) != FILE_TYPE_PIPE {
             return false;
         }
+        if is_ssh_session() {
+            return true;
+        }
         // FILE_NAME_INFO: u32 byte length followed by the UTF-16 name.
         let mut buf = [0u8; 1024];
         if GetFileInformationByHandleEx(h, FILE_NAME_INFO, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) == 0 {
@@ -1893,11 +1907,11 @@ pub fn stdin_is_cygwin_pty() -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn stdin_is_cygwin_pty() -> bool {
+pub fn stdin_is_vt_pipe() -> bool {
     false
 }
 
-/// Marks the client as running in pipe (Cygwin pty) mode so other client
+/// Marks the client as running in raw VT pipe mode so other client
 /// code — the periodic size query in the render loop — can key off it.
 static PIPE_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1939,9 +1953,9 @@ pub fn request_pipe_terminal_size() {
 }
 
 /// Enable the VT modes psmux needs from a pipe-mode terminal: SGR mouse
-/// reporting, focus events, and bracketed paste. mintty handles these
-/// natively (no ConPTY in the path), so the issue #457 build gating that
-/// applies to SSH-over-ConPTY does not apply here.
+/// reporting, focus events, and bracketed paste. The pipe connects directly
+/// to mintty or the SSH channel (no ConPTY in the path), so the issue #457
+/// build gating that applies to SSH-over-ConPTY does not apply here.
 pub fn pipe_send_modes_enable() {
     pipe_stdout_write(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[?2004h");
 }
@@ -1977,7 +1991,7 @@ fn start_pipe_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
 
     PIPE_MODE.store(true, std::sync::atomic::Ordering::SeqCst);
     let (tx, rx) = mpsc::sync_channel::<Event>(1024);
-    ssh_debug_log("pipe reader starting (cygwin pty mode)");
+    ssh_debug_log("pipe reader starting (raw VT pipe mode)");
 
     std::thread::spawn(move || {
         let handle = handle as *mut c_void;
@@ -2066,10 +2080,9 @@ fn start_pipe_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
 }
 
 impl InputSource {
-    /// Input source for a client attached over a Cygwin/MSYS pty (issue
-    /// #474): VT byte stream from the stdin pipe. Falls back to crossterm if
-    /// the reader cannot start (the client then fails the same way it did
-    /// before pipe mode existed).
+    /// Input source for a client attached over a Cygwin/MSYS pty (issue #474)
+    /// or an SSH channel without a remote PTY: VT byte stream from stdin.
+    /// Falls back to crossterm if the reader cannot start.
     pub fn new_pipe() -> io::Result<Self> {
         #[cfg(windows)]
         {
