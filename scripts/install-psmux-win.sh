@@ -73,12 +73,23 @@ config_file=$config_dir/config
 target=$bin_dir/psmux-win
 stamp=$(date '+%Y%m%d-%H%M%S')
 
+backup_file() {
+    backup_source=$1
+    backup_target=$backup_source.backup-$stamp
+    suffix=0
+    while [ -e "$backup_target" ]; do
+        suffix=$((suffix + 1))
+        backup_target=$backup_source.backup-$stamp-$suffix
+    done
+    cp "$backup_source" "$backup_target"
+}
+
 mkdir -p "$bin_dir" "$config_dir"
 if [ -e "$target" ]; then
-    cp "$target" "$target.backup-$stamp"
+    backup_file "$target"
 fi
 if [ -e "$config_file" ]; then
-    cp "$config_file" "$config_file.backup-$stamp"
+    backup_file "$config_file"
 fi
 
 cp "$source_wrapper" "$target"

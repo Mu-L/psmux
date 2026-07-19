@@ -1,5 +1,5 @@
 #!/bin/sh
-set -u
+set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 wrapper="$repo/scripts/psmux-ssh.sh"
@@ -40,6 +40,7 @@ run_wrapper() {
     MOCK_SSH_ARGS="$ssh_args" \
     MOCK_SSH_STATUS="${MOCK_SSH_STATUS:-0}" \
     MOCK_SSH_SIGNAL="${MOCK_SSH_SIGNAL-}" \
+    PSMUX_WIN_CONFIG="$tmp/no-config" \
     PSMUX_SSH_TTY="$tty_file" \
     PSMUX_SSH_STTY="$tmp/bin/stty" \
     PSMUX_SSH_BIN="$tmp/bin/ssh" \

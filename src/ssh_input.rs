@@ -212,8 +212,8 @@ pub fn send_mouse_enable() {
 /// stayed mouse-dead until the client restarted (detach/reattach).
 ///
 /// Mode routing:
-///  * pipe mode (mintty / Cygwin pty) — re-send the curated pipe mode set
-///    (which deliberately excludes 1003 motion reporting).
+///  * pipe mode (mintty / Cygwin pty / no-PTY SSH) — re-send the curated pipe
+///    mode set (which deliberately excludes 1003 motion reporting).
 ///  * VT input mode (SSH / JediTerm / WezTerm) — full [`send_mouse_enable`],
 ///    including the stdin VTI restore and the DSR probe.
 ///  * local Windows console — write ONLY the DECSET bytes and re-assert
@@ -1929,7 +1929,13 @@ pub fn pipe_stdout_write(bytes: &[u8]) {
     #[link(name = "kernel32")]
     extern "system" {
         fn GetStdHandle(n: u32) -> *mut c_void;
-        fn WriteFile(h: *mut c_void, buf: *const u8, len: u32, written: *mut u32, ovl: *mut c_void) -> i32;
+        fn WriteFile(
+            h: *mut c_void,
+            buf: *const u8,
+            len: u32,
+            written: *mut u32,
+            ovl: *mut c_void,
+        ) -> i32;
     }
     const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
     unsafe {
@@ -1937,8 +1943,22 @@ pub fn pipe_stdout_write(bytes: &[u8]) {
         if h.is_null() || h == (-1isize) as *mut c_void {
             return;
         }
-        let mut written: u32 = 0;
-        let _ = WriteFile(h, bytes.as_ptr(), bytes.len() as u32, &mut written, std::ptr::null_mut());
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let chunk_len = (bytes.len() - offset).min(u32::MAX as usize) as u32;
+            let mut written: u32 = 0;
+            let ok = WriteFile(
+                h,
+                bytes.as_ptr().add(offset),
+                chunk_len,
+                &mut written,
+                std::ptr::null_mut(),
+            );
+            if ok == 0 || written == 0 {
+                break;
+            }
+            offset += written as usize;
+        }
     }
 }
 

@@ -80,7 +80,18 @@ if (-not (Test-Path $Psmux)) {
 
 Write-Host "`n=== Windows 10 SSH direct-pipe mouse E2E ===" -ForegroundColor Cyan
 & $Psmux -L $Namespace kill-server 2>$null | Out-Null
-& $Psmux -L $Namespace new-session -d -s $Session -- cmd.exe
+$hadNoWarm = Test-Path Env:PSMUX_NO_WARM
+$previousNoWarm = $env:PSMUX_NO_WARM
+try {
+    # Keep this isolated E2E from leaving an intentional warm standby process
+    # that would lock the release binary after the namespace is killed.
+    $env:PSMUX_NO_WARM = '1'
+    & $Psmux -L $Namespace new-session -d -s $Session -- cmd.exe
+}
+finally {
+    if ($hadNoWarm) { $env:PSMUX_NO_WARM = $previousNoWarm }
+    else { Remove-Item Env:PSMUX_NO_WARM -ErrorAction SilentlyContinue }
+}
 Start-Sleep -Seconds 2
 & $Psmux -L $Namespace set-option -g mouse on -t $Session | Out-Null
 & $Psmux -L $Namespace set-option -g scroll-enter-copy-mode on -t $Session | Out-Null

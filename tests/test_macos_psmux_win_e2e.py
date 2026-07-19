@@ -10,6 +10,7 @@ import subprocess
 import sys
 import termios
 import time
+from pathlib import Path
 
 
 def required_env(name):
@@ -23,6 +24,10 @@ SESSION = required_env("PSMUX_E2E_SESSION")
 SOCKET = os.environ.get("PSMUX_E2E_SOCKET")
 WINDOWS = required_env("PSMUX_E2E_WINDOWS_HOST")
 REMOTE_PSMUX = required_env("PSMUX_E2E_REMOTE_EXE")
+WRAPPER = os.environ.get(
+    "PSMUX_E2E_WRAPPER",
+    str(Path(__file__).resolve().parent.parent / "scripts" / "psmux-ssh.sh"),
+)
 
 
 def remote(*args):
@@ -74,11 +79,13 @@ def main():
 
     pid, master = os.forkpty()
     if pid == 0:
-        command = ["psmux-win"]
+        command = ["sh", WRAPPER]
         if SOCKET:
-            command.extend(["-L", SOCKET])
-        command.extend(["-t", SESSION])
-        os.execvp("psmux-win", command)
+            command.extend(["--socket", SOCKET])
+        command.extend(
+            ["--session", SESSION, "--psmux", REMOTE_PSMUX, "--", WINDOWS]
+        )
+        os.execvp("sh", command)
 
     captured = bytearray()
     stage = "startup"
@@ -108,12 +115,14 @@ def main():
         # EXIT trap to restore the Mac terminal state and disable mouse mode.
         stage = "detach"
         os.write(master, b"\x02d")
-        drain(master, 3.0, captured)
+        drain(master, 5.0, captured)
         waited, status = os.waitpid(pid, os.WNOHANG)
         if waited == 0:
-            os.kill(pid, signal.SIGTERM)
-            _, status = os.waitpid(pid, 0)
+            raise AssertionError("wrapper did not exit after psmux detach")
         pid = 0
+        exit_code = os.waitstatus_to_exitcode(status)
+        if exit_code != 0:
+            raise AssertionError(f"wrapper exited with status {exit_code} after detach")
 
         required_off = (b"\x1b[?1006l", b"\x1b[?1002l", b"\x1b[?1000l")
         if not all(sequence in captured for sequence in required_off):

@@ -1511,7 +1511,7 @@ mod position_token_tests {
 }
 
 #[cfg(test)]
-mod swap_mru_tests {
+mod window_ops_tests {
     use super::swap_pane_with_path;
     use crate::proxy_pane::create_proxy_pane;
     use crate::types::{AppState, LayoutKind, Mode, Node, Window};
@@ -1576,7 +1576,10 @@ mod swap_mru_tests {
         let history = (0..80)
             .map(|line| format!("history-{line}\r\n"))
             .collect::<String>();
-        pane.term.lock().expect("term lock").process(history.as_bytes());
+        pane.term
+            .lock()
+            .expect("term lock")
+            .process(history.as_bytes());
 
         let mut app = AppState::new("mouse-scrollback".to_string());
         app.mouse_enabled = mouse_enabled;
@@ -1628,7 +1631,10 @@ mod swap_mru_tests {
         super::handle_pane_scroll(&mut app, 41, true);
         assert!(matches!(app.mode, Mode::CopyMode));
         let first_offset = app.copy_scroll_offset;
-        assert!(first_offset > 0, "first wheel report must move into history");
+        assert!(
+            first_offset > 0,
+            "first wheel report must move into history"
+        );
 
         super::handle_pane_scroll(&mut app, 41, true);
         assert!(

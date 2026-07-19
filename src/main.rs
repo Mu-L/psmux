@@ -4057,12 +4057,13 @@ fn run_main() -> io::Result<()> {
     let backend = crate::platform::PsmuxBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // For VT input mode (SSH / JetBrains), explicitly (re-)send mouse-enable
-    // escape sequences.  ConPTY may have consumed crossterm's
-    // EnableMouseCapture output without forwarding it.
-    if use_vt_input {
+    // For console-backed VT input (SSH / JetBrains), explicitly (re-)send
+    // mouse-enable escape sequences. ConPTY may have consumed crossterm's
+    // EnableMouseCapture output without forwarding it. Pipe mode already sent
+    // its safe mode set above and must not enter this ConPTY-specific path.
+    if use_vt_input && !pipe_vt {
         send_mouse_enable();
-    } else {
+    } else if !pipe_vt {
         // Local console: write the DECSET registration explicitly instead of
         // relying solely on ConPTY synthesizing it from ENABLE_MOUSE_INPUT.
         // Windows Terminal tracks this registration and can silently drop it

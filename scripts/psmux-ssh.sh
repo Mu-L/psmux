@@ -2,7 +2,7 @@
 # Run on the macOS/Linux client. Uses a plain SSH channel instead of a remote
 # ConPTY so Windows 10 cannot consume mouse registration or SGR input bytes.
 
-set -u
+set -eu
 
 program=${0##*/}
 
@@ -114,7 +114,7 @@ if [ ! -r "$tty_path" ] || [ ! -w "$tty_path" ]; then
     exit 1
 fi
 
-saved_stty=$($stty_bin -g <"$tty_path") || {
+saved_stty=$("$stty_bin" -g <"$tty_path") || {
     echo "psmux-ssh: could not read local terminal state" >&2
     exit 1
 }
@@ -136,7 +136,7 @@ cleanup() {
     if [ "$cleaned" -eq 0 ]; then
         cleaned=1
         printf '%b' "$mouse_off" >&3 2>/dev/null || true
-        $stty_bin "$saved_stty" <"$tty_path" 2>/dev/null || true
+        "$stty_bin" "$saved_stty" <"$tty_path" 2>/dev/null || true
     fi
     return "$rc"
 }
@@ -160,7 +160,7 @@ trap 'signal_exit TERM 143' TERM
 
 # Raw, no-echo, and no local signal translation are required so Ctrl+C and all
 # other control bytes reach the remote psmux pane exactly as typed.
-$stty_bin raw -echo -isig <"$tty_path" || {
+"$stty_bin" raw -echo -isig <"$tty_path" || {
     echo "psmux-ssh: could not put the local terminal in raw mode" >&2
     exit 1
 }
@@ -176,7 +176,7 @@ if [ -n "$session" ]; then
 fi
 
 # Do not exec: the wrapper must regain control to restore stty and mouse modes.
-$ssh_bin -T "$@" "$remote_command" <&4 &
+"$ssh_bin" -T "$@" "$remote_command" <&4 &
 child_pid=$!
 wait "$child_pid"
 rc=$?
