@@ -279,29 +279,43 @@ if (-not $makensis) {
                     Start-Sleep -Seconds 1
                     $proc = Start-Process -FilePath $uninstaller -ArgumentList "/S" -PassThru -NoNewWindow
                     if (-not $proc.WaitForExit(60000)) { try { $proc.Kill() } catch {} }
-                    Start-Sleep -Seconds 2
                     if ($proc.ExitCode -eq 0) {
-                        Write-Pass "Silent uninstall completed (exit code 0)"
+                        Write-Pass "Silent uninstall launched (exit code 0)"
                     } else {
                         Write-Fail "Silent uninstall exited with code: $($proc.ExitCode)"
                     }
 
                     # ── Test 14: Files removed after uninstall ─────────
+                    # CRITICAL: an NSIS uninstaller copies itself to %TEMP% and
+                    # re-execs, so it can delete its own install dir. The launched
+                    # process exits immediately; the real file/registry removal
+                    # happens ASYNC in that temp copy ~several seconds later.
+                    # Poll for actual completion instead of checking immediately.
                     Write-Test "Files removed after uninstall"
-                    $cleanedUp = $true
-                    foreach ($bin in @("psmux.exe", "pmux.exe", "tmux.exe")) {
-                        if (Test-Path (Join-Path $testDir $bin)) {
-                            Write-Fail "File still exists after uninstall: $bin"
-                            $cleanedUp = $false
-                        }
+                    $bins = @("psmux.exe", "pmux.exe", "tmux.exe")
+                    $cleanedUp = $false
+                    for ($w = 0; $w -lt 20; $w++) {
+                        $anyLeft = $false
+                        foreach ($bin in $bins) { if (Test-Path (Join-Path $testDir $bin)) { $anyLeft = $true; break } }
+                        if (-not $anyLeft) { $cleanedUp = $true; break }
+                        Start-Sleep -Seconds 1
                     }
                     if ($cleanedUp) {
                         Write-Pass "All binaries removed by uninstaller"
+                    } else {
+                        foreach ($bin in $bins) {
+                            if (Test-Path (Join-Path $testDir $bin)) { Write-Fail "File still exists after uninstall: $bin" }
+                        }
                     }
 
-                    # ── Test 15: Registry cleaned up ───────────────────
+                    # ── Test 15: Registry cleaned up (also part of the async pass) ─
                     Write-Test "Registry cleaned after uninstall"
-                    if (-not (Test-Path $regPath)) {
+                    $regGone = $false
+                    for ($w = 0; $w -lt 10; $w++) {
+                        if (-not (Test-Path $regPath)) { $regGone = $true; break }
+                        Start-Sleep -Seconds 1
+                    }
+                    if ($regGone) {
                         Write-Pass "Registry uninstall key removed"
                     } else {
                         Write-Fail "Registry key still present after uninstall"
