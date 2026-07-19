@@ -202,8 +202,24 @@ if (-not $makensis) {
             Write-Test "Silent install /S /D=<tmpdir>"
             $testDir = Join-Path $env:TEMP "psmux-installer-test-$(Get-Random)"
             try {
-                # Run installer silently to a temp directory
-                $proc = Start-Process -FilePath $installerExe -ArgumentList "/S", "/D=$testDir" -Wait -PassThru -NoNewWindow
+                # Run installer silently to a temp directory. NOTE: pwsh7's
+                # Start-Process -Wait blocks on the ENTIRE process tree, and the
+                # installer's post-install step spawns a detached __warm__ psmux
+                # server that never exits -- which hung this to the harness
+                # timeout. Wait only on the installer's own PID, then reap any
+                # warm server it spawned.
+                $proc = Start-Process -FilePath $installerExe -ArgumentList "/S", "/D=$testDir" -PassThru -NoNewWindow
+                # The installer's post-install ExecWait's on `psmux warmup`, which
+                # spawns a persistent warm server that never exits -> the installer
+                # process itself blocks. Reap warm servers in a poll loop so the
+                # ExecWait returns and the installer exits promptly.
+                $deadline = [DateTime]::Now.AddSeconds(30)
+                while (-not $proc.HasExited -and [DateTime]::Now -lt $deadline) {
+                    Get-Process psmux,pmux,tmux -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+                    Start-Sleep -Milliseconds 400
+                }
+                if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
+                Get-Process psmux,pmux,tmux -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
                 if ($proc.ExitCode -eq 0) {
                     Write-Pass "Silent install completed (exit code 0)"
                 } else {
@@ -254,7 +270,15 @@ if (-not $makensis) {
                 Write-Test "Silent uninstall"
                 $uninstaller = Join-Path $testDir "uninstall.exe"
                 if (Test-Path $uninstaller) {
-                    $proc = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru -NoNewWindow
+                    # Kill any warm server holding the installed exes open BEFORE
+                    # uninstalling, so the uninstaller can delete them. Do NOT kill
+                    # during the uninstall (that interrupts its file/registry
+                    # cleanup); the uninstaller does not itself spawn a warmup, so
+                    # a plain bounded WaitForExit on its own PID is enough.
+                    Get-Process psmux,pmux,tmux -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+                    Start-Sleep -Seconds 1
+                    $proc = Start-Process -FilePath $uninstaller -ArgumentList "/S" -PassThru -NoNewWindow
+                    if (-not $proc.WaitForExit(60000)) { try { $proc.Kill() } catch {} }
                     Start-Sleep -Seconds 2
                     if ($proc.ExitCode -eq 0) {
                         Write-Pass "Silent uninstall completed (exit code 0)"
