@@ -1968,6 +1968,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // colour parser sees it (otherwise status-style falls back
                     // to bright green). wsf/wscf stay raw: they are per-window
                     // formats the client expands with each window's own context.
+                    // #() in these periodic status/style formats expands ASYNC so
+                    // a slow shell helper never blocks the server loop; the guard
+                    // is dropped right after this block so one-shot expansions
+                    // elsewhere (display-message -p) stay synchronous (see format.rs).
+                    let _async_fmt = crate::format::AsyncFormatGuard::new();
                     let ss_escaped = json_escape_string(&expand_format(&cached_status_style, &app));
                     let sl_expanded = json_escape_string(&expand_format(&app.status_left, &app));
                     let sr_expanded = json_escape_string(&expand_format(&app.status_right, &app));
@@ -1997,6 +2002,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         sf.push(']');
                         sf
                     };
+                    drop(_async_fmt); // end async-#() region; later expansions run synchronously
                     let cursor_style_code = crate::rendering::configured_cursor_code();
                     let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
                         "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"message_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"defaults_suppressed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{},\"bold_is_bright\":{}}}",

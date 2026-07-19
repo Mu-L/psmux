@@ -255,7 +255,59 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
 /// Cached in `app.format_shell_cache`, keyed by command string, TTL =
 /// `status-interval` seconds (1s floor). A command already in flight is not
 /// re-spawned, so a burst of pushes runs it at most once per TTL. See issue #272.
+thread_local! {
+    // When true, `#()` expansion is ASYNC (spawn a background worker, return the
+    // cached value, apply the result on a later repaint). Default false = SYNC.
+    static FORMAT_ASYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard that puts `#()` expansion in ASYNC mode for its lifetime. ONLY the
+/// periodic status-bar / dump-state render path should use this: that path runs
+/// every server-loop tick, so a slow `#(command)` there must never block the
+/// loop (issue #272 / PR #477). Every other caller — one-shot `display-message
+/// -p '#(cmd)'`, hooks, etc. — expands `#()` synchronously so a single expansion
+/// returns the command's real output immediately. PR #477 made ALL expansion
+/// async, which silently broke one-shot `#()` (it returned the empty pre-first-
+/// result value and never repainted). This restores tmux-parity: async only for
+/// the status bar, synchronous everywhere else.
+pub struct AsyncFormatGuard(());
+impl AsyncFormatGuard {
+    pub fn new() -> Self {
+        FORMAT_ASYNC.with(|c| c.set(true));
+        AsyncFormatGuard(())
+    }
+}
+impl Drop for AsyncFormatGuard {
+    fn drop(&mut self) {
+        FORMAT_ASYNC.with(|c| c.set(false));
+    }
+}
+
 fn run_shell_command(cmd: &str, app: &AppState) -> String {
+    // Synchronous one-shot expansion (the default): run the command inline and
+    // return its real output. A one-shot `display-message -p '#(cmd)'` has no
+    // later repaint to pick up an async result, so it must block here.
+    if !FORMAT_ASYNC.with(|c| c.get()) {
+        use std::process::Command;
+        use crate::platform::HideWindowCommandExt;
+        let output = if cfg!(windows) {
+            Command::new("cmd").args(["/C", cmd]).hide_window().output()
+        } else {
+            Command::new("sh").args(["-c", cmd]).output()
+        };
+        let value = match output {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => String::new(),
+        };
+        // Refresh the cache so a following async status render starts fresh.
+        if let Ok(mut guard) = app.format_shell_cache.lock() {
+            guard.insert(cmd.to_string(), crate::types::ShellEntry {
+                at: std::time::Instant::now(), value: value.clone(), running: false,
+            });
+        }
+        return value;
+    }
+
     let ttl = std::time::Duration::from_secs(app.status_interval.max(1));
 
     let mut guard = match app.format_shell_cache.lock() {

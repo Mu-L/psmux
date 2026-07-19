@@ -17,6 +17,15 @@
 use super::*;
 use std::time::{Duration, Instant};
 
+/// Expand in ASYNC mode — the mode the periodic status bar uses (PR #477).
+/// These tests assert the non-blocking spawn-once-per-TTL caching contract,
+/// which is now opt-in; one-shot callers (display-message -p) expand `#()`
+/// synchronously by default.
+fn expand_async(fmt: &str, app: &AppState) -> String {
+    let _g = AsyncFormatGuard::new();
+    super::expand_format(fmt, app)
+}
+
 fn mock_app(interval_secs: u64) -> AppState {
     let mut app = AppState::new("issue272".to_string());
     app.window_base_index = 0;
@@ -115,7 +124,7 @@ fn expand_does_not_block_on_the_subprocess() {
     let fmt = format!("#({})", slow_tracer_cmd(&counter));
 
     let t0 = Instant::now();
-    let out = expand_format(&fmt, &app);
+    let out = expand_async(&fmt, &app);
     let elapsed = t0.elapsed();
 
     // The helper waits ~1s; a synchronous spawn would block here. The async
@@ -146,17 +155,17 @@ fn one_spawn_per_window_and_value_after_drain() {
     let fmt = format!("[#({})]", cmd);
 
     // First render: worker spawned, value not ready yet -> empty.
-    assert_eq!(expand_format(&fmt, &app), "[]", "empty before the worker completes");
+    assert_eq!(expand_async(&fmt, &app), "[]", "empty before the worker completes");
     // 50 rapid calls in the same window must not double-spawn (cache is fresh).
     for _ in 0..50 {
-        let _ = expand_format(&fmt, &app);
+        let _ = expand_async(&fmt, &app);
     }
 
     let drained = wait_for_drain(&app, Duration::from_secs(5));
     assert_eq!(drained, 1, "exactly one result should drain");
 
-    let second = expand_format(&fmt, &app);
-    let third = expand_format(&fmt, &app);
+    let second = expand_async(&fmt, &app);
+    let third = expand_async(&fmt, &app);
     let spawns = line_count(&counter);
     cleanup(&counter);
 
@@ -172,17 +181,17 @@ fn respawns_after_ttl_expiry() {
     let app = mock_app(1); // TTL = 1s
     let fmt = format!("#({})", tracer_cmd(&counter));
 
-    let _ = expand_format(&fmt, &app);
+    let _ = expand_async(&fmt, &app);
     wait_for_drain(&app, Duration::from_secs(5));
     assert_eq!(line_count(&counter), 1, "first call spawns");
 
     for _ in 0..10 {
-        let _ = expand_format(&fmt, &app);
+        let _ = expand_async(&fmt, &app);
     }
     assert_eq!(line_count(&counter), 1, "within TTL: no respawn");
 
     std::thread::sleep(Duration::from_millis(1100));
-    let _ = expand_format(&fmt, &app);
+    let _ = expand_async(&fmt, &app);
     let spawns = wait_for_spawns(&counter, 2, Duration::from_secs(5));
     cleanup(&counter);
     assert_eq!(spawns, 2, "respawn after TTL expiry; got {}", spawns);
@@ -198,12 +207,12 @@ fn in_flight_worker_blocks_a_second_spawn_after_ttl() {
     let app = mock_app(1); // TTL = 1s
     let fmt = format!("#({})", slow_tracer_cmd(&counter));
 
-    let _ = expand_format(&fmt, &app); // spawn worker (waits ~1s)
+    let _ = expand_async(&fmt, &app); // spawn worker (waits ~1s)
     // Hammer just past the 1s TTL while the worker is still in flight (and we
     // never drain, so `running` stays true).
     std::thread::sleep(Duration::from_millis(1050));
     for _ in 0..10 {
-        let _ = expand_format(&fmt, &app);
+        let _ = expand_async(&fmt, &app);
     }
 
     let spawns = wait_for_spawns(&counter, 1, Duration::from_secs(5));
@@ -225,8 +234,8 @@ fn distinct_commands_are_independent() {
     let fb = format!("#({})", tracer_cmd(&cb));
 
     for _ in 0..20 {
-        let _ = expand_format(&fa, &app);
-        let _ = expand_format(&fb, &app);
+        let _ = expand_async(&fa, &app);
+        let _ = expand_async(&fb, &app);
     }
 
     wait_for_spawns(&ca, 1, Duration::from_secs(5));
@@ -249,7 +258,7 @@ fn status_interval_zero_uses_one_second_floor() {
     let fmt = format!("#({})", tracer_cmd(&counter));
 
     for _ in 0..50 {
-        let _ = expand_format(&fmt, &app);
+        let _ = expand_async(&fmt, &app);
     }
     wait_for_spawns(&counter, 1, Duration::from_secs(5));
     std::thread::sleep(Duration::from_millis(150));
@@ -271,9 +280,9 @@ fn value_is_stdout_not_command_text() {
     };
     let fmt = format!("#({})", cmd);
 
-    let _ = expand_format(&fmt, &app); // spawn
+    let _ = expand_async(&fmt, &app); // spawn
     wait_for_drain(&app, Duration::from_secs(5));
-    let out = expand_format(&fmt, &app); // cached value
+    let out = expand_async(&fmt, &app); // cached value
     cleanup(&counter);
 
     assert!(out.contains("SAFE_OUT"), "value should be the helper stdout; got {:?}", out);
