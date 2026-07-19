@@ -8,6 +8,11 @@
 # a proven no-op end-to-end.
 
 $ErrorActionPreference = "Continue"
+# Decode psmux stdout (powerline separator glyphs are U+E0Bx PUA chars) as UTF-8
+# so the config comparison is on true bytes, not codepage-mangled text (same fix
+# as test_issue263_nested / the _fixed sibling).
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SESSION = "test_issue58_sep"
 $psmuxDir = "$env:USERPROFILE\.psmux"
@@ -53,10 +58,16 @@ foreach ($sep in @('arrow','rounded','slant')) {
 Write-Host "`n=== Comparison ===" -ForegroundColor Cyan
 $arrow = $results['arrow']; $rounded = $results['rounded']; $slant = $results['slant']
 
-if ($arrow -eq $rounded -and $rounded -eq $slant) {
-    Write-Pass "CLAIM CONFIRMED: arrow/rounded/slant produce BYTE-IDENTICAL config (separator is a no-op)"
+# leblocks claimed the @<theme>-separator option "doesn't change anything in the
+# config". The product REFUTES that: arrow/rounded/slant each select a distinct
+# powerline separator glyph (U+E0B0 / U+E0B4 / U+E0B8), so each produces a
+# DISTINCT config end-to-end. The option working is the correct behavior, so a
+# distinct config per value is the PASS condition; byte-identical output would be
+# the real no-op bug.
+if ($arrow -ne $rounded -and $rounded -ne $slant -and $arrow -ne $slant) {
+    Write-Pass "separator option is effective: arrow/rounded/slant each produce a distinct config (leblocks' 'no-op' claim refuted)"
 } else {
-    Write-Fail "Config differs between separator values (separator DOES matter)"
+    Write-Fail "separator appears to be a no-op: some of arrow/rounded/slant produced byte-identical config"
     Write-Host "--- arrow ---";   Write-Host $arrow
     Write-Host "--- rounded ---"; Write-Host $rounded
     Write-Host "--- slant ---";   Write-Host $slant
