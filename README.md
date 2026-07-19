@@ -210,9 +210,9 @@ Contributions welcome — bug reports, PRs, docs, and test scripts via [GitHub I
 
 If psmux helps your Windows workflow, consider giving it a ⭐ on GitHub!
 
-## Star History
+## psmux in Numbers
 
-[![Star History Chart](https://api.star-history.com/image?repos=psmux/psmux&type=date&legend=top-left)](https://www.star-history.com/?repos=psmux%2Fpsmux&type=date&legend=top-left)
+[![psmux live statistics: stars, forks, contributors, companies, universities and countries](https://psmux.pages.dev/stats-card.svg)](https://psmux.pages.dev)
 
 ---
 
