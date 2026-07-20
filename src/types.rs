@@ -20,9 +20,9 @@ pub const GIT_DIRTY: &str = env!("PSMUX_GIT_DIRTY");
 
 /// Human-readable build provenance line, e.g.
 ///
-///   `psmux 3.3.6 (f179849 2026-07-19)`
-///   `psmux 3.3.6 (f179849 2026-07-19, dirty)`   ← built from a modified tree
-///   `psmux 3.3.6 (unknown commit)`               ← built without a git checkout
+///   `psmux 3.3.7 (a1b2c3d 2026-07-20)`
+///   `psmux 3.3.7 (a1b2c3d 2026-07-20, dirty)`   ← built from a modified tree
+///   `psmux 3.3.7 (unknown commit)`               ← built without a git checkout
 pub fn build_version_string() -> String {
     if GIT_HASH == "unknown" {
         return format!("psmux {VERSION} (unknown commit)");

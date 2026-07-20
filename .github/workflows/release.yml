@@ -241,7 +241,7 @@ jobs:
         run: find . -type f \( -name "*.zip" -o -name "*-setup.exe" \)
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
           name: ${{ inputs.tag }}
@@ -285,12 +285,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             Write-Warning "portable-pty-psmux publish failed (may already be published)"
           }
-          Start-Sleep 15
+          Start-Sleep 45
           cargo publish --allow-dirty -p vt100-psmux 2>&1
           if ($LASTEXITCODE -ne 0) {
             Write-Warning "vt100-psmux publish failed (may already be published)"
           }
-          Start-Sleep 15
+          Start-Sleep 45
           $out = cargo publish --allow-dirty 2>&1
           $out | Write-Output
           if ($LASTEXITCODE -ne 0) {

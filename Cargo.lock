@@ -1305,7 +1305,7 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
 name = "portable-pty-psmux"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "anyhow",
  "downcast-rs",
@@ -1352,7 +1352,7 @@ dependencies = [
 
 [[package]]
 name = "psmux"
-version = "3.3.6"
+version = "3.3.7"
 dependencies = [
  "anyhow",
  "base64",
@@ -2018,7 +2018,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vt100-psmux"
-version = "0.16.8"
+version = "0.16.9"
 dependencies = [
  "itoa",
  "nix 0.30.1",

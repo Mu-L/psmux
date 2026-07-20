@@ -433,7 +433,7 @@ pub fn print_version() {
     // the binary was built from (short hash + date, plus a "dirty" marker when
     // built from a modified tree). Tools that parse only the first line ignore
     // it, so this stays fully backward compatible. Example:
-    //   psmux 3.3.6 (f179849 2026-07-19)
+    //   psmux 3.3.7 (a1b2c3d 2026-07-20)
     println!("{}", build_version_string());
 }
 
