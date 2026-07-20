@@ -187,6 +187,22 @@ pub(crate) fn build_osc8_overlay(runs: &[HyperlinkRun]) -> String {
     out
 }
 
+/// Content area of a pane after reserving the `pane-border-status` label row.
+/// Must match `render_layout_json`'s `inner`; the caret and every screen→cell
+/// mouse mapping route through this so they stay aligned with the content (#288).
+pub(crate) fn pane_content_inner(area: Rect, border_status: &str, border_format: &str) -> Rect {
+    let has_border_label = border_status != "off" && !border_format.is_empty() && area.height > 1;
+    if !has_border_label {
+        return area;
+    }
+    if border_status == "top" {
+        Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1))
+    } else {
+        // "bottom": content keeps its top origin, only the last row is reserved.
+        Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
+    }
+}
+
 fn collect_leaves<'a>(node: &'a LayoutJson, area: Rect, out: &mut Vec<PaneLeaf<'a>>) {
     match node {
         LayoutJson::Leaf { rows_v2, .. } => {
@@ -357,6 +373,8 @@ fn extract_selection_text(
     end: (u16, u16),
     block: bool,
     pane_clip: Option<Rect>,
+    border_status: &str,
+    border_format: &str,
 ) -> String {
     let (r0, c0, r1, c1) = normalize_selection(start, end, block);
 
@@ -382,7 +400,7 @@ fn extract_selection_text(
         for col in col_start..=col_end {
             let mut ch = ' ';
             for leaf in &leaves {
-                let inner = &leaf.inner;
+                let inner = pane_content_inner(leaf.inner, border_status, border_format);
                 if col >= inner.x
                     && col < inner.x + inner.width
                     && row >= inner.y
@@ -463,19 +481,23 @@ fn word_bounds_at(
     pane_rect: Rect,
     col: u16,
     row: u16,
+    border_status: &str,
+    border_format: &str,
 ) -> Option<(u16, u16)> {
     let content_area = Rect { x: 0, y: 0, width: term_width, height: content_height };
     let mut leaves: Vec<PaneLeaf> = Vec::new();
     collect_leaves(layout, content_area, &mut leaves);
 
+    // `pane_rect` is the outer rect; match on it, then map into the content inner.
     let leaf = leaves.iter().find(|l| l.inner == pane_rect)?;
+    let content = pane_content_inner(leaf.inner, border_status, border_format);
 
-    let local_row = row.checked_sub(leaf.inner.y)? as usize;
+    let local_row = row.checked_sub(content.y)? as usize;
     if local_row >= leaf.rows_v2.len() { return None; }
-    let width = leaf.inner.width as usize;
+    let width = content.width as usize;
     let chars = row_chars(&leaf.rows_v2[local_row].runs, width);
 
-    let local_col = col.checked_sub(leaf.inner.x)? as usize;
+    let local_col = col.checked_sub(content.x)? as usize;
     if local_col >= width { return None; }
     if !is_word_char(chars[local_col]) { return None; }
 
@@ -488,7 +510,7 @@ fn word_bounds_at(
         right += 1;
     }
 
-    Some((leaf.inner.x + left as u16, leaf.inner.x + right as u16))
+    Some((content.x + left as u16, content.x + right as u16))
 }
 
 /// Check if screen coordinates (x, y) fall on a separator line in the layout.
@@ -915,18 +937,9 @@ pub fn render_layout_json(
             rows_v2,
             title,
         } => {
-            // When pane-border-status is enabled, reserve 1 row for the
-            // border label so it doesn't overlap pane content (#288).
+            // Reserve 1 row for the border label so it doesn't overlap content (#288).
             let has_border_label = border_status != "off" && !border_format.is_empty() && area.height > 1;
-            let inner = if has_border_label {
-                if border_status == "top" {
-                    Rect::new(area.x, area.y + 1, area.width, area.height - 1)
-                } else {
-                    Rect::new(area.x, area.y, area.width, area.height - 1)
-                }
-            } else {
-                area
-            };
+            let inner = pane_content_inner(area, border_status, border_format);
             let mut lines: Vec<Line> = Vec::new();
             let use_full_cells = *copy_mode && *active && !content.is_empty();
             // If the source pane is larger than the preview area, reflow
@@ -1945,6 +1958,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut client_pane_rects: Vec<(usize, Rect)> = Vec::new();
     let mut client_borders: Vec<(Vec<usize>, String, usize, u16, u16, Vec<u16>, Rect)> = Vec::new();
     let mut client_content_area: Rect = Rect::default();
+    // Border status/format from the last draw, for cursor/mouse inner-rect calc.
+    let mut client_border_status: String = "off".to_string();
+    let mut client_border_format: String = String::new();
     let mut client_copy_mode: bool = false;
     let mut client_pwsh_selection: bool = false;
     let mut client_mouse_selection: bool = true;
@@ -3721,7 +3737,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                     last_sent_size.1,
                                                     s, e,
                                                     rsel_block,
-                                                    rsel_pane_rect,
+                                                    rsel_pane_rect, &client_border_status, &client_border_format,
                                                 );
                                                 if !text.is_empty() {
                                                     copy_to_system_clipboard(&text);
@@ -3767,7 +3783,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                 last_sent_size.1,
                                                 s, e,
                                                 rsel_block,
-                                                rsel_pane_rect,
+                                                rsel_pane_rect, &client_border_status, &client_border_format,
                                             );
                                             if !text.is_empty() {
                                                 copy_to_system_clipboard(&text);
@@ -4035,7 +4051,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         if let Some(&(pane_id, pane_rect)) = clicked_pane {
                                             cmd_batch.push(format!("select-pane -t %{}\n", pane_id));
                                             let rel_col = me.column as i16 - pane_rect.x as i16;
-                                            let rel_row = me.row as i16 - pane_rect.y as i16;
+                                            let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
 
                                             if client_copy_mode {
                                                 cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n",
@@ -4113,6 +4129,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                                 last_sent_size.1,
                                                                 pane_rect,
                                                                 me.column, me.row,
+                                                                &client_border_status, &client_border_format,
                                                             ))
                                                     } else {
                                                         None
@@ -4164,7 +4181,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                     }) {
                                         let rel_col = me.column as i16 - pane_rect.x as i16;
-                                        let rel_row = me.row as i16 - pane_rect.y as i16;
+                                        let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
                                         cmd_batch.push(format!("pane-mouse {} 2 {} {} M\n",
                                             pane_id, rel_col, rel_row));
                                     }
@@ -4181,7 +4198,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                 last_sent_size.1,
                                                 s, e,
                                                 rsel_block,
-                                                rsel_pane_rect,
+                                                rsel_pane_rect, &client_border_status, &client_border_format,
                                             );
                                             if !text.is_empty() {
                                                 copy_to_system_clipboard(&text);
@@ -4216,7 +4233,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                 }) {
                                     let rel_col = me.column as i16 - pane_rect.x as i16;
-                                    let rel_row = me.row as i16 - pane_rect.y as i16;
+                                    let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
                                     cmd_batch.push(format!("pane-mouse {} 1 {} {} M\n",
                                         pane_id, rel_col, rel_row));
                                 } else {
@@ -4250,7 +4267,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                         }) {
                                             let rel_col = me.column as i16 - pane_rect.x as i16;
-                                            let rel_row = me.row as i16 - pane_rect.y as i16;
+                                            let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
                                             cmd_batch.push(format!("pane-mouse {} 32 {} {} M\n",
                                                 pane_id, rel_col, rel_row));
                                         }
@@ -4304,7 +4321,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                     last_sent_size.1,
                                                     s, e,
                                                     rsel_block,
-                                                    rsel_pane_rect,
+                                                    rsel_pane_rect, &client_border_status, &client_border_format,
                                                 );
                                                 if !text.is_empty() {
                                                     copy_to_system_clipboard(&text);
@@ -4329,7 +4346,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                     last_sent_size.1,
                                                     s, e,
                                                     false,
-                                                    rsel_pane_rect,
+                                                    rsel_pane_rect, &client_border_status, &client_border_format,
                                                 );
                                                 if !text.is_empty() {
                                                     copy_to_system_clipboard(&text);
@@ -4355,7 +4372,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                         }) {
                                             let rel_col = me.column as i16 - pane_rect.x as i16;
-                                            let rel_row = me.row as i16 - pane_rect.y as i16;
+                                            let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
                                             cmd_batch.push(format!("pane-mouse {} 0 {} {} m\n",
                                                 pane_id, rel_col, rel_row));
                                         }
@@ -4394,7 +4411,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                 }) {
                                     let rel_col = me.column as i16 - pane_rect.x as i16;
-                                    let rel_row = me.row as i16 - pane_rect.y as i16;
+                                    let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
                                     cmd_batch.push(format!("pane-mouse {} 35 {} {} M\n",
                                         pane_id, rel_col, rel_row));
                                 } else {
@@ -4936,6 +4953,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 Some(s) if !s.is_empty() => s,
                 _ => "#{pane_index} \"#{pane_title}\"",
             };
+            // Publish for the post-draw cursor and next frame's mouse handlers.
+            client_border_status = border_status.to_string();
+            client_border_format = border_format.to_string();
             // O(N) per frame but pane counts are small in practice (typically < 20).
             let total_panes = if state.zoomed { 1 } else { root.count_leaves() };
             let bchars = crate::border_lines::border_chars(
@@ -6248,7 +6268,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 compute_active_rect_json_zoom_aware(&root, content_chunk, client_zoomed)
             };
             // Compute screen-global cursor position from pane-local coords.
-            let cursor_visible = if let (Some((cc, cr)), Some(inner)) = (post_draw_cursor, active_pane_area) {
+            let cursor_visible = if let (Some((cc, cr)), Some(outer)) = (post_draw_cursor, active_pane_area) {
+                // Content lives inside the border-label reservation; use the render's inner rect.
+                let inner = pane_content_inner(outer, &client_border_status, &client_border_format);
                 let cy = inner.y + cr.min(inner.height.saturating_sub(1));
                 let cx = inner.x + cc.min(inner.width.saturating_sub(1));
                 Some((cx, cy))
@@ -6471,6 +6493,10 @@ mod test_zoom_bleed;
 #[cfg(test)]
 #[path = "../tests-rs/test_zoom_cursor_rect.rs"]
 mod test_zoom_cursor_rect;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_border_status_cursor.rs"]
+mod test_pane_border_status_cursor;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue345_command_prompt_utf8.rs"]
