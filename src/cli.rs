@@ -1,4 +1,4 @@
-use crate::types::{ParsedTarget, VERSION};
+use crate::types::{ParsedTarget, VERSION, build_version_string};
 
 /// Normalize `-x=VALUE` short-flag forms into `["-x", "VALUE"]`.
 ///
@@ -425,9 +425,16 @@ For more information: https://github.com/psmux/psmux
 }
 
 pub fn print_version() {
-    // Always print "tmux <version>" for compatibility with tools like
-    // libtmux/tmuxp that parse the "tmux " prefix from `-V` output.
+    // First line MUST stay "tmux <version>" (and nothing else) for
+    // compatibility with tools like libtmux/tmuxp that read the first line of
+    // `-V` output and parse the version token right after the "tmux " prefix.
     println!("tmux {}", VERSION);
+    // Second line carries the exact build provenance for humans: the git commit
+    // the binary was built from (short hash + date, plus a "dirty" marker when
+    // built from a modified tree). Tools that parse only the first line ignore
+    // it, so this stays fully backward compatible. Example:
+    //   psmux 3.3.6 (f179849 2026-07-19)
+    println!("{}", build_version_string());
 }
 
 pub fn print_commands() {

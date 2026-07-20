@@ -9,6 +9,32 @@ use chrono::Local;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Git provenance captured at compile time by `build.rs`. These let a binary
+/// report the exact commit it was built from, so a build compiled from an
+/// arbitrary checkout is fully identifiable. Every value falls back to
+/// `"unknown"` / `"false"` when the crate is built outside a git checkout.
+pub const GIT_HASH: &str = env!("PSMUX_GIT_HASH");
+pub const GIT_HASH_FULL: &str = env!("PSMUX_GIT_HASH_FULL");
+pub const GIT_DATE: &str = env!("PSMUX_GIT_DATE");
+pub const GIT_DIRTY: &str = env!("PSMUX_GIT_DIRTY");
+
+/// Human-readable build provenance line, e.g.
+///
+///   `psmux 3.3.6 (f179849 2026-07-19)`
+///   `psmux 3.3.6 (f179849 2026-07-19, dirty)`   ← built from a modified tree
+///   `psmux 3.3.6 (unknown commit)`               ← built without a git checkout
+pub fn build_version_string() -> String {
+    if GIT_HASH == "unknown" {
+        return format!("psmux {VERSION} (unknown commit)");
+    }
+    let dirty_suffix = if GIT_DIRTY == "true" { ", dirty" } else { "" };
+    if GIT_DATE == "unknown" {
+        format!("psmux {VERSION} ({GIT_HASH}{dirty_suffix})")
+    } else {
+        format!("psmux {VERSION} ({GIT_HASH} {GIT_DATE}{dirty_suffix})")
+    }
+}
+
 /// Notifications emitted to control mode clients (tmux wire-compatible).
 #[derive(Clone, Debug)]
 pub enum ControlNotification {

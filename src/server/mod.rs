@@ -567,6 +567,7 @@ pub(crate) fn write_startup_error_log(err: &dyn std::fmt::Display) {
         "psmux server startup error\n\
          ==========================\n\
          psmux version : {version}\n\
+         git commit    : {commit}\n\
          when (epoch s): {now}\n\
          os.family     : windows\n\
          \n\
@@ -590,6 +591,12 @@ pub(crate) fn write_startup_error_log(err: &dyn std::fmt::Display) {
            4. open an issue at https://github.com/psmux/psmux/issues/167\n\
               and attach this file\n",
         version = env!("CARGO_PKG_VERSION"),
+        commit = format!(
+            "{}{} ({})",
+            env!("PSMUX_GIT_HASH"),
+            if env!("PSMUX_GIT_DIRTY") == "true" { "-dirty" } else { "" },
+            env!("PSMUX_GIT_DATE"),
+        ),
         now = now,
         err = err,
         cwd = cwd,
