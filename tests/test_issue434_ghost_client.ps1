@@ -130,6 +130,49 @@ Stop-Process -Id $p.Id -Force -EA SilentlyContinue
 Cleanup $S
 
 # ============================================================
+# TEST 3b: comment-5027591125 scenario A -- a detached session that was
+# NEVER attached must show ZERO list-clients rows (no synthesized pts/0 ghost).
+# ============================================================
+Write-Host "`n[Test 3b] Detached session (never attached) shows no client rows" -ForegroundColor Yellow
+$S = "iss434_neverattach"
+Cleanup $S
+& $PSMUX new-session -d -s $S; Start-Sleep -Seconds 3
+$rows = @(& $PSMUX list-clients -t $S 2>&1 | Where-Object { $_ -match ': ' + [regex]::Escape($S) + ':' })
+$att  = Attached $S
+if ($rows.Count -eq 0 -and $att -eq "0") {
+  Write-Pass "never-attached session: 0 client rows AND session_attached=0"
+} else {
+  Write-Fail "ghost row on never-attached session: rows=$($rows.Count) [$($rows -join '|')] attached=$att"
+}
+Cleanup $S
+
+# ============================================================
+# TEST 3c: comment-5027591125 scenario B -- after a clean in-pane
+# detach-client, the row must disappear (registry is the source of truth).
+# ============================================================
+Write-Host "`n[Test 3c] Clean detach-client leaves no residual row" -ForegroundColor Yellow
+$S = "iss434_cleandetach"
+Cleanup $S
+& $PSMUX new-session -d -s $S; Start-Sleep -Seconds 3
+$p = Start-Process -FilePath $PSMUX -ArgumentList "attach-session","-t",$S -PassThru -WindowStyle Minimized
+Start-Sleep -Seconds 4
+$dRows = @(& $PSMUX list-clients -t $S 2>&1 | Where-Object { $_ -match ': ' + [regex]::Escape($S) + ':' })
+if ((Attached $S) -eq "1" -and $dRows.Count -eq 1) { Write-Pass "attached: exactly 1 row, attached=1" }
+else { Write-Fail "attach state wrong: rows=$($dRows.Count) attached=$(Attached $S)" }
+& $PSMUX detach-client -t $S 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+$aRows = @(& $PSMUX list-clients -t $S 2>&1 | Where-Object { $_ -match ': ' + [regex]::Escape($S) + ':' })
+$aAtt  = Attached $S
+$pDead = -not (Get-Process -Id $p.Id -EA SilentlyContinue)
+if ($aRows.Count -eq 0 -and $aAtt -eq "0" -and $pDead) {
+  Write-Pass "after clean detach: 0 rows, attached=0, attach process exited"
+} else {
+  Write-Fail "residual after detach: rows=$($aRows.Count) [$($aRows -join '|')] attached=$aAtt procDead=$pDead"
+}
+Stop-Process -Id $p.Id -Force -EA SilentlyContinue
+Cleanup $S
+
+# ============================================================
 # TEST 4 (TUI visual verification via CLI): live window stays functional
 # ============================================================
 Write-Host "`n[Test 4] Win32 TUI visual verification (CLI-driven)" -ForegroundColor Yellow

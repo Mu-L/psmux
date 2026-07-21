@@ -4117,30 +4117,33 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::ListClients(resp) => {
+                    // Emit exactly one row per real registered client. When the
+                    // registry is empty (a detached session, or every client has
+                    // been reaped) the output is empty, matching tmux, which
+                    // prints nothing for a session with no attached clients.
+                    //
+                    // Issue #434: an old "backward compat" branch synthesized a
+                    // phantom `/dev/pts/0` row from session geometry whenever the
+                    // registry was empty. That fabricated a ghost client for a
+                    // detached session that had never been attached, and left a
+                    // stale row behind after a clean detach reaped the last real
+                    // client, even though `#{session_attached}` correctly read 0.
+                    // The registry is the single source of truth here, exactly as
+                    // it already is for the ListClientsFormat (-F) path below.
                     let mut output = String::new();
-                    if app.client_registry.is_empty() {
-                        // Fallback for backward compat when no clients registered yet
-                        output.push_str(&format!("/dev/pts/0: {}: {} [{}x{}] (utf8)\n", 
-                            app.session_name, 
+                    let mut clients: Vec<&crate::types::ClientInfo> = app.client_registry.values().collect();
+                    clients.sort_by_key(|c| c.id);
+                    for ci in &clients {
+                        let activity_secs = ci.last_activity.elapsed().as_secs();
+                        let kind = if ci.is_control { " (control mode)" } else { "" };
+                        output.push_str(&format!("{}: {}: {} [{}x{}] (utf8){} [activity={}s ago]\n",
+                            ci.tty_name,
+                            app.session_name,
                             app.windows[app.active_idx].name,
-                            app.last_window_area.width,
-                            app.last_window_area.height
+                            ci.width, ci.height,
+                            kind,
+                            activity_secs,
                         ));
-                    } else {
-                        let mut clients: Vec<&crate::types::ClientInfo> = app.client_registry.values().collect();
-                        clients.sort_by_key(|c| c.id);
-                        for ci in &clients {
-                            let activity_secs = ci.last_activity.elapsed().as_secs();
-                            let kind = if ci.is_control { " (control mode)" } else { "" };
-                            output.push_str(&format!("{}: {}: {} [{}x{}] (utf8){} [activity={}s ago]\n",
-                                ci.tty_name,
-                                app.session_name,
-                                app.windows[app.active_idx].name,
-                                ci.width, ci.height,
-                                kind,
-                                activity_secs,
-                            ));
-                        }
                     }
                     let _ = resp.send(output);
                 }
