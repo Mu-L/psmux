@@ -1212,6 +1212,14 @@ pub fn send_control(line: String) -> io::Result<()> {
         let _ = write!(stream, "TARGET {}\n", ft);
     }
     let _ = write!(stream, "{}", line);
+    // Tier 2 — confirmed EXECUTION (not just delivery): append a `session-info`
+    // barrier. It round-trips through the server's single FIFO event loop, so its
+    // reply proves the command above was actually applied, not merely enqueued.
+    // This makes send_control synchronous and closes races where a caller inspects
+    // the effect immediately after the CLI returns. For commands whose server
+    // handler tears down the connection first (e.g. kill-session), the barrier is
+    // simply never answered — that path is covered by the caller's verify-retry.
+    let _ = write!(stream, "session-info\n");
     let _ = stream.flush();
     // Half-close the write side so the server observes EOF *after* our bytes.
     // TCP guarantees all sent data is delivered before the FIN, so the server's
@@ -1219,8 +1227,9 @@ pub fn send_control(line: String) -> io::Result<()> {
     // the RST-on-close race that used to silently drop fire-and-forget commands
     // (the old 50ms "drain" read was only a partial mitigation).
     let _ = stream.shutdown(std::net::Shutdown::Write);
-    // Drain to EOF (bounded by the read timeout): confirms the server stayed up
-    // and consumed the command before we drop the socket.
+    // Read to EOF (bounded by the read timeout): blocks until the server has
+    // processed the barrier — i.e. the command has executed — or the connection
+    // closes / times out.
     let mut buf = [0u8; 256];
     loop {
         match std::io::Read::read(&mut stream, &mut buf) {
