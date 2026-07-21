@@ -3981,7 +3981,7 @@ mod tests_ctrlc_shell_classify;
 /// to the console size APIs.
 static PIPE_TERM_SIZE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// Record the real terminal size reported over the pty (issue #474).
+/// Record the real terminal size reported over a raw VT pipe.
 pub fn set_pipe_term_size(cols: u16, rows: u16) {
     if cols == 0 || rows == 0 {
         return;
@@ -4001,10 +4001,10 @@ pub fn pipe_term_size() -> Option<(u16, u16)> {
 
 /// TUI backend for the psmux client: [`ratatui::backend::CrosstermBackend`]
 /// over [`PsmuxWriter`], with one twist — `size()`/`window_size()` consult the
-/// pipe-mode override first so a client attached over a Cygwin pty (mintty,
-/// issue #474) renders at the real terminal size even though the console
-/// size APIs cannot see that terminal. Outside pipe mode the override is
-/// never set and every call delegates.
+/// pipe-mode override first so a client attached over a Cygwin pty or a
+/// no-ConPTY SSH channel renders at the real terminal size even though the
+/// console size APIs cannot see that terminal. Outside pipe mode the override
+/// is never set and every call delegates.
 pub struct PsmuxBackend {
     inner: ratatui::backend::CrosstermBackend<PsmuxWriter>,
 }

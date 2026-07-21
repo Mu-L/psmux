@@ -1984,7 +1984,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Windows Terminal drops even a local client's mouse registration.
     let is_ssh_mode = crate::ssh_input::needs_vt_input();
     let mut last_mouse_enable = Instant::now();
-    // Cygwin pty (issue #474): cadence for the XTWINOPS size poll.
+    // Raw VT pipe: cadence for the XTWINOPS size poll.
     let mut last_pipe_size_query = Instant::now();
     // ── Cursor blink stabilisation ──────────────────────────────────
     // Cache the last-sent DECSCUSR code so we only write it when it
@@ -6223,7 +6223,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             last_mouse_enable = Instant::now();
         }
 
-        // ── Cygwin pty: periodic terminal-size poll (issue #474) ─────
+        // ── Raw VT pipe: periodic terminal-size poll ───────────────
         // A pipe carries no resize notifications, so ask the terminal for
         // its text-area size (XTWINOPS). The reply flows through the VT
         // reader, which updates the backend size override; an unchanged

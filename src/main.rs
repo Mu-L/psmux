@@ -3969,17 +3969,17 @@ fn run_main() -> io::Result<()> {
         return run_control_mode(control_mode);
     }
 
-    // Cygwin/MSYS pty detection (issue #474): under mintty (Git Bash, MSYS2)
-    // stdin/stdout are pty pipes, not a console. The client then reads VT
-    // bytes from the pipe and writes UTF-8 frames back to it instead of
-    // using console APIs (which fail with ERROR_INVALID_FUNCTION there).
-    let pipe_vt = crate::ssh_input::stdin_is_cygwin_pty();
+    // Raw VT pipe detection: under mintty (Git Bash/MSYS2, issue #474) and
+    // under `ssh -T` (the Win10 SSH mouse workaround), stdin/stdout are pipes,
+    // not a console. Read and write VT bytes directly instead of using console
+    // APIs or routing them through ConPTY.
+    let pipe_vt = crate::ssh_input::stdin_is_vt_pipe();
 
     // If stdin is not a terminal (headless/non-interactive environment, e.g.
     // winget validation pipeline), print version and exit cleanly — starting
     // a TUI session would fail without an interactive console. A Cygwin pty
     // IS a terminal (a human sits on the mintty side) even though it is
-    // technically a pipe.
+    // technically a pipe. The same is true of an interactive `ssh -T` channel.
     if !std::io::stdin().is_terminal() && !pipe_vt {
         print_version();
         return Ok(());
@@ -4003,9 +4003,9 @@ fn run_main() -> io::Result<()> {
     let mut stdout = crate::platform::create_writer();
     enable_virtual_terminal_processing();
     if pipe_vt {
-        // A Cygwin pty is already raw from the native side (no console line
-        // discipline in the path); enable_raw_mode would call SetConsoleMode
-        // on the pipe handle and fail with ERROR_INVALID_FUNCTION.
+        // The local wrapper (or Cygwin pty) is already raw on the terminal
+        // side; enable_raw_mode would call SetConsoleMode on this pipe handle
+        // and fail with ERROR_INVALID_FUNCTION.
         // crossterm's ANSI detection needs TERM set to take the pure-ANSI
         // path on Windows — mintty always sets it, but make sure.
         if env::var("TERM").is_err() {
@@ -4047,10 +4047,10 @@ fn run_main() -> io::Result<()> {
     };
 
     if pipe_vt {
-        // Learn the real terminal size over the pty (XTWINOPS) before the
+        // Learn the real terminal size over the pipe (XTWINOPS) before the
         // first draw; the reader thread records the reply for the backend.
-        // Also enable SGR mouse / focus / bracketed paste directly — mintty
-        // handles these natively.
+        // Also enable SGR mouse / focus / bracketed paste directly. With
+        // `ssh -T`, these bytes reach the client terminal without ConPTY.
         crate::ssh_input::pipe_send_modes_enable();
         crate::ssh_input::request_pipe_terminal_size();
         for _ in 0..50 {
@@ -4069,12 +4069,13 @@ fn run_main() -> io::Result<()> {
     let backend = crate::platform::PsmuxBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // For VT input mode (SSH / JetBrains), explicitly (re-)send mouse-enable
-    // escape sequences.  ConPTY may have consumed crossterm's
-    // EnableMouseCapture output without forwarding it.
-    if use_vt_input {
+    // For console-backed VT input (SSH / JetBrains), explicitly (re-)send
+    // mouse-enable escape sequences. ConPTY may have consumed crossterm's
+    // EnableMouseCapture output without forwarding it. Pipe mode already sent
+    // its safe mode set above and must not enter this ConPTY-specific path.
+    if use_vt_input && !pipe_vt {
         send_mouse_enable();
-    } else {
+    } else if !pipe_vt {
         // Local console: write the DECSET registration explicitly instead of
         // relying solely on ConPTY synthesizing it from ENABLE_MOUSE_INPUT.
         // Windows Terminal tracks this registration and can silently drop it

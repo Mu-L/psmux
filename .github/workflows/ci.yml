@@ -65,3 +65,26 @@ jobs:
           $exe = (Resolve-Path "target\x86_64-pc-windows-msvc\release\psmux.exe").Path
           $env:PSMUX_EXE = $exe
           .\tests\run_smoke_integration.ps1
+
+      - name: Run raw SSH pipe mouse integration
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "target\x86_64-pc-windows-msvc\release\psmux.exe").Path
+          .\tests\test_windows10_ssh_pipe_mouse.ps1 -Psmux $exe
+
+  posix-helper-tests:
+    name: POSIX helper tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test SSH wrapper cleanup
+        run: sh tests/test_psmux_ssh_wrapper.sh
+
+      - name: Test helper installation
+        run: sh tests/test_install_psmux_win.sh

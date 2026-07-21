@@ -1159,6 +1159,12 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
 
 /// Handle a semantic scroll event targeted at a specific pane.
 pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool) {
+    // Server request dispatch already applies this gate. Keep it here too so
+    // alternate/direct callers cannot scroll or enter copy mode with mouse off.
+    if !app.mouse_enabled {
+        return;
+    }
+
     // Ignore scroll in popup mode (#110)
     if matches!(app.mode, Mode::PopupMode { .. }) { return; }
 
@@ -1505,10 +1511,10 @@ mod position_token_tests {
 }
 
 #[cfg(test)]
-mod swap_mru_tests {
+mod window_ops_tests {
     use super::swap_pane_with_path;
     use crate::proxy_pane::create_proxy_pane;
-    use crate::types::{AppState, LayoutKind, Node, Window};
+    use crate::types::{AppState, LayoutKind, Mode, Node, Window};
     use ratatui::layout::Rect;
     use std::net::{TcpListener, TcpStream};
 
@@ -1565,6 +1571,46 @@ mod swap_mru_tests {
         }
     }
 
+    fn make_scrollback_app(mouse_enabled: bool) -> AppState {
+        let pane = proxy_pane(41, 8, 40);
+        let history = (0..80)
+            .map(|line| format!("history-{line}\r\n"))
+            .collect::<String>();
+        pane.term
+            .lock()
+            .expect("term lock")
+            .process(history.as_bytes());
+
+        let mut app = AppState::new("mouse-scrollback".to_string());
+        app.mouse_enabled = mouse_enabled;
+        app.scroll_enter_copy_mode = true;
+        app.last_window_area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 8,
+        };
+        app.windows.push(Window {
+            root: Node::Leaf(pane),
+            active_path: vec![],
+            name: "w0".to_string(),
+            id: 0,
+            activity_flag: false,
+            bell_flag: false,
+            silence_flag: false,
+            last_output_time: std::time::Instant::now(),
+            last_seen_version: 0,
+            manual_rename: false,
+            layout_index: 0,
+            pane_mru: vec![41],
+            zoom_saved: None,
+            linked_from: None,
+            floating: Vec::new(),
+            floating_focus: None,
+        });
+        app
+    }
+
     #[test]
     fn swap_with_path_updates_mru_for_focused_pane_after_swap() {
         let mut app = AppState::new("swap-mru".to_string());
@@ -1576,6 +1622,34 @@ mod swap_mru_tests {
         assert!(swapped, "swap should succeed");
         assert_eq!(app.windows[0].active_path, vec![1], "focus should follow moved active pane");
         assert_eq!(app.windows[0].pane_mru.first().copied(), Some(11), "MRU should be the focused pane id after swap");
+    }
+
+    #[test]
+    fn wheel_up_enters_copy_mode_and_repeated_wheel_scrolls_further() {
+        let mut app = make_scrollback_app(true);
+
+        super::handle_pane_scroll(&mut app, 41, true);
+        assert!(matches!(app.mode, Mode::CopyMode));
+        let first_offset = app.copy_scroll_offset;
+        assert!(
+            first_offset > 0,
+            "first wheel report must move into history"
+        );
+
+        super::handle_pane_scroll(&mut app, 41, true);
+        assert!(
+            app.copy_scroll_offset > first_offset,
+            "repeated wheel reports must continue scrolling"
+        );
+    }
+
+    #[test]
+    fn mouse_off_ignores_wheel_without_entering_copy_mode() {
+        let mut app = make_scrollback_app(false);
+
+        super::handle_pane_scroll(&mut app, 41, true);
+        assert!(matches!(app.mode, Mode::Passthrough));
+        assert_eq!(app.copy_scroll_offset, 0);
     }
 }
 
