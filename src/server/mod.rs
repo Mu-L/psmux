@@ -4440,16 +4440,31 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         Some(dest) => {
                             let same_session = dest == current;
                             if !same_session {
-                                // Cross-session: signal the client to re-attach.
+                                // Cross-session: if the target also names a
+                                // window/pane, pre-select it on the DESTINATION
+                                // server (one server per session) so the client
+                                // lands there after it re-attaches (#483). Then
+                                // signal the client to re-attach to dest.
+                                if pt.pane.is_some() || pt.window.is_some() || pt.window_name.is_some() {
+                                    if let Ok(port_str) = std::fs::read_to_string(crate::paths::port_file(&dest)) {
+                                        if let Ok(port) = port_str.trim().parse::<u16>() {
+                                            if let Ok(key) = crate::session::read_session_key(&dest) {
+                                                let sel = if pt.pane.is_some() { "select-pane" } else { "select-window" };
+                                                let msg = format!("TARGET {}\n{}\n", raw, sel);
+                                                let _ = crate::session::send_control_to_port(port, &msg, &key);
+                                            }
+                                        }
+                                    }
+                                }
                                 if let Some(cid) = app.latest_client_id {
                                     crate::types::send_directive_to_client(cid, &format!("SWITCH {}", dest));
                                 } else {
                                     crate::types::send_directive_to_all_clients(&format!("SWITCH {}", dest));
                                 }
                             }
-                            // Window/pane selection only acts on THIS server's
-                            // session. Cross-session window/pane targets switch the
-                            // session (the destination selection is not carried).
+                            // Same-session window/pane selection acts on THIS
+                            // server directly. (Cross-session selection was
+                            // forwarded to the destination server above.)
                             if same_session {
                                 if let Some(pid) = pt.pane {
                                     if pt.pane_is_id {
