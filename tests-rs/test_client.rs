@@ -423,11 +423,11 @@ fn extract_selection_text_block_mode() {
     };
 
     // Block select cols 2..5, rows 0..2
-    let text = extract_selection_text(&layout, 10, 3, (2, 0), (5, 2), true, None);
+    let text = extract_selection_text(&layout, 10, 3, (2, 0), (5, 2), true, None, "off", "");
     assert_eq!(text, "2345\ncdef\nCDEF");
 
     // Non-block (reading order) same coordinates should give full intermediate rows
-    let text_normal = extract_selection_text(&layout, 10, 3, (2, 0), (5, 2), false, None);
+    let text_normal = extract_selection_text(&layout, 10, 3, (2, 0), (5, 2), false, None, "off", "");
     assert_eq!(text_normal, "23456789\nabcdefghij\nABCDEF");
 }
 
@@ -444,7 +444,7 @@ fn extract_selection_text_clips_reading_order_to_origin_pane() {
     };
     let pane_clip = ratatui::layout::Rect { x: 0, y: 0, width: 5, height: 3 };
 
-    let text = extract_selection_text(&layout, 11, 3, (1, 0), (3, 2), false, Some(pane_clip));
+    let text = extract_selection_text(&layout, 11, 3, (1, 0), (3, 2), false, Some(pane_clip), "off", "");
 
     assert_eq!(text, "bcde\nfghij\nklmn");
 }
@@ -462,7 +462,7 @@ fn extract_selection_text_clips_block_mode_to_origin_pane() {
     };
     let pane_clip = ratatui::layout::Rect { x: 0, y: 0, width: 5, height: 3 };
 
-    let text = extract_selection_text(&layout, 11, 3, (1, 0), (8, 2), true, Some(pane_clip));
+    let text = extract_selection_text(&layout, 11, 3, (1, 0), (8, 2), true, Some(pane_clip), "off", "");
 
     assert_eq!(text, "bcde\nghij\nlmno");
 }
@@ -500,15 +500,15 @@ fn word_bounds_at_finds_word() {
     let pane_rect = ratatui::layout::Rect { x: 0, y: 0, width: 20, height: 1 };
 
     // Click on 'h' (col 0): word is "hello" -> (0, 4)
-    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 0, 0), Some((0, 4)));
+    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 0, 0, "off", ""), Some((0, 4)));
     // Click on 'l' (col 3): still "hello" -> (0, 4)
-    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 3, 0), Some((0, 4)));
+    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 3, 0, "off", ""), Some((0, 4)));
     // Click on space (col 5): no word
-    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 5, 0), None);
+    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 5, 0, "off", ""), None);
     // Click on 'w' (col 6): "world_test" -> (6, 15)
-    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 6, 0), Some((6, 15)));
+    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 6, 0, "off", ""), Some((6, 15)));
     // Click on '_' (col 11): still "world_test" since _ is a word char -> (6, 15)
-    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 11, 0), Some((6, 15)));
+    assert_eq!(word_bounds_at(&layout, 20, 1, pane_rect, 11, 0, "off", ""), Some((6, 15)));
 }
 
 #[cfg(windows)]
