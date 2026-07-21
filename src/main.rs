@@ -3233,7 +3233,19 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // #483: the server validates a -t target and replies "ERROR
+                // <reason>" for an unresolvable window/pane/session so scripts
+                // see a non-zero exit instead of a silent success. A missing/
+                // unreachable server keeps the old fire-and-forget behavior.
+                match send_control_with_response(cmd) {
+                    Ok(resp) => {
+                        if let Some(reason) = resp.trim().strip_prefix("ERROR ") {
+                            eprintln!("{}", reason);
+                            std::process::exit(1);
+                        }
+                    }
+                    Err(_) => {}
+                }
                 return Ok(());
             }
             // copy-mode - Enter copy mode

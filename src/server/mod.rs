@@ -4417,6 +4417,115 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
+                CtrlReq::SwitchClientTarget(raw, resp_tx) => {
+                    // #483: `switch-client -t <target>` with a full
+                    // session:window.pane / @window / %pane spec. Switch the
+                    // client's session AND select the addressed window/pane, and
+                    // validate the target exists so the CLI can exit non-zero.
+                    let now = std::time::Instant::now();
+                    let current = app.port_file_base();
+                    let all_sessions = crate::session::list_session_names();
+                    let pt = crate::cli::parse_target(&raw);
+                    let sess_req = pt.session.clone().filter(|s| !s.is_empty());
+
+                    // Resolve destination session: explicit prefix, else current.
+                    let target_session = match &sess_req {
+                        Some(s) if all_sessions.contains(s) => Some(s.clone()),
+                        Some(s) => all_sessions.iter().find(|x| x.starts_with(s)).cloned(),
+                        None => Some(current.clone()),
+                    };
+
+                    let outcome: Result<bool, String> = match target_session {
+                        None => Err(format!("can't find session: {}", sess_req.clone().unwrap_or_default())),
+                        Some(dest) => {
+                            let same_session = dest == current;
+                            if !same_session {
+                                // Cross-session: signal the client to re-attach.
+                                if let Some(cid) = app.latest_client_id {
+                                    crate::types::send_directive_to_client(cid, &format!("SWITCH {}", dest));
+                                } else {
+                                    crate::types::send_directive_to_all_clients(&format!("SWITCH {}", dest));
+                                }
+                            }
+                            // Window/pane selection only acts on THIS server's
+                            // session. Cross-session window/pane targets switch the
+                            // session (the destination selection is not carried).
+                            if same_session {
+                                if let Some(pid) = pt.pane {
+                                    if pt.pane_is_id {
+                                        if crate::tree::find_pane_by_id_global(&app, pid).is_some() {
+                                            switch_with_copy_save(&mut app, |app| { crate::tree::focus_pane_by_id(app, pid); });
+                                            unzoom_if_zoomed(&mut app);
+                                            resize_all_panes(&mut app);
+                                            Ok(true)
+                                        } else {
+                                            Err(format!("can't find pane: %{}", pid))
+                                        }
+                                    } else {
+                                        switch_with_copy_save(&mut app, |app| { crate::tree::focus_pane_by_index(app, pid); });
+                                        unzoom_if_zoomed(&mut app);
+                                        Ok(true)
+                                    }
+                                } else if let Some(w) = pt.window {
+                                    let internal = if pt.window_is_id {
+                                        app.windows.iter().position(|x| x.id == w)
+                                    } else {
+                                        app.win_pos(w)
+                                    };
+                                    match internal {
+                                        Some(i) => {
+                                            if i != app.active_idx {
+                                                switch_with_copy_save(&mut app, |app| {
+                                                    app.last_window_idx = app.active_idx;
+                                                    app.active_idx = i;
+                                                });
+                                                if let Some(win) = app.windows.get_mut(i) {
+                                                    win.activity_flag = false; win.bell_flag = false; win.silence_flag = false;
+                                                }
+                                                resize_all_panes(&mut app);
+                                            }
+                                            Ok(true)
+                                        }
+                                        None => Err(format!("can't find window: {}", raw)),
+                                    }
+                                } else if let Some(ref wname) = pt.window_name {
+                                    match app.windows.iter().position(|x| x.name == *wname) {
+                                        Some(i) => {
+                                            if i != app.active_idx {
+                                                switch_with_copy_save(&mut app, |app| {
+                                                    app.last_window_idx = app.active_idx;
+                                                    app.active_idx = i;
+                                                });
+                                                resize_all_panes(&mut app);
+                                            }
+                                            Ok(true)
+                                        }
+                                        None => Err(format!("can't find window: {}", wname)),
+                                    }
+                                } else {
+                                    // Session-only target equal to the current session: no-op.
+                                    Ok(false)
+                                }
+                            } else {
+                                Ok(false)
+                            }
+                        }
+                    };
+
+                    match outcome {
+                        Ok(selected) => {
+                            meta_dirty = true;
+                            state_dirty = true;
+                            if selected { hook_event = Some("after-select-window"); }
+                            let _ = resp_tx.send("OK".to_string());
+                        }
+                        Err(msg) => {
+                            app.status_message = Some((format!("switch-client: {}", msg), now, None));
+                            state_dirty = true;
+                            let _ = resp_tx.send(format!("ERROR {}", msg));
+                        }
+                    }
+                }
                 CtrlReq::SwitchClientTable(table) => {
                     app.current_key_table = Some(table);
                     state_dirty = true;

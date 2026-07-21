@@ -1593,6 +1593,12 @@ pub enum CtrlReq {
     /// The String carries the resolved target session name (or "" for -n/-p/-l to be
     /// resolved server-side), and the second field carries the flag: 't', 'n', 'p', or 'l'.
     SwitchClient(String, char),
+    /// `switch-client -t <target>` where the target is a full
+    /// `session:window.pane` / `@window` / `%pane` spec (#483). The server loop
+    /// switches the client's session AND selects the addressed window/pane,
+    /// validates the target exists, and reports "OK" or "ERROR <reason>" back on
+    /// the channel so the CLI can exit non-zero on an unresolvable target.
+    SwitchClientTarget(String, mpsc::Sender<String>),
     LockClient,
     RefreshClient,
     /// `refresh-client -B name:what:format` subscription management.

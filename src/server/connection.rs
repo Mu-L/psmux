@@ -887,9 +887,13 @@ let args: Vec<&str> = {
 };
 // Commands that should permanently change focus when used with -t
 let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp");
-// Commands that handle -t internally and should NOT get FocusWindowTemp
+// Commands that handle -t internally and should NOT get FocusWindowTemp.
+// switch-client resolves the window/pane target itself (#483) and makes the
+// change PERMANENT; letting the generic block issue a temporary focus here
+// would restore the old focus after the batch and silently undo the switch.
 let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "movep"
-    | "move-window" | "movew" | "swap-window" | "swapw");
+    | "move-window" | "movew" | "swap-window" | "swapw"
+    | "switch-client" | "switchc");
 if let Some(wid) = target_win {
     if is_focus_cmd {
         if target_win_is_id {
@@ -2313,7 +2317,17 @@ match cmd {
         let stdin_flag = args.iter().any(|a| *a == "-I");
         let stdout_flag = args.iter().any(|a| *a == "-O");
         let toggle = args.iter().any(|a| *a == "-o");
-        let cmd = args.iter().filter(|a| !a.starts_with('-')).cloned().collect::<Vec<&str>>().join(" ");
+        // #482: everything after pipe-pane's own options (-I/-O/-o; the -t target
+        // was already stripped by the global -t parser) is an opaque shell
+        // command. Skip only the leading option flags and keep the rest verbatim
+        // so the command's OWN dash-flags survive (e.g.
+        // `pwsh -NoProfile -EncodedCommand <b64>`). Previously every dash-token
+        // was filtered out, silently mangling the piped command.
+        let mut start = 0;
+        while start < args.len() && matches!(args[start], "-I" | "-O" | "-o") {
+            start += 1;
+        }
+        let cmd = args[start..].join(" ");
         let (stdin, stdout) = if !stdin_flag && !stdout_flag {
             (false, true)
         } else {
@@ -2357,17 +2371,22 @@ match cmd {
         } else if args.contains(&"-l") {
             let _ = tx.send(CtrlReq::SwitchClient(String::new(), 'l'));
         } else {
-            // -t <target> was already extracted into raw_target by the global -t parser.
-            // Use raw_target which holds the original -t value (session name, not window id).
+            // -t <target> was already extracted into raw_target by the global -t
+            // parser. Pass the FULL target (session:window.pane / @window / %pane)
+            // to the server loop so it switches the session AND selects the
+            // addressed window/pane, and validates existence (#483). Previously
+            // the window/pane suffix was stripped and silently ignored.
             let target = raw_target.clone().unwrap_or_default();
-            // Strip any window/pane suffix (e.g. "session:window.pane" -> "session")
-            let session_target = if let Some(pos) = target.find(':') {
-                target[..pos].to_string()
-            } else {
-                target
-            };
-            let _ = tx.send(CtrlReq::SwitchClient(session_target, 't'));
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::SwitchClientTarget(target, rtx));
+            let resp = rrx.recv_timeout(Duration::from_millis(2000))
+                .unwrap_or_else(|_| "OK".to_string());
+            if !persistent {
+                let _ = write!(write_stream, "{}\n", resp);
+                let _ = write_stream.flush();
+            }
         }
+        if !persistent { break; }
     }
     "lock-client" | "lockc" => {
         let _ = tx.send(CtrlReq::LockClient);
