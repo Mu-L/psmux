@@ -13,6 +13,7 @@
 //! | `PSMUX_SSH_DEBUG=1`    | `~/.psmux/ssh_input.log`          | SSH input handling (existing)        |
 //! | `PSMUX_LATENCY_LOG=1`  | `~/.psmux/latency.log`            | Keypress-to-render latency (existing)|
 //! | `PSMUX_SESSION_DEBUG=1`| `~/.psmux/session_debug.log`      | Session-registry stale-port cleanup  |
+//! | `PSMUX_AUTORENAME_DEBUG=1` | `~/.psmux/autorename.log`     | Process-tree walk for automatic-rename |
 //!
 //! All loggers are:
 //! - **Off by default** — zero overhead when disabled (one atomic load per call)
