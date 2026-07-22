@@ -26,15 +26,38 @@ fn shim_does_not_hardcode_claude_exe_invocation() {
     );
 }
 
+// Since psmux#399 the wrapper skips --teammate-mode injection when
+// teammateMode is configured in any settings.json Claude Code reads (user
+// scope, project scope walking up from the CWD, managed).  These tests assert
+// injection DOES happen, so they must run isolated from the developer's real
+// ~/.claude/settings.json: CLAUDE_CONFIG_DIR points at an empty dir and the
+// CWD sits outside the user profile so the ancestor walk finds nothing.
 fn run_pwsh(script: &str, path: &std::ffi::OsStr) -> std::process::Output {
+    let cwd = neutral_cwd("475");
+    let cfg = cwd.join("empty_claude_cfg");
+    let _ = std::fs::create_dir_all(&cfg);
     let attempt = |exe: &str| {
         std::process::Command::new(exe)
             .args(["-NoProfile", "-Command", script])
             .env("PATH", path)
             .env("PSMUX_CLAUDE_TEAMMATE_MODE", "tmux")
+            .env("CLAUDE_CONFIG_DIR", &cfg)
+            .current_dir(&cwd)
             .output()
     };
     attempt("pwsh").or_else(|_| attempt("powershell")).expect("no PowerShell available")
+}
+
+/// A scratch directory outside the real user profile, so the wrapper's
+/// ancestor .claude/settings.json walk (psmux#399) cannot pick up the
+/// developer's own user-scope settings file.
+fn neutral_cwd(tag: &str) -> std::path::PathBuf {
+    let base = std::env::var_os("PUBLIC")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let d = base.join(format!("psmux_wrapper_test_{tag}"));
+    let _ = std::fs::create_dir_all(&d);
+    d
 }
 
 /// Functional proof: with a PATH that contains only npm-style claude.cmd /

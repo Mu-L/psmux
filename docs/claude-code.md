@@ -69,7 +69,7 @@ Claude Code's standalone binary (the Bun SFE `claude.exe`) has two issues on Win
 
 1. **Agent teams feature gate**: The entire teammate tool-set (spawnTeam, spawnTeammate) is gated behind `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. Without this env var, Claude only has the in-process "Agent" tool and never creates separate panes. psmux sets this automatically.
 
-2. **`teammateMode` config ignored**: The standalone binary ignores `teammateMode: "tmux"` from `~/.claude/settings.json`. psmux injects `--teammate-mode tmux` via a PowerShell wrapper function that's loaded in every pane.
+2. **`teammateMode` default**: Early standalone binaries ignored `teammateMode: "tmux"` from `~/.claude/settings.json`, so psmux injects `--teammate-mode tmux` via a PowerShell wrapper function that's loaded in every pane. The injection only happens when you have NOT configured `teammateMode` yourself: if the key is present in your user settings (`~/.claude/settings.json` or `$env:CLAUDE_CONFIG_DIR\settings.json`), your project's `.claude/settings.json` / `.claude/settings.local.json` (searched upward from the current directory), managed settings, or an explicit `--teammate-mode` argument, psmux leaves the invocation untouched and your configuration wins.
 
 ## Configuration Options
 
@@ -87,7 +87,7 @@ set -g claude-code-fix-tty off
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `claude-code-fix-tty` | `on` | Sets `PSMUX_CLAUDE_TEAMMATE_MODE=tmux` and defines a `claude` wrapper function that injects `--teammate-mode tmux` into every `claude` invocation |
+| `claude-code-fix-tty` | `on` | Sets `PSMUX_CLAUDE_TEAMMATE_MODE=tmux` and defines a `claude` wrapper function that injects `--teammate-mode tmux` when `teammateMode` is not configured in any of your Claude Code settings files (your settings always take priority) |
 
 The `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` env var is always set (not gated by any option) since it's required for the feature to work at all.
 
@@ -177,7 +177,7 @@ You can also verify the `claude` wrapper is active:
 Get-Command claude | Format-List
 ```
 
-If the wrapper is active, this shows a `Function` (not an `Application`). The wrapper auto-injects `--teammate-mode tmux` when calling `claude.exe`.
+If the wrapper is active, this shows a `Function` (not an `Application`). The wrapper auto-injects `--teammate-mode tmux` when calling `claude.exe`, unless `teammateMode` is already configured in your settings.json (user, project, or managed scope) or passed explicitly on the command line. Your own configuration always outranks the psmux default.
 
 ## Troubleshooting
 
@@ -207,7 +207,9 @@ npm install -g @anthropic-ai/claude-code
 
 ### Wrapper not injecting `--teammate-mode`
 
-The wrapper is only defined when `claude-code-fix-tty` is `on` (default). Check:
+If `teammateMode` is set anywhere in your Claude Code settings (user, project, or managed settings.json), the wrapper intentionally does NOT inject the flag; your configuration is respected as-is. Remove the key from your settings if you want the psmux default back.
+
+The wrapper is also only defined when `claude-code-fix-tty` is `on` (default). Check:
 ```powershell
 tmux show-options -g claude-code-fix-tty
 ```

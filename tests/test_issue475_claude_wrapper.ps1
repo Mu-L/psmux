@@ -68,7 +68,16 @@ else { Write-Fail "PSMUX_CLAUDE_TEAMMATE_MODE not set: $out" }
 # === TEST 3: THE BUG - npm-only PATH (no claude.exe) must still work ===
 Write-Host "`n[Test 3] npm-only install (claude.cmd/ps1, no exe) works in pane" -ForegroundColor Yellow
 $pathCmd = "`$env:PATH = '$fakeDir;' + ((`$env:PATH -split ';' | Where-Object { -not (Test-Path (Join-Path `$_ 'claude.exe')) }) -join ';')"
-$out = Invoke-InPane "$pathCmd; claude --version"
+# Isolation (psmux#399): the wrapper now skips --teammate-mode injection when
+# teammateMode is configured in any settings.json Claude Code reads.  Point
+# CLAUDE_CONFIG_DIR at an empty dir and cd outside the user profile so this
+# machine's real ~/.claude/settings.json cannot suppress the injection this
+# test asserts.
+$isoCwd = Join-Path $env:PUBLIC "psmux_test475_iso"
+$isoCfg = Join-Path $isoCwd "cfg"
+New-Item -ItemType Directory -Force $isoCfg | Out-Null
+$isoCmd = "`$env:CLAUDE_CONFIG_DIR='$isoCfg'; cd '$isoCwd'"
+$out = Invoke-InPane "$pathCmd; $isoCmd; claude --version"
 if ($out -match "not recognized") { Write-Fail "BUG #475 PRESENT: claude.exe not recognized error" }
 else { Write-Pass "No 'claude.exe not recognized' error" }
 if ($out -match "FAKE_NPM_CLAUDE_RAN") { Write-Pass "npm-style claude executed through wrapper" }
@@ -138,6 +147,7 @@ else { Write-Fail "TUI: expected 2 panes, got $panes" }
 try { Stop-Process -Id $proc.Id -Force -EA SilentlyContinue } catch {}
 
 Remove-Item $fakeDir -Recurse -Force -EA SilentlyContinue
+Remove-Item (Join-Path $env:PUBLIC "psmux_test475_iso") -Recurse -Force -EA SilentlyContinue
 
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
 Write-Host "  Passed: $($script:TestsPassed)" -ForegroundColor Green

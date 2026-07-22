@@ -840,11 +840,13 @@ pub fn set_tmux_env(builder: &mut CommandBuilder, pane_id: usize, control_port: 
     // ── Claude Code workarounds (removable once upstream fixes land) ──
     //
     // claude-code-fix-tty (set -g claude-code-fix-tty on/off):
-    //   Claude Code v2.1.71 standalone binary ignores `teammateMode` from
-    //   settings.json (config schema strips the field).  The `--teammate-mode
-    //   tmux` CLI flag DOES work.  We set PSMUX_CLAUDE_TEAMMATE_MODE=tmux so
-    //   the PowerShell env-shim `claude` wrapper function injects the flag
-    //   automatically.  Disable with: set -g claude-code-fix-tty off
+    //   Early Claude Code standalone binaries (v2.1.71) ignored `teammateMode`
+    //   from settings.json, so psmux injects `--teammate-mode tmux` via the
+    //   PowerShell env-shim `claude` wrapper.  Since psmux#399 (comment
+    //   5041988743) the wrapper only injects when the user has NOT configured
+    //   teammateMode in any settings.json Claude Code reads, because CLI flags
+    //   outrank settings and blind injection silently overrode an explicit
+    //   user choice.  Disable with: set -g claude-code-fix-tty off
     if fix_tty {
         builder.env("PSMUX_CLAUDE_TEAMMATE_MODE", "tmux");
     }
@@ -918,13 +920,18 @@ const ENV_SHIM_PS: &str = concat!(
     "} elseif($v.Count -gt 0){ ",
     "foreach($e in $v.GetEnumerator()){[Environment]::SetEnvironmentVariable($e.Key,$e.Value,'Process')} ",
     "} else { Get-ChildItem Env:|ForEach-Object{$_.Name+'='+$_.Value} } }; ",
-    // Claude Code teammate-mode wrapper (claude-code#26244):
-    // The standalone (Bun SFE) binary ignores `teammateMode` from settings.json
-    // but honours the `--teammate-mode tmux` CLI flag.  The agent teams tool-set
-    // is separately gated by CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var (set
-    // above in set_tmux_env).  This wrapper auto-injects --teammate-mode when
-    // PSMUX_CLAUDE_TEAMMATE_MODE is set (via `set -g claude-code-fix-tty on`).
-    // Disable with: set -g claude-code-fix-tty off
+    // Claude Code teammate-mode wrapper (claude-code#26244, psmux#399):
+    // Early standalone (Bun SFE) binaries ignored `teammateMode` from
+    // settings.json, so psmux force-injected the `--teammate-mode` CLI flag.
+    // Current Claude Code builds DO honour settings.json (debug log shows
+    // `[TeammateModeSnapshot] Captured from config: ...`), and a CLI flag
+    // outranks settings, so unconditional injection silently overrode an
+    // explicit user choice.  The wrapper therefore injects ONLY when the user
+    // has not configured teammateMode anywhere Claude Code reads it from:
+    // an explicit CLI flag, managed settings, user-scope settings
+    // (CLAUDE_CONFIG_DIR or ~/.claude), or a project's
+    // .claude/settings(.local).json found by walking up from the CWD at call
+    // time.  Disable entirely with: set -g claude-code-fix-tty off
     //
     // The real claude command is resolved at call time via Get-Command instead
     // of hardcoding claude.exe, because npm/nvm4w installs ship only claude.cmd
@@ -932,10 +939,25 @@ const ENV_SHIM_PS: &str = concat!(
     // (Application = .exe/.cmd, ExternalScript = .ps1) excludes this wrapper
     // function itself, so there is no self-recursion.
     "if($env:PSMUX_CLAUDE_TEAMMATE_MODE){ ",
+    // _psmux_tmcfg: $true when teammateMode is already configured in a settings
+    // file Claude Code consults.  Checked at call time (not shim load time) so
+    // cd'ing into a project with its own .claude/settings.json is honoured.
+    "function Global:_psmux_tmcfg { ",
+    "$fs=@(); ",
+    "if($env:ProgramData){ $fs+=(Join-Path $env:ProgramData 'ClaudeCode/managed-settings.json') }; ",
+    "$u=if($env:CLAUDE_CONFIG_DIR){$env:CLAUDE_CONFIG_DIR}else{Join-Path $env:USERPROFILE '.claude'}; ",
+    "$fs+=(Join-Path $u 'settings.json'); ",
+    "$d=$null; try{$d=(Get-Location -PSProvider FileSystem -EA Stop).ProviderPath}catch{}; ",
+    "while($d){ ",
+    "$fs+=(Join-Path $d '.claude/settings.json'); ",
+    "$fs+=(Join-Path $d '.claude/settings.local.json'); ",
+    "$p=Split-Path $d -Parent; if(-not $p -or $p -eq $d){break}; $d=$p }; ",
+    "foreach($f in $fs){ try{ if((Test-Path -LiteralPath $f) -and ((Get-Content -LiteralPath $f -Raw) -match '\"teammateMode\"\\s*:')){ return $true } }catch{} }; ",
+    "$false }; ",
     "function Global:claude { ",
     "$c=Get-Command claude -CommandType Application,ExternalScript -EA 0 | Select-Object -First 1; ",
     "if(-not $c){ $c='claude.exe' }; ",
-    "if($args -contains '--teammate-mode'){ & $c @args } ",
+    "if(($args -contains '--teammate-mode') -or (_psmux_tmcfg)){ & $c @args } ",
     "else{ & $c --teammate-mode $env:PSMUX_CLAUDE_TEAMMATE_MODE @args } } }",
 );
 
@@ -2010,6 +2032,10 @@ mod test_windowsapps_alias_shell;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue475_claude_wrapper.rs"]
 mod test_issue475_claude_wrapper;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue399_teammate_settings_priority.rs"]
+mod test_issue399_teammate_settings_priority;
 
 #[cfg(test)]
 mod test_parser_audible_bell {
