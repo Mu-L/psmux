@@ -38,9 +38,15 @@ fn counter_path(tag: &str) -> std::path::PathBuf {
 fn slow_tracer(counter: &std::path::Path) -> String {
     let p = counter.display().to_string().replace('\\', "/");
     if cfg!(windows) {
-        format!("ping -n 2 127.0.0.1 >nul & echo x>>\"{}\"", p)
+        // NOTE: the redirect target is intentionally unquoted. `#()` runs via
+        // `Command::new("cmd").args(["/C", ...])`, and quoting the target makes
+        // cmd.exe mangle the redirect (Rust's arg escaping collides with cmd's
+        // quote parsing) so the append silently fails — even on a space-free
+        // path. The filename here is fixed, so the only way a space enters is
+        // the temp directory itself; not worth fighting cmd for in a helper.
+        format!("ping -n 2 127.0.0.1 >nul & echo x>>{}", p)
     } else {
-        format!("sleep 1; echo x>>\"{}\"", p)
+        format!("sleep 1; echo x>>{}", p)
     }
 }
 
