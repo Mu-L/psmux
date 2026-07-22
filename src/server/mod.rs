@@ -1851,6 +1851,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let line = crate::format::format_list_sessions(&app, &fmt);
                     let _ = resp.send(format!("{}\n", line));
                 }
+                CtrlReq::ExpandFormat(fmt, resp) => {
+                    // Synchronous by design: the caller is a connection thread
+                    // that is about to run the expanded string, and it has
+                    // already decided the round trip is worth it (it only sends
+                    // this when the command actually contains `#{`).
+                    let _ = resp.send(expand_format(&fmt, &app));
+                }
                 CtrlReq::ClientAttach(cid) => {
                     // Registration and the attached counter are one idempotent
                     // operation. A duplicate attach for the same connection

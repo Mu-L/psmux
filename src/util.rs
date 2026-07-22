@@ -20,6 +20,51 @@ pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
     TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Resolve a `-c` start-dir to one a freshly spawned pane shell can actually
+/// enter, falling back to the user's home directory when it cannot.
+///
+/// `portable_pty`'s `cwd()` maps to the child's initial working directory, and
+/// on Windows a directory the child cannot enter makes the spawn itself fail —
+/// before the shell runs, so no amount of profile-level healing helps. The pane
+/// dies on creation and psmux tears it straight back down. That is the
+/// "prefix + | splits, opens, then immediately aborts" report.
+///
+/// Two cases produce an unusable start-dir in practice:
+///   - the directory no longer exists (it was deleted, or renamed, since the
+///     pane that is being split last `cd`'d into it), and
+///   - a UNC path. `\\wsl.localhost\...` after a `cd` into WSL is the common
+///     one. These are rejected even when currently reachable: whether they work
+///     depends on the WSL VM being up and the share being mounted, so a split
+///     that succeeds now and dies in ten minutes is worse than one that
+///     predictably lands in the home directory.
+///
+/// Returning `None` means "do not set a cwd at all" and lets the child inherit
+/// the server's — the last resort for the case where even home is unusable.
+pub fn usable_start_dir(dir: &str) -> Option<std::path::PathBuf> {
+    // UNC rejection is a Windows concept (the `\\wsl.localhost\...` case). On
+    // Unix a leading `//` is a legitimate absolute path, so treating it as UNC
+    // would wrongly send existing directories to the home fallback.
+    #[cfg(windows)]
+    fn is_unc(p: &str) -> bool {
+        p.starts_with("\\\\") || p.starts_with("//")
+    }
+    #[cfg(not(windows))]
+    fn is_unc(_p: &str) -> bool {
+        false
+    }
+
+    if !dir.is_empty() && !is_unc(dir) && std::path::Path::new(dir).is_dir() {
+        return Some(std::path::PathBuf::from(dir));
+    }
+
+    let home = crate::paths::home_dir();
+    if !home.is_empty() && std::path::Path::new(&home).is_dir() {
+        return Some(std::path::PathBuf::from(home));
+    }
+
+    None
+}
+
 /// Expand `~` to the user's home directory in a shell command string,
 /// then rewrite `~/.psmux/plugins/` to `~/.config/psmux/plugins/` when
 /// the classic path does not exist but the XDG path does (issue psmux-plugins#2).
@@ -582,3 +627,7 @@ pub fn color_to_name(c: vt100::Color) -> std::borrow::Cow<'static, str> {
         vt100::Color::Rgb(r,g,b) => Cow::Owned(format!("rgb:{},{},{}", r,g,b)),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_run_shell_format_and_start_dir.rs"]
+mod tests_run_shell_format_and_start_dir;

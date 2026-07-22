@@ -2383,6 +2383,18 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     None,
                 ));
             } else {
+                // Expand #{...} format variables (tmux parity: run-shell's
+                // command is format-expanded before it runs).
+                //
+                // This was missing entirely, and it silently broke every bind of
+                // the shape `run-shell "helper --path '#{pane_current_path}'"`:
+                // the helper received the literal string `#{pane_current_path}`.
+                // Combined with `-b` discarding the spawn result below, such a
+                // bind did nothing at all and reported nothing — no output, no
+                // status message, no log line. Only `-c`/`-d` start-dirs were
+                // being expanded (in server/mod.rs), which is why `popup -d
+                // "#{pane_current_path}"` worked and this did not.
+                let shell_cmd = crate::format::expand_format(&shell_cmd, app);
                 // Expand ~ to home directory + XDG fallback for plugin paths
                 let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
                 // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
@@ -2394,7 +2406,17 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     if !target_session.is_empty() {
                         c.env("PSMUX_TARGET_SESSION", &target_session);
                     }
-                    let _ = c.spawn();
+                    // Report a spawn failure. `-b` means "don't wait for the
+                    // command", not "don't tell me it never started" — the old
+                    // `let _ = c.spawn();` made a broken background bind
+                    // indistinguishable from an unbound key.
+                    if let Err(e) = c.spawn() {
+                        app.status_message = Some((
+                            format!("run-shell: {}: {}", shell_cmd, e),
+                            Instant::now(),
+                            None,
+                        ));
+                    }
                 } else {
                     // No -b: spawn async to avoid blocking the UI thread.
                     // Interactive commands (htop, vim, etc.) would freeze psmux

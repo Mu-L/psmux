@@ -2594,11 +2594,47 @@ fn run_main() -> io::Result<()> {
                     eprintln!("usage: run-shell [-b] shell-command");
                     std::process::exit(1);
                 }
+                // `#{...}` can only be resolved against live server state, which
+                // this process does not have — the CLI path runs the command
+                // itself rather than going through the server. So when the
+                // command references a format variable, hand the whole thing to
+                // the server and let it run there (connection.rs expands, then
+                // executes). Without this, `psmux run-shell "x #{pane_id}"`
+                // passed the helper that literal text, exactly as the bind path
+                // used to.
+                if shell_cmd_str.contains("#{") {
+                    let mut line = String::from("run-shell");
+                    if background {
+                        line.push_str(" -b");
+                    }
+                    line.push(' ');
+                    line.push_str(&shell_cmd_str);
+                    line.push('\n');
+                    match crate::session::send_control_with_response(line) {
+                        Ok(resp) => {
+                            if !resp.is_empty() {
+                                io::stdout().write_all(resp.as_bytes())?;
+                            }
+                            return Ok(());
+                        }
+                        // No server reachable: fall through and run locally with
+                        // the format text unexpanded. That is the pre-existing
+                        // behaviour, and it beats refusing to run at all.
+                        Err(e) => {
+                            eprintln!("run-shell: {} (running without format expansion)", e);
+                        }
+                    }
+                }
                 let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd_str);
                 // Run the command using the resolved shell
                 if background {
                     let mut c = crate::commands::build_run_shell_command(&shell_cmd);
-                    let _ = c.spawn();
+                    // Report a failure to START the command. `-b` waives the
+                    // output, not the error.
+                    if let Err(e) = c.spawn() {
+                        eprintln!("run-shell: {}: {}", shell_cmd, e);
+                        std::process::exit(1);
+                    }
                 } else {
                     let mut c = crate::commands::build_run_shell_command(&shell_cmd);
                     let output = c.output()?;

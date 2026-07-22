@@ -769,12 +769,26 @@ Run an external command and display the output:
 # Output appears in the status bar message area
 psmux run-shell "echo hello"
 
-# Run in background (fire-and-forget, no output displayed)
+# Run in background (fire-and-forget, no output displayed).
+# The command's OUTPUT is discarded, but a failure to start it is reported.
 psmux run-shell -b "long-running-script.ps1"
 
 # Use format variables in shell commands
 psmux run-shell "echo 'Current pane: #{pane_index}'"
 ```
+
+`#{...}` variables are expanded against the live server state before the command
+runs, so a bind can hand a helper the current pane's context:
+
+```powershell
+bind-key e run-shell -b "my-helper.ps1 -Pane '#{pane_id}' -Path '#{pane_current_path}'"
+```
+
+> **Note:** expansion here was missing until psmux 3.3.8. On earlier versions
+> the helper received the literal text `#{pane_id}`, and with `-b` also
+> swallowing spawn errors, such a bind failed completely silently. If you are
+> targeting an older psmux, pass the values from the caller instead of relying
+> on expansion.
 
 ## Interactive Choosers
 

@@ -1546,6 +1546,16 @@ pub enum CtrlReq {
     ShowOptions(mpsc::Sender<String>),
     ShowWindowOptions(mpsc::Sender<String>),
     SourceFile(String),
+    /// Expand `#{...}` format variables against the live server state and send
+    /// the result back: `(format_string, reply)`.
+    ///
+    /// Connection threads parse commands without access to `AppState` (it is an
+    /// owned local of the server loop, not shared behind a lock), so anything
+    /// they need format-expanded has to make this round trip. `run-shell` is the
+    /// motivating caller: its command was never expanded at all, so a bind like
+    /// `run-shell "helper --path '#{pane_current_path}'"` handed the helper that
+    /// literal string.
+    ExpandFormat(String, mpsc::Sender<String>),
     MoveWindow(Option<usize>),
     // (source display index, target display index); source None = active window
     SwapWindow(Option<usize>, usize),
