@@ -38,9 +38,9 @@ fn counter_path(tag: &str) -> std::path::PathBuf {
 fn slow_tracer(counter: &std::path::Path) -> String {
     let p = counter.display().to_string().replace('\\', "/");
     if cfg!(windows) {
-        format!("ping -n 2 127.0.0.1 >nul & echo x>>{}", p)
+        format!("ping -n 2 127.0.0.1 >nul & echo x>>\"{}\"", p)
     } else {
-        format!("sleep 1; echo x>>{}", p)
+        format!("sleep 1; echo x>>\"{}\"", p)
     }
 }
 
