@@ -51,6 +51,76 @@ fn write_mouse_event(master: &mut dyn std::io::Write, button: u8, col: u16, row:
     }
 }
 
+/// Look up a copy-mode key binding for `key`, honouring `mode-keys`.
+///
+/// The table name selection matches tmux: `mode-keys vi` uses `copy-mode-vi`,
+/// anything else uses `copy-mode`.
+pub fn copy_mode_binding(app: &AppState, key: (KeyCode, KeyModifiers)) -> Option<crate::types::Action> {
+    let table_name = if app.mode_keys == "vi" { "copy-mode-vi" } else { "copy-mode" };
+    let key_tuple = normalize_key_for_binding(key);
+    app.key_tables
+        .get(table_name)?
+        .iter()
+        .find(|b| b.key == key_tuple)
+        .map(|b| b.action.clone())
+}
+
+/// Run a resolved copy-mode binding.
+///
+/// Returns `true` when the binding was handled and the caller must NOT fall
+/// through to the built-in copy-mode key handling.
+///
+/// `send-keys -X <cmd>` is by far the most common action in these tables (it is
+/// how tmux-yank and every copy-mode rebind is written), and its implementation
+/// lives in the server loop's own `CtrlReq::SendKeysX` arm. Since this function
+/// is itself called from the loop, it queues the request rather than trying to
+/// re-enter that arm — see `AppState::control_tx`. Everything else goes through
+/// the normal action executor.
+pub fn run_copy_mode_binding(app: &mut AppState, action: &crate::types::Action) -> bool {
+    use crate::types::Action;
+    if let Action::Command(cmd) = action {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        if matches!(parts.first(), Some(&"send-keys") | Some(&"send"))
+            && parts.iter().any(|p| *p == "-X")
+        {
+            // Everything after the flags is the copy-mode command name plus its
+            // arguments, e.g. `copy-pipe-and-cancel "clip.exe"`. Rebuild it from
+            // the ORIGINAL string rather than the whitespace split so a quoted
+            // argument containing spaces survives.
+            if let Some(x_pos) = cmd.find("-X") {
+                let rest = cmd[x_pos + 2..].trim();
+                if !rest.is_empty() {
+                    if let Some(tx) = app.control_tx.as_ref() {
+                        let _ = tx.send(crate::types::CtrlReq::SendKeysX(rest.to_string()));
+                        return true;
+                    }
+                }
+            }
+            // No sender (or nothing after -X): fall through to the built-ins
+            // rather than silently swallowing the key.
+            return false;
+        }
+    }
+    crate::commands::execute_action(app, action).is_ok()
+}
+
+/// **This function is currently unreachable.** `grep -rn "handle_key(" src/`
+/// returns only this definition.
+///
+/// It is the input dispatcher from the pre-server, single-process architecture.
+/// The live path is client -> TCP -> `CtrlReq::SendKey` -> `send_key_to_active`
+/// (named keys) and `handle_copy_mode_char` (printable characters), none of
+/// which come through here.
+///
+/// That mattered: this was the ONLY code that consulted the `copy-mode-vi` /
+/// `copy-mode` key tables, so those bindings parsed, stored, and listed
+/// correctly while never actually firing. `switch-client -T <table>` below is
+/// still in exactly that state. Before fixing a key-handling bug here, check
+/// whether the code you are editing runs at all.
+///
+/// Kept rather than deleted because it is still the most readable statement of
+/// the intended key semantics, and because deleting ~600 lines is a change that
+/// deserves its own review.
 pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
     // Fold NUL onto C-Space up front, for the same reason as the client input
     // loop: the raw `is_prefix` tuple comparisons below must see C-Space when
@@ -709,14 +779,15 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             Ok(false)
         }
         Mode::CopyMode => {
-            // Check copy-mode key table for user bindings first (used by plugins like tmux-yank)
-            let table_name = if app.mode_keys == "vi" { "copy-mode-vi" } else { "copy-mode" };
-            let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
-            if let Some(bind) = app.key_tables.get(table_name)
-                .and_then(|t| t.iter().find(|b| b.key == key_tuple))
-                .cloned()
-            {
-                return execute_action(app, &bind.action);
+            // Check copy-mode key table for user bindings first (used by plugins like tmux-yank).
+            // Shares its lookup with the LIVE dispatch path (send_key_to_active
+            // / handle_copy_mode_char) rather than keeping a second copy — the
+            // second copy is what let the live path go years without consulting
+            // these tables at all.
+            if let Some(action) = copy_mode_binding(app, (key.code, key.modifiers)) {
+                if run_copy_mode_binding(app, &action) {
+                    return Ok(false);
+                }
             }
             // Handle register pending state (waiting for a-z after ")
             if app.copy_register_pending {
@@ -3031,6 +3102,24 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
 
 /// Dispatch a single character as a copy-mode action.
 fn handle_copy_mode_char(app: &mut AppState, c: char) -> io::Result<()> {
+    // User bindings from `bind -T copy-mode-vi` / `-T copy-mode` win over the
+    // built-ins below.
+    //
+    // These tables parsed, stored, and showed up in `list-keys`, but nothing in
+    // the live client/server path ever consulted them: the only lookup lived in
+    // `input::handle_key`, which has no callers (it is dead code from the
+    // pre-server architecture). So a rebind like
+    // `bind -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "clip.exe"`
+    // appeared to work only because `y` happens to coincide with the hardcoded
+    // vi default — the user's pipe never ran.
+    //
+    // Checked BEFORE the pending-state handling below, matching tmux: a bound
+    // key is a bound key.
+    if let Some(action) = copy_mode_binding(app, (KeyCode::Char(c), KeyModifiers::NONE)) {
+        if run_copy_mode_binding(app, &action) {
+            return Ok(());
+        }
+    }
     // Handle text-object pending state (waiting for w/W after a/i)
     if let Some(prefix) = app.copy_text_object_pending.take() {
         match (prefix, c) {
@@ -3291,6 +3380,18 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
 
     // --- Copy mode: full vi-style key table ---
     if matches!(app.mode, Mode::CopyMode) {
+        // User `bind -T copy-mode-vi` / `-T copy-mode` bindings win over the
+        // built-in defaults below. See handle_copy_mode_char for why this was
+        // missing. `k` is a canonical key NAME here ("escape", "C-v", ...), so
+        // it goes back through the same parser the config used to produce the
+        // table's keys — that keeps one definition of what a key name means.
+        if let Some((code, mods)) = crate::config::parse_key_string(k) {
+            if let Some(action) = copy_mode_binding(app, (code, mods)) {
+                if run_copy_mode_binding(app, &action) {
+                    return Ok(());
+                }
+            }
+        }
         match k {
             "esc" | "q" => {
                 exit_copy_mode(app);
@@ -3657,3 +3758,7 @@ mod tests_pane_last_special_key;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue413_copy_count.rs"]
 mod tests_issue413_copy_count;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_copy_mode_key_tables.rs"]
+mod tests_copy_mode_key_tables;
