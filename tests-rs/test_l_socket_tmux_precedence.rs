@@ -152,6 +152,25 @@ fn no_dash_l_adopts_current_server_from_tmux() {
 }
 
 #[test]
+fn issue485_tmux_beats_a_newer_last_created_session() {
+    // Issue #485: two real sessions, `repro` (6001) attached in this pane and a
+    // NEWER `repro_other` (6002) created afterwards. `$TMUX` names `repro`, so a
+    // no-`-t` query (display-message -p '#S') must resolve to `repro`, NOT the
+    // most-recently-created `repro_other`. This is the resolve-layer invariant
+    // that main() must honor by always consulting $TMUX when no explicit `-t
+    // session` is given (a stale PSMUX_TARGET_SESSION must never short-circuit it).
+    let reg = TempRegistry::new();
+    reg.with_session("repro", 6001).with_session("repro_other", 6002);
+    let tmux = tmux_for(6001);
+    let got = resolve_routing_target(None, Some(&tmux), reg.path());
+    assert_eq!(
+        got.as_deref(),
+        Some("repro"),
+        "$TMUX must select the current session, never the newer last-created one"
+    );
+}
+
+#[test]
 fn warm_session_is_never_adopted_from_tmux() {
     // $TMUX points at the internal warm (standby) server; a real `main` exists.
     let reg = TempRegistry::new();

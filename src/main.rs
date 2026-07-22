@@ -264,6 +264,14 @@ fn run_main() -> io::Result<()> {
     // Supports session:window.pane format (e.g., "dev:0.1")
     // PSMUX_TARGET_SESSION stores the port file base name (for port file lookup)
     // PSMUX_TARGET_FULL stores the full target (session:window.pane) for the server
+    //
+    // Tracks whether THIS command line supplied an explicit `-t <session>`. Only
+    // an explicit session target may pin routing; anything else (no -t, a pane/
+    // window-only target like `-t %2`, or switch-client) must fall through to the
+    // $TMUX-based resolution below so a stale PSMUX_TARGET_SESSION inherited from
+    // the pane environment (e.g. a warm-pool shell frozen at `__warm__`) can never
+    // hijack the current session. See issue #485.
+    let mut explicit_session_target = false;
     if let Some(pos) = args.iter().position(|a| a == "-t") {
         if let Some(target) = args.get(pos + 1) {
             // move-window/swap-window: a bare numeric -t is a WINDOW index (tmux
@@ -312,14 +320,20 @@ fn run_main() -> io::Result<()> {
             let is_switch_client = args.iter().any(|a| a == "switch-client" || a == "switchc");
             if has_explicit_session && !is_switch_client {
                 env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
+                explicit_session_target = true;
             }
         }
     }
-    if env::var("PSMUX_TARGET_SESSION").is_err() {
-        // No explicit `-t session`: resolve which server to route to. `$TMUX`
-        // (set inside every psmux pane) names the current server; the `-L`
-        // namespace and the most-recent-session fallback are applied inside
-        // resolve_routing_target.
+    if !explicit_session_target {
+        // No explicit `-t session` on this command line: `$TMUX` (set inside
+        // every psmux pane and kept pointing at the live server) is the authority
+        // for which server we belong to. It must OVERRIDE any PSMUX_TARGET_SESSION
+        // inherited from the pane environment, because a warm-pool shell freezes
+        // that variable at `__warm__` (it names the server the pane was born in,
+        // not the session it was transplanted into). Guarding on `is_err()` here
+        // let that stale value win and routed queries like `display-message -p
+        // '#S'` to the wrong session (issue #485). The `-L` namespace and the
+        // most-recent-session fallback are applied inside resolve_routing_target.
         let psmux_dir = std::path::PathBuf::from(crate::paths::psmux_dir());
         let tmux_env = env::var("TMUX").ok();
         if let Some(name) = crate::session::resolve_routing_target(
