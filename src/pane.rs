@@ -1269,6 +1269,98 @@ fn detect_env_prefix_command(cmd: &str) -> Option<(Option<String>, Vec<(String, 
     Some((cwd_override, env_sets, remainder.to_string()))
 }
 
+/// Split a spawn-command string into whitespace-separated tokens, honouring
+/// double- and single-quoted segments (quotes are consumed).  Used by the
+/// direct-spawn path below to recover `program + args` from strings like
+/// `"C:/Program Files/Git/bin/bash.exe" --login -i`.
+#[cfg(windows)]
+fn split_spawn_tokens(cmd: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for c in cmd.chars() {
+        match quote {
+            Some(q) => {
+                if c == q { quote = None; } else { cur.push(c); }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                c if c.is_whitespace() => {
+                    if !cur.is_empty() { tokens.push(std::mem::take(&mut cur)); }
+                }
+                _ => cur.push(c),
+            },
+        }
+    }
+    if !cur.is_empty() { tokens.push(cur); }
+    tokens
+}
+
+/// tmux parity for window/pane commands (issues #492, #493): tmux execs a
+/// multi-argument shell-command DIRECTLY (spawn.c: `execvp(argv[0], argv)`)
+/// and only routes single strings through `$SHELL -c`.  psmux wrapped every
+/// command in `<shell> -Command "<cmd>"`, which (a) leaves a wrapper
+/// powershell process around every pane (#493) and (b) breaks quoted
+/// executable paths containing spaces, which pwsh cannot parse as a bare
+/// statement (#492).
+///
+/// Resolve the command to `Some((program, args))` when it is a plain program
+/// invocation we can spawn directly:
+///   - shell syntax (pipes, redirects, `&&`, variables, ...) → None (needs a
+///     real shell);
+///   - the whole string is an existing executable path (spaces included);
+///   - a quoted first token, or the longest token-prefix, is an existing
+///     executable path (handles unquoted space paths with arguments);
+///   - a single leading token resolvable via PATH (e.g. `cmd.exe`, `bash`).
+#[cfg(windows)]
+fn try_direct_spawn(cmd: &str) -> Option<(String, Vec<String>)> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() { return None; }
+    // pwsh call-operator form produced by the env-prefix path (#399) keeps
+    // its established shell route.
+    if trimmed.starts_with('&') { return None; }
+    let exists_as_program = |p: &str| -> Option<String> {
+        let path = std::path::Path::new(p);
+        if path.is_file() { return Some(p.to_string()); }
+        if !p.to_ascii_lowercase().ends_with(".exe") {
+            let with_exe = format!("{}.exe", p);
+            if std::path::Path::new(&with_exe).is_file() { return Some(with_exe); }
+        }
+        None
+    };
+    // Whole string as one path — covers `C:/Program Files/Git/bin/bash.exe`
+    // exactly as users write it in bind-key/new-window (quotes already
+    // consumed by the command parser).  Checked BEFORE the metacharacter
+    // bail so `C:\Program Files (x86)\...` paths are still resolved.
+    if let Some(prog) = exists_as_program(trimmed) {
+        return Some((prog, Vec::new()));
+    }
+    // Any shell metacharacter means the string needs a real shell.
+    if trimmed.chars().any(|c| matches!(c, '&' | '|' | '<' | '>' | ';' | '`' | '$' | '(' | ')' | '%' | '\n' | '\r')) {
+        return None;
+    }
+    let tokens = split_spawn_tokens(trimmed);
+    if tokens.is_empty() { return None; }
+    // Longest token-prefix that is an existing file: handles unquoted space
+    // paths followed by arguments (`C:/Program Files/.../bash.exe --login`).
+    for k in (1..=tokens.len()).rev() {
+        let candidate = tokens[..k].join(" ");
+        // Only multi-token candidates that look like paths — a bare word
+        // sequence like `echo hello` must not accidentally match a file.
+        if k > 1 && !(candidate.contains('/') || candidate.contains('\\')) { continue; }
+        if let Some(prog) = exists_as_program(&candidate) {
+            return Some((prog, tokens[k..].to_vec()));
+        }
+    }
+    // Single leading token resolvable via PATH (cmd.exe, bash, ping, ...).
+    // Shell builtins (echo, dir, cd) have no executable and fall through to
+    // the shell-wrapped path.
+    if let Ok(found) = which::which(&tokens[0]) {
+        return Some((found.to_string_lossy().into_owned(), tokens[1..].to_vec()));
+    }
+    None
+}
+
 pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: bool) -> CommandBuilder {
     // Capture CWD early — portable_pty on Windows defaults to USERPROFILE
     // (home dir) when no cwd is set on CommandBuilder, so we must set it
@@ -1283,7 +1375,7 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
         // on the CommandBuilder.  The final command is then passed to whatever
         // shell `cached_shell()` resolves to, env-manipulation-free.
         #[cfg(windows)]
-        let (env_removes, env_sets, cmd, cwd_override) = {
+        let (env_removes, env_sets, cmd, cwd_override, direct_ok) = {
             let trimmed = cmd.trim();
             if let Some((inner_script, _)) = detect_bash_c_wrapper(trimmed) {
                 let (removes, sets, final_cmd) = parse_bash_env_script(inner_script);
@@ -1292,7 +1384,7 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
                 } else {
                     resolve_unix_path(&final_cmd)
                 };
-                (removes, sets, final_cmd, None)
+                (removes, sets, final_cmd, None, false)
             } else if let Some((cwd_dir, sets, final_cmd)) = detect_env_prefix_command(trimmed) {
                 // POSIX `env VAR=val <program>` idiom (issue #399: Claude Code
                 // agent-teams teammate launch). Apply env/cwd directly and run the
@@ -1300,9 +1392,9 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
                 // `env` binary being on PATH. The program is a path/exe token, so
                 // prefix the pwsh call operator `&` to invoke it rather than have
                 // pwsh treat the first token as a string to print.
-                (Vec::new(), sets, format!("& {}", final_cmd), cwd_dir)
+                (Vec::new(), sets, format!("& {}", final_cmd), cwd_dir, false)
             } else {
-                (Vec::new(), Vec::new(), resolve_unix_path(cmd), None)
+                (Vec::new(), Vec::new(), resolve_unix_path(cmd), None, true)
             }
         };
         #[cfg(not(windows))]
@@ -1312,6 +1404,28 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
         let cwd = cwd_override
             .map(std::path::PathBuf::from)
             .or(cwd);
+
+        // tmux parity (#492, #493): spawn plain program invocations DIRECTLY
+        // instead of wrapping them in `<shell> -Command`. tmux only routes
+        // shell-syntax command strings through a shell (spawn.c execvp's
+        // multi-argument commands verbatim). This removes the lingering
+        // powershell wrapper process around every command pane (#493) and
+        // makes quoted executable paths containing spaces spawnable (#492).
+        #[cfg(windows)]
+        if direct_ok {
+            if let Some((prog, prog_args)) = try_direct_spawn(&cmd) {
+                let mut builder = CommandBuilder::new(&prog);
+                if let Some(ref dir) = cwd { builder.cwd(dir); }
+                apply_bare_env_if_set(&mut builder);
+                builder.env("TERM", "xterm-256color");
+                builder.env("COLORTERM", "truecolor");
+                builder.env("PSMUX_SESSION", "1");
+                for var in &env_removes { builder.env_remove(var); }
+                for (k, v) in &env_sets { builder.env(k, v); }
+                builder.args(&prog_args);
+                return builder;
+            }
+        }
 
         let shell = cached_shell().map(|s| s.to_string());
 
@@ -2173,3 +2287,7 @@ mod tests_warm_pane_start_dir;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue474_unix_shells.rs"]
 mod tests_issue474_unix_shells;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue492_493_direct_spawn.rs"]
+mod tests_issue492_493_direct_spawn;
