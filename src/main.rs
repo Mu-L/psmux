@@ -1380,6 +1380,7 @@ fn run_main() -> io::Result<()> {
                 let mut start_dir: Option<String> = None;
                 let mut title_arg: Option<String> = None;
                 let mut empty_flag = false;
+                let mut env_args: Vec<String> = Vec::new();
                 let mut nw_positional: Vec<String> = Vec::new();
                 {
                     let mut i = 1;
@@ -1392,7 +1393,9 @@ fn run_main() -> io::Result<()> {
                             s if s.starts_with("-F") && s.len() > 2 => { format_str = Some(s[2..].trim_matches('"').to_string()); }
                             "-c" => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-T" => { i += 1; if i < cmd_args.len() { title_arg = Some(cmd_args[i].trim_matches('"').to_string()); } }
-                            "-t" | "-e" | "-S" => { i += 1; /* skip value */ }
+                            // -e KEY=VALUE environment for the new pane (#489)
+                            "-e" => { i += 1; if i < cmd_args.len() { env_args.push(cmd_args[i].trim_matches('"').to_string()); } }
+                            "-t" | "-S" => { i += 1; /* skip value */ }
                             "-d" => { detached = true; }
                             "-P" => { print_info = true; }
                             "-E" => { empty_flag = true; }
@@ -1436,6 +1439,9 @@ fn run_main() -> io::Result<()> {
                 if let Some(dir) = &start_dir {
                     cmd_line.push_str(&format!(" -c \"{}\"", dir.replace("\"", "\\\"")));
                 }
+                for ev in &env_args {
+                    cmd_line.push_str(&format!(" -e \"{}\"", ev.replace("\"", "\\\"")));
+                }
                 if !cmd_arg.is_empty() {
                     cmd_line.push_str(&format!(" \"{}\"", cmd_arg.replace("\"", "\\\"")));
                 }
@@ -1463,6 +1469,7 @@ fn run_main() -> io::Result<()> {
                 let mut size_pct: Option<String> = None;
                 let mut size_cells: Option<String> = None;
                 let mut title_arg: Option<String> = None;
+                let mut env_args: Vec<String> = Vec::new();
                 let mut sw_positional: Vec<String> = Vec::new();
                 {
                     let mut i = 1;
@@ -1476,7 +1483,9 @@ fn run_main() -> io::Result<()> {
                             "-T" => { i += 1; if i < cmd_args.len() { title_arg = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-p" => { i += 1; if i < cmd_args.len() { size_pct = Some(cmd_args[i].to_string()); size_cells = None; } }
                             "-l" => { i += 1; if i < cmd_args.len() { let v = cmd_args[i].to_string(); if v.ends_with('%') { size_pct = Some(v); size_cells = None; } else { size_cells = Some(v); size_pct = None; } } }
-                            "-t" | "-e" => { i += 1; /* skip value */ }
+                            // -e KEY=VALUE environment for the new pane (#489)
+                            "-e" => { i += 1; if i < cmd_args.len() { env_args.push(cmd_args[i].trim_matches('"').to_string()); } }
+                            "-t" => { i += 1; /* skip value */ }
                             "-h" => { flag = "-h"; }
                             "-v" => { flag = "-v"; }
                             "-d" => { detached = true; }
@@ -1515,6 +1524,9 @@ fn run_main() -> io::Result<()> {
                     cmd_line.push_str(&format!(" -p {}", pct));
                 } else if let Some(cells) = &size_cells {
                     cmd_line.push_str(&format!(" -l {}", cells));
+                }
+                for ev in &env_args {
+                    cmd_line.push_str(&format!(" -e \"{}\"", ev.replace("\"", "\\\"")));
                 }
                 if !cmd_arg.is_empty() {
                     cmd_line.push_str(&format!(" \"{}\"", cmd_arg.replace("\"", "\\\"")));

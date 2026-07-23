@@ -218,6 +218,14 @@ pub(crate) fn silent_rehome(pane: &mut Pane, dir: &str) {
 }
 
 pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, command: Option<&str>, start_dir: Option<&str>, empty: bool) -> io::Result<()> {
+    create_window_with_env(pty_system, app, command, start_dir, empty, &[])
+}
+
+/// `create_window` plus per-pane environment from `new-window -e KEY=VALUE`
+/// (tmux parity, issue #489). The extra variables are applied to the spawned
+/// process only, after the session environment, so `-e` wins over
+/// `set-environment`.
+pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, command: Option<&str>, start_dir: Option<&str>, empty: bool, extra_env: &[(String, String)]) -> io::Result<()> {
     // ── Empty window (tmux new-window -E): a new window whose single pane has
     // no command/process. It renders blank until respawn-pane gives it one. ──
     if empty {
@@ -253,7 +261,9 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     // to cold-spawn in that case; mirrors new-session's own warm-claim gate,
     // which likewise skips warm entirely when a custom config is in play
     // (see `has_custom_config` in main.rs).
-    if command.is_none() && !default_shell_needs_fresh_eval(&app.default_shell) && app.warm_pane.is_some() {
+    // A warm pane's shell is already running, so `-e` vars can no longer be
+    // injected into its environment — bypass the transplant when -e is used.
+    if command.is_none() && extra_env.is_empty() && !default_shell_needs_fresh_eval(&app.default_shell) && app.warm_pane.is_some() {
         let mut wp = app.warm_pane.take().unwrap();
         // Resize to current terminal dimensions if they changed since pre-spawn
         let area = app.last_window_area;
@@ -328,6 +338,9 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     }
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     apply_user_environment(&mut shell_cmd, &app.environment);
+    // new-window -e KEY=VALUE (#489): pane-scoped env, applied last so it
+    // overrides the session environment, matching tmux.
+    for (k, v) in extra_env { shell_cmd.env(k, v); }
     let child = pair
         .slave
         .spawn_command(shell_cmd)
@@ -518,6 +531,12 @@ const MIN_SPLIT_ROWS: u16 = 2;
 const MIN_SPLIT_COLS: u16 = 10;
 
 pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: Option<&str>, pty_system_ref: Option<&dyn portable_pty::PtySystem>, start_dir: Option<&str>) -> io::Result<()> {
+    split_active_with_env(app, kind, command, pty_system_ref, start_dir, &[])
+}
+
+/// `split_active_with_command` plus per-pane environment from
+/// `split-window -e KEY=VALUE` (tmux parity, issue #489).
+pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Option<&str>, pty_system_ref: Option<&dyn portable_pty::PtySystem>, start_dir: Option<&str>, extra_env: &[(String, String)]) -> io::Result<()> {
     // ── Guard: refuse split if the active pane is too small ──────────
     // After splitting, each half gets roughly (dim / 2) - 1 (for the divider).
     // If that would be below MIN_PANE_DIM, deny the split to avoid crashing
@@ -589,7 +608,9 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     // comment in `create_window` for why only a *dynamic* default-command
     // (format-variable-bearing) must bypass the transplant and cold-spawn
     // instead; a static custom default-shell is safe to transplant.
-    if command.is_none() && !default_shell_needs_fresh_eval(&app.default_shell) && app.warm_pane.is_some() {
+    // A warm pane's shell is already running, so `-e` vars can no longer be
+    // injected into its environment — bypass the transplant when -e is used.
+    if command.is_none() && extra_env.is_empty() && !default_shell_needs_fresh_eval(&app.default_shell) && app.warm_pane.is_some() {
         let mut wp = app.warm_pane.take().unwrap();
         let need_resize = rows != wp.rows || cols != wp.cols;
         // #450: never transplant a spare whose shell died in the pool —
@@ -648,6 +669,9 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     }
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     apply_user_environment(&mut shell_cmd, &app.environment);
+    // split-window -e KEY=VALUE (#489): pane-scoped env, applied last so it
+    // overrides the session environment, matching tmux.
+    for (k, v) in extra_env { shell_cmd.env(k, v); }
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     // Close the slave handle immediately – see create_window() comment.
     drop(pair.slave);

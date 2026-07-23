@@ -16,7 +16,7 @@ use ratatui::prelude::Rect;
 use crate::types::{AppState, CtrlReq, Mode, FocusDir, LayoutKind, PipePaneState, VERSION,
     WaitChannel, WaitForOp, Node, Action, Bind};
 use crate::platform::install_console_ctrl_handler;
-use crate::pane::{create_window, create_window_raw, split_active_with_command, kill_active_pane, kill_pane_by_id, spawn_warm_pane};
+use crate::pane::{create_window, create_window_with_env, create_window_raw, split_active_with_env, kill_active_pane, kill_pane_by_id, spawn_warm_pane};
 use crate::tree::{self, active_pane, active_pane_mut, resize_all_panes, kill_all_children,
     find_window_index_by_id, focus_pane_by_id, focus_pane_by_id_no_mru, focus_pane_by_index, get_active_pane_id,
     get_split_mut, path_exists};
@@ -1388,14 +1388,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         _ => "",
                     };
                     match req {
-                CtrlReq::NewWindow(cmd, name, detached, start_dir, title, empty) => {
+                CtrlReq::NewWindow(cmd, name, detached, start_dir, title, empty, env_sets) => {
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let prev_idx = app.active_idx;
                     // Expand format variables like #{pane_current_path} (#111)
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
-                    if let Err(e) = create_window(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref(), empty) {
+                    if let Err(e) = create_window_with_env(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref(), empty, &env_sets) {
                         eprintln!("psmux: new-window error: {e}");
                     }
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
@@ -1417,13 +1417,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // other clients' commands.
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
-                CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp, title, empty) => {
+                CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp, title, empty, env_sets) => {
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let prev_idx = app.active_idx;
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
-                    if let Err(e) = create_window(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref(), empty) {
+                    if let Err(e) = create_window_with_env(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref(), empty, &env_sets) {
                         eprintln!("psmux: new-window error: {e}");
                     }
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
@@ -1449,7 +1449,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // other clients' commands.
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
-                CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp, title) => {
+                CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp, title, env_sets) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // tmux: split-window without -Z permanently unzooms (#82)
                     unzoom_if_zoomed(&mut app);
@@ -1484,7 +1484,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
                     let prev_path = app.windows[app.active_idx].active_path.clone();
-                    if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref()) {
+                    if let Err(e) = split_active_with_env(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets) {
                         let msg = format!("split-window: {e}");
                         app.status_message = Some((msg.clone(), std::time::Instant::now(), None));
                         let _ = resp.send(format!("psmux: {msg}"));
@@ -1549,14 +1549,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                     }
                 }
-                CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, split_size, format_str, resp, title) => {
+                CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, split_size, format_str, resp, title, env_sets) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     unzoom_if_zoomed(&mut app);
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
                     let prev_path = app.windows[app.active_idx].active_path.clone();
-                    if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref()) {
+                    if let Err(e) = split_active_with_env(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets) {
                         app.status_message = Some((format!("split-window: {e}"), std::time::Instant::now(), None));
                         eprintln!("psmux: split-window error: {e}");
                     }

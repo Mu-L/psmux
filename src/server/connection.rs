@@ -949,19 +949,26 @@ match cmd {
         let format_str: Option<String> = extract_flag_value(&args, "-F").map(|s| s.trim_matches('"').to_string());
         let title: Option<String> = extract_flag_value(&args, "-T").map(|s| s.trim_matches('"').to_string());
         let empty = args.iter().any(|a| *a == "-E");
+        // -e KEY=VALUE (repeatable, tmux parity, #489): collect environment
+        // for the new pane. The values must also be excluded from the
+        // shell-command extraction below or they get spawned as the command.
+        let env_sets: Vec<(String, String)> = args.windows(2)
+            .filter(|w| w[0] == "-e")
+            .filter_map(|w| w[1].trim_matches('"').split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .collect();
         let cmd_str: Option<String> = args.iter()
-            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
+            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-e" && w[1] == **a)) && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
             .map(|s| s.trim_matches('"').to_string());
         if print_info {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title, empty));
+            let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title, empty, env_sets));
             if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 let _ = write!(write_stream, "{}\n", text);
                 let _ = write_stream.flush();
             }
             if !persistent { break; }
         } else {
-            let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir, title, empty));
+            let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir, title, empty, env_sets));
         }
     }
     "split-window" | "splitw" | "split-pane" | "splitp" => {
@@ -981,12 +988,20 @@ match cmd {
                     let is_pct = raw.ends_with('%');
                     raw.trim_end_matches('%').parse::<u16>().ok().map(|v| (v, is_pct))
                 }));
+        // -e KEY=VALUE (repeatable, tmux parity, #489): environment for the
+        // new pane. Excluded from shell-command extraction below — before
+        // this fix the -e value itself was spawned as the pane command,
+        // which flashed a red error and closed the pane instantly.
+        let env_sets: Vec<(String, String)> = args.windows(2)
+            .filter(|w| w[0] == "-e")
+            .filter_map(|w| w[1].trim_matches('"').split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .collect();
         let cmd_str: Option<String> = args.iter()
-            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)))
+            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-e" && w[1] == **a)))
             .map(|s| s.trim_matches('"').to_string());
         if print_info {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx, title));
+            let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx, title, env_sets));
             if let Ok(text) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 let _ = write!(write_stream, "{}\n", text);
                 let _ = write_stream.flush();
@@ -994,7 +1009,7 @@ match cmd {
             if !persistent { break; }
         } else {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx, title));
+            let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx, title, env_sets));
             if let Ok(err_msg) = rrx.recv_timeout(Duration::from_millis(2000)) {
                 if !err_msg.is_empty() {
                     let _ = write!(write_stream, "{}\n", err_msg);
@@ -3298,15 +3313,20 @@ fn dispatch_control_command(
             let cmd_str: Option<String> = args.iter().enumerate()
                 .find(|(i, _)| !skip.contains(i))
                 .map(|(_, s)| s.trim_matches('"').to_string());
+            // -e KEY=VALUE environment for the new pane (tmux parity, #489).
+            let env_sets: Vec<(String, String)> = args.windows(2)
+                .filter(|w| w[0] == "-e")
+                .filter_map(|w| w[1].trim_matches('"').split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+                .collect();
             if print_info {
                 let (rtx, rrx) = mpsc::channel::<String>();
-                let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title, empty));
+                let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title, empty, env_sets));
                 if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                     let _ = resp_tx.send(text);
                 }
                 true
             } else {
-                let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir, title, empty));
+                let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir, title, empty, env_sets));
                 let _ = resp_tx.send(String::new());
                 true
             }
@@ -3333,11 +3353,16 @@ fn dispatch_control_command(
                         let is_pct = raw.ends_with('%');
                         raw.trim_end_matches('%').parse::<u16>().ok().map(|v| (v, is_pct))
                     }));
+            // -e KEY=VALUE environment for the new pane (tmux parity, #489).
+            let env_sets: Vec<(String, String)> = args.windows(2)
+                .filter(|w| w[0] == "-e")
+                .filter_map(|w| w[1].trim_matches('"').split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+                .collect();
             let (rtx, rrx) = mpsc::channel::<String>();
             if print_info {
-                let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx, title));
+                let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx, title, env_sets));
             } else {
-                let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx, title));
+                let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, detached, start_dir, split_size, rtx, title, env_sets));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);

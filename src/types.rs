@@ -1330,10 +1330,10 @@ pub enum Action {
 pub struct Bind { pub key: (KeyCode, KeyModifiers), pub action: Action, pub repeat: bool }
 
 pub enum CtrlReq {
-    NewWindow(Option<String>, Option<String>, bool, Option<String>, Option<String>, bool),  // cmd, name, detached, start_dir, title (-T), empty (-E)
-    NewWindowPrint(Option<String>, Option<String>, bool, Option<String>, Option<String>, mpsc::Sender<String>, Option<String>, bool),  // cmd, name, detached, start_dir, format, resp, title (-T), empty (-E)
-    SplitWindow(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, mpsc::Sender<String>, Option<String>),  // kind, cmd, detached, start_dir, size (value, is_percent), error_resp, title (-T)
-    SplitWindowPrint(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, Option<String>, mpsc::Sender<String>, Option<String>),  // kind, cmd, detached, start_dir, size (value, is_percent), format, resp, title (-T)
+    NewWindow(Option<String>, Option<String>, bool, Option<String>, Option<String>, bool, Vec<(String, String)>),  // cmd, name, detached, start_dir, title (-T), empty (-E), env (-e, #489)
+    NewWindowPrint(Option<String>, Option<String>, bool, Option<String>, Option<String>, mpsc::Sender<String>, Option<String>, bool, Vec<(String, String)>),  // cmd, name, detached, start_dir, format, resp, title (-T), empty (-E), env (-e, #489)
+    SplitWindow(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, mpsc::Sender<String>, Option<String>, Vec<(String, String)>),  // kind, cmd, detached, start_dir, size (value, is_percent), error_resp, title (-T), env (-e, #489)
+    SplitWindowPrint(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, Option<String>, mpsc::Sender<String>, Option<String>, Vec<(String, String)>),  // kind, cmd, detached, start_dir, size (value, is_percent), format, resp, title (-T), env (-e, #489)
     /// new-pane: create a floating pane over the active window's layout.
     /// Flags match tmux: `-X`/`-Y` position, `-x`/`-y` size, `-B` border,
     /// `-T` title, `-c` dir, `-d` detached, `-P` print (returns the pane id).
