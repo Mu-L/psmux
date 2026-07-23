@@ -1570,6 +1570,19 @@ pub mod mouse_inject {
         let fg_is_shell = crate::platform::process_info::foreground_is_shell(child_pid)
             .unwrap_or(true);
 
+        // Issue #491: a VT bridge (wsl.exe, ssh.exe) reads raw bytes from its
+        // console and forwards 0x03 into the guest as SIGINT itself, so the
+        // console-wide CTRL_C_EVENT broadcast below is redundant for it — and
+        // fatal when the bridge was launched from a Cygwin/MSYS shell (Git
+        // Bash, MSYS2, Cygwin): the shell reacts to the broadcast by
+        // delivering SIGINT to its native foreground child, which the Cygwin
+        // runtime implements as a hard kill of wsl.exe.  Deliver only the raw
+        // 0x03 the call site writes and skip the signal.
+        if crate::platform::process_info::foreground_is_vt_bridge(child_pid) {
+            log(&format!("vt-bridge foreground under pid={}: deliver raw 0x03 only, skip CTRL_C_EVENT", child_pid));
+            return false;
+        }
+
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = reattach && GetConsoleWindow() != 0;
@@ -3087,6 +3100,27 @@ pub mod process_info {
     ///   `None`        — the process snapshot could not be taken; the caller
     ///                   should fall back to its default behavior.
     pub fn foreground_is_shell(root_pid: u32) -> Option<bool> {
+        match foreground_leaf_name(root_pid)? {
+            Some(name) => Some(is_shell_exe(&name) || is_vt_bridge_exe(&name)),
+            // Root not present in the snapshot (rare race): default to shell
+            // so the established interrupt behavior is preserved.
+            None => Some(true),
+        }
+    }
+
+    /// True when the pane's deepest foreground process is a VT bridge
+    /// (wsl.exe, ssh.exe, ...).  Used by the Ctrl+C router (issue #491):
+    /// bridges read raw bytes from their console and forward 0x03 into the
+    /// guest as SIGINT themselves, so they must NOT be hit with a
+    /// console-wide CTRL_C_EVENT broadcast.
+    pub fn foreground_is_vt_bridge(root_pid: u32) -> bool {
+        matches!(foreground_leaf_name(root_pid), Some(Some(name)) if is_vt_bridge_exe(&name))
+    }
+
+    /// Snapshot the process table and resolve the deepest foreground leaf
+    /// under `root_pid`.  Outer `None` = snapshot failed; inner `None` =
+    /// root absent from the snapshot (rare race).
+    fn foreground_leaf_name(root_pid: u32) -> Option<Option<String>> {
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if snap == INVALID_HANDLE || snap == 0 {
@@ -3128,18 +3162,11 @@ pub mod process_info {
             // itself — a bare shell prompt resolves to pwsh/cmd (shell), while a
             // directly-exec'd pane (create_window_raw) resolves to the program
             // it ran, which may be a live TUI that must NOT be force-signalled.
-            let fg_name = leaf_name.or_else(|| {
+            Some(leaf_name.or_else(|| {
                 entries.iter()
                     .find(|(pid, _, _)| *pid == root_pid)
                     .map(|(_, _, name)| name.clone())
-            });
-
-            match fg_name {
-                Some(name) => Some(is_shell_exe(&name) || is_vt_bridge_exe(&name)),
-                // Root not present in the snapshot (rare race): default to shell
-                // so the established interrupt behavior is preserved.
-                None => Some(true),
-            }
+            }))
         }
     }
 
@@ -3196,6 +3223,7 @@ pub mod process_info {
     pub fn get_foreground_cwd(_pid: u32) -> Option<String> { None }
     pub fn has_vt_bridge_descendant(_root_pid: u32) -> bool { false }
     pub fn foreground_is_shell(_root_pid: u32) -> Option<bool> { None }
+    pub fn foreground_is_vt_bridge(_root_pid: u32) -> bool { false }
 }
 
 // ─── UTF-16 Console Writer (Windows) ────────────────────────────────────
