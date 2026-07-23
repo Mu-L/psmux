@@ -14,11 +14,12 @@ $script:TestsFailed = 0
 function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
 
-$injectorExe = "$env:TEMP\psmux_injector.exe"
-if (-not (Test-Path $injectorExe)) {
-    $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-    & $csc /nologo /optimize /out:$injectorExe tests\injector.cs 2>&1 | Out-Null
-}
+# Dedicated exe name: test_keystroke_injection.ps1 clobbers the shared
+# $env:TEMP\psmux_injector.exe with a limited inline variant. Always rebuild
+# from tests/injector.cs (the full key map).
+$injectorExe = "$env:TEMP\psmux_injector_full.exe"
+$csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+& $csc /nologo /optimize /out:$injectorExe tests\injector.cs 2>&1 | Out-Null
 
 & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null
 Start-Sleep -Milliseconds 500

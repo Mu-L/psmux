@@ -15,12 +15,13 @@ $script:TestsFailed = 0
 function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
 
-# Compile injector
-$injectorExe = "$env:TEMP\psmux_injector.exe"
-if (-not (Test-Path $injectorExe)) {
-    $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-    & $csc /nologo /optimize /out:$injectorExe tests\injector.cs 2>&1 | Out-Null
-}
+# Compile injector to a DEDICATED exe name: test_keystroke_injection.ps1
+# compiles its own limited inline injector over $env:TEMP\psmux_injector.exe,
+# which silently drops {PGUP}/{DOWN} tokens for every suite that runs after
+# it. Always rebuild from tests/injector.cs (the full key map).
+$injectorExe = "$env:TEMP\psmux_injector_full.exe"
+$csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+& $csc /nologo /optimize /out:$injectorExe tests\injector.cs 2>&1 | Out-Null
 if (-not (Test-Path $injectorExe)) { Write-Fail "injector compile failed"; exit 1 }
 
 function Get-CopyModeState {
