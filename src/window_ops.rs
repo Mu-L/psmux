@@ -274,6 +274,43 @@ pub(crate) fn pane_wants_scroll_forward(pane: &Pane) -> bool {
     false
 }
 
+/// Gate for mouse CLICK/button forwarding.  Like `pane_wants_mouse` but WITHOUT
+/// the tier-3 `is_fullscreen_tui` screen-content heuristic.
+///
+/// Discussion #349 follow-up: the motion leak was fixed by moving bare motion
+/// to `pane_wants_hover`, but clicks were left on the permissive
+/// `pane_wants_mouse`.  Its tier-3 heuristic false-positives on a filled screen
+/// whose foreground is a NON-shell (podman.exe), so a left/right click at a
+/// container shell prompt was forwarded as SGR (`ESC[<0;x;yM`) into the
+/// container pty, which echoed it as raw text (`0;37;26M0;37;26m`).
+///
+/// A click is forwarded only when the child RELIABLY wants the mouse:
+///   1. it enabled a mouse protocol (DECSET 1000/1002/1003 — VT apps like vim,
+///      and modern crossterm/ratatui apps, which emit DECSET 1000/1006 when
+///      they turn mouse capture on); or
+///   2. it is on the alternate screen (fullscreen apps on modern ConPTY).
+///
+/// This deliberately does NOT use the tier-3 `is_fullscreen_tui` content
+/// heuristic (a plain shell that merely filled the screen trips it) nor the
+/// console `ENABLE_MOUSE_INPUT` flag (which is SET by default on every console,
+/// so it never distinguishes a mouse app from a plain shell).  It matches the
+/// gate `pane_wants_scroll_forward` already uses for the wheel, and tmux, which
+/// forwards mouse events only to apps that requested a mouse mode.  A plain
+/// shell — inside a container or not — requests none, so clicks are no longer
+/// leaked into it.
+pub(crate) fn pane_wants_click(pane: &Pane) -> bool {
+    if let Ok(parser) = pane.term.lock() {
+        let screen = parser.screen();
+        if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
+            return true;
+        }
+        if screen.alternate_screen() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Strict check for hover/motion events.  Returns true only when the child
 /// has EXPLICITLY enabled mouse motion tracking (DECSET 1002 ButtonMotion or
 /// DECSET 1003 AnyMotion).
@@ -718,7 +755,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
             let (col, row) = pane_inner_cell_0based(area, x, y);
             let win_name = win.name.clone();
             if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                if pane_wants_mouse(active) {
+                if pane_wants_click(active) {
                     inject_mouse_combined(active, col, row, 0, true,
                         mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED, 0, &win_name);
                 }
@@ -798,7 +835,7 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
             let (col, row) = pane_inner_cell_0based(area, x, y);
             let win_name = win.name.clone();
             if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                if pane_wants_mouse(active) {
+                if pane_wants_click(active) {
                     inject_mouse_combined(active, col, row, 32, true,
                         mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED, mouse_inject::MOUSE_MOVED, &win_name);
                 }
@@ -861,7 +898,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         let (col, row) = pane_inner_cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-            if pane_wants_mouse(active) {
+            if pane_wants_click(active) {
                 inject_mouse_combined(active, col, row, 0, false,
                     0, 0, &win_name);
             }
@@ -879,7 +916,7 @@ pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press
         let (col, row) = pane_inner_cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-            if pane_wants_mouse(active) {
+            if pane_wants_click(active) {
                 let sgr_btn = match button {
                     1 => 1u8, // middle
                     2 => 2u8, // right
@@ -1134,16 +1171,17 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
     //
     // Bare motion (SGR button 35, no button held) requires the child to have
     // EXPLICITLY enabled motion tracking (pane_wants_hover, DECSET 1002/1003).
-    // The permissive pane_wants_mouse() heuristic false-positives on a filled
-    // screen with a non-shell foreground (podman/docker interactive containers,
-    // discussion #349), which sprayed "35;x;yM" as visible garbage into the
-    // container tty on every mouse move.  Clicks/drags/wheel keep the
-    // permissive gate so TUI mouse support on ConPTY builds that strip the
-    // DECSETs keeps working (#285).
+    // Clicks/drags (buttons 0/1/2/32) use pane_wants_click, which also drops
+    // the tier-3 is_fullscreen_tui content heuristic: it false-positives on a
+    // filled screen with a non-shell foreground (podman/docker interactive
+    // containers, discussion #349), which forwarded left/right clicks as
+    // "0;x;yM0;x;ym" garbage into the container tty (comment 17754744). Real
+    // mouse support (VT DECSET apps, alt-screen apps, and native crossterm
+    // apps via ENABLE_MOUSE_INPUT — the #285 case) is preserved.
     let win = &mut app.windows[app.active_idx];
     let win_name = win.name.clone();
     if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
-        let wants = if button == 35 { pane_wants_hover(pane) } else { pane_wants_mouse(pane) };
+        let wants = if button == 35 { pane_wants_hover(pane) } else { pane_wants_click(pane) };
         if wants {
             let button_state = match (button, press) {
                 (0, true) => mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED,

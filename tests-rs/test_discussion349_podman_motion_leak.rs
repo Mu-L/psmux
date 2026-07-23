@@ -156,17 +156,65 @@ fn discussion349_alt_screen_without_mouse_protocol_gets_no_hover() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// PART 4 — #285 stays intact: clicks keep the permissive gate.  This pins
-// the fix's scope: ONLY bare motion switched to the strict gate.
+// PART 4 — CLICK gate (discussion #349 follow-up, comment 17754744).
+//
+// The original motion fix left clicks on the permissive pane_wants_mouse(),
+// whose tier-3 content heuristic still fires on a filled container screen —
+// so left/right clicks leaked "0;x;yM0;x;ym" into the podman tty. Clicks now
+// use pane_wants_click(), which drops the content heuristic while keeping the
+// reliable signals (mouse protocol enabled, or the alternate screen).
+//
+// NOTE: pane_wants_mouse() itself is UNCHANGED (still tier1/2/3) — it is the
+// wheel/scroll gate. Only the click gate switched to pane_wants_click().
 // ─────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn discussion349_clicks_keep_permissive_gate_on_filled_screen() {
+fn discussion349_permissive_gate_still_trips_on_filled_screen() {
+    // The trap state is unchanged; pane_wants_mouse (the WHEEL gate) still
+    // false-positives here. This documents WHY clicks needed a separate gate.
     let term = filled_parser(10, 60);
     let pane = make_pane(term, 10, 60);
-    // handle_pane_mouse gates button != 35 on pane_wants_mouse; a filled
-    // screen with a non-shell foreground must still satisfy it so TUI click
-    // support on DECSET-stripping ConPTY builds keeps working (#285).
     assert!(pane_wants_mouse(&pane),
-        "clicks must keep the permissive pane_wants_mouse gate (#285)");
+        "pane_wants_mouse (wheel gate) still trips on a filled screen — that is why \
+         clicks moved to the stricter pane_wants_click");
+}
+
+#[test]
+fn discussion349_clicks_not_forwarded_on_filled_container_screen() {
+    // THE FIX: a filled container screen (no mouse protocol, not alt-screen,
+    // no native ENABLE_MOUSE_INPUT) must NOT receive clicks. This is the exact
+    // state behind the reporter's "0;37;26M0;37;26m" leak.
+    let term = filled_parser(10, 60);
+    let pane = make_pane(term, 10, 60);
+    assert!(!pane_wants_click(&pane),
+        "FIX CONTRACT: clicks must NOT be forwarded to a plain (container) shell \
+         that never enabled mouse tracking (discussion #349 comment 17754744)");
+}
+
+#[test]
+fn discussion349_clicks_forwarded_when_mouse_protocol_enabled() {
+    // A VT app that enabled a mouse protocol (DECSET 1000/1002/1003) still
+    // receives clicks after the fix.
+    let term = filled_parser_with_decset(10, 60, b"\x1b[?1000h\x1b[?1006h");
+    let pane = make_pane(term, 10, 60);
+    assert!(pane_wants_click(&pane),
+        "a child that enabled a mouse protocol must still receive clicks (vim/htop)");
+}
+
+#[test]
+fn discussion349_clicks_forwarded_on_alt_screen() {
+    // A fullscreen app on modern ConPTY (alt-screen passes through) still
+    // receives clicks.
+    let term = filled_parser_with_decset(10, 60, b"\x1b[?1049h");
+    let pane = make_pane(term, 10, 60);
+    assert!(pane_wants_click(&pane),
+        "an alt-screen (fullscreen) app must still receive clicks");
+}
+
+#[test]
+fn discussion349_button_motion_app_still_gets_clicks() {
+    let term = filled_parser_with_decset(10, 60, b"\x1b[?1002h\x1b[?1006h");
+    let pane = make_pane(term, 10, 60);
+    assert!(pane_wants_click(&pane),
+        "a ButtonMotion (DECSET 1002) app must still receive clicks");
 }
