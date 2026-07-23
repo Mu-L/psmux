@@ -2318,14 +2318,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if in_copy {
                         // In copy/search mode — route through mode-aware handlers
                         if literal {
-                            send_text_to_active(&mut app, &keys)?;
+                            send_text_to_active(&mut app, &keys.join(""))?;
                         } else {
-                            // #490: `keys` is exactly ONE send-keys argument
-                            // (the connection layer dispatches per token).
-                            // Match the whole token as a named key or send it
-                            // verbatim — never split on whitespace, which
-                            // destroyed spacing inside quoted arguments.
-                            let parts: Vec<&str> = vec![keys.as_str()];
+                            // #490: `keys` holds the send-keys arguments as
+                            // separate tokens. Match each WHOLE token as a
+                            // named key or send it verbatim — never split a
+                            // token on whitespace, which destroyed spacing
+                            // inside quoted arguments.
+                            let parts: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
                             for key in parts.iter() {
                                 let key_upper = key.to_uppercase();
                                 let normalized = match key_upper.as_str() {
@@ -2358,13 +2358,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                     } else if literal {
-                        send_text_to_active(&mut app, &keys)?;
+                        send_text_to_active(&mut app, &keys.join(""))?;
                     } else {
-                        // #490: `keys` is exactly ONE send-keys argument (the
-                        // connection layer dispatches per token). A token
-                        // either matches a named key in its entirety or is
-                        // typed verbatim with its whitespace intact.
-                        let parts: Vec<&str> = vec![keys.as_str()];
+                        // #490: `keys` holds the send-keys arguments as
+                        // separate tokens. A token either matches a named key
+                        // in its entirety or is typed verbatim with its
+                        // whitespace intact; a single separator space is
+                        // still inserted between adjacent PLAIN tokens for
+                        // backward compatibility with multi word scripts
+                        // (strict tmux would concatenate them).
+                        let parts: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
                         for (i, key) in parts.iter().enumerate() {
                             let key_upper = key.to_uppercase();
                             let _is_special = matches!(key_upper.as_str(), 
@@ -2492,12 +2495,25 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     }
                                 }
                                 _ => {
-                                    // Plain token: typed verbatim. No synthetic
-                                    // separator — tmux concatenates arguments
-                                    // without spaces (#490). `i`/`parts` remain
-                                    // for shape-compat; parts is single-element.
-                                    let _ = i;
+                                    // Plain token: typed VERBATIM (#490 — the
+                                    // token's own whitespace is untouched).
+                                    // Keep the historical single separator
+                                    // space between two adjacent plain tokens
+                                    // so existing multi word scripts like
+                                    // `send-keys echo hi Enter` keep working.
                                     send_text_to_active(&mut app, key)?;
+                                    if i + 1 < parts.len() {
+                                        let next_upper = parts[i + 1].to_uppercase();
+                                        let next_is_special = matches!(next_upper.as_str(),
+                                            "ENTER" | "TAB" | "BTAB" | "BACKTAB" | "ESCAPE" | "ESC" | "SPACE" | "BSPACE" | "BACKSPACE" |
+                                            "UP" | "DOWN" | "RIGHT" | "LEFT" | "HOME" | "END" |
+                                            "PAGEUP" | "PPAGE" | "PAGEDOWN" | "NPAGE" | "DELETE" | "DC" | "INSERT" | "IC" |
+                                            "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
+                                        ) || next_upper.starts_with("C-") || next_upper.starts_with("M-") || next_upper.starts_with("S-");
+                                        if !next_is_special {
+                                            send_text_to_active(&mut app, " ")?;
+                                        }
+                                    }
                                 }
                             }
                         }

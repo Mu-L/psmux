@@ -1361,19 +1361,10 @@ match cmd {
             for _ in 0..repeat_count {
                 if paste_mode {
                     let _ = tx.send(CtrlReq::SendPaste(keys.join("")));
-                } else if effective_literal {
-                    // Literal: concatenate without space separator.
-                    let _ = tx.send(CtrlReq::SendKeys(keys.join(""), true));
                 } else {
-                    // tmux parity (#490): each argument is processed on its
-                    // own — a token either resolves to a named key (Enter,
-                    // C-m, Up, ...) or is typed VERBATIM. Joining with
-                    // spaces and re-splitting on whitespace collapsed runs
-                    // of spaces inside quoted arguments and stripped
-                    // leading/trailing spaces.
-                    for k in &keys {
-                        let _ = tx.send(CtrlReq::SendKeys(k.clone(), false));
-                    }
+                    // #490: hand the tokens over UNJOINED so quoted
+                    // arguments keep their exact whitespace end to end.
+                    let _ = tx.send(CtrlReq::SendKeys(keys.clone(), effective_literal));
                 }
             }
         }
@@ -3410,15 +3401,9 @@ fn dispatch_control_command(
                 false
             });
             let effective_literal = literal || any_hex;
-            if effective_literal {
-                let _ = tx.send(CtrlReq::SendKeys(keys.join(""), true));
-            } else {
-                // tmux parity (#490): dispatch each argument separately so
-                // quoted arguments keep their exact whitespace.
-                for k in &keys {
-                    let _ = tx.send(CtrlReq::SendKeys(k.clone(), false));
-                }
-            }
+            // #490: hand the tokens over UNJOINED so quoted arguments keep
+            // their exact whitespace end to end.
+            let _ = tx.send(CtrlReq::SendKeys(keys, effective_literal));
             let _ = resp_tx.send(String::new());
             true
         }

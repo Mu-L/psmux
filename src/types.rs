@@ -1445,7 +1445,12 @@ pub enum CtrlReq {
     ToggleSync,
     SetPaneTitle(String),
     SetPaneStyle(String),
-    SendKeys(String, bool),
+    // send-keys arguments as SEPARATE tokens (#490): each token is either a
+    // named key (Enter, C-c, Up, ...) matched in its entirety or literal
+    // text typed verbatim with its whitespace intact. Never re-join and
+    // re-split on whitespace — that collapsed runs of spaces inside quoted
+    // arguments and stripped leading/trailing spaces.
+    SendKeys(Vec<String>, bool),
     SendKeysX(String),  // send-keys -X copy-mode-command
     SelectPane(String, bool),
     SelectWindow(usize),
