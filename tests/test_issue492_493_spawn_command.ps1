@@ -41,8 +41,10 @@ else { Write-Fail "bash NOT running. pane_current_command=$cmd Capture:`n$cap" }
 Start-Sleep -Seconds 1
 
 # === TEST 2 (#493): pane process is the exe itself, not a powershell wrapper ===
-Write-Host "`n[Test 2] new-window cmd.exe spawns cmd directly (no powershell wrapper)" -ForegroundColor Yellow
-& $PSMUX new-window -t $SESSION "cmd.exe" 2>&1 | Out-Null
+# Direct spawn applies to EXPLICIT paths (the reporters' case). Bare names
+# like plain `cmd.exe` keep the shell wrapper for console stdin semantics.
+Write-Host "`n[Test 2] new-window with explicit cmd path spawns cmd directly (no powershell wrapper)" -ForegroundColor Yellow
+& $PSMUX new-window -t $SESSION "C:/Windows/System32/cmd.exe" 2>&1 | Out-Null
 Start-Sleep -Seconds 5
 $panePid = (& $PSMUX display-message -t $SESSION -p '#{pane_pid}' 2>&1 | Out-String).Trim()
 if ($panePid -match '^\d+$') {

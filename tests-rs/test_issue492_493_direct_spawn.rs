@@ -53,10 +53,14 @@ fn path_with_spaces_spawns_directly() {
 }
 
 #[test]
-fn exe_resolved_via_path_lookup() {
-    let (prog, args) = try_direct_spawn("cmd.exe /c exit").expect("cmd.exe must resolve via PATH");
-    assert!(prog.to_lowercase().ends_with("cmd.exe"));
-    assert_eq!(args, vec!["/c", "exit"]);
+fn bare_program_names_keep_shell_wrapper() {
+    // Bare names (no path separator) intentionally stay on the shell
+    // wrapper: console utilities like timeout.exe exit immediately when
+    // spawned without the shell re-establishing console stdin, and bare
+    // invocations relied on shell semantics historically.
+    assert!(try_direct_spawn("cmd.exe /c exit").is_none());
+    assert!(try_direct_spawn("timeout /T 120 /nobreak").is_none());
+    assert!(try_direct_spawn("ping -t 127.0.0.1").is_none());
 }
 
 #[test]

@@ -1304,14 +1304,21 @@ fn split_spawn_tokens(cmd: &str) -> Vec<String> {
 /// executable paths containing spaces, which pwsh cannot parse as a bare
 /// statement (#492).
 ///
-/// Resolve the command to `Some((program, args))` when it is a plain program
-/// invocation we can spawn directly:
+/// Resolve the command to `Some((program, args))` when it is an EXPLICIT
+/// executable path we can spawn directly:
 ///   - shell syntax (pipes, redirects, `&&`, variables, ...) → None (needs a
 ///     real shell);
 ///   - the whole string is an existing executable path (spaces included);
 ///   - a quoted first token, or the longest token-prefix, is an existing
-///     executable path (handles unquoted space paths with arguments);
-///   - a single leading token resolvable via PATH (e.g. `cmd.exe`, `bash`).
+///     executable path (handles unquoted space paths with arguments).
+///
+/// Only commands whose program contains a path separator qualify — that is
+/// the case both reporters hit (`C:/Program Files/Git/bin/bash.exe`,
+/// `C:/cygwin64/bin/zsh.exe --login`).  Bare program names (`timeout`,
+/// `ping`, `cmd.exe`) intentionally KEEP the historical shell wrapper:
+/// console utilities like timeout.exe exit immediately when spawned without
+/// the shell re-establishing console stdin ("input redirection is not
+/// supported"), and the wrapper preserves their expected environment.
 #[cfg(windows)]
 fn try_direct_spawn(cmd: &str) -> Option<(String, Vec<String>)> {
     let trimmed = cmd.trim();
@@ -1319,7 +1326,10 @@ fn try_direct_spawn(cmd: &str) -> Option<(String, Vec<String>)> {
     // pwsh call-operator form produced by the env-prefix path (#399) keeps
     // its established shell route.
     if trimmed.starts_with('&') { return None; }
+    // Direct spawn is only for explicit paths.
+    if !(trimmed.contains('/') || trimmed.contains('\\')) { return None; }
     let exists_as_program = |p: &str| -> Option<String> {
+        if !(p.contains('/') || p.contains('\\')) { return None; }
         let path = std::path::Path::new(p);
         if path.is_file() { return Some(p.to_string()); }
         if !p.to_ascii_lowercase().ends_with(".exe") {
@@ -1328,12 +1338,16 @@ fn try_direct_spawn(cmd: &str) -> Option<(String, Vec<String>)> {
         }
         None
     };
+    // CreateProcess is picky about forward slashes in the application path
+    // (unix style `C:/...` is how users write these commands), so normalize
+    // the program to backslashes before spawning.
+    let normalize = |p: String| p.replace('/', "\\");
     // Whole string as one path — covers `C:/Program Files/Git/bin/bash.exe`
     // exactly as users write it in bind-key/new-window (quotes already
     // consumed by the command parser).  Checked BEFORE the metacharacter
     // bail so `C:\Program Files (x86)\...` paths are still resolved.
     if let Some(prog) = exists_as_program(trimmed) {
-        return Some((prog, Vec::new()));
+        return Some((normalize(prog), Vec::new()));
     }
     // Any shell metacharacter means the string needs a real shell.
     if trimmed.chars().any(|c| matches!(c, '&' | '|' | '<' | '>' | ';' | '`' | '$' | '(' | ')' | '%' | '\n' | '\r')) {
@@ -1345,18 +1359,9 @@ fn try_direct_spawn(cmd: &str) -> Option<(String, Vec<String>)> {
     // paths followed by arguments (`C:/Program Files/.../bash.exe --login`).
     for k in (1..=tokens.len()).rev() {
         let candidate = tokens[..k].join(" ");
-        // Only multi-token candidates that look like paths — a bare word
-        // sequence like `echo hello` must not accidentally match a file.
-        if k > 1 && !(candidate.contains('/') || candidate.contains('\\')) { continue; }
         if let Some(prog) = exists_as_program(&candidate) {
-            return Some((prog, tokens[k..].to_vec()));
+            return Some((normalize(prog), tokens[k..].to_vec()));
         }
-    }
-    // Single leading token resolvable via PATH (cmd.exe, bash, ping, ...).
-    // Shell builtins (echo, dir, cd) have no executable and fall through to
-    // the shell-wrapped path.
-    if let Ok(found) = which::which(&tokens[0]) {
-        return Some((found.to_string_lossy().into_owned(), tokens[1..].to_vec()));
     }
     None
 }
