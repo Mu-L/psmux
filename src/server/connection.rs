@@ -1350,7 +1350,15 @@ match cmd {
                     // Literal: concatenate without space separator.
                     let _ = tx.send(CtrlReq::SendKeys(keys.join(""), true));
                 } else {
-                    let _ = tx.send(CtrlReq::SendKeys(keys.join(" "), false));
+                    // tmux parity (#490): each argument is processed on its
+                    // own — a token either resolves to a named key (Enter,
+                    // C-m, Up, ...) or is typed VERBATIM. Joining with
+                    // spaces and re-splitting on whitespace collapsed runs
+                    // of spaces inside quoted arguments and stripped
+                    // leading/trailing spaces.
+                    for k in &keys {
+                        let _ = tx.send(CtrlReq::SendKeys(k.clone(), false));
+                    }
                 }
             }
         }
@@ -3377,8 +3385,15 @@ fn dispatch_control_command(
                 false
             });
             let effective_literal = literal || any_hex;
-            let text = if effective_literal { keys.join("") } else { keys.join(" ") };
-            let _ = tx.send(CtrlReq::SendKeys(text, effective_literal));
+            if effective_literal {
+                let _ = tx.send(CtrlReq::SendKeys(keys.join(""), true));
+            } else {
+                // tmux parity (#490): dispatch each argument separately so
+                // quoted arguments keep their exact whitespace.
+                for k in &keys {
+                    let _ = tx.send(CtrlReq::SendKeys(k.clone(), false));
+                }
+            }
             let _ = resp_tx.send(String::new());
             true
         }
