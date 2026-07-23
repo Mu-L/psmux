@@ -6,9 +6,12 @@
 
 /// Default root-table keybindings (no prefix required).
 /// These match tmux defaults for the root key table.
-pub const ROOT_DEFAULTS: &[(&str, &str)] = &[
-    ("PageUp",  "copy-mode -u"),
-];
+/// tmux binds NO keys in the root table by default (mouse aside) — in
+/// particular PPage/PageUp is bound only in the PREFIX table, so a bare
+/// PageUp must reach the running application (pagers, editors) untouched
+/// (issue #488). Users can restore the old behavior with
+/// `bind-key -n PageUp copy-mode -u`.
+pub const ROOT_DEFAULTS: &[(&str, &str)] = &[];
 
 /// Default prefix-table keybindings.
 /// Each entry is `(key_string, command_string)`.
@@ -89,6 +92,9 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
 
     // ── Copy / Paste ──
     ("[",       "copy-mode"),
+    // tmux: bind PPage { copy-mode -u } — enter copy mode scrolled up one
+    // page. The root table deliberately has no PageUp binding (issue #488).
+    ("PageUp",  "copy-mode -u"),
     ("]",       "paste-buffer"),
     ("=",       "choose-buffer"),
     ("#",       "list-buffers"),

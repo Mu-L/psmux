@@ -2153,3 +2153,7 @@ mod tests_issue425_bold_is_bright_option;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue459_hook_accumulation.rs"]
 mod tests_issue459_hook_accumulation;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue488_pageup_defaults.rs"]
+mod tests_issue488_pageup_defaults;
