@@ -13,6 +13,12 @@ pub struct Grid {
     scrollback: std::collections::VecDeque<crate::row::Row>,
     scrollback_len: usize,
     scrollback_offset: usize,
+    /// Copy-mode freeze (psmux issue #494): when set, the visible region is
+    /// anchored to its current content even at `scrollback_offset == 0` —
+    /// rows pushed into scrollback bump the offset so the view does not
+    /// follow new output, matching tmux's frozen copy-mode screen.  (At
+    /// offset > 0 this anchoring always happens, frozen or not.)
+    frozen: bool,
 }
 
 impl Grid {
@@ -29,7 +35,16 @@ impl Grid {
             scrollback: std::collections::VecDeque::new(),
             scrollback_len,
             scrollback_offset: 0,
+            frozen: false,
         }
+    }
+
+    pub fn frozen(&self) -> bool {
+        self.frozen
+    }
+
+    pub fn set_frozen(&mut self, frozen: bool) {
+        self.frozen = frozen;
     }
 
     pub fn allocate_rows(&mut self) {
@@ -229,7 +244,7 @@ impl Grid {
         while self.scrollback.len() > self.scrollback_len {
             self.scrollback.pop_front();
         }
-        if self.scrollback_offset > 0 {
+        if self.scrollback_offset > 0 || self.frozen {
             self.scrollback_offset =
                 self.scrollback.len().min(self.scrollback_offset + 1);
         }
@@ -609,7 +624,7 @@ impl Grid {
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
                 }
-                if self.scrollback_offset > 0 {
+                if self.scrollback_offset > 0 || self.frozen {
                     self.scrollback_offset =
                         self.scrollback.len().min(self.scrollback_offset + 1);
                 }

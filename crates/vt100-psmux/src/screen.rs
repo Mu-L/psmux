@@ -263,6 +263,21 @@ impl Screen {
         self.grid_mut().set_scrollback_len(new_len);
     }
 
+    /// Copy-mode freeze (psmux issue #494): while set, the main grid's
+    /// visible region stays anchored to its current content — new rows
+    /// entering scrollback bump the scrollback offset instead of shifting
+    /// the view, matching tmux's frozen copy-mode screen.  Always targets
+    /// the main grid (the alternate grid has no scrollback to anchor to).
+    pub fn set_frozen(&mut self, frozen: bool) {
+        self.grid.set_frozen(frozen);
+    }
+
+    /// Whether the copy-mode freeze anchor is currently set on the main grid.
+    #[must_use]
+    pub fn frozen(&self) -> bool {
+        self.grid.frozen()
+    }
+
     /// Returns the configured maximum size of the scrollback buffer.
     #[must_use]
     pub fn scrollback_len(&self) -> usize {
