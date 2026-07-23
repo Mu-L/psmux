@@ -1057,6 +1057,18 @@ const CWD_SYNC: &str = concat!(
     "} }",
 );
 
+/// True when the resolved shell path is a PowerShell (either PowerShell 7
+/// `pwsh.exe` or Windows PowerShell 5.1 `powershell.exe`) and therefore needs
+/// the interactive `psrl_init` block. Besides the PSReadLine prediction fix,
+/// that block installs the Set-Location hook that keeps the Win32 process CWD
+/// in sync so `#{pane_current_path}` tracks `cd` (issue #495). Both spawn
+/// paths (`build_command`'s interactive branch and `build_default_shell`) must
+/// use this so 5.1 is never left without the hook.
+pub(crate) fn shell_needs_psrl_init(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("pwsh") || lower.contains("powershell")
+}
+
 /// Build the full interactive init string for PowerShell:
 /// 1. Disable PSReadLine predictions (before profile — prevents #109 crash)
 /// 2. Source the user's profile scripts
@@ -1489,7 +1501,11 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
                 builder.env("TERM", "xterm-256color");
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
-                if path.to_lowercase().contains("pwsh") {
+                // Both PowerShell 7 (pwsh.exe) and Windows PowerShell 5.1
+                // (powershell.exe) need psrl_init — it installs the
+                // Set-Location hook that keeps #{pane_current_path} tracking
+                // `cd` (issue #495). See shell_needs_psrl_init.
+                if shell_needs_psrl_init(&path) {
                     builder.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", &psrl_init]);
                 }
                 builder
@@ -1605,7 +1621,6 @@ pub fn build_default_shell(shell_path: &str, env_shim: bool, allow_predictions: 
     // Resolve bare names via cached `which` — avoids repeated PATH scans.
     let resolved = cached_which(&program);
 
-    let lower = resolved.to_lowercase();
     let mut builder = CommandBuilder::new(&resolved);
     // Set CWD explicitly — portable_pty on Windows defaults to USERPROFILE
     // (home dir) when no cwd is set on CommandBuilder.
@@ -1634,7 +1649,7 @@ pub fn build_default_shell(shell_path: &str, env_shim: bool, allow_predictions: 
         if extra_args.is_empty() {
             builder.args(["-l"]);
         }
-    } else if lower.contains("pwsh") || lower.contains("powershell") {
+    } else if shell_needs_psrl_init(&resolved) {
         // Issue #109: -NoProfile + manual profile sourcing to prevent
         // PSReadLine GetHistoryItems NullReferenceException.
         // If the user already passed -NoProfile in extra_args, we still
@@ -2296,3 +2311,7 @@ mod tests_issue474_unix_shells;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue492_493_direct_spawn.rs"]
 mod tests_issue492_493_direct_spawn;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue495_cwd_hook_gate.rs"]
+mod tests_issue495_cwd_hook_gate;
