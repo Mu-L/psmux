@@ -10,6 +10,28 @@ use crate::util::base64_decode;
 use crate::control;
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Append-only AUTH diagnostics, gated by PSMUX_AUTH_DEBUG=1. Written to
+/// %TEMP%\psmux_auth_debug.log so concurrent processes never truncate each
+/// other (issue #496 forensics).
+fn auth_debug(msg: &str) {
+    if std::env::var("PSMUX_AUTH_DEBUG").map(|v| v == "1").unwrap_or(false) {
+        let tmp = std::env::var("TEMP")
+            .or_else(|_| std::env::var("TMP"))
+            .unwrap_or_else(|_| ".".to_string());
+        let path = format!("{}\\psmux_auth_debug.log", tmp);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = std::io::Write::write_all(
+                &mut f,
+                format!("[{} pid={}] {}\n", ts, std::process::id(), msg).as_bytes(),
+            );
+        }
+    }
+}
 use crate::commands::parse_command_line;
 use super::helpers::TMUX_COMMANDS;
 
@@ -273,12 +295,14 @@ let mut r = io::BufReader::new(stream);
 // Read the authentication line
 let mut auth_line = String::new();
 if r.read_line(&mut auth_line).is_err() {
+    auth_debug(&format!("client_id={} reject: auth read_line error/timeout", client_id));
     return;
 }
 
 // Verify session key
 let auth_line = auth_line.trim();
 if !auth_line.starts_with("AUTH ") {
+    auth_debug(&format!("client_id={} reject: no AUTH prefix, line={:?}", client_id, auth_line));
     // Legacy client without auth - reject for security
     let _ = write_stream.write_all(b"ERROR: Authentication required\n");
     let _ = write_stream.flush();
@@ -286,6 +310,10 @@ if !auth_line.starts_with("AUTH ") {
 }
 let provided_key = auth_line.strip_prefix("AUTH ").unwrap_or("");
 if provided_key != session_key {
+    auth_debug(&format!(
+        "client_id={} reject: key mismatch provided={:?} expected={:?}",
+        client_id, provided_key, session_key
+    ));
     let _ = write_stream.write_all(b"ERROR: Invalid session key\n");
     let _ = write_stream.flush();
     return;

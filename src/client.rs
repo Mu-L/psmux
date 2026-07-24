@@ -1338,7 +1338,14 @@ fn establish_connection(addr: &str, key: &str) -> io::Result<Connection> {
     let _ = writer.write_all(format!("AUTH {}\n", key).as_bytes());
     let _ = writer.flush();
     let mut auth_line = String::new();
-    reader.read_line(&mut auth_line)?;
+    let read_res = reader.read_line(&mut auth_line);
+    if std::env::var("PSMUX_AUTH_DEBUG").map(|v| v == "1").unwrap_or(false) {
+        eprintln!(
+            "[auth-debug pid={}] establish_connection addr={} key={} read_res={:?} got_line={:?}",
+            std::process::id(), addr, key, read_res.as_ref().map(|n| *n), auth_line
+        );
+    }
+    read_res?;
     if !auth_line.trim().starts_with("OK") {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "auth failed"));
     }
@@ -1408,7 +1415,25 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("can't find session '{}' (no server running)", name)))?;
     let addr = format!("127.0.0.1:{}", port);
-    let session_key = read_session_key(&name).unwrap_or_default();
+    // The .port file can be visible a beat before the .key has readable
+    // content (servers before the issue #496 fix wrote .port first, and a
+    // just-claimed warm server rewrites its files). Never AUTH with an empty
+    // key — that is guaranteed to fail — poll briefly for the credential.
+    let mut session_key = read_session_key(&name).unwrap_or_default();
+    if session_key.is_empty() {
+        for _ in 0..400 {
+            std::thread::sleep(Duration::from_millis(5));
+            session_key = read_session_key(&name).unwrap_or_default();
+            if !session_key.is_empty() { break; }
+        }
+    }
+    let session_key = session_key;
+    if std::env::var("PSMUX_AUTH_DEBUG").map(|v| v == "1").unwrap_or(false) {
+        eprintln!(
+            "[auth-debug pid={}] run_remote name={} port={} key={}",
+            std::process::id(), name, port, session_key
+        );
+    }
     let last_path = crate::paths::psmux_dir_file("last_session");
     if !crate::session::is_warm_session(&name) {
         let _ = std::fs::write(&last_path, &name);

@@ -87,13 +87,11 @@ fn ensure_session_registry_files(app: &AppState) {
     let port_value = port.to_string();
     let sid_value = app.session_id.to_string();
 
-    if std::fs::read_to_string(&port_path)
-        .map(|s| s.trim() != port_value)
-        .unwrap_or(true)
-    {
-        let _ = std::fs::write(&port_path, &port_value);
-    }
-
+    // Write the .key (and .sid) BEFORE the .port file: the .port file is the
+    // readiness beacon clients poll for, so every credential they will read
+    // next must already be on disk when it appears. Writing .port first opened
+    // a window where a cold-start attach read an empty .key and failed AUTH
+    // with "psmux: auth failed" (issue #496).
     if std::fs::read_to_string(&key_path)
         .map(|s| s.trim() != app.session_key)
         .unwrap_or(true)
@@ -127,6 +125,14 @@ fn ensure_session_registry_files(app: &AppState) {
         .unwrap_or(true)
     {
         let _ = std::fs::write(&pid_path, &pid_value);
+    }
+
+    // .port goes LAST: it is the readiness beacon (see comment above).
+    if std::fs::read_to_string(&port_path)
+        .map(|s| s.trim() != port_value)
+        .unwrap_or(true)
+    {
+        let _ = std::fs::write(&port_path, &port_value);
     }
 }
 
@@ -811,6 +817,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 
     app.session_key = session_key.clone();
 
+    // Write the key file up front (user-only visibility on Windows comes from
+    // the profile directory ACLs). This MUST happen before
+    // ensure_session_registry_files writes the .port readiness beacon: a
+    // truncate+rewrite of the .key after .port is visible gave attaching
+    // clients a window to read an EMPTY key and fail with "psmux: auth
+    // failed" on cold start (issue #496). ensure_session_registry_files sees
+    // the matching content below and never rewrites it.
+    {
+        let keypath = crate::paths::key_file(&app.port_file_base());
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&keypath)
+            .map(|mut f| std::io::Write::write_all(&mut f, session_key.as_bytes()));
+    }
+
     // TEST-ONLY fault injection — compiled out of release builds entirely
     // (gated on debug_assertions); inert in debug unless the env var is set.
     // Delays the .port file write (which happens inside
@@ -849,17 +872,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // they call `psmux set -g ...` or other CLI commands.
     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
 
-    // Try to set file permissions to user-only (Windows)
-    #[cfg(windows)]
-    {
-        // Recreate key file with restricted permissions
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&keypath)
-            .map(|mut f| std::io::Write::write_all(&mut f, session_key.as_bytes()));
-    }
+    // NOTE: the .key file is written BEFORE ensure_session_registry_files
+    // above — never recreate/truncate it here, after the .port beacon is
+    // already visible to attaching clients (issue #496).
 
     // Start accept thread BEFORE load_config so that run-shell commands
     // (e.g. PPM plugin manager) spawned during config parsing can connect
@@ -3037,7 +3052,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let new_keypath = crate::paths::key_file(&new_base);
                     if let Some(port) = app.control_port {
                         let _ = std::fs::remove_file(&old_path);
-                        let _ = std::fs::write(&new_path, port.to_string());
                         // Write this server's OWN in-memory key, NOT a copy of the
                         // old .key file. Under warm-server replenish churn the
                         // __warm__.key file may have been overwritten by a LATER warm
@@ -3052,6 +3066,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // Re-anchor the PID sentinel to the new base (issue #448):
                         // remove_session_id_file above dropped the old .pid.
                         crate::session::write_session_pid_file(&new_base, std::process::id());
+                        // The new .port file goes LAST: it is the readiness beacon an
+                        // attaching client polls for, so the .key/.sid/.pid it will
+                        // read next must already exist when it appears (issue #496).
+                        let _ = std::fs::write(&new_path, port.to_string());
                     }
                     app.session_name = name;
                     // Update env so run-shell/hooks from this server target the new name
@@ -3086,7 +3104,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let new_keypath = crate::paths::key_file(&new_base);
                     if let Some(port) = app.control_port {
                         let _ = std::fs::remove_file(&old_path);
-                        let _ = std::fs::write(&new_path, port.to_string());
                         // Write this server's OWN in-memory key, NOT a copy of the
                         // old .key file. Under warm-server replenish churn the
                         // __warm__.key file may have been overwritten by a LATER warm
@@ -3101,6 +3118,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // Re-anchor the PID sentinel to the new base (issue #448):
                         // remove_session_id_file above dropped the old .pid.
                         crate::session::write_session_pid_file(&new_base, std::process::id());
+                        // The new .port file goes LAST: it is the readiness beacon an
+                        // attaching client polls for, so the .key/.sid/.pid it will
+                        // read next must already exist when it appears (issue #496).
+                        let _ = std::fs::write(&new_path, port.to_string());
                     }
                     app.session_name = name;
                     // Warm server's created_at is the warm process start time, not the
