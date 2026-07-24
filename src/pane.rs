@@ -1091,6 +1091,56 @@ fn build_psrl_init(env_shim: bool, allow_predictions: bool) -> String {
     s
 }
 
+/// Init block for PowerShell panes where the user explicitly passed
+/// `-NoProfile`: no profile sourcing, but the PSReadLine fix and the CWD-sync
+/// hook still apply. The hook is what keeps `#{pane_current_path}` tracking
+/// `cd` (#495) — it is unrelated to profiles and must not be dropped just
+/// because profile sourcing is skipped.
+fn build_psrl_init_noprofile(env_shim: bool) -> String {
+    let mut s = format!("{}; {}", PSRL_FIX, CWD_SYNC);
+    if env_shim {
+        s.push_str("; ");
+        s.push_str(ENV_SHIM_PS);
+    }
+    s
+}
+
+/// True when `prog`'s file stem is exactly a PowerShell executable (`pwsh` or
+/// `powershell`). Stricter than `shell_needs_psrl_init` (which substring
+/// matches anywhere in the path) — used for directly spawned commands, where
+/// appending PowerShell flags to a non-PowerShell exe would break it.
+#[cfg(windows)]
+fn is_powershell_program(prog: &str) -> bool {
+    std::path::Path::new(prog)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            let lower = s.to_ascii_lowercase();
+            lower == "pwsh" || lower == "powershell"
+        })
+        .unwrap_or(false)
+}
+
+/// True when the args of a directly spawned PowerShell leave it interactive:
+/// every arg is a `-Flag` and none of them executes a command or script
+/// (`-Command`, `-File`, `-EncodedCommand` or their short forms). A
+/// positional arg means a script/command (pwsh treats it as `-File`,
+/// powershell as `-Command`), so the pane is not an interactive shell and
+/// must not get the init block appended.
+#[cfg(windows)]
+fn powershell_args_interactive(args: &[String]) -> bool {
+    args.iter().all(|a| {
+        if !a.starts_with('-') {
+            return false;
+        }
+        let flag = a.trim_start_matches('-').to_ascii_lowercase();
+        !matches!(
+            flag.as_str(),
+            "command" | "c" | "file" | "f" | "encodedcommand" | "e" | "ec"
+        )
+    })
+}
+
 /// On Windows, translate Unix-style shell wrappers to Windows equivalents.
 ///
 /// Tools like Overstory wrap agent commands in `/bin/bash -c '...'` for
@@ -1440,6 +1490,25 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
                 for var in &env_removes { builder.env_remove(var); }
                 for (k, v) in &env_sets { builder.env(k, v); }
                 builder.args(&prog_args);
+                // #495 follow-up: a directly spawned pwsh/powershell path is an
+                // interactive PowerShell pane, and without psrl_init it lacks
+                // the Set-Location hook, freezing #{pane_current_path} at the
+                // spawn directory. Append the same init that default-shell
+                // panes get, unless the user's args already execute a
+                // command/script (then the pane is not an interactive shell).
+                if is_powershell_program(&prog) && powershell_args_interactive(&prog_args) {
+                    let has_noprofile = prog_args.iter()
+                        .any(|a| a.eq_ignore_ascii_case("-NoProfile"));
+                    let psrl_init = if has_noprofile {
+                        build_psrl_init_noprofile(env_shim)
+                    } else {
+                        build_psrl_init(env_shim, allow_predictions)
+                    };
+                    if !has_noprofile {
+                        builder.args(["-NoProfile"]);
+                    }
+                    builder.args(["-NoLogo", "-NoExit", "-Command", &psrl_init]);
+                }
                 return builder;
             }
         }
@@ -1658,13 +1727,10 @@ pub fn build_default_shell(shell_path: &str, env_shim: bool, allow_predictions: 
         let has_noprofile = extra_args.iter()
             .any(|a| a.eq_ignore_ascii_case("-NoProfile"));
         let psrl_init = if has_noprofile {
-            // User explicitly wants no profile — just apply PSRL fix + shim.
-            let mut s = PSRL_FIX.to_string();
-            if env_shim {
-                s.push_str("; ");
-                s.push_str(ENV_SHIM_PS);
-            }
-            s
+            // User explicitly wants no profile — apply PSRL fix + CWD-sync
+            // hook + shim. The CWD hook is unrelated to profiles and must
+            // stay, or #{pane_current_path} freezes (#495).
+            build_psrl_init_noprofile(env_shim)
         } else {
             build_psrl_init(env_shim, allow_predictions)
         };
@@ -2315,3 +2381,7 @@ mod tests_issue492_493_direct_spawn;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue495_cwd_hook_gate.rs"]
 mod tests_issue495_cwd_hook_gate;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue495_direct_spawn_cwd_hook.rs"]
+mod tests_issue495_direct_spawn_cwd_hook;
