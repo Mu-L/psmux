@@ -847,6 +847,8 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 // Paragraph jump: { = previous paragraph, } = next paragraph
                 KeyCode::Char('{') => { for _ in 0..copy_repeat { crate::copy_mode::move_prev_paragraph(app); } }
                 KeyCode::Char('}') => { for _ in 0..copy_repeat { crate::copy_mode::move_next_paragraph(app); } }
+                // Centre the cursor line in the pane: z = scroll-middle
+                KeyCode::Char('z') => { crate::copy_mode::scroll_middle(app); }
                 // Line motions: 0 = start, $ = end, ^ = first non-blank
                 KeyCode::Char('0') => { crate::copy_mode::move_to_line_start(app); }
                 KeyCode::Char('$') => { crate::copy_mode::move_to_line_end(app); }
@@ -3079,6 +3081,13 @@ fn handle_copy_mode_char(app: &mut AppState, c: char) -> io::Result<()> {
         'H' => { crate::copy_mode::move_to_screen_top(app); }
         'M' => { crate::copy_mode::move_to_screen_middle(app); }
         'L' => { crate::copy_mode::move_to_screen_bottom(app); }
+        // Paragraph jumps and bracket matching (#498). These reached the
+        // KeyCode table but not this one, and this is the path the client
+        // actually uses for plain printable keys, so they were dead keys.
+        '{' => { for _ in 0..n { crate::copy_mode::move_prev_paragraph(app); } }
+        '}' => { for _ in 0..n { crate::copy_mode::move_next_paragraph(app); } }
+        '%' => { crate::copy_mode::move_matching_bracket(app); }
+        'z' => { crate::copy_mode::scroll_middle(app); }
         // Preserve the count so e.g. "3fx" finds the 3rd 'x' (consumed above).
         'f' => { app.copy_find_char_pending = Some(0); app.copy_count = Some(n); }
         'F' => { app.copy_find_char_pending = Some(1); app.copy_count = Some(n); }

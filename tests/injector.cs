@@ -96,7 +96,7 @@ class Injector
         if (args.Length < 2)
         {
             File.WriteAllText(logFile, "Usage: injector.exe <pid> <keys>\n" +
-                "Keys: chars, ^x=Ctrl+x, {ENTER}, {ESC}, {SLEEP:ms}");
+                "Keys: chars, ^x=Ctrl+x, {ENTER}, {ESC}, {LBRACE}, {RBRACE}, {SLEEP:ms}");
             return 99;
         }
 
@@ -186,6 +186,16 @@ class Injector
                     {
                         if (SendKey(handle, 0x22, '\0', 0, log)) injected++;
                     }
+                    else if (token == "LBRACE")
+                    {
+                        // '{' cannot be written literally: it opens a token.
+                        // Shift + the '[' key is how a real keyboard makes it.
+                        if (SendKey(handle, 0xDB, '{', SHIFT_PRESSED, log)) injected++;
+                    }
+                    else if (token == "RBRACE")
+                    {
+                        if (SendKey(handle, 0xDD, '}', SHIFT_PRESSED, log)) injected++;
+                    }
                     else if (token.StartsWith("SLEEP:"))
                     {
                         int ms = int.Parse(token.Substring(6));
@@ -270,6 +280,8 @@ class Injector
                 else if (c == '&') { vk = 0x37; ctrl = SHIFT_PRESSED; }
                 else if (c == '*') { vk = 0x38; ctrl = SHIFT_PRESSED; }
                 else if (c == '+') { vk = 0xBB; ctrl = SHIFT_PRESSED; }
+                else if (c == '}') { vk = 0xDD; ctrl = SHIFT_PRESSED; }
+                else if (c == '{') { vk = 0xDB; ctrl = SHIFT_PRESSED; }
                 else vk = (ushort)c;
 
                 if (SendKey(handle, vk, c, ctrl, log)) injected++;

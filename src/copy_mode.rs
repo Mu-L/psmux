@@ -1271,53 +1271,114 @@ mod trim_trailing_empty_styled_lines_tests {
     }
 }
 
-/// Move to next empty line (paragraph boundary) — } key
-pub fn move_next_paragraph(app: &mut AppState) {
-    let (r, _) = match get_copy_pos(app) { Some(p) => p, None => return };
-    let rows = app.windows.get(app.active_idx)
-        .and_then(|w| active_pane(&w.root, &w.active_path))
-        .map(|p| p.last_rows).unwrap_or(24);
-    // Skip current non-blank lines, then find next blank line
-    let mut row = r + 1;
-    // Skip non-blank
-    while row < rows {
-        if let Some((text, _)) = read_row_text(app, row) {
-            if text.trim().is_empty() { break; }
-        } else { break; }
-        row += 1;
+/// Safety net for the paragraph walk. The walk normally terminates because
+/// stepping stops making progress at the top/bottom of the buffer; this only
+/// bounds a pathological history.
+const PARAGRAPH_WALK_LIMIT: usize = 100_000;
+
+/// Is the given visible row blank (whitespace only)?
+fn row_is_blank(app: &mut AppState, row: u16) -> bool {
+    match read_row_text(app, row) {
+        Some((text, _)) => text.trim().is_empty(),
+        None => true,
     }
-    // Skip blank lines to find start of next paragraph
-    while row < rows {
-        if let Some((text, _)) = read_row_text(app, row) {
-            if !text.trim().is_empty() { break; }
-        } else { break; }
-        row += 1;
-    }
-    app.copy_pos = Some((row.min(rows.saturating_sub(1)), 0));
 }
 
-/// Move to previous empty line (paragraph boundary) — { key
-pub fn move_prev_paragraph(app: &mut AppState) {
+/// Identifies the buffer line the copy cursor sits on. Comparing this before
+/// and after a step tells us whether the cursor actually moved, which is how
+/// the paragraph walk detects the top/bottom of the buffer.
+fn copy_walk_key(app: &AppState) -> (usize, u16) {
+    (app.copy_scroll_offset, app.copy_pos.map(|(r, _)| r).unwrap_or(0))
+}
+
+/// Step the copy cursor one line up or down, scrolling the view when the step
+/// crosses the edge of the visible area. Returns false when the cursor could
+/// not move (top or bottom of the buffer).
+fn step_copy_line(app: &mut AppState, down: bool) -> bool {
+    let before = copy_walk_key(app);
+    move_copy_cursor(app, 0, if down { 1 } else { -1 });
+    copy_walk_key(app) != before
+}
+
+/// Move to the blank line that ends the current paragraph — } key.
+///
+/// Mirrors tmux's window_copy_next_paragraph(): skip any blank lines under the
+/// cursor, then walk the paragraph body, landing on the following blank line.
+/// The walk steps through move_copy_cursor so it scrolls into history at the
+/// edge of the viewport instead of stopping there (tmux walks the whole
+/// buffer, not just the visible screen).
+pub fn move_next_paragraph(app: &mut AppState) {
     let (r, _) = match get_copy_pos(app) { Some(p) => p, None => return };
-    if r == 0 { return; }
-    let mut row = r.saturating_sub(1);
-    // Skip non-blank
-    loop {
-        if let Some((text, _)) = read_row_text(app, row) {
-            if text.trim().is_empty() { break; }
-        } else { break; }
-        if row == 0 { app.copy_pos = Some((0, 0)); return; }
-        row -= 1;
+    app.copy_pos = Some((r, 0));
+    let mut row = r;
+    let mut steps = 0usize;
+    // Skip the blank lines the cursor is sitting in.
+    while steps < PARAGRAPH_WALK_LIMIT && row_is_blank(app, row) {
+        if !step_copy_line(app, true) { return; }
+        row = app.copy_pos.map(|(rr, _)| rr).unwrap_or(row);
+        steps += 1;
     }
-    // Skip blank lines
-    loop {
-        if let Some((text, _)) = read_row_text(app, row) {
-            if !text.trim().is_empty() { break; }
-        } else { break; }
-        if row == 0 { app.copy_pos = Some((0, 0)); return; }
-        row -= 1;
+    // Then walk the paragraph body to the blank line that follows it.
+    while steps < PARAGRAPH_WALK_LIMIT && !row_is_blank(app, row) {
+        if !step_copy_line(app, true) { return; }
+        row = app.copy_pos.map(|(rr, _)| rr).unwrap_or(row);
+        steps += 1;
     }
     app.copy_pos = Some((row, 0));
+}
+
+/// Move to the blank line that starts the current paragraph — { key.
+///
+/// Mirrors tmux's window_copy_previous_paragraph(), the upward counterpart of
+/// move_next_paragraph().
+pub fn move_prev_paragraph(app: &mut AppState) {
+    let (r, _) = match get_copy_pos(app) { Some(p) => p, None => return };
+    app.copy_pos = Some((r, 0));
+    let mut row = r;
+    let mut steps = 0usize;
+    while steps < PARAGRAPH_WALK_LIMIT && row_is_blank(app, row) {
+        if !step_copy_line(app, false) { return; }
+        row = app.copy_pos.map(|(rr, _)| rr).unwrap_or(row);
+        steps += 1;
+    }
+    while steps < PARAGRAPH_WALK_LIMIT && !row_is_blank(app, row) {
+        if !step_copy_line(app, false) { return; }
+        row = app.copy_pos.map(|(rr, _)| rr).unwrap_or(row);
+        steps += 1;
+    }
+    app.copy_pos = Some((row, 0));
+}
+
+/// Scroll the line containing the cursor to the middle of the pane — z key.
+///
+/// Mirrors tmux's window_copy_cmd_scroll_middle(): the cursor stays on the
+/// same buffer line and the view moves under it, clamped by how much
+/// scrollback is actually available in that direction.
+pub fn scroll_middle(app: &mut AppState) {
+    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
+    let win = &mut app.windows[app.active_idx];
+    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return };
+    let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return };
+    let mid = p.last_rows.saturating_sub(1) / 2;
+    let current = parser.screen().scrollback();
+    // The cursor's buffer line is `base - scrollback + row`, so holding that
+    // line fixed while the row becomes `mid` means the scrollback offset has
+    // to change by `mid - row` in the same direction.
+    if r < mid {
+        // Cursor above the middle: pull older lines in above it (scroll up).
+        parser.screen_mut().set_scrollback(current.saturating_add((mid - r) as usize));
+        // set_scrollback clamps at the top of the history, so use what it
+        // actually applied rather than what we asked for.
+        let applied = parser.screen().scrollback().saturating_sub(current) as u16;
+        app.copy_scroll_offset = parser.screen().scrollback();
+        app.copy_pos = Some((r.saturating_add(applied), c));
+    } else if r > mid {
+        // Cursor below the middle: scroll down, bounded by the offset we have.
+        let applied = ((r - mid) as usize).min(current);
+        parser.screen_mut().set_scrollback(current - applied);
+        app.copy_scroll_offset = parser.screen().scrollback();
+        app.copy_pos = Some((r.saturating_sub(applied as u16), c));
+    }
 }
 
 /// Move to matching bracket — % key

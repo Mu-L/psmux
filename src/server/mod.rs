@@ -2664,6 +2664,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "page-down" => { scroll_copy_down(&mut app, 20); }
                         "scroll-up" => { scroll_copy_up(&mut app, 1); }
                         "scroll-down" => { scroll_copy_down(&mut app, 1); }
+                        "scroll-middle" => { crate::copy_mode::scroll_middle(&mut app); }
                         "search-forward" | "search-forward-incremental" => {
                             app.mode = Mode::CopySearch { input: String::new(), forward: true };
                             let prompt = "(search down) ".to_string();

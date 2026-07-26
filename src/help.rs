@@ -177,6 +177,7 @@ const COPY_MODE_VI: &[(&str, &str)] = &[
     ("%",         "next-matching-bracket"),
     ("{",         "previous-paragraph"),
     ("}",         "next-paragraph"),
+    ("z",         "scroll-middle"),
     // Selection
     ("v",         "rectangle-toggle"),
     ("V",         "select-line"),
