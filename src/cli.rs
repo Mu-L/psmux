@@ -534,9 +534,22 @@ pub fn parse_target(target: &str) -> ParsedTarget {
         return result;
     }
     if target.starts_with('@') {
-        if let Ok(wid) = target[1..].parse::<usize>() {
+        // Allow a ".pane" suffix after the window id (e.g. "@2.0" or "@2.%3")
+        let (wid_part, pane_part) = match target.find('.') {
+            Some(dot) => (&target[1..dot], Some(&target[dot + 1..])),
+            None => (&target[1..], None),
+        };
+        if let Ok(wid) = wid_part.parse::<usize>() {
             result.window = Some(wid);
             result.window_is_id = true;
+            if let Some(pp) = pane_part {
+                if let Some(pid) = pp.strip_prefix('%').and_then(|s| s.parse::<usize>().ok()) {
+                    result.pane = Some(pid);
+                    result.pane_is_id = true;
+                } else if let Ok(p) = pp.parse::<usize>() {
+                    result.pane = Some(p);
+                }
+            }
         }
         return result;
     }
@@ -602,9 +615,22 @@ pub fn parse_target(target: &str) -> ParsedTarget {
                 result.pane_is_id = true;
             }
         } else if wp.starts_with('@') {
-            if let Ok(wid) = wp[1..].parse::<usize>() {
+            // Allow a ".pane" suffix after the window id (e.g. "ses:@2.0")
+            let (wid_part, pane_part) = match wp.find('.') {
+                Some(dot) => (&wp[1..dot], Some(&wp[dot + 1..])),
+                None => (&wp[1..], None),
+            };
+            if let Ok(wid) = wid_part.parse::<usize>() {
                 result.window = Some(wid);
                 result.window_is_id = true;
+                if let Some(pp) = pane_part {
+                    if let Some(pid) = pp.strip_prefix('%').and_then(|s| s.parse::<usize>().ok()) {
+                        result.pane = Some(pid);
+                        result.pane_is_id = true;
+                    } else if let Ok(p) = pp.parse::<usize>() {
+                        result.pane = Some(p);
+                    }
+                }
             }
         } else if let Some(dot_pos) = wp.find('.') {
             if dot_pos > 0 {
@@ -752,3 +778,7 @@ mod tests {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue196_flag_equals.rs"]
 mod tests_issue196_flag_equals;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue497_selectwindow_id.rs"]
+mod tests_issue497_selectwindow_id;

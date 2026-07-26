@@ -1431,8 +1431,11 @@ match cmd {
         }
     }
     "select-window" | "selectw" => {
+        // An @id target was already focused permanently by the generic target
+        // focus block above (FocusWindowById). Re-sending it here as an INDEX
+        // via SelectWindow would override that with the wrong window (#497).
         let idx = args.iter().find(|a| !a.starts_with('-')).and_then(|s| s.parse::<usize>().ok())
-            .or(target_win);
+            .or(if target_win_is_id { None } else { target_win });
         if let Some(idx) = idx {
             let _ = tx.send(CtrlReq::SelectWindow(idx));
         }

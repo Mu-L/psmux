@@ -86,9 +86,9 @@ fn color_to_ansi(c: ratatui::style::Color, fg: bool) -> String {
     }
 }
 
-/// Returns Some(true) if the window spec (index or name) exists in the target
-/// server, Some(false) if it definitively does not, or None if the server could
-/// not be queried (in which case the caller should NOT block the command).
+/// Returns Some(true) if the window spec (id, index, or name) exists in the
+/// target server, Some(false) if it definitively does not, or None if the server
+/// could not be queried (in which case the caller should NOT block the command).
 /// Routing uses the already-set PSMUX_TARGET_SESSION (from the global -t parse).
 fn cli_window_exists(window_spec: &str) -> Option<bool> {
     // Clear PSMUX_TARGET_FULL for the query: it holds the (possibly bad) target
@@ -97,7 +97,7 @@ fn cli_window_exists(window_spec: &str) -> Option<bool> {
     let saved_full = std::env::var("PSMUX_TARGET_FULL").ok();
     std::env::remove_var("PSMUX_TARGET_FULL");
     let resp = crate::session::send_control_with_response(
-        "list-windows -F #{window_index}|#{window_name}\n".to_string(),
+        "list-windows -F #{window_id}|#{window_index}|#{window_name}\n".to_string(),
     );
     if let Some(v) = saved_full { std::env::set_var("PSMUX_TARGET_FULL", v); }
     let resp = resp.ok()?;
@@ -105,13 +105,14 @@ fn cli_window_exists(window_spec: &str) -> Option<bool> {
     for line in resp.lines() {
         let line = line.trim();
         if line.is_empty() || line == "OK" { continue; }
-        let mut parts = line.splitn(2, '|');
+        let mut parts = line.splitn(3, '|');
+        let id = parts.next().unwrap_or("").trim();
         let idx = parts.next().unwrap_or("").trim();
         let name = parts.next().unwrap_or("").trim();
-        // Only count lines that actually look like "<index>|<name>".
-        if idx.parse::<usize>().is_ok() {
+        // Only count lines that actually look like "@<id>|<index>|<name>".
+        if id.starts_with('@') && idx.parse::<usize>().is_ok() {
             any = true;
-            if idx == window_spec || name == window_spec { return Some(true); }
+            if id == window_spec || idx == window_spec || name == window_spec { return Some(true); }
         }
     }
     if any { Some(false) } else { None }
