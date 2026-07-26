@@ -25,6 +25,7 @@ class Injector
     const ushort KEY_EVENT = 1;
     const uint LEFT_CTRL_PRESSED = 0x0008;
     const uint SHIFT_PRESSED = 0x0010;
+    const uint LEFT_ALT_PRESSED = 0x0002;
 
     [StructLayout(LayoutKind.Sequential)]
     struct KEY_EVENT_RECORD
@@ -96,7 +97,7 @@ class Injector
         if (args.Length < 2)
         {
             File.WriteAllText(logFile, "Usage: injector.exe <pid> <keys>\n" +
-                "Keys: chars, ^x=Ctrl+x, {ENTER}, {ESC}, {LBRACE}, {RBRACE}, {SLEEP:ms}");
+                "Keys: chars, ^x=Ctrl+x, {ALT:x}, {ENTER}, {ESC}, {LBRACE}, {RBRACE}, {SLEEP:ms}");
             return 99;
         }
 
@@ -185,6 +186,23 @@ class Injector
                     else if (token == "PGDN" || token == "PAGEDOWN")
                     {
                         if (SendKey(handle, 0x22, '\0', 0, log)) injected++;
+                    }
+                    else if (token.StartsWith("ALT:"))
+                    {
+                        // {ALT:x} — Alt+x, e.g. copy mode jump-to-mark
+                        char ac = token[4];
+                        ushort avk = (ac >= 'a' && ac <= 'z') ? (ushort)(0x41 + ac - 'a')
+                                   : (ac >= 'A' && ac <= 'Z') ? (ushort)(0x41 + ac - 'A')
+                                   : (ushort)ac;
+                        var arecs = new INPUT_RECORD[] {
+                            MakeKey(true,  0x12, '\0', LEFT_ALT_PRESSED),
+                            MakeKey(true,  avk,  ac,   LEFT_ALT_PRESSED),
+                            MakeKey(false, avk,  ac,   LEFT_ALT_PRESSED),
+                            MakeKey(false, 0x12, '\0', 0)
+                        };
+                        uint aw; bool aok = WriteConsoleInput(handle, arecs, 4, out aw);
+                        log.Add(string.Format("  ALT+{0} vk=0x{1:X2} ok={2} w={3}", ac, avk, aok, aw));
+                        if (aok) injected++;
                     }
                     else if (token == "LBRACE")
                     {

@@ -2748,13 +2748,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "jump-backward" => { app.copy_find_char_pending = Some(1); }
                         "jump-to-forward" => { app.copy_find_char_pending = Some(2); }
                         "jump-to-backward" => { app.copy_find_char_pending = Some(3); }
-                        "jump-again" => {
-                            // Repeat last find-char in same direction
-                            // We'd need to store last char; for now emit the pending
-                        }
-                        "jump-reverse" => {
-                            // Repeat last find-char in reverse direction
-                        }
+                        "jump-again" => { crate::copy_mode::jump_again(&mut app); }
+                        "jump-reverse" => { crate::copy_mode::jump_reverse(&mut app); }
+                        "set-mark" => { crate::copy_mode::set_mark(&mut app); }
+                        "jump-to-mark" => { crate::copy_mode::jump_to_mark(&mut app); }
+                        // tmux 3.3 calls this refresh-toggle; older tables and
+                        // the #498 report use refresh-from-pane for the same key.
+                        "refresh-from-pane" | "refresh-toggle" => { crate::copy_mode::toggle_refresh(&mut app); }
                         "next-paragraph" => {
                             crate::copy_mode::move_next_paragraph(&mut app);
                         }

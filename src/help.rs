@@ -173,6 +173,12 @@ const COPY_MODE_VI: &[(&str, &str)] = &[
     ("F{char}",   "jump-backward"),
     ("t{char}",   "jump-to-forward"),
     ("T{char}",   "jump-to-backward"),
+    (";",         "jump-again"),
+    (",",         "jump-reverse"),
+    // Mark
+    ("X",         "set-mark"),
+    ("M-x",       "jump-to-mark"),
+    ("r",         "refresh-from-pane"),
     // Bracket / paragraph
     ("%",         "next-matching-bracket"),
     ("{",         "previous-paragraph"),

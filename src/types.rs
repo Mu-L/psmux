@@ -439,6 +439,9 @@ pub struct CopyModeState {
     pub text_object_pending: Option<u8>,
     pub register_pending: bool,
     pub register: Option<char>,
+    /// Mark and last-jump are pane-local like the rest of copy state (#498)
+    pub mark: Option<(usize, u16, u16)>,
+    pub last_jump: Option<(u8, char)>,
     /// true when the pane was in CopySearch (not CopyMode)
     pub in_search: bool,
     /// search input buffer (only meaningful when in_search == true)
@@ -560,6 +563,16 @@ pub struct AppState {
     pub copy_register_pending: bool,
     /// Currently selected named register (a-z), None = default unnamed
     pub copy_register: Option<char>,
+    /// Copy-mode mark set by `X` (set-mark): (scroll_offset, row, col).
+    /// `M-x` (jump-to-mark) swaps the cursor with it, so pressing it twice
+    /// returns you to where you started, same as tmux (#498).
+    pub copy_mark: Option<(usize, u16, u16)>,
+    /// Last f/F/t/T jump as (kind, char), so `;` (jump-again) and `,`
+    /// (jump-reverse) can repeat it (#498).
+    pub copy_last_jump: Option<(u8, char)>,
+    /// When true the pane keeps following live output while in copy mode
+    /// instead of being anchored. Toggled by `r` (refresh-from-pane) (#498).
+    pub copy_refresh_live: bool,
     /// Named registers a-z for copy-mode yank/paste
     pub named_registers: std::collections::HashMap<char, String>,
     pub display_map: Vec<(usize, Vec<usize>)>,
@@ -1130,6 +1143,9 @@ impl AppState {
             copy_text_object_pending: None,
             copy_register_pending: false,
             copy_register: None,
+            copy_mark: None,
+            copy_last_jump: None,
+            copy_refresh_live: false,
             named_registers: std::collections::HashMap::new(),
             display_map: Vec::new(),
             key_tables: std::collections::HashMap::new(),

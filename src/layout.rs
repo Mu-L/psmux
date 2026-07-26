@@ -212,6 +212,9 @@ pub fn dump_window_layout_json(app: &mut AppState, win_id: usize) -> io::Result<
 /// `app.copy_scroll_offset` the (possibly auto-bumped) parser offset so
 /// selection math and the client-side scroll indicator stay consistent.
 fn sync_copy_freeze(app: &mut AppState, in_copy_mode: bool) {
+    // `r` (refresh-from-pane, #498) releases the anchor so the pane tracks
+    // live output while copy mode stays open.
+    let in_copy_mode = in_copy_mode && !app.copy_refresh_live;
     fn walk(node: &mut Node, path: &mut Vec<usize>, target: Option<&[usize]>) -> Option<usize> {
         let mut synced = None;
         match node {

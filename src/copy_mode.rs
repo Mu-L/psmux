@@ -30,6 +30,9 @@ pub fn enter_copy_mode(app: &mut AppState) {
     app.copy_register_pending = false;
     app.copy_register = None;
     app.copy_count = None;
+    app.copy_mark = None;
+    app.copy_last_jump = None;
+    app.copy_refresh_live = false;
     // Mark the active pane as being in copy mode (pane-local state).
     save_copy_state_to_pane(app);
 }
@@ -78,6 +81,8 @@ pub fn save_copy_state_to_pane(app: &mut AppState) {
         text_object_pending: app.copy_text_object_pending,
         register_pending: app.copy_register_pending,
         register: app.copy_register,
+        mark: app.copy_mark,
+        last_jump: app.copy_last_jump,
         in_search,
         search_input,
         search_input_forward,
@@ -110,6 +115,8 @@ pub fn restore_copy_state_from_pane(app: &mut AppState) {
         app.copy_text_object_pending = s.text_object_pending;
         app.copy_register_pending = s.register_pending;
         app.copy_register = s.register;
+        app.copy_mark = s.mark;
+        app.copy_last_jump = s.last_jump;
         if s.in_search {
             app.mode = Mode::CopySearch { input: s.search_input, forward: s.search_input_forward };
         } else {
@@ -778,47 +785,135 @@ pub fn move_to_screen_bottom(app: &mut AppState) {
     app.copy_pos = Some((rows.saturating_sub(1), 0));
 }
 
+/// Jump kinds shared by f/F/t/T and their `;` / `,` repeats.
+pub const JUMP_FORWARD: u8 = 0;
+pub const JUMP_BACKWARD: u8 = 1;
+pub const JUMP_TO_FORWARD: u8 = 2;
+pub const JUMP_TO_BACKWARD: u8 = 3;
+
+/// Perform one f/F/t/T search WITHOUT recording it as the last jump.
+/// `jump_again` and `jump_reverse` go through here so repeating a jump never
+/// rewrites the stored direction (tmux keeps `jumptype` fixed across `,`).
+fn apply_jump(app: &mut AppState, kind: u8, ch: char) {
+    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
+    let text = match read_row_text(app, r) { Some((t, _)) => t, None => return };
+    let bytes: Vec<char> = text.chars().collect();
+    match kind {
+        JUMP_FORWARD => {
+            for i in (c as usize + 1)..bytes.len() {
+                if bytes[i] == ch { app.copy_pos = Some((r, i as u16)); return; }
+            }
+        }
+        JUMP_BACKWARD => {
+            for i in (0..(c as usize)).rev() {
+                if bytes[i] == ch { app.copy_pos = Some((r, i as u16)); return; }
+            }
+        }
+        // tmux starts the `t` search two cells along (window_copy_cursor_jump_to
+        // uses cx + 2) so that repeating it with `;` steps past the character
+        // the cursor is already parked in front of instead of stalling.
+        JUMP_TO_FORWARD => {
+            for i in (c as usize + 2)..bytes.len() {
+                if bytes[i] == ch { app.copy_pos = Some((r, (i as u16).saturating_sub(1))); return; }
+            }
+        }
+        JUMP_TO_BACKWARD => {
+            for i in (0..(c as usize).saturating_sub(1)).rev() {
+                if bytes[i] == ch { app.copy_pos = Some((r, (i as u16) + 1)); return; }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Find character forward on current line — f key
 pub fn find_char_forward(app: &mut AppState, ch: char) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    if let Some((text, _)) = read_row_text(app, r) {
-        let bytes: Vec<char> = text.chars().collect();
-        for i in (c as usize + 1)..bytes.len() {
-            if bytes[i] == ch { app.copy_pos = Some((r, i as u16)); return; }
-        }
-    }
+    app.copy_last_jump = Some((JUMP_FORWARD, ch));
+    apply_jump(app, JUMP_FORWARD, ch);
 }
 
 /// Find character backward on current line — F key
 pub fn find_char_backward(app: &mut AppState, ch: char) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    if let Some((text, _)) = read_row_text(app, r) {
-        let bytes: Vec<char> = text.chars().collect();
-        for i in (0..(c as usize)).rev() {
-            if bytes[i] == ch { app.copy_pos = Some((r, i as u16)); return; }
-        }
-    }
+    app.copy_last_jump = Some((JUMP_BACKWARD, ch));
+    apply_jump(app, JUMP_BACKWARD, ch);
 }
 
 /// Find char up to (not including) forward — t key
 pub fn find_char_to_forward(app: &mut AppState, ch: char) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    if let Some((text, _)) = read_row_text(app, r) {
-        let bytes: Vec<char> = text.chars().collect();
-        for i in (c as usize + 1)..bytes.len() {
-            if bytes[i] == ch { app.copy_pos = Some((r, (i as u16).saturating_sub(1))); return; }
-        }
-    }
+    app.copy_last_jump = Some((JUMP_TO_FORWARD, ch));
+    apply_jump(app, JUMP_TO_FORWARD, ch);
 }
 
 /// Find char up to (not including) backward — T key
 pub fn find_char_to_backward(app: &mut AppState, ch: char) {
-    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
-    if let Some((text, _)) = read_row_text(app, r) {
-        let bytes: Vec<char> = text.chars().collect();
-        for i in (0..(c as usize)).rev() {
-            if bytes[i] == ch { app.copy_pos = Some((r, (i as u16) + 1)); return; }
-        }
+    app.copy_last_jump = Some((JUMP_TO_BACKWARD, ch));
+    apply_jump(app, JUMP_TO_BACKWARD, ch);
+}
+
+/// Repeat the last f/F/t/T in the same direction — `;` key.
+pub fn jump_again(app: &mut AppState) {
+    if let Some((kind, ch)) = app.copy_last_jump { apply_jump(app, kind, ch); }
+}
+
+/// Repeat the last f/F/t/T in the opposite direction — `,` key.
+pub fn jump_reverse(app: &mut AppState) {
+    if let Some((kind, ch)) = app.copy_last_jump {
+        let reversed = match kind {
+            JUMP_FORWARD => JUMP_BACKWARD,
+            JUMP_BACKWARD => JUMP_FORWARD,
+            JUMP_TO_FORWARD => JUMP_TO_BACKWARD,
+            JUMP_TO_BACKWARD => JUMP_TO_FORWARD,
+            _ => return,
+        };
+        apply_jump(app, reversed, ch);
+    }
+}
+
+/// Move the view to an absolute scrollback offset, keeping copy_scroll_offset
+/// in step with whatever the parser actually clamped to.
+fn set_scroll_offset(app: &mut AppState, offset: usize) {
+    let win = &mut app.windows[app.active_idx];
+    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return };
+    let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return };
+    parser.screen_mut().set_scrollback(offset);
+    app.copy_scroll_offset = parser.screen().scrollback();
+}
+
+/// Record the cursor position as the mark — X key (set-mark).
+pub fn set_mark(app: &mut AppState) {
+    if let Some((r, c)) = get_copy_pos(app) {
+        app.copy_mark = Some((app.copy_scroll_offset, r, c));
+    }
+}
+
+/// Swap the cursor with the mark — M-x (jump-to-mark).
+///
+/// tmux's window_copy_jump_to_mark() exchanges the two positions rather than
+/// just moving to the mark, so pressing it twice brings you back to where you
+/// jumped from.
+pub fn jump_to_mark(app: &mut AppState) {
+    let (mark_scroll, mark_row, mark_col) = match app.copy_mark { Some(m) => m, None => return };
+    let here = match get_copy_pos(app) {
+        Some((r, c)) => (app.copy_scroll_offset, r, c),
+        None => return,
+    };
+    set_scroll_offset(app, mark_scroll);
+    app.copy_pos = Some((mark_row, mark_col));
+    app.copy_mark = Some(here);
+}
+
+/// Toggle whether the pane keeps following live output while in copy mode —
+/// r key (refresh-from-pane / refresh-toggle).
+///
+/// psmux anchors the active pane while in copy mode (#494) so the view does
+/// not shift under the cursor. This releases that anchor so the pane tracks
+/// new output, and re-applies it on the next press.
+pub fn toggle_refresh(app: &mut AppState) {
+    app.copy_refresh_live = !app.copy_refresh_live;
+    if app.copy_refresh_live {
+        // Following live output means sitting at the bottom of the history,
+        // which is where that output lands.
+        scroll_to_bottom(app);
     }
 }
 

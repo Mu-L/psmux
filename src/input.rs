@@ -849,6 +849,14 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Char('}') => { for _ in 0..copy_repeat { crate::copy_mode::move_next_paragraph(app); } }
                 // Centre the cursor line in the pane: z = scroll-middle
                 KeyCode::Char('z') => { crate::copy_mode::scroll_middle(app); }
+                // Mark, jump repeat and live-refresh toggle (#498).
+                // M-x must stay above the bare Char('x') matches, like the
+                // other ALT-qualified arms in this table.
+                KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::ALT) => { crate::copy_mode::jump_to_mark(app); }
+                KeyCode::Char('X') => { crate::copy_mode::set_mark(app); }
+                KeyCode::Char(';') => { for _ in 0..copy_repeat { crate::copy_mode::jump_again(app); } }
+                KeyCode::Char(',') => { for _ in 0..copy_repeat { crate::copy_mode::jump_reverse(app); } }
+                KeyCode::Char('r') => { crate::copy_mode::toggle_refresh(app); }
                 // Line motions: 0 = start, $ = end, ^ = first non-blank
                 KeyCode::Char('0') => { crate::copy_mode::move_to_line_start(app); }
                 KeyCode::Char('$') => { crate::copy_mode::move_to_line_end(app); }
@@ -3088,6 +3096,11 @@ fn handle_copy_mode_char(app: &mut AppState, c: char) -> io::Result<()> {
         '}' => { for _ in 0..n { crate::copy_mode::move_next_paragraph(app); } }
         '%' => { crate::copy_mode::move_matching_bracket(app); }
         'z' => { crate::copy_mode::scroll_middle(app); }
+        // Mark, jump repeat and live-refresh toggle (#498)
+        'X' => { crate::copy_mode::set_mark(app); }
+        ';' => { for _ in 0..n { crate::copy_mode::jump_again(app); } }
+        ',' => { for _ in 0..n { crate::copy_mode::jump_reverse(app); } }
+        'r' => { crate::copy_mode::toggle_refresh(app); }
         // Preserve the count so e.g. "3fx" finds the 3rd 'x' (consumed above).
         'f' => { app.copy_find_char_pending = Some(0); app.copy_count = Some(n); }
         'F' => { app.copy_find_char_pending = Some(1); app.copy_count = Some(n); }
@@ -3316,6 +3329,10 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             "M-f" | "m-f" => { crate::copy_mode::move_word_forward(app); }
             "M-b" | "m-b" => { crate::copy_mode::move_word_backward(app); }
             "M-w" | "m-w" => { yank_selection(app)?; exit_copy_mode(app); }
+            // jump-to-mark (#498). Alt keys reach copy mode as named keys via
+            // `send-key M-x`, not through the char table, so this is the arm
+            // that actually runs when the user presses M-x.
+            "M-x" | "m-x" => { crate::copy_mode::jump_to_mark(app); }
             "C-s" | "c-s" => { app.mode = Mode::CopySearch { input: String::new(), forward: true }; refresh_search_prompt(app); }
             "C-r" | "c-r" => { app.mode = Mode::CopySearch { input: String::new(), forward: false }; refresh_search_prompt(app); }
             "C-c" | "c-c" => {
