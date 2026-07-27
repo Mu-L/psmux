@@ -1279,27 +1279,73 @@ pub fn shell_words(s: &str) -> Vec<String> {
 pub fn split_chained_commands_pub(command: &str) -> Vec<String> {
     split_chained_commands(command)
 }
+/// Split a command line into chained sub-commands.
+///
+/// A separator is a *whole top-level token* of exactly `;` or `\;`, matching
+/// tmux's `cmd_parse_from_arguments`, which only ends a command when an
+/// argument consists of (or ends with) an unescaped semicolon. Two properties
+/// matter here and both were broken before (#499):
+///
+///  1. **Quote awareness.** A `;` inside single or double quotes is data, not a
+///     separator. The one-shot CLI path flattens argv into a single line and
+///     wraps any argument containing whitespace in double quotes, so a user
+///     value like `"a ; b"` used to be split mid-value: the option was stored
+///     truncated to `a` and the remainder (`b"`) was dispatched as its own
+///     command. With a real command after the `;` that meant arbitrary command
+///     execution from inside a quoted *value* (`"x ; kill-server"` killed the
+///     server).
+///
+///  2. **Whitespace preservation.** Sub-commands are returned as slices of the
+///     original line rather than re-joined `split_whitespace()` tokens, so runs
+///     of spaces inside a quoted argument survive chaining (previously
+///     `set-option @a 1 \; set-option @b "x    y"` stored `x y`).
+///
+/// A semicolon that is only *part* of a token (`a;b`, `a; b`) is left alone,
+/// again matching tmux, which inspects the whole argument.
 fn split_chained_commands(command: &str) -> Vec<String> {
+    let chars: Vec<char> = command.chars().collect();
     let mut commands: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let tokens: Vec<&str> = command.split_whitespace().collect();
-    
-    for token in &tokens {
-        if *token == "\\;" || *token == ";" {
-            let trimmed = current.trim().to_string();
-            if !trimmed.is_empty() {
-                commands.push(trimmed);
-            }
-            current.clear();
-        } else {
-            if !current.is_empty() { current.push(' '); }
-            current.push_str(token);
+    let mut seg_start = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0usize;
+
+    fn push_seg(commands: &mut Vec<String>, seg: &[char]) {
+        let s: String = seg.iter().collect();
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            commands.push(trimmed.to_string());
         }
     }
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        commands.push(trimmed);
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        // Separator check first: only a standalone top-level `;` / `\;` token.
+        if !in_single && !in_double && (c == ';' || (c == '\\' && chars.get(i + 1) == Some(&';'))) {
+            let sep_len = if c == ';' { 1 } else { 2 };
+            let starts_token = i == 0 || chars[i - 1].is_whitespace();
+            let ends_token = chars.get(i + sep_len).is_none_or(|n| n.is_whitespace());
+            if starts_token && ends_token {
+                push_seg(&mut commands, &chars[seg_start..i]);
+                i += sep_len;
+                seg_start = i;
+                continue;
+            }
+        }
+
+        match c {
+            // An escape pair is copied over verbatim; skipping the escaped
+            // character keeps `\"` from toggling the quote state.
+            '\\' if !in_single => { i += 2; continue; }
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            _ => {}
+        }
+        i += 1;
     }
+
+    push_seg(&mut commands, &chars[seg_start.min(chars.len())..]);
     commands
 }
 
@@ -2157,3 +2203,7 @@ mod tests_issue459_hook_accumulation;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue488_pageup_defaults.rs"]
 mod tests_issue488_pageup_defaults;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue499_quoted_semicolon.rs"]
+mod tests_issue499_quoted_semicolon;
