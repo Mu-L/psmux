@@ -49,6 +49,10 @@ path = "src/lib.rs"
 name = "width_thai_441"
 path = "tests/width_thai_441.rs"
 
+[[test]]
+name = "issue502_altscreen_attrs"
+path = "tests/issue502_altscreen_attrs.rs"
+
 [dependencies.itoa]
 version = "1.0.15"
 
