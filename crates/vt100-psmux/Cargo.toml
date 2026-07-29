@@ -53,6 +53,10 @@ path = "tests/width_thai_441.rs"
 name = "issue502_altscreen_attrs"
 path = "tests/issue502_altscreen_attrs.rs"
 
+[[test]]
+name = "issue502_decsc_altscreen"
+path = "tests/issue502_decsc_altscreen.rs"
+
 [dependencies.itoa]
 version = "1.0.15"
 
@@ -81,3 +85,6 @@ version = "1.0.140"
 
 [dev-dependencies.terminal_size]
 version = "0.4.2"
+
+
+
