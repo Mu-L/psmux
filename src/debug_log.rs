@@ -13,6 +13,7 @@
 //! | `PSMUX_SSH_DEBUG=1`    | `~/.psmux/ssh_input.log`          | SSH input handling (existing)        |
 //! | `PSMUX_LATENCY_LOG=1`  | `~/.psmux/latency.log`            | Keypress-to-render latency (existing)|
 //! | `PSMUX_SESSION_DEBUG=1`| `~/.psmux/session_debug.log`      | Session-registry stale-port cleanup  |
+//! | `PSMUX_PANE_RAW=1`    | `~/.psmux/pane_raw.bin`           | Raw pre-parse pane byte stream        |
 //!
 //! All loggers are:
 //! - **Off by default** — zero overhead when disabled (one atomic load per call)
@@ -97,6 +98,55 @@ pub fn client_log(component: &str, msg: &str) {
 /// Returns `true` if client debug logging is active.
 pub fn client_log_enabled() -> bool {
     CLIENT_LOG.lock().ok().map_or(false, |g| g.is_some())
+}
+
+// ─── Raw pane byte log ──────────────────────────────────────────────────────
+
+/// Raw pane output log, gated by `PSMUX_PANE_RAW=1`.
+///
+/// Appends the EXACT bytes each pane's ConPTY hands to the vt100 parser, before
+/// any parsing. This is the only artifact that can settle "who emitted this
+/// escape sequence" questions: the pane grid and `capture-pane -e` show the
+/// RESULT, not the input, so a stuck colour looks identical whether the child
+/// emitted it or psmux mis-parsed something (issue #502).
+///
+/// Written verbatim with no framing so the file can be replayed straight back
+/// through the parser. Capped at 8 MB, which is far more than any interactive
+/// session needs and keeps a runaway `yes` loop from filling the disk.
+static PANE_RAW_LOG: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| {
+    if !env_enabled("PSMUX_PANE_RAW") { return Mutex::new(None); }
+    Mutex::new(open_log("pane_raw.bin"))
+});
+
+static PANE_RAW_BYTES: AtomicU32 = AtomicU32::new(0);
+
+/// Cheap gate so the pane hot path pays one relaxed load, not a mutex, when
+/// logging is off. `LazyLock` on the file handle alone would still lock.
+static PANE_RAW_ON: LazyLock<bool> = LazyLock::new(|| env_enabled("PSMUX_PANE_RAW"));
+
+/// Maximum bytes captured per session (8 MB).
+const PANE_RAW_CAP: u32 = 8 * 1024 * 1024;
+
+/// Append raw pane bytes. No-op unless `PSMUX_PANE_RAW=1`.
+pub fn pane_raw(bytes: &[u8]) {
+    if !*PANE_RAW_ON || bytes.is_empty() {
+        return;
+    }
+    let n = PANE_RAW_BYTES.fetch_add(bytes.len() as u32, Ordering::Relaxed);
+    if n >= PANE_RAW_CAP {
+        return;
+    }
+    if let Ok(mut guard) = PANE_RAW_LOG.lock() {
+        if let Some(ref mut f) = *guard {
+            let _ = f.write_all(bytes);
+            let _ = f.flush();
+        }
+    }
+}
+
+/// Returns `true` if raw pane logging is active (lets hot paths skip the call).
+pub fn pane_raw_enabled() -> bool {
+    PANE_RAW_LOG.lock().ok().map_or(false, |g| g.is_some())
 }
 
 // ─── Style debug log ────────────────────────────────────────────────────────
@@ -277,3 +327,4 @@ pub fn session_log(component: &str, msg: &str) {
 pub fn session_log_enabled() -> bool {
     SESSION_LOG.lock().ok().map_or(false, |g| g.is_some())
 }
+

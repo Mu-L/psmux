@@ -2186,6 +2186,10 @@ pub fn spawn_reader_thread(
             let has_cpr_query = cpr_scanner.scan(&bytes);
             let color_query_bits = color_scanner.scan(&bytes);
 
+            // Issue #502 diagnostic: capture the exact pre-parse byte stream
+            // when PSMUX_PANE_RAW=1. Off by default, one atomic load when off.
+            crate::debug_log::pane_raw(&bytes);
+
             if let Ok(mut parser) = term_reader.lock() {
                 parser.process(&bytes);
                 if parser.screen_mut().take_audible_bell() {
