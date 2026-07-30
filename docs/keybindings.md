@@ -119,10 +119,15 @@ Once a picker is open (`Prefix + s`, `Prefix + w`, `Prefix + =`, `Prefix + ?`, o
 | `1`..`9`, `0` | Append digit to jump buffer (Enter consumes it) |
 | `Backspace` | Edit the jump buffer |
 | `Enter` | Switch to the selected entry (or to the jump buffer index if non-empty) |
+| `f` | Enter session-name filter mode (choose-session only) |
 | `p` | Toggle live preview (choose-session / choose-tree only) |
 | `x` | Kill selected session (choose-session only) |
 | `d` / `Delete` | Delete selected buffer (choose-buffer only) |
-| `Esc` / `q` | Close the picker |
+| `Esc` | Clear an active session filter; otherwise close the picker |
+
+In the session picker, filter mode matches session names case-insensitively as
+you type. `Backspace` edits the filter. Press `Esc` after entering text to clear
+the filter and show every session; with no filter text, `Esc` closes the picker.
 
 ## Command Prompt
 
