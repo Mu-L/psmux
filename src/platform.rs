@@ -302,8 +302,24 @@ unsafe impl Send for SessionMutex {}
 impl Drop for SessionMutex {
     fn drop(&mut self) {
         #[link(name = "kernel32")]
-        extern "system" { fn CloseHandle(h: isize) -> i32; }
-        if !self.handle.is_null() { unsafe { CloseHandle(self.handle as isize); } }
+        extern "system" {
+            fn ReleaseMutex(h: *mut std::ffi::c_void) -> i32;
+            fn CloseHandle(h: isize) -> i32;
+        }
+        if !self.handle.is_null() {
+            unsafe {
+                // Give up ownership explicitly before closing. Closing alone frees
+                // the name only when ours is the LAST handle; if any other process
+                // happens to hold one open at that instant (a concurrent probe from
+                // a starting server), the object outlives our close and would stay
+                // owned by a thread that has moved on. Releasing first makes the
+                // handover deterministic, which is what re-keying the guard across
+                // a rename depends on (issue #505). Harmlessly returns 0 when this
+                // thread does not own the mutex.
+                ReleaseMutex(self.handle);
+                CloseHandle(self.handle as isize);
+            }
+        }
     }
 }
 

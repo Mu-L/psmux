@@ -726,6 +726,34 @@ pub(crate) fn read_fresh_config_warnings(since_epoch: u64) -> Vec<String> {
     }
 }
 
+/// Move the single-server-per-name guard (issue #2) onto `new_base` after this
+/// server's session was renamed or a warm server was claimed (issue #505).
+///
+/// The guard is a named mutex keyed on the session's port-file base, and that
+/// base changes with the session name. Leaving it on the startup name breaks
+/// both directions:
+///
+/// * the OLD name stays locked for the process's whole life, so a later server
+///   spawned under it exits as a "duplicate" and never writes a `.port` file —
+///   the caller reports `failed to create session '<old name>'`. The default
+///   session name is `0`, which is exactly what a bare `new-session` auto-picks,
+///   so renaming the first session broke plain `new-session` outright.
+/// * the NEW name is left unguarded, silently disabling duplicate-server
+///   protection for every renamed (and every warm-claimed) session.
+///
+/// Release before acquiring so renaming a session onto a name it already holds
+/// cannot block on itself. A refused acquire is not fatal: the rename has
+/// already happened, so we simply run unguarded rather than abandon the session.
+/// Warm servers stay exempt (the pool intentionally runs several at once).
+fn rekey_session_guard(guard: &mut Option<crate::platform::SessionMutex>, new_base: &str) {
+    *guard = None; // drop releases + closes the old name's mutex
+    if crate::session::is_warm_session(new_base) { return; }
+    *guard = crate::platform::acquire_session_mutex(new_base);
+    if guard.is_none() {
+        warm_debug(&format!("session guard: '{}' already owned by a live server — running unguarded", new_base));
+    }
+}
+
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>, env_vars: Vec<(String, String)>) -> io::Result<()> {
     // Write crash info to a log file when stderr is unavailable (detached server)
     // and clean up port/key files so stale entries do not linger (issue #204).
@@ -773,7 +801,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // wedge the session ("appears lost"). Warm (standby) servers are exempt (the
     // warm pool intentionally runs several). Fail-open: any FFI hiccup yields a
     // live guard, never a blocked legitimate start.
-    let _session_guard = {
+    // Re-keyed on every rename/claim, see rekey_session_guard (issue #505).
+    let mut session_guard = {
         let base = app.port_file_base();
         if crate::session::is_warm_session(&base) {
             None
@@ -3062,6 +3091,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = std::fs::write(&new_path, port.to_string());
                     }
                     app.session_name = name;
+                    // Move the single-server-per-name guard onto the new name, or the
+                    // old name stays locked forever and blocks re-creating it (#505).
+                    rekey_session_guard(&mut session_guard, &app.port_file_base());
                     // Update env so run-shell/hooks from this server target the new name
                     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     hook_event = Some("after-rename-session");
@@ -3114,6 +3146,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = std::fs::write(&new_path, port.to_string());
                     }
                     app.session_name = name;
+                    // A warm server skipped the startup guard (the pool runs several),
+                    // so the name it just claimed picks the guard up here (#505).
+                    rekey_session_guard(&mut session_guard, &app.port_file_base());
                     // Warm server's created_at is the warm process start time, not the
                     // user's session-creation time — reset on claim or list-sessions /
                     // session_created / uptime would report the warm pool's age.
@@ -6001,6 +6036,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     #[allow(unreachable_code)]
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue505_rename_session_guard.rs"]
+mod tests_issue505_rename_session_guard;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_server.rs"]
