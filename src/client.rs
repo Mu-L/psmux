@@ -1499,6 +1499,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Digits typed while the picker is open accumulate here and are consumed
     // when the user presses Enter — "12" + Enter jumps to the 12th session.
     let mut session_num_buffer = String::new();
+    let mut session_filter_active = false;
+    let mut session_filter = String::new();
     // Digit-jump buffer for the customize-mode picker. Customize lives on
     // the server, so Enter computes a navigate delta and dispatches
     // `customize-navigate <delta>` instead of mutating local state directly.
@@ -2680,24 +2682,39 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             }
                         }
                         else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
-                            command_input = false;
-                            command_cursor = 0;
-                            renaming = false;
-                            pane_renaming = false;
-                            tree_chooser = false;
-                            buffer_chooser = false;
-                            session_chooser = false;
-                            keys_viewer = false;
-                            confirm_cmd = None;
-                            // Drop any pending digit-jump buffers when the
-                            // pickers are dismissed via Esc.
-                            tree_num_buffer.clear();
-                            buffer_num_buffer.clear();
-                            session_num_buffer.clear();
-                            // Also clear any lingering selection
-                            rsel_start = None;
-                            rsel_end = None;
-                            selection_changed = true;
+                            if session_chooser && !session_filter.is_empty() {
+                                let selected_entry = session_filter_escape_selection(
+                                    &session_entries,
+                                    &session_filter,
+                                    session_selected,
+                                );
+                                session_filter.clear();
+                                session_filter_active = false;
+                                session_selected = selected_entry.unwrap_or(0);
+                                session_scroll = 0;
+                                session_num_buffer.clear();
+                            } else {
+                                command_input = false;
+                                command_cursor = 0;
+                                renaming = false;
+                                pane_renaming = false;
+                                tree_chooser = false;
+                                buffer_chooser = false;
+                                session_chooser = false;
+                                session_filter_active = false;
+                                session_filter.clear();
+                                keys_viewer = false;
+                                confirm_cmd = None;
+                                // Drop any pending digit-jump buffers when the
+                                // pickers are dismissed via Esc.
+                                tree_num_buffer.clear();
+                                buffer_num_buffer.clear();
+                                session_num_buffer.clear();
+                                // Also clear any lingering selection
+                                rsel_start = None;
+                                rsel_end = None;
+                                selection_changed = true;
+                            }
                         }
                         else if rsel_start.is_some() && matches!(key.code, KeyCode::Esc) {
                             // Escape clears any active text selection
@@ -3049,6 +3066,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 session_selected = 0;
                                 session_scroll = 0;
                                 session_num_buffer.clear();
+                                session_filter_active = false;
+                                session_filter.clear();
                                 popup_offset = (0, 0);
                                 popup_dragging = false;
                                 popup_rect_last = None;
@@ -3242,20 +3261,51 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             let paste_burst_active = false;
                             match key.code {
                                 KeyCode::Up if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
-                                KeyCode::Down if session_chooser => { if session_selected + 1 < session_entries.len() { session_selected += 1; } }
+                                KeyCode::Down if session_chooser => {
+                                    let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
+                                    if session_selected + 1 < visible_len { session_selected += 1; }
+                                }
+                                KeyCode::Backspace if session_chooser && session_filter_active => {
+                                    session_filter.pop();
+                                    session_selected = 0;
+                                    session_scroll = 0;
+                                    session_num_buffer.clear();
+                                }
+                                KeyCode::Char(c) if session_chooser && session_filter_active => {
+                                    if session_filter.len() < 256 {
+                                        session_filter.push(c);
+                                        session_selected = 0;
+                                        session_scroll = 0;
+                                        session_num_buffer.clear();
+                                    }
+                                }
                                 // hjkl parity with tmux mode-tree (issue #259): for flat lists
                                 // tmux treats h/k as up and j/l as down. g/G map to Home/End.
                                 KeyCode::Char('k') if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
-                                KeyCode::Char('j') if session_chooser => { if session_selected + 1 < session_entries.len() { session_selected += 1; } }
+                                KeyCode::Char('j') if session_chooser => {
+                                    let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
+                                    if session_selected + 1 < visible_len { session_selected += 1; }
+                                }
                                 KeyCode::Char('h') if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
-                                KeyCode::Char('l') if session_chooser => { if session_selected + 1 < session_entries.len() { session_selected += 1; } }
+                                KeyCode::Char('l') if session_chooser => {
+                                    let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
+                                    if session_selected + 1 < visible_len { session_selected += 1; }
+                                }
                                 KeyCode::Char('g') if session_chooser => { session_selected = 0; }
-                                KeyCode::Char('G') if session_chooser => { session_selected = session_entries.len().saturating_sub(1); }
+                                KeyCode::Char('G') if session_chooser => {
+                                    session_selected = session_filtered_indices(&session_entries, &session_filter).len().saturating_sub(1);
+                                }
                                 KeyCode::PageUp if session_chooser => { session_selected = session_selected.saturating_sub(10); }
-                                KeyCode::PageDown if session_chooser => { session_selected = (session_selected + 10).min(session_entries.len().saturating_sub(1)); }
+                                KeyCode::PageDown if session_chooser => {
+                                    let last = session_filtered_indices(&session_entries, &session_filter).len().saturating_sub(1);
+                                    session_selected = (session_selected + 10).min(last);
+                                }
                                 KeyCode::Home if session_chooser => { session_selected = 0; }
-                                KeyCode::End if session_chooser => { session_selected = session_entries.len().saturating_sub(1); }
+                                KeyCode::End if session_chooser => {
+                                    session_selected = session_filtered_indices(&session_entries, &session_filter).len().saturating_sub(1);
+                                }
                                 KeyCode::Enter if session_chooser => {
+                                    let filtered_indices = session_filtered_indices(&session_entries, &session_filter);
                                     // If the user has typed a number, that wins over the arrow cursor.
                                     // Buffer is 1-based: "1" → first entry, "12" → twelfth. Out-of-range
                                     // or unparseable → do nothing (keep buffer so user can Backspace).
@@ -3263,11 +3313,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         Some(session_selected)
                                     } else {
                                         match session_num_buffer.parse::<usize>() {
-                                            Ok(n) if n >= 1 && n <= session_entries.len() => Some(n - 1),
+                                            Ok(n) if n >= 1 && n <= filtered_indices.len() => Some(n - 1),
                                             _ => None,
                                         }
                                     };
-                                    if let Some(idx) = target_idx {
+                                    if let Some(idx) = target_idx.and_then(|i| filtered_indices.get(i).copied()) {
                                         if let Some((sname, _)) = session_entries.get(idx) {
                                             if sname != &current_session {
                                                 cmd_batch.push("client-detach\n".into());
@@ -3276,19 +3326,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             }
                                             session_chooser = false;
                                             session_num_buffer.clear();
+                                            session_filter_active = false;
+                                            session_filter.clear();
                                         }
                                     }
-                                }
-                                KeyCode::Esc if session_chooser => {
-                                    session_chooser = false;
-                                    session_num_buffer.clear();
                                 }
                                 KeyCode::Backspace if session_chooser => {
                                     session_num_buffer.pop();
                                 }
                                 KeyCode::Char('x') if session_chooser => {
                                     // Kill the selected session (like tmux session chooser)
-                                    if let Some((sname, _)) = session_entries.get(session_selected) {
+                                    let selected_entry = session_filtered_indices(&session_entries, &session_filter)
+                                        .get(session_selected)
+                                        .copied();
+                                    if let Some((sname, _)) = selected_entry.and_then(|i| session_entries.get(i)) {
                                         let sname = sname.clone();
                                         if sname == current_session {
                                             // Killing current session — exit after kill
@@ -3312,8 +3363,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                 }
                                             }
                                             // Remove the killed session from the list
-                                            session_entries.remove(session_selected);
-                                            if session_selected >= session_entries.len() && session_selected > 0 {
+                                            if let Some(idx) = selected_entry {
+                                                session_entries.remove(idx);
+                                            }
+                                            let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
+                                            if session_selected >= visible_len && session_selected > 0 {
                                                 session_selected -= 1;
                                             }
                                             if session_entries.is_empty() {
@@ -3323,6 +3377,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             session_num_buffer.clear();
                                         }
                                     }
+                                }
+                                KeyCode::Char('f') if session_chooser => {
+                                    session_filter_active = true;
+                                    session_filter.clear();
+                                    session_selected = 0;
+                                    session_scroll = 0;
+                                    session_num_buffer.clear();
                                 }
                                 KeyCode::Char(c) if session_chooser && c.is_ascii_digit() => {
                                     // Accumulate into the jump buffer — Enter consumes it.
@@ -4023,7 +4084,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                                 MouseEventKind::ScrollDown => {
                                     if tree_chooser && tree_selected + 1 < tree_entries.len() { tree_selected += 1; }
-                                    if session_chooser && session_selected + 1 < session_entries.len() { session_selected += 1; }
+                                    if session_chooser {
+                                        let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
+                                        if session_selected + 1 < visible_len { session_selected += 1; }
+                                    }
                                 }
                                 _ => {}
                             }
@@ -5118,10 +5182,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
 
             if session_chooser {
                 let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
+                let filtered_indices = session_filtered_indices(&session_entries, &session_filter);
                 // Popup size: when preview is OFF use the original
                 // pre-#257 dynamic sizing (compact, list-only). When preview
                 // is ON expand to 85x75% so the right-side preview has room.
-                let buffer_rows: u16 = if session_num_buffer.is_empty() { 0 } else { 2 };
+                let jump_rows: u16 = if session_num_buffer.is_empty() { 0 } else { 2 };
+                let filter_rows: u16 = if session_filter_active { 2 } else { 0 };
+                let buffer_rows = jump_rows.saturating_add(filter_rows);
                 let avail_w = content_chunk.width;
                 let avail_h = content_chunk.height;
                 let (popup_w, popup_h) = if preview_enabled {
@@ -5129,7 +5196,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     let want_h = ((avail_h as u32 * 75) / 100) as u16;
                     (want_w.max(40).min(avail_w), want_h.max(10).min(avail_h))
                 } else {
-                    let sess_h = (session_entries.len() as u16)
+                    let sess_h = (filtered_indices.len() as u16)
                         .saturating_add(2)
                         .saturating_add(buffer_rows)
                         .max(5)
@@ -5151,9 +5218,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 };
                 popup_rect_last = Some(oa);
                 let title = if preview_enabled {
-                    " choose-session (digits+enter=jump, enter=switch, x=kill, p=preview, esc=close, drag border to move) "
+                    " choose-session (f=filter, digits+enter=jump, enter=switch, x=kill, p=preview, esc=clear/close, drag border to move) "
                 } else {
-                    " choose-session (digits+enter=jump, enter=switch, x=kill, p=preview, esc=close) "
+                    " choose-session (f=filter, digits+enter=jump, enter=switch, x=kill, p=preview, esc=clear/close) "
                 };
                 let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
@@ -5180,7 +5247,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     })
                 } else { None };
 
-                // Reserve the last two inner rows for the jump-buffer indicator
+                // Reserve rows for the active jump and filter indicators.
                 let reserved = buffer_rows as usize;
                 let visible_h = (list_area.height as usize).saturating_sub(reserved);
                 if visible_h > 0 && session_selected >= session_scroll + visible_h {
@@ -5189,22 +5256,33 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 if session_selected < session_scroll {
                     session_scroll = session_selected;
                 }
-                let num_width = session_entries.len().to_string().len();
+                let num_width = filtered_indices.len().max(1).to_string().len();
                 let mut lines: Vec<Line> = Vec::new();
-                for (i, (sname, info)) in session_entries.iter().enumerate().skip(session_scroll).take(visible_h) {
+                for (visible_idx, entry_idx) in filtered_indices.iter().copied().enumerate().skip(session_scroll).take(visible_h) {
+                    let (sname, info) = &session_entries[entry_idx];
                     let marker = if sname == &current_session { "*" } else { " " };
-                    let row = format!("{:>w$}. {} {}", i + 1, marker, info, w = num_width);
-                    let line = if i == session_selected {
+                    let row = format!("{:>w$}. {} {}", visible_idx + 1, marker, info, w = num_width);
+                    let line = if visible_idx == session_selected {
                         Line::from(Span::styled(row, sel_style))
                     } else {
                         Line::from(row)
                     };
                     lines.push(line);
                 }
+                if filtered_indices.is_empty() && visible_h > 0 {
+                    lines.push(Line::from("(no matching sessions)"));
+                }
                 if !session_num_buffer.is_empty() {
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(
                         format!("go to {}", session_num_buffer),
+                        sel_style,
+                    )));
+                }
+                if session_filter_active {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        format!("Filter: {}", session_filter),
                         sel_style,
                     )));
                 }
@@ -5220,7 +5298,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     // Issue #257 follow-up: render the first window of the
                     // highlighted session with its full split layout.
                     let mut rendered = false;
-                    if let Some((sname, _info)) = session_entries.get(session_selected) {
+                    if let Some((sname, _info)) = filtered_indices
+                        .get(session_selected)
+                        .and_then(|idx| session_entries.get(*idx))
+                    {
                         // Resolve first window id via cached list-tree fetch.
                         let lt_key = format!("__lt__\t{}", sname);
                         let win_id = if let Some((cached, ts)) = preview_cache.get(&lt_key) {
@@ -5265,7 +5346,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     if !rendered {
                         // Fallback to single-pane preview if the layout
                         // endpoint is unavailable.
-                        let preview_text: Option<String> = session_entries.get(session_selected)
+                        let preview_text: Option<String> = filtered_indices
+                            .get(session_selected)
+                            .and_then(|idx| session_entries.get(*idx))
                             .and_then(|(sname, _info)| {
                                 let lt_key = format!("__lt__\t{}", sname);
                                 let win_id = if let Some((cached, ts)) = preview_cache.get(&lt_key) {
@@ -5285,8 +5368,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     }
                 }
                 // Scroll position indicator (when content overflows)
-                if session_entries.len() > visible_h {
-                    let max_scroll = session_entries.len().saturating_sub(visible_h);
+                if filtered_indices.len() > visible_h {
+                    let max_scroll = filtered_indices.len().saturating_sub(visible_h);
                     let pct = if max_scroll > 0 { session_scroll * 100 / max_scroll } else { 0 };
                     let indicator = if session_scroll == 0 {
                         "Top".to_string()
@@ -6391,6 +6474,36 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         }
     }
     Ok(())
+}
+
+fn session_filtered_indices(entries: &[(String, String)], filter: &str) -> Vec<usize> {
+    if filter.is_empty() {
+        return (0..entries.len()).collect();
+    }
+
+    let filter = filter.to_lowercase();
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (name, _))| name.to_lowercase().contains(&filter).then_some(idx))
+        .collect()
+}
+
+fn session_filter_escape_selection(
+    entries: &[(String, String)],
+    filter: &str,
+    selected: usize,
+) -> Option<usize> {
+    if filter.is_empty() {
+        return None;
+    }
+
+    Some(
+        session_filtered_indices(entries, filter)
+            .get(selected)
+            .copied()
+            .unwrap_or(0),
+    )
 }
 
 /// Flush the paste-pending buffer as individual send-text / send-key commands.

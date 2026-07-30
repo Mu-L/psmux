@@ -2,6 +2,49 @@
 use super::*;
 
 #[cfg(windows)]
+fn session_entries(names: &[&str]) -> Vec<(String, String)> {
+    names
+        .iter()
+        .map(|name| (name.to_string(), format!("{}: info", name)))
+        .collect()
+}
+
+#[cfg(windows)]
+#[test]
+fn session_filter_matches_names_case_insensitively() {
+    let entries = session_entries(&["Alpha", "dev-api", "DEV-web", "production"]);
+    assert_eq!(session_filtered_indices(&entries, "dev"), vec![1, 2]);
+    assert_eq!(session_filtered_indices(&entries, "ALP"), vec![0]);
+}
+
+#[cfg(windows)]
+#[test]
+fn session_filter_does_not_match_session_info() {
+    let entries = vec![
+        ("alpha".to_string(), "contains needle in details".to_string()),
+        ("needle-session".to_string(), "other details".to_string()),
+    ];
+    assert_eq!(session_filtered_indices(&entries, "needle"), vec![1]);
+}
+
+#[cfg(windows)]
+#[test]
+fn session_filter_escape_restores_selected_entry_in_full_list() {
+    let entries = session_entries(&["alpha", "dev-api", "dev-web", "production"]);
+    assert_eq!(
+        session_filter_escape_selection(&entries, "dev", 1),
+        Some(2),
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn session_filter_escape_without_query_closes_picker() {
+    let entries = session_entries(&["alpha"]);
+    assert_eq!(session_filter_escape_selection(&entries, "", 0), None);
+}
+
+#[cfg(windows)]
 #[test]
 fn ime_detection_ascii_only() {
     // Pure ASCII text should NOT be detected as IME input
