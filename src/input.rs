@@ -52,6 +52,13 @@ fn write_mouse_event(master: &mut dyn std::io::Write, button: u8, col: u16, row:
 }
 
 pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
+    // Fold NUL onto C-Space up front, for the same reason as the client input
+    // loop: the raw `is_prefix` tuple comparisons below must see C-Space when
+    // the terminal delivered a NUL (issue #504).
+    let key = {
+        let folded = crate::config::fold_nul_to_ctrl_space((key.code, key.modifiers));
+        KeyEvent { code: folded.0, modifiers: folded.1, ..key }
+    };
     match app.mode {
         Mode::Passthrough => {
             // Check switch-client -T key table first

@@ -1468,6 +1468,48 @@ pub fn ensure_prefix_self_binding(app: &mut AppState) {
     }
 }
 
+/// Fold the NUL key (ASCII 0x00) onto `C-Space`.
+///
+/// A terminal encodes Ctrl+Space as the NUL byte 0x00.  On Windows the console
+/// delivers that byte as a KEY_EVENT with `wVirtualKeyCode = VK_2` and
+/// `UnicodeChar = 0`, because NUL is classically typed as Ctrl+@ (Shift+2 on a
+/// US layout).  crossterm resolves that zero UnicodeChar back through the
+/// keyboard layout with an empty key state, so it surfaces as `Char('2')` with
+/// CONTROL.  Physical Ctrl+2, physical Ctrl+Shift+2, and a NUL byte written by
+/// a ConPTY-hosted terminal are byte-for-byte identical in that record, so they
+/// cannot be told apart, and in terminal terms they are all genuinely the same
+/// key: NUL.
+///
+/// tmux folds the same way in `tty-keys.c`:
+///
+/// ```text
+/// /* C-Space is special. */
+/// if ((key & KEYC_MASK_KEY) == C0_NUL)
+///         key = ' ' | KEYC_CTRL | (key & KEYC_META);
+/// ```
+///
+/// Without this fold `set -g prefix C-Space` is dead on Windows for any
+/// terminal whose only way to emit Ctrl+Space is to send a literal NUL, which
+/// is exactly Alacritty's documented `chars = <NUL escape>` workaround (issue
+/// #504).  The fold is applied symmetrically to incoming key events and to
+/// registered binding keys, so an existing `bind-key C-2` keeps firing.
+pub fn fold_nul_to_ctrl_space(key: (KeyCode, KeyModifiers)) -> (KeyCode, KeyModifiers) {
+    let is_nul = match key.0 {
+        // Windows console encoding of NUL (Ctrl+@ / Ctrl+Shift+2 / Ctrl+Space).
+        KeyCode::Char('2') => key.1.contains(KeyModifiers::CONTROL)
+            && !key.1.contains(KeyModifiers::ALT),
+        // A literal NUL that reached the key layer as a character.
+        KeyCode::Char('\0') => true,
+        _ => false,
+    };
+    if is_nul {
+        // SHIFT is noise here: Ctrl+Shift+2 and Ctrl+2 are the same NUL.
+        (KeyCode::Char(' '), key.1.difference(KeyModifiers::SHIFT) | KeyModifiers::CONTROL)
+    } else {
+        key
+    }
+}
+
 /// Normalize a key tuple for binding comparison.
 /// Strips SHIFT from Char events since the character itself encodes shift information.
 /// e.g., '|' already implies Shift was pressed, so (Char('|'), SHIFT) and (Char('|'), NONE) should match.
@@ -1477,7 +1519,11 @@ pub fn ensure_prefix_self_binding(app: &mut AppState) {
 /// (e.g. `[` `]` `{` `}` `@` `\` `|` `~` on German/Czech keyboards) arrive
 /// as Char('[') with CONTROL|ALT modifiers.  Stripping those fake modifiers
 /// lets the binding lookup match the registered `[` binding (issue #287).
+///
+/// NUL (`C-2` / `C-Space`) is folded first so that a binding registered as
+/// `C-2` and one registered as `C-Space` resolve to the same tuple (#504).
 pub fn normalize_key_for_binding(key: (KeyCode, KeyModifiers)) -> (KeyCode, KeyModifiers) {
+    let key = fold_nul_to_ctrl_space(key);
     match key.0 {
         KeyCode::Char(c) => {
             let mut mods = key.1.difference(KeyModifiers::SHIFT);
@@ -2207,3 +2253,7 @@ mod tests_issue488_pageup_defaults;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue499_quoted_semicolon.rs"]
 mod tests_issue499_quoted_semicolon;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue504_ctrl_space_nul.rs"]
+mod tests_issue504_ctrl_space_nul;

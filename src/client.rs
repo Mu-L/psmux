@@ -2377,6 +2377,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         }
                     }
                     Event::Key(mut key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
+                        // Fold NUL onto C-Space before anything looks at the key.
+                        // The console reports Ctrl+Space, Ctrl+2, Ctrl+Shift+2 and a
+                        // NUL byte sent by a ConPTY-hosted terminal identically, and
+                        // all of them ARE NUL.  Folding here (not just in the binding
+                        // lookup) is what lets the raw `is_prefix` comparison below
+                        // match a `C-Space` prefix, and makes the byte forwarded to
+                        // the pane 0x00 instead of 0x12 (issue #504).
+                        {
+                            let folded = crate::config::fold_nul_to_ctrl_space((key.code, key.modifiers));
+                            key.code = folded.0;
+                            key.modifiers = folded.1;
+                        }
                         // On Windows, VS Code's xterm.js sends ESC+CR for
                         // Shift+Enter.  ConPTY interprets the ESC as Alt, so
                         // crossterm reports Alt+Enter.  Poll the physical
