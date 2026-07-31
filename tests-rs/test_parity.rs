@@ -307,8 +307,17 @@ fn option_catalog_default_for_escape_time() {
 
 #[test]
 fn option_catalog_default_for_mouse() {
+    // This asserted "off" (tmux's default) while psmux actually starts with
+    // `mouse_enabled: true`, so the catalog was advertising a default the
+    // product does not have. Because customize-mode writes the catalog default
+    // verbatim when you reset an option, that mismatch meant resetting `mouse`
+    // silently turned the mouse OFF in a session the user never reconfigured.
+    // psmux deliberately diverges from tmux here and enables the mouse by
+    // default; the catalog has to mirror the runtime, not upstream tmux.
+    // Enforced across every option by
+    // `tests-rs/test_option_default_parity.rs`.
     let def = crate::server::option_catalog::default_for("mouse");
-    assert_eq!(def, Some("off"));
+    assert_eq!(def, Some("on"));
 }
 
 #[test]

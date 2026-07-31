@@ -15,7 +15,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "bold-is-bright", scope: "server", option_type: "boolean", default: "on", description: "Rewrite crossterm's 256-indexed basic colors to standard SGR so the terminal applies bold-is-bright (issue #425); off keeps explicit 256-indexed low colors byte-accurate" },
     OptionDef { name: "history-limit", scope: "server", option_type: "number", default: "2000", description: "Maximum scrollback lines per pane" },
     OptionDef { name: "alternate-screen", scope: "server", option_type: "boolean", default: "on", description: "Honour DEC 47/1049 alt-screen mode (off = TUI output goes to scrollback, #88)" },
-    OptionDef { name: "set-clipboard", scope: "server", option_type: "choice", default: "external", description: "OSC 52 clipboard integration" },
+    OptionDef { name: "set-clipboard", scope: "server", option_type: "choice", default: "on", description: "OSC 52 clipboard integration" },
     OptionDef { name: "default-shell", scope: "server", option_type: "string", default: "", description: "Default shell for new panes" },
     OptionDef { name: "default-terminal", scope: "server", option_type: "string", default: "xterm-256color", description: "TERM value for new panes" },
     OptionDef { name: "copy-command", scope: "server", option_type: "string", default: "", description: "External copy command (pipe selection)" },
@@ -28,7 +28,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "display-time", scope: "session", option_type: "number", default: "750", description: "Duration of messages in ms" },
     OptionDef { name: "display-panes-time", scope: "session", option_type: "number", default: "1000", description: "Duration of pane numbers display in ms" },
     OptionDef { name: "repeat-time", scope: "session", option_type: "number", default: "500", description: "Repeat timeout for prefix keys in ms" },
-    OptionDef { name: "mouse", scope: "session", option_type: "boolean", default: "off", description: "Enable mouse support" },
+    OptionDef { name: "mouse", scope: "session", option_type: "boolean", default: "on", description: "Enable mouse support" },
     OptionDef { name: "scroll-enter-copy-mode", scope: "session", option_type: "boolean", default: "on", description: "Enter copy mode on mouse scroll up at shell prompt" },
     OptionDef { name: "pwsh-mouse-selection", scope: "session", option_type: "boolean", default: "off", description: "Windows 11 PowerShell-style drag selection (pane-aware, right-click to copy, word/line multi-click)" },
     OptionDef { name: "mouse-selection", scope: "session", option_type: "boolean", default: "on", description: "Enable psmux's client-side drag-selection overlay. Set to off so apps inside a pane (opencode, etc.) can implement their own mouse selection without psmux drawing on top." },
@@ -42,7 +42,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "status-interval", scope: "session", option_type: "number", default: "15", description: "Status bar refresh interval in seconds" },
     OptionDef { name: "status-justify", scope: "session", option_type: "choice", default: "left", description: "Window list alignment (left/centre/right)" },
     OptionDef { name: "status-left", scope: "session", option_type: "string", default: "[#S] ", description: "Left side of the status bar" },
-    OptionDef { name: "status-right", scope: "session", option_type: "string", default: "\"#H\" %H:%M %d-%b-%y", description: "Right side of the status bar" },
+    OptionDef { name: "status-right", scope: "session", option_type: "string", default: "#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}\"#{=21:pane_title}\" %H:%M %d-%b-%y", description: "Right side of the status bar" },
     OptionDef { name: "status-left-length", scope: "session", option_type: "number", default: "10", description: "Max width of left status section" },
     OptionDef { name: "status-right-length", scope: "session", option_type: "number", default: "40", description: "Max width of right status section" },
     OptionDef { name: "status-style", scope: "session", option_type: "string", default: "bg=green,fg=black", description: "Status bar style" },
@@ -64,26 +64,26 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "allow-passthrough", scope: "session", option_type: "choice", default: "off", description: "Allow passthrough escape sequences" },
     OptionDef { name: "allow-rename", scope: "session", option_type: "boolean", default: "on", description: "Allow programs to rename windows" },
     OptionDef { name: "allow-set-title", scope: "session", option_type: "boolean", default: "off", description: "Allow programs to set pane title via escape sequences" },
-    OptionDef { name: "update-environment", scope: "session", option_type: "string", default: "", description: "Environment variables to update on attach" },
+    OptionDef { name: "update-environment", scope: "session", option_type: "string", default: "DISPLAY KRB5CCNAME SSH_ASKPASS SSH_AUTH_SOCK SSH_AGENT_PID SSH_CONNECTION WINDOWID XAUTHORITY", description: "Environment variables to update on attach" },
     OptionDef { name: "synchronize-panes", scope: "session", option_type: "boolean", default: "off", description: "Send input to all panes simultaneously" },
     // ── psmux extensions (session scope) ──
-    OptionDef { name: "prediction-dimming", scope: "session", option_type: "boolean", default: "on", description: "Dim PSReadLine prediction text" },
+    OptionDef { name: "prediction-dimming", scope: "session", option_type: "boolean", default: "off", description: "Dim PSReadLine prediction text" },
     OptionDef { name: "allow-predictions", scope: "session", option_type: "boolean", default: "off", description: "Allow PSReadLine predictions" },
     OptionDef { name: "warm", scope: "session", option_type: "boolean", default: "on", description: "Pre-spawn warm shell for fast window creation" },
     OptionDef { name: "cursor-style", scope: "session", option_type: "choice", default: "bar", description: "Cursor style (bar/block/underline)" },
     OptionDef { name: "cursor-blink", scope: "session", option_type: "boolean", default: "on", description: "Blink the cursor" },
-    OptionDef { name: "claude-code-fix-tty", scope: "session", option_type: "boolean", default: "off", description: "Fix TTY for Claude Code sessions" },
-    OptionDef { name: "claude-code-force-interactive", scope: "session", option_type: "boolean", default: "off", description: "Force interactive mode for Claude Code" },
+    OptionDef { name: "claude-code-fix-tty", scope: "session", option_type: "boolean", default: "on", description: "Fix TTY for Claude Code sessions" },
+    OptionDef { name: "claude-code-force-interactive", scope: "session", option_type: "boolean", default: "on", description: "Force interactive mode for Claude Code" },
     // ── Window options ──
     OptionDef { name: "automatic-rename", scope: "window", option_type: "boolean", default: "on", description: "Auto-rename windows based on running command" },
     OptionDef { name: "monitor-activity", scope: "window", option_type: "boolean", default: "off", description: "Monitor for activity in window" },
     OptionDef { name: "remain-on-exit", scope: "window", option_type: "boolean", default: "off", description: "Keep pane open after command exits" },
     OptionDef { name: "aggressive-resize", scope: "window", option_type: "boolean", default: "off", description: "Resize window to smallest attached client" },
-    OptionDef { name: "main-pane-width", scope: "window", option_type: "number", default: "80", description: "Width of main pane in main-* layouts" },
-    OptionDef { name: "main-pane-height", scope: "window", option_type: "number", default: "24", description: "Height of main pane in main-* layouts" },
+    OptionDef { name: "main-pane-width", scope: "window", option_type: "number", default: "0", description: "Width of main pane in main-* layouts (0 sizes it automatically)" },
+    OptionDef { name: "main-pane-height", scope: "window", option_type: "number", default: "0", description: "Height of main pane in main-* layouts (0 sizes it automatically)" },
     OptionDef { name: "window-size", scope: "window", option_type: "choice", default: "latest", description: "Window sizing strategy" },
-    OptionDef { name: "window-status-format", scope: "window", option_type: "string", default: "#I:#W#F", description: "Window status bar format" },
-    OptionDef { name: "window-status-current-format", scope: "window", option_type: "string", default: "#I:#W#F", description: "Active window status bar format" },
+    OptionDef { name: "window-status-format", scope: "window", option_type: "string", default: "#I:#W#{?window_flags,#{window_flags}, }", description: "Window status bar format" },
+    OptionDef { name: "window-status-current-format", scope: "window", option_type: "string", default: "#I:#W#{?window_flags,#{window_flags}, }", description: "Active window status bar format" },
     OptionDef { name: "window-status-separator", scope: "window", option_type: "string", default: " ", description: "Separator between window entries" },
     OptionDef { name: "window-status-style", scope: "window", option_type: "string", default: "default", description: "Inactive window style" },
     OptionDef { name: "window-status-current-style", scope: "window", option_type: "string", default: "default", description: "Active window style" },
@@ -109,3 +109,7 @@ pub fn build_option_list(app: &crate::types::AppState) -> Vec<(String, String, S
 pub fn default_for(name: &str) -> Option<&'static str> {
     OPTION_CATALOG.iter().find(|d| d.name == name).map(|d| d.default)
 }
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_option_default_parity.rs"]
+mod tests_option_default_parity;

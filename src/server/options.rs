@@ -21,9 +21,37 @@ fn is_window_option(name: &str) -> bool {
     )
 }
 
+/// Effective value of an option that is stored empty or not stored at all.
+///
+/// Several options live in `user_options` (or are simply left blank at startup)
+/// and the code that consumes them substitutes a built-in when the entry is
+/// missing. `show-options` has to report that built-in, otherwise it tells the
+/// user an option is unset when the feature is demonstrably active, and
+/// customize-mode shows a "default" the running session does not have.
+fn effective_when_unset(name: &str) -> Option<&'static str> {
+    Some(match name {
+        // Consumed at src/rendering.rs, missing entry means border_lines::DEFAULT.
+        "pane-border-lines" => crate::border_lines::DEFAULT,
+        // Consumed at src/server/helpers.rs, a missing entry disables the gutter.
+        "copy-mode-line-numbers" => "off",
+        "copy-mode-line-number-style" => "fg=brightblack",
+        "copy-mode-current-line-number-style" => "fg=yellow,bold",
+        // TERM handed to panes when default-terminal was never set.
+        "default-terminal" => "xterm-256color",
+        // tmux reports `default` for a style that has not been overridden.
+        "status-style" | "status-left-style" | "status-right-style"
+        | "message-style" | "message-command-style" | "mode-style"
+        | "pane-border-style" | "pane-active-border-style"
+        | "pane-border-hover-style" | "window-status-style"
+        | "window-status-current-style" | "window-status-activity-style"
+        | "window-status-bell-style" | "window-status-last-style" => "default",
+        _ => return None,
+    })
+}
+
 /// Get a single option's value by name (for `show-options -v name`).
 pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
-    match name {
+    let value = match name {
         "prefix" => format_key_binding(&app.prefix_key),
         "prefix2" => app.prefix2_key.as_ref().map(|k| format_key_binding(k)).unwrap_or_else(|| "none".to_string()),
         "base-index" => app.window_base_index.to_string(),
@@ -61,7 +89,16 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "destroy-unattached" => if app.destroy_unattached { "on".into() } else { "off".into() },
         "exit-empty" => if app.exit_empty { "on".into() } else { "off".into() },
         "set-titles" => if app.set_titles { "on".into() } else { "off".into() },
-        "set-titles-string" => app.set_titles_string.clone(),
+        // Report the format that actually drives the host title. An empty stored
+        // value means "use the built-in", so report the built-in, not a blank.
+        "set-titles-string" => if app.set_titles_string.is_empty() {
+            "#S:#I:#W".to_string()
+        } else {
+            app.set_titles_string.clone()
+        },
+        // repeat-time had no arm at all, so `show-options -v repeat-time`
+        // returned an empty string even though the option works.
+        "repeat-time" => app.repeat_time_ms.to_string(),
         "prediction-dimming" => if app.prediction_dimming { "on".into() } else { "off".into() },
         "allow-predictions" => if app.allow_predictions { "on".into() } else { "off".into() },
         "cursor-style" => std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string()),
@@ -125,7 +162,16 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
                 .or_else(|| app.environment.get(name).cloned())
                 .unwrap_or_default()
         }
+    };
+
+    // An empty result means "never set". Report what the feature will actually
+    // use so `show-options` and customize-mode agree with the running session.
+    if value.is_empty() {
+        if let Some(effective) = effective_when_unset(name) {
+            return effective.to_string();
+        }
     }
+    value
 }
 
 pub(crate) fn get_window_option_value(app: &AppState, name: &str) -> String {
