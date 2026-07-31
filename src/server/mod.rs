@@ -127,6 +127,14 @@ fn ensure_session_registry_files(app: &AppState) {
         let _ = std::fs::write(&pid_path, &pid_value);
     }
 
+    // Claim this process for this data dir (issue #510). Keyed by PID and kept
+    // outside the per-session registry on purpose: the `.pid` entry above is
+    // removed with its session, but the reaper still needs to recognise a
+    // server as its own AFTER that happens - a spawn-race duplicate, or a
+    // registry wipe, is exactly the case it must clean up. Re-ensured here so
+    // the claim self-heals if the file is deleted underneath a live server.
+    crate::session::write_server_marker(self_pid);
+
     // .port goes LAST: it is the readiness beacon (see comment above).
     if std::fs::read_to_string(&port_path)
         .map(|s| s.trim() != port_value)

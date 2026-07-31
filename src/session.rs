@@ -177,6 +177,46 @@ pub fn remove_session_pid_file(port_file_base: &str) {
     let _ = std::fs::remove_file(&pid_path);
 }
 
+/// Record that server process `pid` belongs to THIS data dir (issue #510).
+///
+/// Keyed by PID rather than by session, and deliberately independent of the
+/// session registry lifecycle: the whole point is to still identify a server as
+/// ours after its `.port`/`.pid` entries are gone, which is exactly the state a
+/// spawn-race duplicate or a registry wipe leaves behind. Body is the same
+/// `pid:creation_filetime` as the `.pid` sentinel so a reused PID cannot
+/// inherit a dead process's claim.
+pub fn write_server_marker(pid: u32) {
+    let dir = crate::paths::server_marker_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let creation = crate::platform::process_kill::process_creation_time(pid).unwrap_or(0);
+    let _ = std::fs::write(
+        crate::paths::server_marker_file(pid),
+        format_pid_file_contents(pid, creation),
+    );
+}
+
+/// Server processes `psmux_dir` claims, as `pid -> recorded creation filetime`.
+///
+/// The PID is read from the file body rather than its name so a truncated or
+/// hand-copied marker cannot assert a claim over an arbitrary PID.
+pub fn read_owned_server_pids(psmux_dir: &Path) -> std::collections::HashMap<u32, Option<u64>> {
+    let mut owned = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir(psmux_dir.join("servers")) else {
+        return owned;
+    };
+    for entry in entries.flatten() {
+        let Ok(body) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        if let Some((pid, creation)) = parse_pid_file_contents(&body) {
+            owned.insert(pid, creation);
+        }
+    }
+    owned
+}
+
 /// Resolve a tmux session ID (`$N`) to the port file base name of the
 /// session that owns that ID. Returns `None` if no session has that ID.
 pub fn resolve_session_by_id(id: usize) -> Option<String> {
@@ -258,6 +298,7 @@ fn select_orphan_pids(
     candidates: &[ServerCandidate],
     tracked_ports: &std::collections::HashSet<u16>,
     tracked_pids: &std::collections::HashSet<u32>,
+    owned_pids: &std::collections::HashMap<u32, Option<u64>>,
     self_pid: u32,
     age_cutoff_ft: u64,
 ) -> Vec<u32> {
@@ -266,6 +307,22 @@ fn select_orphan_pids(
         if c.pid == self_pid { continue; }
         if tracked_pids.contains(&c.pid) { continue; }
         if c.ports.iter().any(|p| tracked_ports.contains(p)) { continue; }
+        // Issue #510: reap only what this data dir can positively claim.
+        //
+        // The candidate list is machine-wide, so "no registry entry references
+        // it" covers two very different processes: an orphan we started, and a
+        // perfectly healthy server belonging to another USERPROFILE/HOME. The
+        // old rule could not tell them apart and killed both. An absent
+        // ownership marker now means "not ours, not our business" rather than
+        // "orphan" - unknown must never justify termination.
+        let Some(&recorded_creation) = owned_pids.get(&c.pid) else { continue; };
+        // Same identity gate force_kill_targets applies: without a recorded
+        // creation time there is nothing to distinguish this process from an
+        // unrelated one that inherited the PID, so it is not a candidate.
+        match recorded_creation {
+            Some(ft) if ft == c.creation_ft => {}
+            _ => continue,
+        }
         // Only reap processes old enough to have finished registering.
         if age_cutoff_ft != 0 && c.creation_ft > age_cutoff_ft { continue; }
         out.push(c.pid);
@@ -439,13 +496,52 @@ fn reap_orphaned_servers_in(psmux_dir: &Path) {
         candidates.push(ServerCandidate { pid, ports, creation_ft });
     }
 
-    let orphans = select_orphan_pids(&candidates, &tracked_ports, &tracked_pids, self_pid, age_cutoff_ft);
+    let owned_pids = read_owned_server_pids(psmux_dir);
+    let orphans = select_orphan_pids(
+        &candidates, &tracked_ports, &tracked_pids, &owned_pids, self_pid, age_cutoff_ft);
     for pid in orphans {
         if crate::debug_log::session_log_enabled() {
             crate::debug_log::session_log("reaper", &format!(
-                "terminating orphaned psmux server pid {} (no registry entry references it)", pid));
+                "terminating orphaned psmux server pid {} (this data dir claims it, no registry entry references it)", pid));
         }
         process_kill::terminate_server_pid(pid, Some(now_ft));
+    }
+
+    prune_stale_server_markers(psmux_dir, &owned_pids);
+}
+
+/// Delete ownership markers whose process is gone or whose PID now belongs to
+/// something else, so the directory tracks live servers rather than growing
+/// without bound. Kept separate from reaping: a marker is only a claim, and
+/// dropping a claim never terminates anything.
+///
+/// This is the sole reclamation path rather than a removal on server shutdown:
+/// a server can exit down several routes (exit-empty, kill-session, a crash)
+/// and a marker missed by any of them would linger forever, so the invariant is
+/// "markers are reconciled against the process table", not "every exit tidies
+/// up after itself". A lingering marker is harmless in the meantime — it names
+/// either a dead PID or, after reuse, a process whose creation time no longer
+/// matches, and neither can authorise a kill.
+fn prune_stale_server_markers(
+    psmux_dir: &Path,
+    owned_pids: &std::collections::HashMap<u32, Option<u64>>,
+) {
+    for (&pid, &recorded_creation) in owned_pids {
+        let live_creation = crate::platform::process_kill::process_creation_time(pid);
+        let still_ours = match (live_creation, recorded_creation) {
+            // Process is gone.
+            (None, _) => false,
+            // Same PID, different process: the original exited and the PID was
+            // reused, so this claim is stale.
+            (Some(live), Some(recorded)) => live == recorded,
+            // No recorded creation time to compare against. Keep it: a marker
+            // that cannot be identity-checked can never authorise a kill
+            // either, so leaving it costs nothing.
+            (Some(_), None) => true,
+        };
+        if !still_ours {
+            let _ = std::fs::remove_file(psmux_dir.join("servers").join(pid.to_string()));
+        }
     }
 }
 
@@ -1614,3 +1710,7 @@ mod tests_startup_stale_port_tax;
 #[cfg(test)]
 #[path = "../tests-rs/test_l_socket_tmux_precedence.rs"]
 mod tests_l_socket_tmux_precedence;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue510_reaper_attribution.rs"]
+mod tests_issue510_reaper_attribution;
