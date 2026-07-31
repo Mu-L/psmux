@@ -1,393 +1,540 @@
+# psmux Command and Flag Reference
 
-## Complete Command Table
+This is the reference for the commands **psmux itself** accepts and the flags **psmux itself** parses. Every entry was read out of the psmux Rust sources, not out of the upstream tmux manual, so a flag listed here is a flag psmux actually looks at. Where tmux has a flag and psmux does not parse it, the flag is either absent from this page or listed under "Accepted but ignored".
 
-| Command | Alias | Args Template | Min | Max | Source File |
-|---|---|---|---|---|---|
-| `attach-session` | `attach` | `"ErdD:f:c:t:x:"` | 0 | 0 | cmd-attach-session.c *(not fetched, from Perplexity)* |
-| `bind-key` | `bind` | `"nrN:T:"` | 1 | -1 | cmd-bind-key.c |
-| `break-pane` | `breakp` | `"abdPF:n:s:t:"` | 0 | 0 | cmd-break-pane.c |
-| `capture-pane` | `capturep` | `"ab:CeE:JMNpPqS:Tt:"` | 0 | 0 | cmd-capture-pane.c |
-| `choose-buffer` | *(none)* | `"F:f:K:NO:rt:yZ"` | 0 | 1 | cmd-choose-tree.c |
-| `choose-client` | *(none)* | `"F:f:K:NO:rt:yZ"` | 0 | 1 | cmd-choose-tree.c |
-| `choose-tree` | *(none)* | `"F:f:GK:NO:rst:wyZ"` | 0 | 1 | cmd-choose-tree.c |
-| `clear-history` | `clearhist` | `"Ht:"` | 0 | 0 | cmd-capture-pane.c |
-| `clock-mode` | *(none)* | `"t:"` | 0 | 0 | cmd-copy-mode.c |
-| `command-prompt` | *(none)* | `"1beFiklI:Np:t:T:"` | 0 | 1 | cmd-command-prompt.c |
-| `confirm-before` | `confirm` | `"bc:p:t:y"` | 1 | 1 | cmd-confirm-before.c |
-| `copy-mode` | *(none)* | `"deHMqSs:t:u"` | 0 | 0 | cmd-copy-mode.c |
-| `customize-mode` | *(none)* | `"F:f:Nt:yZ"` | 0 | 0 | cmd-choose-tree.c |
-| `delete-buffer` | `deleteb` | `"b:"` | 0 | 0 | cmd-paste-buffer.c *(delete in same file)* |
-| `detach-client` | `detach` | `"aE:s:t:P"` | 0 | 0 | cmd-detach-client.c |
-| `display-message` | `display` | `"aCc:d:lINpt:F:v"` | 0 | 1 | cmd-display-message.c |
-| `display-panes` | `displayp` | `"bd:Nt:"` | 0 | 1 | cmd-display-panes.c |
-| `has-session` | `has` | `"t:"` | 0 | 0 | cmd-select-window.c *(in same file)* |
-| `if-shell` | `if` | `"bFt:"` | 2 | 3 | cmd-if-shell.c |
-| `join-pane` | `joinp` | `"bdfhvp:l:s:t:"` | 0 | 0 | cmd-join-pane.c |
-| `kill-pane` | `killp` | `"at:"` | 0 | 0 | cmd-kill-pane.c |
-| `kill-server` | *(none)* | `""` | 0 | 0 | cmd-kill-server.c |
-| `kill-session` | *(none)* | `"aCt:"` | 0 | 0 | cmd-kill-session.c |
-| `kill-window` | `killw` | `"at:"` | 0 | 0 | cmd-kill-window.c |
-| `last-pane` | `lastp` | `"det:Z"` | 0 | 0 | cmd-select-pane.c |
-| `last-window` | `last` | `"t:"` | 0 | 0 | cmd-select-window.c |
-| `link-window` | `linkw` | `"abdks:t:"` | 0 | 0 | cmd-move-window.c |
-| `list-buffers` | `lsb` | `"F:f:O:r"` | 0 | 0 | cmd-list-buffers.c |
-| `list-clients` | `lsc` | `"F:f:O:rt:"` | 0 | 0 | cmd-list-clients.c |
-| `list-commands` | `lscm` | `"F:"` | 0 | 1 | cmd-list-keys.c |
-| `list-keys` | `lsk` | `"1aNP:T:"` | 0 | 1 | cmd-list-keys.c |
-| `list-panes` | `lsp` | `"aF:f:O:rst:"` | 0 | 0 | cmd-list-panes.c |
-| `list-sessions` | `ls` | `"F:f:O:r"` | 0 | 0 | cmd-list-sessions.c |
-| `list-windows` | `lsw` | `"aF:f:O:rt:"` | 0 | 0 | cmd-list-windows.c |
-| `load-buffer` | `loadb` | `"b:t:w"` | 1 | 1 | cmd-load-buffer.c |
-| `lock-client` | `lockc` | `"t:"` | 0 | 0 | cmd-lock-server.c |
-| `lock-server` | `lock` | `""` | 0 | 0 | cmd-lock-server.c |
-| `lock-session` | `locks` | `"t:"` | 0 | 0 | cmd-lock-server.c |
-| `move-pane` | `movep` | `"bdfhvp:l:s:t:"` | 0 | 0 | cmd-join-pane.c |
-| `move-window` | `movew` | `"abdkrs:t:"` | 0 | 0 | cmd-move-window.c |
-| `new-session` | `new` | `"Ac:dDe:EF:f:n:Ps:t:x:Xy:"` | 0 | -1 | cmd-new-session.c |
-| `new-window` | `neww` | `"abc:de:F:kn:PSt:"` | 0 | -1 | cmd-new-window.c |
-| `next-window` | `next` | `"at:"` | 0 | 0 | cmd-select-window.c |
-| `paste-buffer` | `pasteb` | `"db:prs:t:"` | 0 | 0 | cmd-paste-buffer.c |
-| `pipe-pane` | `pipep` | `"IOot:"` | 0 | 1 | cmd-pipe-pane.c |
-| `previous-window` | `prev` | `"at:"` | 0 | 0 | cmd-select-window.c |
-| `refresh-client` | `refresh` | `"A:B:cC:Df:r:F:lLRSt:U"` | 0 | 1 | cmd-refresh-client.c |
-| `rename-session` | `rename` | `"t:"` | 1 | 1 | cmd-rename-session.c |
-| `rename-window` | `renamew` | `"t:"` | 1 | 1 | cmd-rename-window.c |
-| `resize-pane` | `resizep` | `"DLMRTt:Ux:y:Z"` | 0 | 1 | cmd-resize-pane.c |
-| `respawn-pane` | `respawnp` | `"c:e:kt:"` | 0 | -1 | cmd-respawn-pane.c |
-| `respawn-window` | `respawnw` | `"c:e:kt:"` | 0 | -1 | cmd-respawn-window.c |
-| `rotate-window` | `rotatew` | `"Dt:UZ"` | 0 | 0 | cmd-rotate-window.c |
-| `run-shell` | `run` | `"bd:Ct:Es:c:"` | 0 | 1 | cmd-run-shell.c |
-| `save-buffer` | `saveb` | `"ab:"` | 1 | 1 | cmd-save-buffer.c |
-| `select-pane` | `selectp` | `"DdegLlMmP:RT:t:UZ"` | 0 | 0 | cmd-select-pane.c |
-| `select-window` | `selectw` | `"lnpTt:"` | 0 | 0 | cmd-select-window.c |
-| `send-keys` | `send` | `"c:FHKlMN:Rt:X"` | 0 | -1 | cmd-send-keys.c |
-| `send-prefix` | *(none)* | `"2t:"` | 0 | 0 | cmd-send-keys.c |
-| `set-buffer` | `setb` | `"ab:t:n:w"` | 0 | 1 | cmd-set-buffer.c |
-| `set-environment` | `setenv` | `"Fhgrt:u"` | 1 | 2 | cmd-set-environment.c |
-| `set-hook` | *(none)* | `"agpRt:uw"` | 1 | 2 | cmd-set-option.c |
-| `set-option` | `set` | `"aFgopqst:uUw"` | 1 | 2 | cmd-set-option.c |
-| `set-window-option` | `setw` | `"aFgoqt:u"` | 1 | 2 | cmd-set-option.c |
-| `show-buffer` | `showb` | `"b:"` | 0 | 0 | cmd-save-buffer.c |
-| `show-environment` | `showenv` | `"hgst:"` | 0 | 1 | cmd-show-environment.c |
-| `show-hooks` | *(none)* | `"gpt:w"` | 0 | 1 | cmd-show-options.c |
-| `show-options` | `show` | `"AgHpqst:vw"` | 0 | 1 | cmd-show-options.c |
-| `show-window-options` | `showw` | `"gvt:"` | 0 | 1 | cmd-show-options.c |
-| `source-file` | `source` | `"t:Fnqv"` | 1 | -1 | cmd-source-file.c |
-| `split-window` | `splitw` | `"bc:de:fF:hIl:p:Pt:vZ"` | 0 | -1 | cmd-split-window.c |
-| `start-server` | `start` | `""` | 0 | 0 | cmd-kill-server.c |
-| `suspend-client` | `suspendc` | `"t:"` | 0 | 0 | cmd-detach-client.c |
-| `swap-pane` | `swapp` | `"dDs:t:UZ"` | 0 | 0 | cmd-swap-pane.c |
-| `swap-window` | `swapw` | `"ds:t:"` | 0 | 0 | cmd-swap-window.c |
-| `switch-client` | `switchc` | `"c:EFlnO:pt:rT:Z"` | 0 | 0 | cmd-switch-client.c |
-| `unbind-key` | `unbind` | `"anqT:"` | 0 | 1 | cmd-unbind-key.c |
-| `unlink-window` | `unlinkw` | `"kt:"` | 0 | 0 | cmd-kill-window.c |
-| `wait-for` | `wait` | `"LSU"` | 1 | 1 | cmd-wait-for.c |
+`psmux list-commands` is the live authority. If this page and `list-commands` disagree, `list-commands` wins and this page is stale.
 
-## Flag Details by Command
+## How to read this page
 
-### Session Commands
+**Layers.** psmux matches command names in four separate places, and they do not all accept the same set. A command is usable only on the layers listed for it.
 
-**new-session** (`new`) — `"Ac:dDe:EF:f:n:Ps:t:x:Xy:"`
-- Boolean: `-A` (attach if exists), `-d` (detach), `-D` (detach other), `-E` (no environ update), `-P` (print info), `-X` (no default-command exec), `-x` → **wait, x: takes value**
-- Value: `-c` (start-dir), `-e` (environment), `-F` (format), `-f` (flags), `-n` (window-name), `-s` (session-name), `-t` (group target), `-x` (width), `-y` (height)
+| Layer | What reaches it |
+|---|---|
+| `CLI` | `psmux <command>` typed in a shell |
+| `SRV` | key bindings, and anything the CLI forwards over the socket |
+| `CFG` | config file lines, hooks, `run-shell`, `if-shell`, `bind-key` actions |
+| `CTL` | control mode clients (`psmux -C` / `psmux -CC`) |
 
-**has-session** (`has`) — `"t:"`
+**The flags column** uses getopt style notation. A bare letter is a boolean, a letter followed by `:` takes a value. `-t:` therefore means `-t <target>`.
+
+**`-t` is global at the CLI.** psmux scans the whole command line for `-t <target>` before the command name is even dispatched, so `psmux -t work:1 kill-pane` and `psmux kill-pane -t work:1` both work even for commands whose own parser ignores `-t`.
+
+**Combined short flags** are expanded for `new-session` (`-As main` is `-A -s main`), for `set-option` and `show-options` (`-ga`, `-gu`, `-gq`), for `set-hook` (`-ga`, `-ug`) and for the config file forms of `if-shell` (`-bF`, `-Fb`). Elsewhere flags must be given separately.
+
+## Complete command table
+
+| Command | Aliases | Flags psmux parses | Layers |
+|---|---|---|---|
+| `attach-session` | `attach`, `a`, `at` | `t:` | CLI, SRV, CFG |
+| `bind-key` | `bind` | `nrT:` | CLI, SRV, CFG, CTL |
+| `break-pane` | `breakp` | `dt:` | CLI, SRV, CFG, CTL |
+| `capture-pane` | `capturep` | `eJpb:E:S:t:` | CLI, SRV, CFG, CTL |
+| `choose-buffer` | `chooseb` | none | CLI, SRV, CFG |
+| `choose-client` | *(none)* | none | CLI, SRV, CFG |
+| `choose-session` | *(none)* | none | CLI, SRV, CFG |
+| `choose-tree` | *(none)* | none | CLI, SRV, CFG |
+| `choose-window` | *(none)* | none | CLI, SRV, CFG |
+| `clear-history` | `clearhist` | `Ht:` | CLI, SRV, CFG |
+| `clear-prompt-history` | `clearphist` | none | SRV |
+| `clock-mode` | *(none)* | none | CLI, SRV, CFG |
+| `command-prompt` | *(none)* | `NWI:p:T:t:` | CLI, SRV, CFG |
+| `confirm-before` | `confirm` | `p:` | CLI, SRV, CFG |
+| `copy-mode` | *(none)* | `deHqut:` | CLI, SRV, CFG, CTL |
+| `customize-mode` | *(none)* | none | CLI, SRV, CFG |
+| `delete-buffer` | `deleteb` | `b:` | CLI, SRV, CFG |
+| `detach-client` | `detach` | `aPE:s:t:` | CLI, SRV, CFG, CTL |
+| `display-menu` | `menu` | `T:x:y:` | CLI, SRV, CFG |
+| `display-message` | `display` | `pFd:I:t:` | CLI, SRV, CFG, CTL |
+| `display-panes` | `displayp` | none | CLI, SRV, CFG |
+| `display-popup` | `popup` | `EKc:d:h:w:` | CLI, SRV, CFG |
+| `dump-layout` | *(none)* | none | SRV |
+| `dump-state` | `dump` | none | CLI, SRV, CTL |
+| `find-window` | `findw` | none that take effect | CLI, SRV, CFG |
+| `has-session` | `has` | `t:` | CLI, SRV, CFG, CTL |
+| `if-shell` | `if` | `bFt:` | CLI, SRV, CFG |
+| `join-pane` | `joinp` | `dhvs:t:` | CLI, SRV, CFG |
+| `kill-pane` | `killp` | `t:` | CLI, SRV, CFG, CTL |
+| `kill-server` | *(none)* | none | CLI, SRV, CFG, CTL |
+| `kill-session` | `kill-ses` | `t:` | CLI, SRV, CFG |
+| `kill-window` | `killw` | `at:` | CLI, SRV, CFG, CTL |
+| `last-pane` | `lastp` | none | CLI, SRV, CFG, CTL |
+| `last-window` | `last` | none | CLI, SRV, CFG, CTL |
+| `link-window` | `linkw` | `s:t:` | CLI, SRV, CFG |
+| `list-buffers` | `lsb` | `F:t:` | CLI, SRV, CFG, CTL |
+| `list-clients` | `lsc` | `F:` (SRV and CTL only) | CLI, SRV, CFG, CTL |
+| `list-commands` | `lscm` | none | CLI, SRV, CFG, CTL |
+| `list-keys` | `lsk` | `T:t:` | CLI, SRV, CFG, CTL |
+| `list-panes` | `lsp` | `asF:t:` | CLI, SRV, CFG, CTL |
+| `list-sessions` | `ls` | `F:f:` | CLI, SRV, CFG, CTL |
+| `list-tree` | *(none)* | none | SRV |
+| `list-windows` | `lsw` | `aJF:t:` | CLI, SRV, CFG, CTL |
+| `load-buffer` | `loadb` | `wb:` | CLI, SRV, CFG |
+| `lock-client` | `lockc` | none | CLI, SRV, CFG |
+| `lock-server` | `lock` | none | CLI, SRV, CFG |
+| `lock-session` | `locks` | none | CLI, SRV, CFG |
+| `move-pane` | `movep` | `dhvs:t:` | CLI, SRV, CFG |
+| `move-window` | `movew` | `abrdks:t:` | CLI, SRV, CFG |
+| `new-pane` | `newp` | `dPEB:T:c:x:y:X:Y:` | CLI, SRV, CTL |
+| `new-session` | `new` | `AdPc:e:F:f:n:s:t:x:y:` | CLI, SRV, CFG |
+| `new-window` | `neww` | `dPEc:e:F:n:T:t:` | CLI, SRV, CFG, CTL |
+| `next-layout` | `nextl` (not at the CLI) | none | CLI, SRV, CFG, CTL |
+| `next-window` | `next` | none | CLI, SRV, CFG, CTL |
+| `paste-buffer` | `pasteb` | `dpb:t:` | CLI, SRV, CFG |
+| `pipe-pane` | `pipep` | `IOot:` | CLI, SRV, CFG |
+| `previous-layout` | `prevl` (not at the CLI) | none | CLI, SRV, CFG |
+| `previous-window` | `prev` | none | CLI, SRV, CFG, CTL |
+| `refresh-client` | `refresh` | `SlC:t:` at the CLI, plus `A:B:f:` in control mode | CLI, SRV, CFG, CTL |
+| `rename-session` | `rename` | none, takes the new name as a positional argument | CLI, SRV, CFG, CTL |
+| `rename-window` | `renamew` | none, takes the new name as a positional argument | CLI, SRV, CFG, CTL |
+| `resize-pane` | `resizep` | `UDLRZx:y:t:` | CLI, SRV, CFG, CTL |
+| `resize-window` | `resizew` | `ADUx:y:t:` | CLI, SRV, CFG, CTL |
+| `respawn-pane` | `respawnp`, `resp` | `kc:t:` plus `-- <command>` | CLI, SRV, CFG, CTL |
+| `respawn-window` | `respawnw` | none | CLI, SRV, CFG |
+| `rotate-window` | `rotatew` | `UDt:` | CLI, SRV, CFG, CTL |
+| `run-command` | `runcmd` | none, takes the command line as positional arguments | SRV, CTL |
+| `run-shell` | `run` | `b` | CLI, SRV, CFG |
+| `save-buffer` | `saveb` | `ab:` | CLI, SRV, CFG |
+| `select-layout` | `selectl` | `npoEt:` plus a positional layout name | CLI, SRV, CFG, CTL |
+| `select-pane` | `selectp` | `UDLRlZmMedP:T:t:` | CLI, SRV, CFG, CTL |
+| `select-window` | `selectw` | `lnpt:` | CLI, SRV, CFG, CTL |
+| `send-keys` | `send`, `send-key` | `lRXN:t:` | CLI, SRV, CFG, CTL |
+| `send-paste` | *(none)* | `t:` plus a positional payload | CLI, SRV |
+| `send-prefix` | *(none)* | none | CLI, SRV, CFG |
+| `send-text` | *(none)* | none, takes the text as positional arguments | SRV |
+| `server-info` | `info` | none | CLI, SRV, CFG, CTL |
+| `set-buffer` | `setb` | `wb:` | CLI, SRV, CFG |
+| `set-environment` | `setenv` | `grhut:` | CLI, SRV, CFG, CTL |
+| `set-hook` | *(none)* | `gua` | CLI, SRV, CFG, CTL |
+| `set-option` | `set` | `guaqowt:p:` | CLI, SRV, CFG, CTL |
+| `set-pane-title` | *(none)* | none, takes the title as positional arguments | SRV |
+| `set-window-option` | `setw` | `guaqowt:p:` | CLI, SRV, CFG, CTL |
+| `show-buffer` | `showb` | `b:` | CLI, SRV, CFG, CTL |
+| `show-environment` | `showenv` | `gsht:` | CLI, SRV, CFG, CTL |
+| `show-hooks` | *(none)* | `g` | CLI, SRV, CFG, CTL |
+| `show-messages` | `showmsgs` | none | CLI, SRV, CFG |
+| `show-options` | `show` | `Aswvqt:` | CLI, SRV, CFG, CTL |
+| `show-prompt-history` | `showphist` | none | SRV |
+| `show-window-options` | `showw` | `Aswvqt:` | CLI, SRV, CFG, CTL |
+| `source-file` | `source` | `qnv` | CLI, SRV, CFG, CTL |
+| `split-window` | `splitw`, `split-pane`, `splitp` | `hvdPc:e:F:l:p:T:t:` | CLI, SRV, CFG, CTL |
+| `start-server` | `start`, `warmup` | none | CLI, SRV, CFG |
+| `suspend-client` | `suspendc` | none | CLI, SRV, CFG |
+| `swap-pane` | `swapp` | `UDds:t:` | CLI, SRV, CFG, CTL |
+| `swap-window` | `swapw` | `ds:t:` | CLI, SRV, CFG |
+| `switch-client` | `switchc` | `lnprc:t:` plus `T:` on SRV | CLI, SRV, CFG |
+| `toggle-sync` | *(none)* | none | SRV, CFG |
+| `unbind-key` | `unbind` | `anT:t:` | CLI, SRV, CFG, CTL |
+| `unlink-window` | `unlinkw` | none, acts on the active window | CLI, SRV, CFG, CTL |
+| `wait-for` | `wait` | `LSU` | CLI, SRV, CFG |
+| `zoom-pane` | *(none)* | none | CLI, SRV, CFG, CTL |
+
+102 command names. `warmup`, `resp`, `a` and `at` are CLI only aliases. `nextl` and `prevl` are recognised on the server, config and control layers but not by the CLI front end, so use the full name when typing in a shell.
+
+### Commands deliberately not listed
+
+The server also matches a set of internal wire commands that the client sends on your behalf and that are not meant to be typed: the overlay and chooser wire (`popup-input`, `menu-select`, `customize-navigate`, `confirm-respond` and friends), the cross session pane transfer wire (`pane-forward-extract`, `pane-forward-inject` and friends), the layout drag wire (`split-sizes`, `split-resize-done`), `claim-session`, `session-info`, `client-attach`, `client-detach`, `server-access`, `window-layout`, `window-dump`, and the copy mode key wire (`copy-enter`, `copy-move`, `copy-anchor`, `copy-yank`, `rectangle-toggle`, `copy-mode-page-up`, `delete-buffer-at`, `paste-buffer-at`).
+
+Five mouse wire commands are an exception and are genuinely usable for scripting: `mouse-down`, `mouse-drag`, `mouse-up`, `mouse-down-right` and `mouse-up-right` are accepted at the CLI as well as on the socket.
+
+`select-window-index` appears in the default prefix bindings but is a client side pseudo command. `psmux select-window-index` fails with "unknown command" and it cannot be used from a config line, a hook or `run-shell`.
+
+## Flag details by command
+
+### Session commands
+
+**new-session** (`new`)
+- Boolean: `-A` (attach if the session already exists), `-d` (detached), `-P` (print the new session info)
+- Value: `-s` (session name), `-n` (first window name), `-c` (start directory), `-x` (initial width), `-y` (initial height), `-e` (environment `KEY=VALUE`, repeatable), `-F` (format), `-f` (value consumed and discarded), `-t` (session group target)
+- `--` ends option parsing. Everything after it is the raw command to run instead of a shell.
+- Accepted but ignored, for tmux script compatibility: `-D`, `-E`, `-X`
+- Not accepted: `-g`. Session groups are set with `set -g session-group <name>`, not with a `new-session` flag.
+- Combined short flags are expanded, so `-As main` means `-A -s main` and `-dP` means `-d -P`.
+
+**attach-session** (`attach`, `a`, `at`)
 - Value: `-t` (target session)
+- A bare positional argument is also accepted as the session name, so `psmux attach work` works.
+- Not accepted: `-d`, `-D`, `-E`, `-r`, `-c`, `-f`, `-x`, `-y`
 
-**kill-session** — `"aCt:"`
-- Boolean: `-a` (kill all other), `-C` (clear alerts)
+**has-session** (`has`)
+- Value: `-t` (target session). A leading `=` is stripped, matching tmux exact match semantics.
+
+**kill-session** (`kill-ses`)
 - Value: `-t` (target session)
+- Not accepted: `-a`, `-C`
 
-**rename-session** (`rename`) — `"t:"`  [1 positional arg: new-name]
-- Value: `-t` (target session)
+**rename-session** (`rename`)
+- No flags. The first positional argument is the new name.
 
-**list-sessions** (`ls`) — `"F:f:O:r"`
-- Boolean: `-r` (reverse sort)
-- Value: `-F` (format), `-f` (filter), `-O` (sort order)
+**list-sessions** (`ls`)
+- Value: `-F` (format, also accepted glued as `-F<format>`), `-f` (filter)
+- Any other `-x` token is rejected with a usage error and a non-zero exit, so scripts see the failure.
 
-**switch-client** (`switchc`) — `"c:EFlnO:pt:rT:Z"`
-- Boolean: `-E` (no environ), `-F` → **wait, F: no-colon = boolean here**, `-l` (last), `-n` (next), `-p` (previous), `-r` (toggle readonly), `-Z` (zoom)
-- Value: `-c` (client), `-O` (sort order), `-t` (target), `-T` (key-table)
+**switch-client** (`switchc`)
+- Boolean: `-l` (last), `-n` (next), `-p` (previous), `-r` (toggle read only)
+- Value: `-c` (client), `-t` (target, a full `session:window.pane` target is honored)
+- Server layer only: `-T` (switch the active key table)
+- Not accepted: `-E`, `-F`, `-O`, `-Z`
 
-**detach-client** (`detach`) — `"aE:s:t:P"`
-- Boolean: `-a` (all other), `-P` (kill after detach)
-- Value: `-E` (shell-command), `-s` (target-session), `-t` (target-client)
+**detach-client** (`detach`)
+- Boolean: `-a` (detach all other clients), `-P` (kill the parent process)
+- Value: `-t` (target client), `-s` (target session), `-E` (command that replaces the shell on detach)
 
-**suspend-client** (`suspendc`) — `"t:"`
-- Value: `-t` (target-client)
+**suspend-client** (`suspendc`)
+- No flags. This is a no-op on Windows, which has no SIGTSTP.
 
-**lock-server** (`lock`) — `""`
-- No flags
+**lock-server** (`lock`), **lock-session** (`locks`), **lock-client** (`lockc`)
+- No flags. All three are no-ops on Windows, which has no terminal locking concept.
 
-**lock-session** (`locks`) — `"t:"`
-- Value: `-t` (target-session)
+**kill-server**
+- No flags.
+- Note: bare `kill-server` stops every socket and session (the default plus all `-L` namespaces), unlike tmux which only kills the current socket. Use `-L <name> kill-server` to scope it to one namespace. See [compatibility.md](compatibility.md#kill-server-with-multiple-sockets).
 
-**lock-client** (`lockc`) — `"t:"`
-- Value: `-t` (target-client)
+**start-server** (`start`, `warmup`)
+- No flags. Pre-spawns a warm server so the next `new-session` is instant.
 
-**kill-server** — `""`
-- No flags
-- Note: bare `kill-server` stops every socket and session (default plus all `-L` namespaces), unlike tmux which only kills the current socket. Use `-L <name> kill-server` to scope it to one namespace. See [compatibility.md](compatibility.md#kill-server-with-multiple-sockets).
+**server-info** (`info`)
+- No flags.
 
-**start-server** (`start`) — `""`
-- No flags
+**list-clients** (`lsc`)
+- Value: `-F` (format), honored on the server and control mode layers. The CLI front end forwards a bare `list-clients`, so `psmux list-clients -F ...` silently drops the format.
 
-**list-clients** (`lsc`) — `"F:f:O:rt:"`
-- Boolean: `-r` (reverse sort)
-- Value: `-F` (format), `-f` (filter), `-O` (sort order), `-t` (target-session)
+**choose-client**
+- No flags. psmux has a single client model, so this returns the current client info.
 
-**refresh-client** (`refresh`) — `"A:B:cC:Df:r:F:lLRSt:U"`
-- Boolean: `-c` (clear pan), `-D` (pan down), `-l` (clipboard query), `-L` (pan left), `-R` (pan right), `-S` (status only), `-U` (pan up)
-- Value: `-A` (pane:state), `-B` (subscription), `-C` (size), `-f` (flags), `-r` (pane:report), `-F` (flags alias), `-t` (target-client)
+**refresh-client** (`refresh`)
+- Boolean: `-S` (status line only), `-l` (request the clipboard)
+- Value: `-C` (client size), `-t` (target client)
+- Control mode adds: `-A '%<pane>:continue'` (resume a paused pane), `-B 'name:target:format'` (add a subscription, `-B 'name:'` removes it), `-f pause-after=N` and `-f no-pause` (flow control)
+- The control mode `-C` argument is comma separated (`-C 120,30`), which is the form iTerm2 sends.
+- Not accepted: `-c`, `-D`, `-L`, `-R`, `-U`, `-r`, `-F`
 
-### Window Commands
+### Window commands
 
-**new-window** (`neww`) — `"abc:de:F:kn:PSt:"`
-- Boolean: `-a` (after current), `-b` (before current), `-d` (don't switch), `-k` (kill if exists), `-P` (print info), `-S` (select if exists)
-- Value: `-c` (start-dir), `-e` (environment), `-F` (format), `-n` (window-name), `-t` (target-window)
+**new-window** (`neww`)
+- Boolean: `-d` (do not switch to the new window), `-P` (print the new window info), `-E` (empty pane, no shell)
+- Value: `-n` (window name), `-c` (start directory), `-T` (pane title), `-e` (environment `KEY=VALUE`), `-F` (format, also accepted glued as `-F<format>`), `-t` (target, value consumed)
+- Accepted but ignored: `-a`, `-D`, `-k`, `-S`
+- Not accepted: `-b`
 
-**kill-window** (`killw`) — `"at:"`
-- Boolean: `-a` (kill all other)
-- Value: `-t` (target-window)
+**kill-window** (`killw`)
+- Boolean: `-a` (kill all windows but the current one)
+- Value: `-t` (target window)
 
-**unlink-window** (`unlinkw`) — `"kt:"`
-- Boolean: `-k` (kill if last)
-- Value: `-t` (target-window)
+**unlink-window** (`unlinkw`)
+- No flags. Acts on the active window.
+- Not accepted: `-k`
 
-**rename-window** (`renamew`) — `"t:"`  [1 positional arg: new-name]
-- Value: `-t` (target-window)
+**rename-window** (`renamew`)
+- No flags. The first positional argument is the new name.
 
-**select-window** (`selectw`) — `"lnpTt:"`
-- Boolean: `-l` (last), `-n` (next), `-p` (previous), `-T` (toggle)
-- Value: `-t` (target-window)
+**select-window** (`selectw`)
+- Boolean: `-l` (last), `-n` (next), `-p` (previous)
+- Value: `-t` (target window, `session:@id` form is honored)
+- Not accepted: `-T`
 
-**next-window** (`next`) — `"at:"`
-- Boolean: `-a` (with alert)
-- Value: `-t` (target-session)
+**next-window** (`next`), **previous-window** (`prev`), **last-window** (`last`)
+- No flags.
 
-**previous-window** (`prev`) — `"at:"`
-- Boolean: `-a` (with alert)
-- Value: `-t` (target-session)
+**move-window** (`movew`)
+- Boolean: `-a` (after), `-b` (before), `-r` (renumber), `-d` (do not switch), `-k` (kill the target if it exists)
+- Value: `-s` (source window), `-t` (destination window). A bare numeric `-t` is treated as a window index, not a session.
 
-**last-window** (`last`) — `"t:"`
-- Value: `-t` (target-session)
+**link-window** (`linkw`)
+- Value: `-s` (source window index), `-t` (destination window index)
+- Not accepted: `-a`, `-b`, `-d`, `-k`
 
-**move-window** (`movew`) — `"abdkrs:t:"`
-- Boolean: `-a` (after), `-b` (before), `-d` (detach), `-k` (kill if exists), `-r` (renumber)
-- Value: `-s` (src-window), `-t` (dst-window)
+**swap-window** (`swapw`)
+- Boolean: `-d` (do not switch)
+- Value: `-s` (source window), `-t` (destination window). A bare numeric `-t` is treated as a window index.
 
-**link-window** (`linkw`) — `"abdks:t:"`
-- Boolean: `-a` (after), `-b` (before), `-d` (detach), `-k` (kill if exists)
-- Value: `-s` (src-window), `-t` (dst-window)
+**rotate-window** (`rotatew`)
+- Boolean: `-U` (rotate up), `-D` (rotate down)
+- Value: `-t` (target window)
+- Not accepted: `-Z`
 
-**swap-window** (`swapw`) — `"ds:t:"`
-- Boolean: `-d` (don't switch)
-- Value: `-s` (src-window), `-t` (dst-window)
+**resize-window** (`resizew`)
+- Boolean: `-A`, `-D`, `-U` (passed through to the server)
+- Value: `-x` (width), `-y` (height), `-t` (target window)
 
-**rotate-window** (`rotatew`) — `"Dt:UZ"`
-- Boolean: `-D` (down/clockwise), `-U` (up/counter-clockwise), `-Z` (keep zoomed)
-- Value: `-t` (target-window)
+**find-window** (`findw`)
+- The first positional argument is the search pattern. That is the only thing that has an effect.
+- Accepted but ignored: `-C`, `-N`, `-T`, `-i`, `-r`, `-Z`, `-t`
 
-**list-windows** (`lsw`) — `"aF:f:O:rt:"`
-- Boolean: `-a` (all sessions), `-r` (reverse sort)
-- Value: `-F` (format), `-f` (filter), `-O` (sort order), `-t` (target-session)
+**respawn-window** (`respawnw`)
+- No flags. Respawns the active pane of the window.
 
-**respawn-window** (`respawnw`) — `"c:e:kt:"`
-- Boolean: `-k` (kill existing)
-- Value: `-c` (start-dir), `-e` (environment), `-t` (target-window)
+**list-windows** (`lsw`)
+- Boolean: `-a` (all sessions), `-J` (JSON output, a psmux extension)
+- Value: `-F` (format), `-t` (target session)
 
-### Pane Commands
+### Pane commands
 
-**split-window** (`splitw`) — `"bc:de:fF:hIl:p:Pt:vZ"`
-- Boolean: `-b` (before), `-d` (don't switch), `-f` (full width/height), `-h` (horizontal), `-I` (stdin forward), `-P` (print info), `-v` (vertical), `-Z` (zoom)
-- Value: `-c` (start-dir), `-e` (environment), `-F` (format), `-l` (size), `-p` (percentage), `-t` (target-pane)
+**split-window** (`splitw`, `split-pane`, `splitp`)
+- Boolean: `-h` (horizontal), `-v` (vertical), `-d` (do not switch), `-P` (print the new pane info)
+- Value: `-p` (percentage size), `-l` (size in cells or a percentage), `-c` (start directory), `-T` (pane title), `-F` (format), `-e` (environment `KEY=VALUE`), `-t` (target, value consumed)
+- Accepted but ignored: `-b`, `-f`, `-I`, `-Z`
 
-**select-pane** (`selectp`) — `"DdegLlMmP:RT:t:UZ"`
-- Boolean: `-D` (down), `-d` (disable input), `-e` (enable input), `-g` (show style), `-L` (left), `-l` (last), `-M` (clear marked), `-m` (mark), `-R` (right), `-U` (up), `-Z` (keep zoomed)
-- Value: `-P` (style), `-T` (title), `-t` (target-pane)
+**new-pane** (`newp`)
+A psmux extension that creates a pane floating above the tiled layout.
+- Boolean: `-d` (detached), `-P` (print the new pane id), `-E` (empty, no shell)
+- Value: `-B` (border style), `-T` (title), `-c` (start directory), `-x` (width), `-y` (height), `-X` (column position), `-Y` (row position)
 
-**last-pane** (`lastp`) — `"det:Z"`
-- Boolean: `-d` (disable input), `-e` (enable input), `-Z` (keep zoomed)
-- Value: `-t` (target-window)
+**select-pane** (`selectp`)
+- Boolean: `-U`, `-D`, `-L`, `-R` (directional), `-l` (last pane), `-Z` (keep the zoom while navigating), `-m` (mark), `-M` (unmark), `-e` (enable input), `-d` (disable input)
+- Value: `-T` (set and lock the pane title), `-P` (pane style), `-t` (target pane)
+- `-t` also accepts positional targets: `{top}`, `{bottom}`, `{left}`, `{right}`, `{top-left}`, `{top-right}`, `{bottom-left}`, `{bottom-right}`
+- Not accepted: `-g`
 
-**kill-pane** (`killp`) — `"at:"`
-- Boolean: `-a` (kill all other)
-- Value: `-t` (target-pane)
+**last-pane** (`lastp`)
+- No flags.
 
-**resize-pane** (`resizep`) — `"DLMRTt:Ux:y:Z"`
-- Boolean: `-D` (down), `-L` (left), `-M` (mouse), `-R` (right), `-T` (trim), `-U` (up), `-Z` (zoom toggle)
-- Value: `-t` (target-pane), `-x` (width), `-y` (height)
+**kill-pane** (`killp`)
+- Value: `-t` (target pane, via the global `-t` handler)
+- Not accepted: `-a`
 
-**swap-pane** (`swapp`) — `"dDs:t:UZ"`
-- Boolean: `-d` (don't switch focus), `-D` (swap down), `-U` (swap up), `-Z` (keep zoomed)
-- Value: `-s` (src-pane), `-t` (dst-pane)
+**resize-pane** (`resizep`)
+- Boolean: `-U`, `-D`, `-L`, `-R` (directional), `-Z` (toggle zoom)
+- Value: `-x` (absolute width in cells), `-y` (absolute height in cells), `-t` (target pane)
+- Not accepted: `-M`, `-T`
 
-**join-pane** (`joinp`) — `"bdfhvp:l:s:t:"`
-- Boolean: `-b` (before), `-d` (don't switch), `-f` (full size), `-h` (horizontal), `-v` (vertical)
-- Value: `-p` (percentage), `-l` (size), `-s` (src-pane), `-t` (dst-pane)
+**zoom-pane**
+- No flags. A psmux extension with no tmux equivalent. `resize-pane -Z` does the same thing.
 
-**move-pane** (`movep`) — `"bdfhvp:l:s:t:"`
-- *(Same flags as join-pane)*
+**swap-pane** (`swapp`)
+- Boolean: `-U` (swap up), `-D` (swap down), `-d` (do not move the active pane)
+- Value: `-s` (source pane), `-t` (destination pane)
+- Not accepted: `-Z`
 
-**break-pane** (`breakp`) — `"abdPF:n:s:t:"`
-- Boolean: `-a` (after), `-b` (before), `-d` (don't switch), `-P` (print info)
-- Value: `-F` (format), `-n` (window-name), `-s` (src-pane), `-t` (dst-window)
+**join-pane** (`joinp`) and **move-pane** (`movep`)
+- Boolean: `-h` (horizontal), `-v` (vertical, the default), `-d` (do not switch)
+- Value: `-s` (source pane), `-t` (destination pane)
+- A `-s <other-session>:...` source moves a live pane between independent servers.
+- Not accepted: `-b`, `-f`, `-p`, `-l`
 
-**respawn-pane** (`respawnp`) — `"c:e:kt:"`
-- Boolean: `-k` (kill existing)
-- Value: `-c` (start-dir), `-e` (environment), `-t` (target-pane)
+**break-pane** (`breakp`)
+- Boolean: `-d` (do not switch to the new window)
+- Value: `-t` (target)
+- Not accepted: `-a`, `-b`, `-P`, `-F`, `-n`, `-s`
 
-**capture-pane** (`capturep`) — `"ab:CeE:JMNpPqS:Tt:"`
-- Boolean: `-a` (alt screen), `-C` (escape non-printable as C0), `-e` (escape sequences), `-J` (join wrapped lines), `-M` (mouse target), `-N` (with trailing spaces), `-p` (to stdout), `-P` (only if pane active), `-q` (quiet), `-T` (ignore trailing positions)
-- Value: `-b` (buffer-name), `-E` (end-line), `-S` (start-line), `-t` (target-pane)
+**respawn-pane** (`respawnp`, `resp`)
+- Boolean: `-k` (kill the existing process first)
+- Value: `-c` (start directory), `-t` (target pane)
+- `-- <command>` is honored and replaces the pane command.
+- Not accepted: `-e`
 
-**clear-history** (`clearhist`) — `"Ht:"`
-- Boolean: `-H` (also clear hidden history)
-- Value: `-t` (target-pane)
+**capture-pane** (`capturep`)
+- Boolean: `-p` (print to stdout), `-e` (include escape sequences), `-J` (join wrapped lines)
+- Value: `-S` (start line), `-E` (end line), `-b` (buffer name), `-t` (target pane)
+- Not accepted: `-a`, `-C`, `-M`, `-N`, `-P`, `-q`, `-T`
 
-**list-panes** (`lsp`) — `"aF:f:O:rst:"`
-- Boolean: `-a` (all), `-r` (reverse sort), `-s` (session)
-- Value: `-F` (format), `-f` (filter), `-O` (sort order), `-t` (target)
+**clear-history** (`clearhist`)
+- Boolean: `-H` (also clear the alternate screen)
+- Value: `-t` (target pane)
 
-**display-panes** (`displayp`) — `"bd:Nt:"`
-- Boolean: `-b` (non-blocking), `-N` (no key handling)
-- Value: `-d` (duration), `-t` (target-client)
+**list-panes** (`lsp`)
+- Boolean: `-a` (all sessions), `-s` (session scope)
+- Value: `-F` (format), `-t` (target)
 
-**pipe-pane** (`pipep`) — `"IOot:"`
-- Boolean: `-I` (stdin), `-O` (stdout), `-o` (toggle/open-only)
-- Value: `-t` (target-pane)
+**display-panes** (`displayp`)
+- No flags. Shows the pane number overlay, then a digit key selects a pane.
 
-### Copy & Paste Commands
+**pipe-pane** (`pipep`)
+- Boolean: `-I` (pipe input), `-O` (pipe output), `-o` (toggle)
+- Value: `-t` (target pane)
 
-**copy-mode** — `"deHMqSs:t:u"`
-- Boolean: `-d` (page down), `-e` (exit at bottom), `-H` (hide position), `-M` (mouse), `-q` (cancel), `-S` (scroll bar drag), `-u` (page up)
-- Value: `-s` (src-pane), `-t` (target-pane)
+**set-pane-title**
+- No flags. A psmux extension. The positional arguments are joined into the title.
 
-**paste-buffer** (`pasteb`) — `"db:prs:t:"`
-- Boolean: `-d` (delete after), `-p` (use bracketed paste), `-r` (no newline replacement)
-- Value: `-b` (buffer-name), `-s` (separator), `-t` (target-pane)
+**toggle-sync**
+- No flags. A psmux extension that toggles `synchronize-panes` for the active window.
 
-**set-buffer** (`setb`) — `"ab:t:n:w"`
-- Boolean: `-a` (append), `-w` (send to clipboard)
-- Value: `-b` (buffer-name), `-t` (target-client), `-n` (new-name)
+### Layout commands
 
-**delete-buffer** (`deleteb`) — `"b:"`
-- Value: `-b` (buffer-name)
+**select-layout** (`selectl`)
+- Boolean: `-n` (next layout), `-p` (previous layout)
+- Value: `-t` (target, value consumed)
+- Accepted but ignored: `-o`, `-E`
+- The first positional argument is a layout name: `even-horizontal` (alias `even-h`), `even-vertical`, `main-horizontal` (alias `main-h`), `main-vertical` (alias `main-v`), `tiled`.
 
-**show-buffer** (`showb`) — `"b:"`
-- Value: `-b` (buffer-name)
+**next-layout**, **previous-layout**
+- No flags. `nextl` and `prevl` work on the server, config and control layers but not at the CLI.
 
-**save-buffer** (`saveb`) — `"ab:"`  [1 positional arg: path]
+### Copy and paste commands
+
+**copy-mode**
+- Boolean: `-u` (scroll up one page on entry), `-d` (scroll down), `-e` (exit at the bottom), `-H` (hide the position indicator), `-q` (quit copy mode)
+- Value: `-t` (target pane)
+- Not accepted: `-M`, `-S`, `-s`
+- In control mode `copy-mode` is a success returning no-op, because iTerm2 implements copy mode locally on captured content.
+
+**paste-buffer** (`pasteb`)
+- Boolean: `-d` (delete the buffer after pasting), `-p` (use bracketed paste)
+- Value: `-b` (buffer name), `-t` (target pane)
+- Not accepted: `-r`, `-s`
+- When the buffer stack is empty, psmux falls back to the Windows clipboard.
+
+**set-buffer** (`setb`)
+- Boolean: `-w` (also write to the Windows clipboard)
+- Value: `-b` (buffer name)
+- Not accepted: `-a`, `-n`, `-t`
+
+**delete-buffer** (`deleteb`) and **show-buffer** (`showb`)
+- Value: `-b` (buffer name)
+
+**save-buffer** (`saveb`)
 - Boolean: `-a` (append)
-- Value: `-b` (buffer-name)
+- Value: `-b` (buffer name). The first positional argument is the path.
 
-**load-buffer** (`loadb`) — `"b:t:w"`  [1 positional arg: path]
-- Boolean: `-w` (send to clipboard)
-- Value: `-b` (buffer-name), `-t` (target-client)
+**load-buffer** (`loadb`)
+- Boolean: `-w` (propagate to the clipboard)
+- Value: `-b` (buffer name). The first positional argument is the path.
 
-**list-buffers** (`lsb`) — `"F:f:O:r"`
-- Boolean: `-r` (reverse sort)
-- Value: `-F` (format), `-f` (filter), `-O` (sort order)
+**list-buffers** (`lsb`)
+- Value: `-F` (format), `-t` (value consumed and discarded)
 
-**choose-buffer** — `"F:f:K:NO:rt:yZ"`
-- Boolean: `-N` (hide preview), `-r` (reverse sort), `-y` (immediate exit), `-Z` (zoom)
-- Value: `-F` (format), `-f` (filter), `-K` (key-format), `-O` (sort order), `-t` (target-pane)
+**choose-buffer** (`chooseb`)
+- No flags. Opens the interactive buffer chooser.
 
-### Key Binding Commands
+### Key binding commands
 
-**bind-key** (`bind`) — `"nrN:T:"`
-- Boolean: `-n` (root table / no prefix), `-r` (repeat)
-- Value: `-N` (note), `-T` (key-table)
+**bind-key** (`bind`)
+- Boolean: `-n` (shorthand for `-T root`), `-r` (repeatable)
+- Value: `-T` (key table)
+- Not accepted: `-N` (note)
 
-**unbind-key** (`unbind`) — `"anqT:"`
-- Boolean: `-a` (all), `-n` (root table), `-q` (quiet)
-- Value: `-T` (key-table)
+**unbind-key** (`unbind`)
+- Boolean: `-a` (unbind everything, also matched inside a combined token), `-n` (root table)
+- Value: `-T` (key table), `-t` (target, value consumed)
+- Not accepted: `-q`
 
-**list-keys** (`lsk`) — `"1aNP:T:"`
-- Boolean: `-1` (one key per line), `-a` (with notes), `-N` (with notes only)
-- Value: `-P` (prefix), `-T` (key-table)
+**list-keys** (`lsk`)
+- Value: `-T` (key table), `-t` (value consumed and discarded)
+- Not accepted: `-1`, `-a`, `-N`, `-P`
 
-**send-keys** (`send`) — `"c:FHKlMN:Rt:X"`
-- Boolean: `-F` (expand formats), `-H` (hex), `-K` (key name), `-l` (literal), `-M` (mouse), `-R` (reset terminal), `-X` (copy-mode command)
-- Value: `-c` (target-client), `-N` (repeat count), `-t` (target-pane)
+**send-keys** (`send`, `send-key`)
+- Boolean: `-l` (literal), `-R` (reset the terminal state), `-X` (run a copy mode command)
+- Value: `-N` (repeat count, value consumed), `-t` (target pane)
+- Not accepted: `-c`, `-F`, `-H`, `-K`, `-M`
+- Named key tokens accepted as arguments: `ENTER`, `TAB`, `BTAB` / `BACKTAB`, `ESCAPE` / `ESC`, `SPACE`, `BSPACE` / `BACKSPACE`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`, `END`, `PAGEUP` / `PPAGE`, `PAGEDOWN` / `NPAGE`, `DELETE` / `DC`, `INSERT` / `IC`
 
-**send-prefix** — `"2t:"`
-- Boolean: `-2` (send prefix2)
-- Value: `-t` (target-pane)
+**send-prefix**
+- No flags.
+- Not accepted: `-2`, `-t`
 
-### Configuration Commands
+**send-text**, **send-paste**
+- psmux extensions. `send-text` takes the raw text as positional arguments and does no key name parsing. `send-paste` wraps the payload in a bracketed paste sequence and also accepts `-t` at the CLI.
 
-**set-option** (`set`) — `"aFgopqst:uUw"`
-- Boolean: `-a` (append), `-F` (expand formats), `-g` (global), `-o` (no overwrite), `-p` (pane), `-q` (quiet), `-s` (server), `-u` (unset), `-U` (unset and delete), `-w` (window)
-- Value: `-t` (target)
+### Configuration commands
 
-**set-window-option** (`setw`) — `"aFgoqt:u"`
-- Boolean: `-a` (append), `-F` (expand formats), `-g` (global), `-o` (no overwrite), `-q` (quiet), `-u` (unset)
-- Value: `-t` (target-window)
+**set-option** (`set`) and **set-window-option** (`setw`)
+- Boolean: `-g` (global, accepted, psmux has one scope so this is effectively a selector no-op), `-u` (unset), `-a` (append to the current value), `-q` (quiet), `-o` (only set if currently unset), `-w` (window scope, does **not** consume the next argument)
+- Value: `-t` (target, value consumed), `-p` (pane, value consumed)
+- Flags are also matched inside combined tokens such as `-ga`, `-gu` and `-gq`.
+- A `@name` argument is never treated as a flag.
+- Not accepted: `-F`, `-s`, `-U`
 
-**show-options** (`show`) — `"AgHpqst:vw"`
-- Boolean: `-A` (inherited), `-g` (global), `-H` (include hidden), `-p` (pane), `-q` (quiet), `-s` (server), `-v` (value only), `-w` (window)
-- Value: `-t` (target)
+**show-options** (`show`) and **show-window-options** (`showw`)
+- Boolean: `-A` (include inherited), `-s` (server scope), `-w` (window scope), `-v` (value only), `-q` (quiet)
+- Value: `-t` (window selector)
+- Combined tokens are handled the same way as for `set-option`.
+- Not accepted: `-g` as a distinct behavior (it is absorbed), `-H`, `-p`
 
-**show-window-options** (`showw`) — `"gvt:"`
-- Boolean: `-g` (global), `-v` (value only)
-- Value: `-t` (target-window)
+**set-hook** and **show-hooks**
+- Boolean: `-u` (unset, also as `-gu` or `-ug`), `-a` (append, also as `-ga` or `-ag`), `-g` (global, accepted and absorbed)
+- Not accepted: `-p`, `-R`, `-w`, `-t`
+- `set-hook` accepts **any** hook name with no validation, so a typo silently never fires.
 
-**set-hook** — `"agpRt:uw"`
-- Boolean: `-a` (append), `-g` (global), `-p` (pane), `-R` (run immediately), `-u` (unset), `-w` (window)
-- Value: `-t` (target)
+**set-environment** (`setenv`)
+- Boolean: `-g` (global), `-r` (remove from the environment), `-u` (unset), `-h` (hidden)
+- Value: `-t` (target session)
+- Not accepted: `-F`
 
-**show-hooks** — `"gpt:w"`
-- Boolean: `-g` (global), `-p` (pane), `-w` (window)
-- Value: `-t` (target)
+**show-environment** (`showenv`)
+- Boolean: `-g` (global), `-s` (shell format), `-h` (hidden)
+- Value: `-t` (target session)
 
-**set-environment** (`setenv`) — `"Fhgrt:u"`
-- Boolean: `-F` (expand format), `-h` (hidden), `-g` (global), `-r` (remove from env), `-u` (unset)
-- Value: `-t` (target-session)
+**source-file** (`source`)
+- Boolean: `-q` (quiet), `-n` (parse only, do not execute), `-v` (verbose)
+- Not accepted: `-F`, `-t`
 
-**show-environment** (`showenv`) — `"hgst:"`
-- Boolean: `-h` (hidden only), `-g` (global), `-s` (as shell commands)
-- Value: `-t` (target-session)
+**list-commands** (`lscm`)
+- No flags.
+- Not accepted: `-F`
 
-**source-file** (`source`) — `"t:Fnqv"`
-- Boolean: `-F` (expand format), `-n` (syntax check only), `-q` (quiet), `-v` (verbose)
-- Value: `-t` (target-pane)
+### Display and overlay commands
 
-**list-commands** (`lscm`) — `"F:"`
-- Value: `-F` (format)
+**display-message** (`display`)
+- Boolean: `-p` (print to stdout), `-F` (format mode)
+- Value: `-d` (display duration in ms), `-I` (value consumed), `-t` (target)
+- `--` ends option parsing.
+- Not accepted: `-a`, `-C`, `-c`, `-l`, `-N`, `-v`
 
-### Display & Misc Commands
+**display-menu** (`menu`)
+- Value: `-x` (column), `-y` (row), `-T` (title)
+- Menu items follow as `<label> <key> <command>` triples.
 
-**display-message** (`display`) — `"aCc:d:lINpt:F:v"`
-- Boolean: `-a` (list all variables), `-C` (escape output), `-l` (log to server), `-I` (stdin), `-N` (no output), `-p` (to stdout), `-v` (verbose)
-- Value: `-c` (target-client), `-d` (delay), `-t` (target-pane), `-F` (format)
+**display-popup** (`popup`)
+- Boolean: `-E` (close when the command exits, which is already the default), `-K` (keep the popup open after the command exits)
+- Value: `-w` (width, cells or a percentage), `-h` (height), `-d` or `-c` (start directory)
 
-**command-prompt** — `"1beFiklI:Np:t:T:"`
-- Boolean: `-1` (single key), `-b` (background), `-e` (backspace exit), `-F` (expand), `-i` (incremental), `-k` (key only), `-l` (literal), `-N` (numeric)
-- Value: `-I` (inputs), `-p` (prompts), `-t` (target-client), `-T` (prompt-type)
+**confirm-before** (`confirm`)
+- Value: `-p` (prompt text)
+- Everything that is not the prompt and does not begin with `-` becomes the command to confirm.
+- Not accepted: `-b`, `-c`, `-y`, `-t`
 
-**confirm-before** (`confirm`) — `"bc:p:t:y"`
-- Boolean: `-b` (background), `-y` (default yes)
-- Value: `-c` (confirm-key), `-p` (prompt), `-t` (target-client)
+**command-prompt**
+- Boolean: `-N` (numeric input only), `-W` (word input only)
+- Value: `-I` (initial value), `-p` (prompt list), `-T` (prompt type), `-t` (target)
+- Not accepted: `-1`, `-b`, `-e`, `-F`, `-i`, `-k`, `-l`
 
-**choose-tree** — `"F:f:GK:NO:rst:wyZ"`
-- Boolean: `-G` (grouped sessions), `-N` (no preview), `-r` (reverse), `-s` (sessions only), `-w` (windows only), `-y` (immediate exit), `-Z` (zoom)
-- Value: `-F` (format), `-f` (filter), `-K` (key-format), `-O` (sort order), `-t` (target-pane)
+**choose-tree**, **choose-window**, **choose-session**, **choose-client**, **choose-buffer**, **customize-mode**, **clock-mode**
+- No flags. These open client side overlays. While an overlay is open its keys are handled before any key table, so a bound key does not reach the tables until the overlay closes.
 
-**choose-client** — `"F:f:K:NO:rt:yZ"`
-- Boolean: `-N` (no preview), `-r` (reverse), `-y` (immediate exit), `-Z` (zoom)
-- Value: `-F` (format), `-f` (filter), `-K` (key-format), `-O` (sort order), `-t` (target-pane)
+**show-messages** (`showmsgs`)
+- No flags.
 
-**run-shell** (`run`) — `"bd:Ct:Es:c:"`
-- Boolean: `-b` (background), `-C` (command), `-E` → **wait, no-colon = boolean**
-- Value: `-d` (delay), `-t` (target-pane), `-s` (shell), `-c` (start-dir)
+**clear-prompt-history** (`clearphist`) and **show-prompt-history** (`showphist`)
+- No flags. Server layer only, so reach them from a key binding or a raw socket connection rather than from `psmux <command>`.
 
-**if-shell** (`if`) — `"bFt:"`  [2-3 positional args: shell-cmd, if-true-cmd, [if-false-cmd]]
-- Boolean: `-b` (background), `-F` (test as format not shell)
-- Value: `-t` (target-pane)
+### Shell and flow control commands
 
-**wait-for** (`wait`) — `"LSU"`  [1 positional arg: channel]
-- Boolean: `-L` (lock), `-S` (signal/unlock), `-U` (unlock)
+**run-shell** (`run`)
+- Boolean: `-b` (background)
+- Everything else, including tokens that look like flags, is treated as part of the shell command. `-C`, `-d`, `-s`, `-c` and `-t` are **not** parsed, so passing them sends them straight to the shell.
 
-**clock-mode** — `"t:"`
-- Value: `-t` (target-pane)
+**if-shell** (`if`)
+- Boolean: `-b` (background), `-F` (evaluate the condition as a format string instead of running a shell)
+- Value: `-t` (value consumed and discarded)
+- Positional arguments: the condition, the command to run when it succeeds, and optionally the command to run when it fails.
+- The config file parser also accepts the glued combined forms `-bF` and `-Fb`.
+
+**wait-for** (`wait`)
+- Boolean: `-L` (lock), `-S` (signal), `-U` (unlock)
+- The first positional argument is the channel name.
+
+**run-command** (`runcmd`)
+- No flags. Runs the given command line through the config file command layer and returns its output, with a 15 second timeout. Available on the server and control mode layers.
+
+**dump-state** (`dump`), **dump-layout**, **list-tree**
+- No flags. `dump-state` returns the whole live server state as JSON and is available at the CLI and in control mode. `dump-layout` and `list-tree` are server layer only.
+
+## Global flags, before the command name
+
+These are parsed before psmux looks at the command name.
+
+| Flag | Meaning |
+|---|---|
+| `-L <name>` | Socket namespace. Sessions in a namespace are stored as `<name>__<session>`. |
+| `-f <file>` | Config file to load, exported as `PSMUX_CONFIG_FILE`. |
+| `-C` | Control mode with command echo. |
+| `-CC` | Control mode without command echo. |
+| `-t <target>` | Target `session`, `session:window` or `session:window.pane` for the command that follows. |
+| `-S <path>` | Socket path, accepted and its value consumed. |
+| `-h`, `--help` | Usage. |
+| `-V`, `-v`, `--version` | Version. |
+
+Glued short flags of the form `-x=VALUE` are normalized to `-x VALUE` before parsing.
+
+## User defined command aliases
+
+`set -g command-alias '<alias>=<expansion>'` defines your own command names. There is one asymmetry worth knowing: aliases resolve from key bindings and config lines, and are consulted by the config file unknown command warning, but the **CLI front end does not resolve them**. `psmux <alias>` fails with "unknown command" while the same alias in a key binding or a config line works.

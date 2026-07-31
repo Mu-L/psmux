@@ -128,9 +128,9 @@ The option is read when the chooser opens, not while it is open. Close the choos
 
 ## Related Options and Commands
 
-* `pane-border-style`, `pane-active-border-style` — control how borders look in both the main view and the preview.
-* `mode-style` — controls how the selected entry in the chooser list is highlighted.
-* `mouse on` — enables clicking entries in the chooser list and dragging the popup.
+* `pane-border-style`, `pane-active-border-style`: control how borders look in both the main view and the preview.
+* `mode-style`: controls how the selected entry in the chooser list is highlighted.
+* `mouse on`: enables clicking entries in the chooser list and dragging the popup.
 
 ## See Also
 

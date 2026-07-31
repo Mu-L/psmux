@@ -1,12 +1,12 @@
 # Plugins & Themes
 
-psmux has a full plugin ecosystem — ports of the most popular tmux plugins, reimplemented in PowerShell for Windows.
+psmux has a full plugin ecosystem: ports of the most popular tmux plugins, reimplemented in PowerShell for Windows.
 
 ## Plugin Repository
 
 **Browse available plugins and themes:** [**psmux-plugins**](https://github.com/psmux/psmux-plugins)
 
-**Install & manage plugins with a TUI:** [**Tmux Plugin Panel**](https://github.com/psmux/Tmux-Plugin-Panel) — a terminal UI for browsing, installing, updating, and removing plugins and themes.
+**Install & manage plugins with a TUI:** [**Tmux Plugin Panel**](https://github.com/psmux/Tmux-Plugin-Panel), a terminal UI for browsing, installing, updating, and removing plugins and themes.
 
 ## Available Plugins
 

@@ -32,7 +32,7 @@ set -g prefix C-a
 # Enable mouse
 set -g mouse on
 
-# Window numbering base (default is 1)
+# Window numbering base (default is 0)
 set -g base-index 1
 
 # Customize status bar
@@ -114,7 +114,11 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `status-left-length` | Int | `10` | Max width of status-left |
 | `status-right-length` | Int | `40` | Max width of status-right |
 | `focus-events` | Bool | `off` | Pass focus events to apps |
+| `alternate-screen` | Bool | `on` | Honour the DEC 47 / 1049 alternate screen. Set `off` so full screen program output lands in the scrollback instead of being discarded on exit. See [Alternate Screen](#alternate-screen) |
 | `mode-keys` | Str | `emacs` | `vi` or `emacs` |
+| `status-keys` | Str | | Editing style at the command prompt. Only the literal `vi` is checked; any other value (including unset) keeps emacs style editing |
+| `copy-mode-line-numbers` | Str | `off` | Line number gutter in copy mode: `off`, `default`, `absolute`, `relative`, `hybrid`. See [Copy Mode Line Numbers](#copy-mode-line-numbers) |
+| `wrap-search` | Bool | `on` | Wrap copy-mode searches around the ends of the scrollback. Set `off` to stop at the first or last match |
 | `renumber-windows` | Bool | `off` | Auto-renumber windows on close |
 | `automatic-rename` | Bool | `on` | Rename windows from foreground process |
 | `monitor-activity` | Bool | `off` | Flag windows with new output |
@@ -147,25 +151,40 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `set-clipboard` | Str | `on` | Clipboard interaction (`on`/`off`/`external`) |
 | `main-pane-width` | Int | `0` | Main pane width in main-vertical layout |
 | `main-pane-height` | Int | `0` | Main pane height in main-horizontal layout |
+| `session-group` | Str | | Name of the session group this session joins. `none` or an empty value clears it. See [Session Groups](#session-groups) |
+| `command-alias` | Str | | Define your own command alias as `alias=expansion`. See [Command Aliases](#command-aliases) |
 
 ### Style Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `status-left` | Str | `[#S] ` | Left status bar content |
-| `status-right` | Str | | Right status bar content |
+| `status-right` | Str | `#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}"#{=21:pane_title}" %H:%M %d-%b-%y` | Right status bar content. This is **not** empty by default: out of the box it renders the pane title followed by the time and date |
 | `status-style` | Str | `bg=green,fg=black` | Status bar style |
 | `status-left-style` | Str | | Left status style |
 | `status-right-style` | Str | | Right status style |
+| `status-bg` | Str | | Legacy convenience setter. Rewrites only the `bg=` part of `status-style` and leaves the rest intact |
+| `status-fg` | Str | | Legacy convenience setter. Rewrites only the `fg=` part of `status-style` and leaves the rest intact |
 | `message-style` | Str | `bg=yellow,fg=black` | Message style |
 | `message-command-style` | Str | `bg=black,fg=yellow` | Command prompt style |
 | `mode-style` | Str | `bg=yellow,fg=black` | Copy-mode highlight |
 | `pane-border-style` | Str | | Inactive border style |
 | `pane-active-border-style` | Str | `fg=green` | Active border style |
+| `pane-border-hover-style` | Str | `fg=yellow` | Border style while the mouse hovers a draggable pane border |
+| `pane-border-lines` | Str | `single` | Border glyph set: `single`, `double`, `heavy`, `simple`, `number`, `spaces`, `none`. See [Pane Border Lines](#pane-border-lines) |
 | `pane-border-format` | Str | | Pane border format string (e.g. `#{pane_index}: #{pane_title}`) |
 | `pane-border-status` | Str | | Pane border status position (`top`/`bottom`/`off`) |
-| `window-status-format` | Str | `#I:#W#F` | Inactive tab format |
-| `window-status-current-format` | Str | `#I:#W#F` | Active tab format |
+| `copy-mode-line-number-style` | Str | `fg=brightblack` | Style of the copy-mode line number gutter |
+| `copy-mode-current-line-number-style` | Str | `fg=yellow,bold` | Style of the line number on the copy-mode cursor row |
+| `window-style` | Str | | Style applied to the contents of every pane |
+| `window-active-style` | Str | | Style applied to the contents of the active pane |
+| `popup-border-style` | Str | `fg=yellow` | Border style of `display-popup` overlays |
+| `popup-border-lines` | Str | `single` | Popup border glyph set: `single`, `double`, `heavy`, `rounded` |
+| `popup-style` | Str | | Accepted and stored, but never read. See [Accepted but Not Functional](#accepted-but-not-functional) |
+| `clock-mode-colour` | Str | | Colour of the `clock-mode` digits |
+| `clock-mode-style` | Str | | Accepted and stored, but never read. See [Accepted but Not Functional](#accepted-but-not-functional) |
+| `window-status-format` | Str | `#I:#W#{?window_flags,#{window_flags}, }` | Inactive tab format. Equivalent to tmux's `#I:#W#F`, written out so a flagless window still reserves one space |
+| `window-status-current-format` | Str | `#I:#W#{?window_flags,#{window_flags}, }` | Active tab format. Same shape as `window-status-format` |
 | `window-status-separator` | Str | `" "` | Tab separator |
 | `window-status-style` | Str | | Inactive tab style |
 | `window-status-current-style` | Str | | Active tab style |
@@ -206,6 +225,86 @@ set -g pane-border-status off
 Use `select-pane -T "title"` to set a pane title that appears in the border label. Clear a title with `select-pane -T ""`. The default pane title is the hostname, matching tmux convention.
 
 > **Note:** PowerShell 7 automatically sets the pane title to the current working directory on every prompt via OSC escape sequences. If you see a file path in your pane border labels instead of the hostname, see [pane-titles.md](pane-titles.md) for details and options to control this.
+
+### Pane Border Lines
+
+`pane-border-lines` picks the glyph set psmux draws pane borders with. After the borders are drawn, psmux runs a junction pass that upgrades straight runs into proper corner and tee glyphs, so `double` and `heavy` borders join cleanly instead of showing mismatched crossings.
+
+```tmux
+# Default: thin single lines
+set -g pane-border-lines single
+
+# Double lines
+set -g pane-border-lines double
+
+# Thick lines
+set -g pane-border-lines heavy
+
+# ASCII only, for fonts without box drawing glyphs
+set -g pane-border-lines simple
+
+# Blank borders (the gap stays, the glyphs do not)
+set -g pane-border-lines spaces
+
+# No border glyphs at all
+set -g pane-border-lines none
+```
+
+`number` is accepted for tmux compatibility and renders the same as `single`. Any unrecognised value also falls back to `single`.
+
+### Copy Mode Line Numbers
+
+Copy mode can draw a line number gutter down the left edge. It is off by default:
+
+```tmux
+# Absolute line numbers counted from the top of the scrollback
+set -g copy-mode-line-numbers absolute
+
+# Distance from the cursor row, vi style
+set -g copy-mode-line-numbers relative
+
+# Cursor row shows its absolute number, every other row shows the relative distance
+set -g copy-mode-line-numbers hybrid
+
+# Distance from the current scroll offset
+set -g copy-mode-line-numbers default
+
+# Turn the gutter off again
+set -g copy-mode-line-numbers off
+```
+
+The gutter has two independent styles:
+
+```tmux
+# Every line number except the cursor row
+set -g copy-mode-line-number-style "fg=brightblack"
+
+# The line number on the cursor row
+set -g copy-mode-current-line-number-style "fg=yellow,bold"
+```
+
+### Popup and Window Styling
+
+`display-popup` overlays and the pane contents themselves can be styled separately from the borders around them:
+
+```tmux
+# Popup border colour and glyph set
+set -g popup-border-style "fg=cyan"
+set -g popup-border-lines rounded
+
+# Background and foreground for every pane's contents
+set -g window-style "fg=colour247,bg=colour236"
+
+# ... and a brighter pair for the active pane, so focus is obvious
+set -g window-active-style "fg=colour250,bg=black"
+
+# Colour of the clock-mode digits (Prefix + t)
+set -g clock-mode-colour cyan
+```
+
+`popup-border-lines` accepts `single` (the default), `double`, `heavy` and `rounded`. The values `none` and `simple` are accepted but render as plain single lines, because a popup always draws a border.
+
+> **Note:** `popup-style` and `clock-mode-style` are accepted and stored but never read. See [Accepted but Not Functional](#accepted-but-not-functional).
 
 ### Bell
 
@@ -358,6 +457,59 @@ psmux show-options -g bold-is-bright
 psmux display-message -p '#{bold-is-bright}'
 ```
 
+### Alternate Screen
+
+Full screen programs (`nvim`, `less`, `htop`) switch the terminal to the alternate screen with DEC private mode 47 or 1049, draw over it, and switch back on exit. That is why your scrollback is untouched after you quit them. psmux honours this by default.
+
+Setting `alternate-screen off` makes psmux ignore the switch, so everything those programs draw goes into the normal buffer and stays in the scrollback after they exit:
+
+```tmux
+# Default: full screen apps get their own screen and leave no trace
+set -g alternate-screen on
+
+# Keep full screen output in the scrollback instead
+set -g alternate-screen off
+```
+
+The flag lives in each pane's terminal parser, and psmux patches live panes and the warm pane when you change it, so the new value applies immediately without restarting anything.
+
+### Session Groups
+
+A session group is a name shared by several sessions. psmux exposes the membership through format variables so a status bar or a script can tell grouped sessions apart:
+
+```tmux
+# Join this session to the "work" group
+set -g session-group work
+
+# Leave the group again
+set -g session-group none
+```
+
+The group can also be named when the server is spawned:
+
+```powershell
+psmux server -g work
+```
+
+Grouped state is readable from any format string:
+
+```powershell
+psmux display-message -p '#{session_group} #{session_grouped} #{session_group_size}'
+```
+
+### Command Aliases
+
+`command-alias` defines your own short name for a command:
+
+```tmux
+# "dev" now means "split-window -h"
+set -g command-alias 'dev=split-window -h'
+
+bind-key D dev
+```
+
+> **Note:** the alias is resolved by the server, so it works from a key binding, a config line, a hook, `run-shell` and the command prompt. It is **not** resolved by the command line front end, so `psmux dev` typed at a shell still fails with "unknown command". Wrap the CLI form in the real command name instead.
+
 ### Command Chaining
 
 psmux supports tmux-style command chaining with the `;` operator. Multiple commands on a single line are executed sequentially:
@@ -401,37 +553,182 @@ bind-key C-Space send-prefix
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `prediction-dimming` | Bool | `off` | Dim predictive/speculative text |
-| `bold-is-bright` | Bool | `on` | Restore standard SGR codes for the 16 basic colors so bold renders bright (set `off` to keep explicit 256-indexed low colors byte-accurate). See [Bold Is Bright](#bold-is-bright-color-rendering) |
-| `paste-detection` | Bool | `on` | Detect Ctrl+V paste from console host (set `off` for neovim/vim Ctrl+V) |
-| `cursor-style` | Str | | Cursor shape: `block`, `underline`, or `bar` |
-| `cursor-blink` | Bool | `off` | Cursor blinking |
+| `cursor-style` | Str | `bar` | Cursor shape: `block`, `underline`, or `bar` |
+| `cursor-blink` | Bool | `on` | Cursor blinking |
 | `env-shim` | Bool | `on` | Inject Unix-compatible `env` function in PowerShell panes |
 | `claude-code-fix-tty` | Bool | `on` | Patch Node.js process.stdout.isTTY for Claude Code |
 | `claude-code-force-interactive` | Bool | `on` | Set CLAUDE_CODE_FORCE_INTERACTIVE=1 in panes |
+| `@heal-crashed-panes` | Bool | `off` | Respawn a pane whose shell exits within a short grace window of being spawned, instead of closing the window. Only needed where PowerShell's non-PSReadLine fallback reader dies on its first ConPTY read |
 
-Style format: `"fg=colour,bg=colour,bold,dim,underscore,italics,reverse,strikethrough"`
+`bold-is-bright` and `paste-detection` are psmux extensions too, but they are defined once in
+[All Set Options](#all-set-options) rather than repeated here. Their behaviour is explained in
+[Bold Is Bright](#bold-is-bright-color-rendering) and
+[Paste Detection](#paste-detection-ctrlv-passthrough).
 
-Colours: `default`, `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `colour0`–`colour255`, `#RRGGBB`
+### Style Value Grammar
+
+Every `*-style` option and every inline `#[...]` block in a format string uses the same comma separated grammar:
+
+```tmux
+set -g status-style "fg=white,bg=colour236,bold"
+set -g status-left "#[fg=green,bold]#S#[default] "
+```
+
+**Colours.** `default` and `terminal` (both mean the terminal's own default), `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, the bright variants (`brightblack` through `brightwhite`, also spelled `bright-black`), `colour0` to `colour255` (the American spelling `color0` works too), `#RRGGBB`, `idx:N`, and `rgb:R,G,B`.
+
+**Attributes.** `bold`, `dim`, `italics` (also `italic`), `underscore` (also `underline`), `blink`, `reverse`, `hidden`, `strikethrough`.
+
+**Negations.** Each attribute has a matching keyword that removes it again: `nobold`, `nodim`, `noitalics`, `nounderscore` (also `nounderline`), `noblink`, `noreverse`, `nohidden`, `nostrikethrough`. These matter inside a format string, where a later `#[...]` block builds on the style already in effect rather than starting from nothing:
+
+```tmux
+# Bold for the session name, then drop bold only, keeping the colour
+set -g status-left "#[fg=cyan,bold]#S#[nobold] #{pane_current_command}"
+```
+
+**Reset.** `default` or `none` returns to the base style of whatever is being drawn.
+
+**Style stack.** `push-default` saves the style in effect, and `pop-default` restores the most recently saved one. Use them to make a temporary change without having to spell out how to undo it:
+
+```tmux
+# Save the bar style, highlight the window list, then restore exactly what was there
+set -g status-left "#[push-default]#[fg=black,bg=yellow] #S #[pop-default] ready"
+```
+
+A `pop-default` with nothing on the stack falls back to the base style, so an unbalanced format degrades instead of breaking.
+
+`fill`, `align=...`, `list=...`, `nolist`, `range=...` and `norange` are accepted for tmux compatibility and are handled by the status bar layout code rather than by the style parser.
+
+## Configuration File Conditionals
+
+Config files support tmux's `%if` directives, so one file can serve several machines. Conditions are ordinary format strings, which means anything you can write inside `#{...}` can drive a branch. A condition is true when it expands to something that is neither empty nor `0`.
+
+```tmux
+# A hidden variable. Later config lines can reference it as $THEME or ${THEME},
+# and format strings (including %if conditions) can read it as #{THEME}.
+%hidden THEME=dark
+%hidden ACCENT=cyan
+
+%if "#{==:#{THEME},dark}"
+  set -g status-style "bg=colour236,fg=colour250"
+  set -g pane-active-border-style "fg=$ACCENT"
+%elif "#{==:#{THEME},light}"
+  set -g status-style "bg=colour253,fg=black"
+  set -g pane-active-border-style "fg=blue"
+%else
+  set -g status-style "bg=green,fg=black"
+%endif
+
+# Conditions can read your own user options, and blocks nest
+set -g @work-machine yes
+
+%if "#{==:#{@work-machine},yes}"
+  set -g status-right "#{@work-machine} %H:%M"
+  %if "#{mouse}"
+    set -g pwsh-mouse-selection on
+  %endif
+%endif
+```
+
+The directives:
+
+| Directive | Effect |
+|---|---|
+| `%if <condition>` | Open a block. Lines inside it run only when the condition is true |
+| `%elif <condition>` | Try another condition, but only if no earlier branch in this block matched |
+| `%else` | Run when no earlier branch matched |
+| `%endif` | Close the innermost block |
+| `%hidden NAME=value` | Define `NAME` for the rest of the config, and for panes spawned from this session |
+
+Notes:
+
+- Blocks nest. An inner `%if` inside a branch that was skipped is skipped as a whole, so you never get a partly applied inner block.
+- The condition may be quoted with single or double quotes; the quotes are stripped before it is expanded.
+- Only the first matching branch runs. Once one has, later `%elif` and `%else` branches are skipped.
+- `%hidden` assignments inside a skipped branch are not applied.
+- The two ways to read a `%hidden` variable are not interchangeable. `$NAME` and `${NAME}` are substituted only on ordinary config lines, so they do **not** work inside a `%if` condition. Use the format form `#{NAME}` there, which resolves through the same session environment.
+- `%hidden` writes into the session environment, so the name is also visible to `show-environment` and is inherited by new panes. It is not a private compile-time constant.
+
+## Accepted but Not Functional
+
+These options parse cleanly, survive `show-options`, and do absolutely nothing. They exist so that an
+imported `.tmux.conf` loads without errors. They are listed here so you do not spend time debugging a
+setting that was never wired up.
+
+| Option | Status |
+|---|---|
+| `terminal-overrides` | An explicit no-op. The config file path parses it and throws the value away; the runtime `set-option` path keeps it in the user options map. Neither is ever read, because terminfo overrides have no meaning on Windows, where psmux talks to ConPTY rather than to a terminfo database. Use `default-terminal` to control the `TERM` value panes see |
+| `lock-after-time` | Accepted and stored. Session locking is not implemented, so the timer never runs. `lock-client`, `lock-server` and `lock-session` exist as commands but nothing locks on a timer |
+| `lock-command` | Accepted and stored. Never read, for the same reason |
+| `popup-style` | Accepted and stored. Popup borders are styled by `popup-border-style`; the popup body itself is not styled yet |
+| `clock-mode-style` | Accepted and stored. Use `clock-mode-colour`, which is read |
+
+Setting any of these produces no warning, because the values are stored verbatim in the user options
+map instead of being validated against a known option. For most of them `show-options` will read the
+value back to you unchanged, and that is the trap: a value that round-trips is not evidence that it
+took effect.
 
 ## Environment Variables
 
+Most of psmux is configured with options, not environment variables. The variables below exist either
+because the setting has to be known before a config file is read, or because it is a per shell escape
+hatch you want for one invocation rather than forever.
+
+### Startup and session selection
+
+| Variable | Effect |
+|---|---|
+| `PSMUX_CONFIG_FILE` | Replaces the config file search entirely. Set for you by `psmux -f <file>`. A leading `~` is expanded |
+| `PSMUX_DEFAULT_SESSION` | Session name used when nothing else determines one |
+| `PSMUX_SESSION_NAME` | Target session for a bare `psmux` or a control mode invocation. psmux also sets this itself when it spawns |
+| `PSMUX_TARGET_SESSION` | Session that CLI commands address when you give no `-t`. Exported into panes, which is how a command run inside a pane knows where it is |
+| `PSMUX_TARGET_FULL` | The full `session:window.pane` target string for CLI commands. Set by the global `-t` parse |
+| `PSMUX_ALLOW_NESTING` | Set to `1` to permit running psmux inside a psmux pane. Without it the nesting guard refuses, because a nested client would fight the outer one for the console |
+| `PSMUX_REMOTE_ATTACH` | Marks the invocation as a remote attach, which skips the bare invocation session bootstrap |
+| `PSMUX_ACTIVE` | Set to `1` on a client process to mark that it owns the console. This is what the nesting guard reads |
+| `PSMUX_SWITCH_TO` | Handshake variable carrying the session name across a `switch-client` |
+| `PSMUX_NO_WARM` | Set to `1` to disable warm pane and warm server pre-spawning. Equivalent to `set -g warm off`. See [warm-sessions.md](warm-sessions.md) |
+
+### Appearance and rendering
+
+| Variable | Effect |
+|---|---|
+| `PSMUX_CURSOR_STYLE` | Cursor shape: `bar`, `block`, `underline`, or `default`. Normally set for you by `set -g cursor-style` |
+| `PSMUX_CURSOR_BLINK` | Cursor blink. `0` disables it. Normally set for you by `set -g cursor-blink` |
+| `PSMUX_DIM_PREDICTIONS` | Dim PSReadLine prediction text for this shell only. The option form is `prediction-dimming` |
+| `PSMUX_HOST_COLORS` | Supplies the host terminal's palette so psmux can answer OSC 4, 10 and 11 colour queries. psmux normally queries the host itself; set this when the host misreports or when the query cannot run |
+
+### Windows and transport escape hatches
+
+| Variable | Effect |
+|---|---|
+| `PSMUX_NO_PASSTHROUGH` | Set to `1` to disable the experimental ConPTY passthrough flag on Windows build 22621 and newer. Use this if pane creation fails with `ERROR_INVALID_PARAMETER` |
+| `PSMUX_PIPE_VT` | Forces pipe mode VT handling for Cygwin and MSYS style PTYs. `1` forces it on, `0` forces it off. Left unset, psmux detects the pipe itself |
+| `PSMUX_BARE_ENV` | Spawn panes with a bare environment instead of inheriting yours. Useful when a broken inherited variable stops shells from starting |
+
+### Set inside panes by psmux
+
+These are exported into every pane, so scripts can detect that they are running under psmux and where:
+
+| Variable | Effect |
+|---|---|
+| `TMUX` | Socket path and server info, for tmux compatibility. This is what most tools check |
+| `TMUX_PANE` | Current pane id (`%0`, `%1`, and so on) |
+| `PSMUX_SESSION` | Current session name |
+
+Setting a variable for one shell, or for good:
+
 ```powershell
-# Default session name used when not explicitly provided
-$env:PSMUX_DEFAULT_SESSION = "work"
-
-# Enable prediction dimming (off by default; dims predictive/speculative text)
-$env:PSMUX_DIM_PREDICTIONS = "1"
-
-# Disable warm pane pre-spawning (same as set -g warm off)
+# This shell only
 $env:PSMUX_NO_WARM = "1"
+psmux
 
-# Override the config file path (same effect as -f flag)
-$env:PSMUX_CONFIG_FILE = "C:\Users\me\.psmux-alt.conf"
-
-# These are set INSIDE psmux panes (tmux-compatible):
-# TMUX       - socket path and server info
-# TMUX_PANE  - current pane ID (%0, %1, etc.)
+# Every future shell
+setx PSMUX_NO_WARM 1
 ```
+
+> **Note:** psmux also has a set of `PSMUX_*_DEBUG` logging variables. They are documented in
+> [diagnostics.md](diagnostics.md) rather than here, because they are for reporting a problem rather
+> than for configuring psmux.
 
 ## Managing Environment Variables
 

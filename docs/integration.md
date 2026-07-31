@@ -309,6 +309,20 @@ In addition to the 83 standard tmux commands, psmux provides extra commands usef
 | `claim-session` | Claim a warm (pre-spawned) session for instant startup |
 | `set-pane-title <title>` | Set pane title directly |
 | `toggle-sync` | Toggle synchronized input for all panes in a window |
+| `zoom-pane` | Toggle zoom on the active pane |
+| `new-pane` (`newp`) | Create a floating pane above the tiled layout. With `-P` it prints the new pane id |
+
+`new-pane` is also a CLI command, so a tool can create an overlay pane and get its id back in one
+call:
+
+```powershell
+psmux new-pane -d -P -X 10 -Y 5 -x 60 -y 20 -T "agent log"
+# %4
+```
+
+A floating pane is not part of the window's layout tree, so it does not appear in `list-panes`
+output and `select-layout` leaves it alone. See
+[scripting.md, "new-pane (floating panes)"](scripting.md#new-pane-floating-panes).
 
 ### Text-input route signal (`#{pane_last_text_input}`)
 
@@ -324,12 +338,12 @@ It is a **route** signal, not human-presence detection. The contract:
 - **Interactive route** (`handle_key -> forward_key_to_active`) **updates** it.
 - **Injected route** (`send-keys` / `send-paste` / `send-text` ->
   `send_text_to_active`) does **not** update it. App output never does either,
-  so it distinguishes interactive text from injected text — something
+  so it distinguishes interactive text from injected text, something
   `capture-pane` can't.
 - **Key scope:** printable text counts; `Enter`, arrows/navigation, shortcuts
   and any `Ctrl`/`Alt` chord do not.
 - **Caveat:** a bot that injects *real key events* through the interactive
-  route (not via `send-keys`) will also update it — this measures the route,
+  route (not via `send-keys`) will also update it. This measures the route,
   not who's behind it.
 
 Useful when a tool drives a pane programmatically and wants to yield the moment
@@ -343,9 +357,9 @@ The sibling of `#{pane_last_text_input}` for **non-text** keys. Two read-only
 format variables describing the last key, other than printable text, that
 reached this pane via the interactive input route:
 
-- `#{pane_last_special_key}` -- its canonical bind-key name (`Escape`, `Enter`,
+- `#{pane_last_special_key}` is its canonical bind-key name (`Escape`, `Enter`,
   `Tab`, `Up`, `F9`, `C-c`, `M-a`, ...), empty until the first one.
-- `#{pane_last_special_key_ms}` -- milliseconds since it arrived, empty if none.
+- `#{pane_last_special_key_ms}` is milliseconds since it arrived, empty if none.
 
 ```powershell
 psmux display-message -t dev -p '#{pane_last_special_key} #{pane_last_special_key_ms}'
@@ -356,7 +370,7 @@ Same route contract as `#{pane_last_text_input}`:
 
 - **Interactive route** (`handle_key -> forward_key_to_active`) **updates** it.
 - **Injected route** (`send-keys` / `send-paste` / `send-text`) does **not**.
-- **Scope:** every key that is *not* printable text input -- `Escape`, `Enter`,
+- **Scope:** every key that is *not* printable text input: `Escape`, `Enter`,
   `Tab`, `Backspace`, arrows/navigation, function keys, and any `Ctrl`/`Alt`
   chord. Printable text goes to `#{pane_last_text_input}` instead; together the
   two partition all interactive keys. Names come from the same renderer
@@ -364,6 +378,73 @@ Same route contract as `#{pane_last_text_input}`:
 
 Consumers own all policy (e.g. "name is `Escape` and `_ms` < N"); psmux just
 exposes the last key + its age, kept on the pane (no file, freed with it).
+
+## Machine-Readable Format Variables
+
+These are the variables worth reaching for when a tool, rather than a human, is reading psmux
+state. Query them with `display-message -p` for one value, or with `-F` on a list command for one
+row per object. The full catalogue, including the human facing status bar variables, is in
+[scripting.md, "Format Variables"](scripting.md#format-variables).
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `#{session_id}` | `$0` | Stable session id, safe to key on across renames |
+| `#{window_id}` | `@1` | Stable window id |
+| `#{pane_id}` | `%3` | Stable pane id |
+| `#{session_name}` | `work` | Session name, may change under the tool's feet |
+| `#{session_created}` | `1785161678` | Session creation time as a unix timestamp |
+| `#{session_path}` | `C:\Projects\app` | Directory the session was created in |
+| `#{session_group}` | `backend` | Session group name, empty if ungrouped |
+| `#{window_layout}` | `a8fe,120x30,0,0,1` | tmux layout string with checksum. Capture it and hand it back to `select-layout` to restore geometry |
+| `#{window_flags}` | `*` | Rendered window flag string |
+| `#{pane_pid}` | `32944` | PID of the pane's shell, for process tree work |
+| `#{pane_tty}` | `/dev/pty1` | Pseudo terminal name |
+| `#{pane_current_command}` | `pwsh` | Foreground process name |
+| `#{pane_current_path}` | `C:\Projects\app` | Working directory, in native Windows form |
+| `#{pane_dead}` | `0` | `1` when the process exited and `remain-on-exit` kept the pane |
+| `#{pane_in_mode}` | `0` | `1` when the pane is in copy mode or another mode |
+| `#{pane_mode}` | `copy-mode` | Name of the current mode, empty when in none |
+| `#{pane_at_top}` / `#{pane_at_bottom}` / `#{pane_at_left}` / `#{pane_at_right}` | `1` | Whether the pane touches that window edge, for edge aware key routing |
+| `#{history_size}` | `240` | Lines currently held in the pane's scrollback |
+| `#{scroll_position}` | `0` | Lines scrolled back from the live bottom |
+| `#{cursor_x}` / `#{cursor_y}` | `60` / `0` | Cursor position in the active pane, zero based |
+| `#{selection_present}` | `1` | `1` when a copy mode selection exists |
+| `#{buffer_size}` / `#{buffer_name}` / `#{buffer_sample}` / `#{buffer_created}` | `12` / `config` | Paste buffer metadata |
+| `#{client_pid}` | `32944` | PID of the attached client |
+| `#{client_key_table}` | `root` | Key table the client is currently in |
+| `#{version}` | `3.3.7` | psmux version, for capability gating |
+| `#{pid}` / `#{server_pid}` | `19004` | PID of the psmux server |
+| `#{socket_path}` | `C:\Users\me/.psmux/default` | Server discovery path |
+| `#{host}` / `#{host_short}` / `#{user}` | `BOX` / `me` | Host and user identity |
+
+Any option name also resolves inside `#{...}`, which is usually cheaper and more reliable than
+parsing `show-options` output:
+
+```powershell
+psmux display-message -p "#{mouse}"            # on
+psmux display-message -p "#{history-limit}"    # 2000
+psmux display-message -p "#{@my-tool-state}"   # a bare @name is a user option
+```
+
+### Accepted but not yet meaningful
+
+About twenty five names exist for tmux format compatibility but always return a fixed
+placeholder. They will expand without error, which makes them a quiet source of wrong behaviour
+in a tool that keys on them. Do not build on these:
+
+`session_stack`, `window_bigger`, `window_offset_x`, `window_offset_y`, `window_stack_index`,
+`window_cell_width`, `window_cell_height`, `window_linked_sessions_list`, `pane_dead_signal`,
+`pane_dead_status`, `pane_dead_time`, `pane_start_path`, `pane_tabs`, `cursor_flag`,
+`scroll_region_upper`, `client_name`, `client_tty`, `client_control_mode`, `client_flags`,
+`client_termfeatures`, `client_utf8`, `client_cell_width`, `client_cell_height`,
+`client_written`, `client_discarded`, `alternate_saved_x`, `alternate_saved_y`, `origin_flag`,
+`insert_flag`, `keypad_cursor_flag`, `keypad_flag`, `wrap_flag`, `line`, `command`,
+`command_list_name`, `command_list_alias`, `command_list_usage`, `config_files`.
+
+Note in particular that `#{client_control_mode}` is always `0`, even for a `-CC` client, and
+`#{client_name}` is always `client0`, so neither can be used to tell clients apart. The
+per-variable values are tabulated in
+[scripting.md, "Accepted but not yet meaningful"](scripting.md#accepted-but-not-yet-meaningful).
 
 ## Named Paste Buffers
 
@@ -535,6 +616,34 @@ psmux supports the full tmux target syntax for the `-t` flag:
 | `mysession:2.1` | Pane 1 of window 2 in session "mysession" |
 | `.+1` | Next pane |
 | `.-1` | Previous pane |
+| `=mysession` | Session by name, exact match |
+
+Prefer the stable ids (`$N`, `@N`, `%N`) in a tool. Names and indices move when the user renames
+a window, reorders windows, or has `renumber-windows` on.
+
+psmux also has geometric pane tokens (`{top-right}`, `{bottom-left}` and friends), but they are
+resolved server side and only by `swap-pane`. A tool calling the CLI cannot use them: the front
+end parses a leading `{` in a `-t` value as a session name. See
+[scripting.md, "Positional pane targets"](scripting.md#positional-pane-targets).
+
+### Moving a Pane Between Sessions
+
+`join-pane` and `move-pane` accept a `-s` source in another session, including one on an
+independent server. The pane's real console stays put and its input and output are tunnelled over
+TCP, so a long running process survives the move:
+
+```powershell
+psmux new-session -d -s alpha
+psmux new-session -d -s beta
+psmux -t alpha join-pane -h -s 'beta:0.0'
+```
+
+### Session Groups
+
+`set -g session-group <name>` tags a session so a tool can treat several sessions as one logical
+unit. `#{session_group}`, `#{session_group_list}`, `#{session_group_size}`,
+`#{session_group_attached}` and `#{session_grouped}` report the grouping and work in any `-F`
+format.
 
 ## Hooks for Event-Driven Automation
 
@@ -542,7 +651,7 @@ Hooks let you react to session events without polling:
 
 ```powershell
 # Run a script when a new window is created
-psmux set-hook -g after-new-window "run-shell 'echo window created >> /tmp/events.log'"
+psmux set-hook -g after-new-window "run-shell 'echo window created >> events.log'"
 
 # Notify on session attach
 psmux set-hook -g client-attached "display-message 'Welcome back!'"
@@ -551,7 +660,34 @@ psmux set-hook -g client-attached "display-message 'Welcome back!'"
 psmux set-hook -g after-split-window "select-layout tiled"
 ```
 
-Available hooks: `after-new-session`, `after-new-window`, `after-split-window`, `client-attached`, `client-detached`, `after-select-window`, `after-select-pane`, `after-resize-pane`, `pane-died`, `alert-activity`, `alert-silence`, `alert-bell`, `after-kill-pane`.
+psmux fires 30 hook events. The canonical list, with what each one fires on, lives in
+[scripting.md, "Available Hook Events"](scripting.md#available-hook-events). It is maintained in
+one place so the two documents cannot drift.
+
+Three things matter when a tool installs hooks rather than a human:
+
+1. **Hook names are not validated.** `set-hook` stores any name it is given. A typo is accepted
+   silently, shows up in `show-hooks` like a real hook, and simply never fires. There is no
+   error to catch. After installing hooks, read `show-hooks` back and diff it against what you
+   intended.
+2. **Use `-a` / `-ga` to coexist with other tools.** The plain form replaces the whole handler
+   list for that event, which will silently uninstall another tool's handler. The append form
+   keeps both. Appends are deduplicated, so a tool that re-runs its own setup, or a user who
+   re-sources a config, cannot stack duplicate handlers.
+3. **Clean up with `-u` / `-gu`.** That removes every handler registered for the event, so
+   remove and reinstall rather than trying to remove one entry of several.
+
+```powershell
+psmux set-hook -ga after-new-window "run-shell 'my-tool notify window'"
+psmux show-hooks
+# after-new-window[0] -> select-layout tiled
+# after-new-window[1] -> run-shell 'my-tool notify window'
+```
+
+Many of these events also surface as control mode notifications (`%window-add`, `%window-close`,
+`%window-renamed`, `%session-window-changed`, `%window-pane-changed`, `%session-renamed`,
+`%session-changed`, `%client-detached`, `%layout-change`), so a `-C` / `-CC` client often does not
+need to install hooks at all. See [control-mode.md](control-mode.md).
 
 ## Synchronization with `wait-for`
 
@@ -589,6 +725,15 @@ if ($LASTEXITCODE -ne 0) {
 ### Empty Results from Format Queries on Windows
 
 If `list-sessions -F`, `list-windows -F`, or `list-panes -F` returns garbled or empty output, your process is decoding psmux's UTF-8 output with the wrong encoding. See the [encoding section](#windows-encoding-fix) above.
+
+### "unknown command" for a `command-alias`
+
+`set -g command-alias 'x=split-window -h'` is accepted and shows up in `show-options`, but the
+alias is only resolved by the server's command dispatcher, which is the path a key binding takes.
+`psmux x` fails with `psmux: unknown command: x`, and so does the same alias on a config line, in
+a hook, or over control mode. Do not build a tool's public surface on `command-alias`; call the
+underlying command instead. See
+[scripting.md, "User Defined Command Aliases"](scripting.md#user-defined-command-aliases).
 
 ### Control Mode Connection Issues
 

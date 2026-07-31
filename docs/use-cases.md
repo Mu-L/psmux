@@ -291,5 +291,3 @@ Windows Terminal draws windows. psmux runs a **server**. That difference is the 
 | [Warm Sessions](warm-sessions.md) | How psmux makes session and pane creation near instant |
 | [Mouse Over SSH](mouse-ssh.md) | Full mouse support on remote Windows servers |
 | [Plugins & Themes](plugins.md) | psmux-resurrect and psmux-continuum for save/restore across reboots |
-</content>
-</invoke>

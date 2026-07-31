@@ -24,7 +24,7 @@ Users should never need to interact with it directly.
 
 The warm server is **not** created when:
 
-- The current session has `destroy-unattached on` — keeping a hidden warm server alive would break the expectation that sessions die when you detach
+- The current session has `destroy-unattached on`, and keeping a hidden warm server alive would break the expectation that sessions die when you detach
 - The current session **is** the warm session (no recursive warm spawning)
 - Warm panes are explicitly disabled (see below)
 

@@ -4,6 +4,13 @@ Default prefix: `Ctrl+b` (same as tmux). Change with `set -g prefix C-a`.
 
 Supported prefix keys include `C-a` through `C-z`, `C-Space`, and any printable character.
 
+Changing the prefix with `set -g prefix <key>` also auto binds the new key to `send-prefix`, so
+pressing the prefix twice always forwards one literal prefix byte to the active pane. That is how a
+shell like bash or nushell still sees `Ctrl+a` as "go to start of line" when `C-a` is your prefix.
+
+A second prefix is available with `set -g prefix2 <key>`. Both keys are checked on every keystroke,
+so either one arms the prefix table.
+
 ## Case Sensitivity
 
 Key bindings are **case-sensitive**, matching tmux behavior:
@@ -13,7 +20,61 @@ Key bindings are **case-sensitive**, matching tmux behavior:
 
 This is essential for plugins like PPM (`Prefix+I`/`Prefix+U`) and psmux-sensible (`Prefix+R`).
 
+## Key Tables
+
+A key table is a named set of bindings. psmux consults these tables:
+
+| Table | How keys reach it | Default contents |
+|-----|--------|--------|
+| `root` | Every keystroke, before the prefix is armed. Bind with `bind-key -n <key>` or `bind-key -T root <key>` | **Empty.** psmux binds nothing here by default |
+| `prefix` | Keystrokes that follow the prefix key. Bind with plain `bind-key <key>` | The full default set listed below |
+| `copy-mode` | Keystrokes while copy mode is active and `mode-keys` is `emacs` | Empty. Bind with `bind-key -T copy-mode <key>` |
+| `copy-mode-vi` | Keystrokes while copy mode is active and `mode-keys` is `vi` (the default) | Empty. Bind with `bind-key -T copy-mode-vi <key>` |
+| any custom table | Only after `switch-client -T <table>`, and only for the very next keystroke | Whatever you bind into it |
+
+The `copy-mode` and `copy-mode-vi` tables are empty by default because the built in copy mode keymap
+is hardcoded. Your bindings in those tables are checked **first**, so binding a key there overrides
+the built in behavior for that key; every key you do not bind falls through to the built in map.
+
+`switch-client -T <table>` installs a one-shot table. The next key is looked up there, and the table
+is discarded whether or not the key matched. This is how multi key chords are built.
+
+Run `list-keys` (or `Prefix + ?`) to print every binding currently in effect.
+
+### The root table is empty on purpose
+
+Nothing is bound without a prefix by default. In particular a bare `PageUp` is **not** a copy mode
+key: it is forwarded untouched so pagers, editors and full screen apps see it. This matches tmux,
+where `PPage` is bound only in the prefix table.
+
+To get the old psmux behavior back, bind it yourself:
+
+```tmux
+bind-key -n PageUp copy-mode -u
+```
+
+One caveat with that recipe. The `scroll-enter-copy-mode` option suppresses any **root** binding
+whose command starts with `copy-mode` and contains `-u`. With `set -g scroll-enter-copy-mode off`
+the binding above stops firing and the key is forwarded to the pane instead. The prefix binding
+`Prefix + PageUp` is unaffected by that option.
+
+### Overlay keys never reach a key table
+
+Overlay UI keys are handled client side and **earlier than any key table**. While a chooser, menu,
+confirmation prompt, customize view, keys viewer or the command prompt is open, the overlay consumes
+the keystroke. A key you bound with `bind-key` or `bind-key -n` will not fire, and the key is not
+forwarded to the pane either. Close the overlay first. The per overlay keymaps are listed below.
+
 ## Prefix Keys
+
+### Sending the Prefix
+
+| Key | Action |
+|-----|--------|
+| `Prefix + Ctrl+b` | Send one literal prefix byte to the pane (`send-prefix`) |
+
+Because the prefix key is `Ctrl+b` by default, this is simply "press the prefix twice". If you
+rebind the prefix, the new key is bound to `send-prefix` for you.
 
 ### Window Management
 
@@ -28,6 +89,13 @@ This is essential for plugins like PPM (`Prefix+I`/`Prefix+U`) and psmux-sensibl
 | `Prefix + ,` | Rename current window |
 | `Prefix + '` | Prompt for window index (jump to any window) |
 | `Prefix + 0-9` | Select window by number |
+
+**Gotcha: `select-window-index` is not a real command.** `Prefix + '` is bound to
+`select-window-index`, which looks like a command but is a client only pseudo command. It exists
+solely so the client can open the window index prompt. It is not accepted by any command dispatcher,
+so `psmux select-window-index` fails with "unknown command", and it cannot be used from a config
+line, from a hook, or from `run-shell`. Rebinding another key to it does work, because key bindings
+go through the client.
 
 ### Pane Splitting
 
@@ -79,7 +147,7 @@ This is essential for plugins like PPM (`Prefix+I`/`Prefix+U`) and psmux-sensibl
 |-----|--------|
 | `Prefix + d` | Detach from session |
 | `Prefix + $` | Rename session |
-| `Prefix + s` | Session chooser/switcher (`choose-tree -s`) |
+| `Prefix + s` | Session chooser/switcher (`choose-session`) |
 | `Prefix + (` | Switch to previous session |
 | `Prefix + )` | Switch to next session |
 
@@ -88,8 +156,15 @@ This is essential for plugins like PPM (`Prefix+I`/`Prefix+U`) and psmux-sensibl
 | Key | Action |
 |-----|--------|
 | `Prefix + [` | Enter copy/scroll mode |
+| `Prefix + PageUp` | Enter copy mode scrolled up one page (`copy-mode -u`) |
 | `Prefix + ]` | Paste from buffer |
-| `Prefix + =` | Interactive buffer chooser |
+| `Prefix + =` | Interactive buffer chooser (`choose-buffer`) |
+| `Prefix + #` | List paste buffers (`list-buffers`) |
+| `Prefix + v` | Toggle rectangle selection in copy mode (`rectangle-toggle`) |
+| `Prefix + y` | Copy the current selection (`copy-yank`) |
+
+`Prefix + v` and `Prefix + y` mirror the copy mode keys of the same name, so the muscle memory works
+whether or not you have entered copy mode through the prefix table.
 
 ### Miscellaneous
 
@@ -99,15 +174,19 @@ This is essential for plugins like PPM (`Prefix+I`/`Prefix+U`) and psmux-sensibl
 | `Prefix + ?` | List keybindings (help overlay) |
 | `Prefix + i` | Display window/pane info |
 | `Prefix + t` | Clock mode |
-| `Prefix + !` | Break pane out to new window |
 
 ### Repeat Bindings
 
 Navigation and resize bindings support **repeat mode**: after pressing the prefix key once, successive keypresses within the `repeat-time` window (default 500ms) trigger the action without needing to re-enter the prefix. This applies to arrow-based pane navigation and resize bindings by default.
 
-## Picker Navigation (choose-session, choose-tree, choose-buffer, list-keys, customize)
+## Overlay Keys
 
-Once a picker is open (`Prefix + s`, `Prefix + w`, `Prefix + =`, `Prefix + ?`, or `customize-mode`), the following keys move the selection. This matches tmux's `mode-tree` behavior, so muscle memory carries over.
+Each overlay owns its own keymap. Remember that these keys are consumed before any key table.
+
+### Chooser Navigation (choose-tree, choose-session)
+
+Open with `Prefix + w` (tree) or `Prefix + s` (sessions). This matches tmux's `mode-tree` behavior,
+so muscle memory carries over.
 
 | Key | Action |
 |-----|--------|
@@ -115,25 +194,136 @@ Once a picker is open (`Prefix + s`, `Prefix + w`, `Prefix + =`, `Prefix + ?`, o
 | `Down` / `j` / `l` | Move selection down |
 | `g` / `Home` | Jump to first entry |
 | `G` / `End` | Jump to last entry |
-| `PageUp` / `PageDown` | Page up / down |
-| `1`..`9`, `0` | Append digit to jump buffer (Enter consumes it) |
+| `PageUp` / `PageDown` | Move selection by 10 rows |
+| `1`..`9`, `0` | Append digit to the jump buffer (Enter consumes it) |
 | `Backspace` | Edit the jump buffer |
 | `Enter` | Switch to the selected entry (or to the jump buffer index if non-empty) |
 | `f` | Enter session-name filter mode (choose-session only) |
-| `p` | Toggle live preview (choose-session / choose-tree only) |
-| `x` | Kill selected session (choose-session only) |
-| `d` / `Delete` | Delete selected buffer (choose-buffer only) |
-| `Esc` | Clear an active session filter; otherwise close the picker |
+| `p` | Toggle live preview |
+| `x` | Kill the highlighted entry (session in choose-session, window in choose-tree) |
+| `Esc` | Clear an active session filter; otherwise close the chooser |
 
-In the session picker, filter mode matches session names case-insensitively as
-you type. `Backspace` edits the filter. Press `Esc` after entering text to clear
-the filter and show every session; with no filter text, `Esc` closes the picker.
+In the session picker, `f` starts filter mode, which matches session names
+case-insensitively as you type. `Backspace` edits the filter. `Esc` with filter
+text entered clears the filter and shows every session again; `Esc` with no
+filter text closes the picker.
+
+`q` does **not** close these two choosers. Every printable key other than the ones above is
+swallowed so it cannot leak into the focused pane, and `q` falls into that group. Use `Esc`.
+
+### Buffer Chooser (choose-buffer)
+
+Open with `Prefix + =`.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `k` / `h` | Move selection up |
+| `Down` / `j` / `l` | Move selection down |
+| `g` / `Home` | Jump to first buffer |
+| `G` / `End` | Jump to last buffer |
+| `PageUp` / `PageDown` | Move selection by 10 rows |
+| `1`..`9`, `0` | Append digit to the jump buffer |
+| `Backspace` | Edit the jump buffer |
+| `Enter` | Paste the selected buffer (or the jump buffer index if non-empty) |
+| `d` / `Delete` | Delete the selected buffer and stay open |
+| `Esc` / `q` | Close the chooser |
+
+### Keys Viewer (list-keys)
+
+Open with `Prefix + ?`. This overlay scrolls a rendered list, it has no selection.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `k` / `h` | Scroll up one line |
+| `Down` / `j` / `l` | Scroll down one line |
+| `PageUp` / `PageDown` | Scroll by 20 lines |
+| `g` / `Home` | Jump to the top |
+| `G` / `End` | Jump to the bottom |
+| `Esc` / `q` | Close the viewer |
+
+### Customize Mode (customize-mode)
+
+An interactive options editor. Navigation keys apply while browsing; a separate set applies once you
+press `Enter` on an option and start editing its value.
+
+Browsing:
+
+| Key | Action |
+|-----|--------|
+| `Up` / `k` / `h` | Move selection up |
+| `Down` / `j` / `l` | Move selection down |
+| `PageUp` / `PageDown` | Move selection by 20 rows |
+| `g` / `Home` | Jump to the first option |
+| `G` / `End` | Jump to the last option |
+| `1`..`9`, `0` | Append digit to the jump buffer |
+| `Backspace` | Edit the jump buffer |
+| `Enter` | Edit the highlighted option, or jump to the jump buffer index if non-empty |
+| `d` | Reset the highlighted option to its built in default |
+| `/` | Clear the active option filter |
+| `Esc` / `q` | Close the editor |
+
+Editing a value:
+
+| Key | Action |
+|-----|--------|
+| Any character | Insert at the cursor |
+| `Backspace` | Delete the character before the cursor |
+| `Enter` | Confirm the new value |
+| `Esc` | Cancel and keep the old value |
+
+Note on `/`: it only clears a filter that is already set. There is no way to type a new filter from
+inside the overlay, so `/` on an unfiltered list does nothing.
+
+### Menu Overlay (display-menu)
+
+| Key | Action |
+|-----|--------|
+| `Up` / `k` | Move selection up |
+| `Down` / `j` | Move selection down |
+| `Enter` | Run the highlighted item |
+| Any other character | Run the item whose mnemonic key is that character |
+| `Esc` / `q` | Close the menu |
+
+Digits are mnemonics, not positions. A digit runs the item whose shortcut key is that digit, and
+does nothing if no item claims it. `q` closes the menu even if an item uses `q` as its mnemonic.
+
+### Confirmation Prompt (confirm-before)
+
+| Key | Action |
+|-----|--------|
+| `y` / `Y` | Confirm and run the command |
+| `n` / `N` / `Esc` | Cancel |
+
+Every other key is ignored, so the prompt cannot be dismissed by accident.
+
+### Text Popup Viewer
+
+Shown by commands that display text in a popup, for example `show-messages`. A `display-popup`
+running a real program is a PTY popup instead, and forwards keys to that program rather than using
+this map.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `k` | Scroll up one line |
+| `Down` / `j` | Scroll down one line |
+| `PageUp` / `PageDown` | Scroll by 10 lines |
+| `g` / `Home` | Jump to the top |
+| `G` / `End` | Jump to the bottom |
+| `Esc` / `q` | Close the popup |
+
+### Display Panes Overlay
+
+Shown by `Prefix + q`.
+
+| Key | Action |
+|-----|--------|
+| `0`..`9` | Select the pane with that number |
+| Any other key | Dismiss the overlay |
 
 ## Command Prompt
 
-Press `Prefix + :` to open the command prompt at the bottom of the screen. You can type any psmux/tmux command here.
-
-### Command Prompt Editing Keys
+Press `Prefix + :` to open the command prompt at the bottom of the screen. You can type any
+psmux/tmux command here.
 
 | Key | Action |
 |-----|--------|
@@ -142,12 +332,16 @@ Press `Prefix + :` to open the command prompt at the bottom of the screen. You c
 | `End` / `Ctrl+E` | Jump to end of line |
 | `Backspace` | Delete character before cursor |
 | `Delete` | Delete character at cursor |
-| `Up` / `Down` | Browse command history (previous/next) |
+| `Ctrl+U` | Kill line (clear to start) |
+| `Ctrl+K` | Kill to end of line |
+| `Ctrl+W` | Delete word backward |
+| `Up` / `Down` | Browse command history (older/newer) |
 | `Tab` | Command name completion |
-| `Enter` | Execute the command |
+| `Enter` | Execute the command (saved to history) |
 | `Escape` | Cancel and close the prompt |
 
-The command prompt remembers your history across the session. Use Up/Down arrows to recall previous commands.
+The command prompt remembers your history across the session. Use Up/Down arrows to recall previous
+commands. Inspect it with `show-prompt-history` and wipe it with `clear-prompt-history`.
 
 You can run any command from the prompt that you would run from the CLI. For example:
 
@@ -159,9 +353,12 @@ You can run any command from the prompt that you would run from the CLI. For exa
 
 ## Copy/Scroll Mode (Vi)
 
-Enter copy mode with `Prefix + [` to scroll through terminal history with vim-style keybindings.
+Enter copy mode with `Prefix + [`, or with `Prefix + PageUp` to start one page up.
 
 Mouse scroll wheel also enters copy mode by default. To disable this, set `scroll-enter-copy-mode off` in your config.
+
+The keys below are the built in copy mode map. Anything you bind with
+`bind-key -T copy-mode-vi <key>` is checked first and wins for that key.
 
 ### Cursor Movement
 
@@ -171,6 +368,8 @@ Mouse scroll wheel also enters copy mode by default. To disable this, set `scrol
 | `j` / `Down` | Move cursor down |
 | `k` / `Up` | Move cursor up |
 | `l` / `Right` | Move cursor right |
+| `Ctrl+a` | Start of line (emacs style, works in vi mode too) |
+| `Ctrl+e` | End of line (emacs style, works in vi mode too) |
 
 ### Word Motions
 
@@ -178,6 +377,7 @@ Mouse scroll wheel also enters copy mode by default. To disable this, set `scrol
 |-----|--------|
 | `w` / `b` / `e` | Next word / prev word / end of word |
 | `W` / `B` / `E` | WORD variants (whitespace-delimited) |
+| `Alt+f` / `Alt+b` | Word forward / backward (emacs style, works in vi mode too) |
 
 ### Line Motions
 
@@ -194,8 +394,15 @@ Mouse scroll wheel also enters copy mode by default. To disable this, set `scrol
 | `Ctrl+u` / `Ctrl+d` | Half page up / down |
 | `Ctrl+b` / `PageUp` | Full page up |
 | `Ctrl+f` / `PageDown` | Full page down |
+| `Ctrl+p` / `Ctrl+n` | Scroll up / down one line |
 | `g` | Top of scrollback |
 | `G` | Bottom (live output) |
+| `z` | Centre the cursor line in the pane (scroll-middle) |
+| `r` | Toggle following live output (see below) |
+
+`r` is a psmux extension with no tmux equivalent. Copy mode normally anchors the view so new output
+cannot shift the text under your cursor. `r` releases that anchor, so the pane follows live output
+again and jumps to the bottom of the history. Press `r` again to re-anchor.
 
 ### Screen Position
 
@@ -211,6 +418,17 @@ Mouse scroll wheel also enters copy mode by default. To disable this, set `scrol
 |-----|--------|
 | `f{char}` / `F{char}` | Find char forward / backward |
 | `t{char}` / `T{char}` | Till char forward / backward |
+| `;` | Repeat the last find in the same direction |
+| `,` | Repeat the last find in the opposite direction |
+
+### Marks
+
+| Key | Action |
+|-----|--------|
+| `X` | Set the mark at the cursor |
+| `Alt+x` | Exchange the cursor and the mark |
+
+`Alt+x` swaps rather than jumps, matching tmux. Pressing it twice returns you to where you started.
 
 ### Bracket / Paragraph
 
@@ -224,19 +442,31 @@ Mouse scroll wheel also enters copy mode by default. To disable this, set `scrol
 
 | Key | Action |
 |-----|--------|
-| `Space` | Begin character selection |
-| `v` | Toggle rectangle selection |
-| `V` | Line selection |
-| `Ctrl+v` | Toggle rectangle selection |
+| `Space` | Begin character selection at the cursor |
+| `V` | Begin line selection at the cursor |
+| `Ctrl+Space` | Set the selection anchor at the cursor |
+| `v` | Toggle rectangle mode on the selection (does not start one) |
+| `Ctrl+v` | Force rectangle mode on the selection |
 | `o` | Swap cursor/anchor ends |
+
+**psmux follows tmux here, not vi.** In vi, `v` starts a character selection. In tmux and in psmux,
+`v` is `rectangle-toggle`: it flips the selection between character mode and block mode and does not
+set an anchor, so pressing `v` on its own selects nothing. Use `Space` (or `Ctrl+Space`) to start a
+selection and `V` to start a line selection. `Ctrl+v` differs from `v` in that it always switches to
+rectangle mode rather than toggling out of it. If you want vi muscle memory, rebind it:
+
+```tmux
+bind-key -T copy-mode-vi v send-keys -X begin-selection
+```
 
 ### Yank (Copy)
 
 | Key | Action |
 |-----|--------|
 | `y` / `Enter` | Copy selection and exit |
-| `D` | Copy to end of line and exit |
-| `A` | Append selection to buffer |
+| `Alt+w` | Copy selection and exit (emacs style, works in vi mode too) |
+| `D` | Copy from the cursor to end of line and exit |
+| `A` | Append selection to the buffer and exit |
 
 ### Search
 
@@ -244,69 +474,57 @@ Mouse scroll wheel also enters copy mode by default. To disable this, set `scrol
 |-----|--------|
 | `/` | Search forward |
 | `?` | Search backward |
+| `Ctrl+s` / `Ctrl+r` | Search forward / backward (emacs style, works in vi mode too) |
 | `n` / `N` | Next / previous match |
 
 ### Text Objects & Registers
 
 | Key | Action |
 |-----|--------|
-| `"a`–`"z` | Named registers (set register for next yank) |
+| `"a` to `"z` | Named registers (set register for next yank) |
 | `aw` / `iw` | Select a word / inner word |
 | `aW` / `iW` | Select a WORD / inner WORD |
-| `1`–`9` | Numeric prefix for motions (up to 9999) |
+| `1` to `9` | Numeric prefix for motions (up to 9999) |
 
 ### Exit
 
 | Key | Action |
 |-----|--------|
-| `Esc` / `q` | Exit copy mode |
+| `Esc` / `q` / `]` | Exit copy mode |
 | `Ctrl+C` / `Ctrl+G` | Exit copy mode |
 
-### Copy Mode Search Input
+### Copy Mode Search Prompt
+
+Opened by `/`, `?`, `Ctrl+s` or `Ctrl+r`. While it is open the copy mode keys are inactive.
 
 | Key | Action |
 |-----|--------|
-| `Esc` | Cancel search |
-| `Enter` | Accept search / jump to match |
-| `Backspace` | Delete character |
-| Any char | Append to search pattern |
+| Any character | Append to the search pattern |
+| `Backspace` | Delete the last character |
+| `Enter` | Accept the search and jump to the match |
+| `Esc` | Cancel the search |
 
 ### Emacs Copy Mode
 
-When `set mode-keys emacs`, additional bindings are available:
+`set -g mode-keys emacs` does not add a separate keymap. Most emacs style keys listed above are
+always active, in vi mode too. What `mode-keys emacs` changes is the meaning of three keys that vi
+mode uses for scrolling:
 
-| Key | Action |
-|-----|--------|
-| `Ctrl+N` / `Ctrl+P` | Scroll down / up 1 line |
-| `Ctrl+A` / `Ctrl+E` | Line start / end |
-| `Ctrl+V` | Page down |
-| `Alt+V` | Page up |
-| `Alt+F` / `Alt+B` | Word forward / backward |
-| `Alt+W` | Yank and exit |
-| `Ctrl+S` / `Ctrl+R` | Search forward / backward |
+| Key | With `mode-keys vi` (default) | With `mode-keys emacs` |
+|-----|--------|--------|
+| `Ctrl+b` | Page up | Move cursor left |
+| `Ctrl+f` | Page down | Move cursor right |
+| `Ctrl+v` | Force rectangle selection | Page down |
+
+These keys behave the same under both settings: `Ctrl+n` / `Ctrl+p` scroll one line, `Ctrl+a` /
+`Ctrl+e` go to line start / end, `Alt+f` / `Alt+b` move by word, `Alt+v` pages up, `Alt+w` copies
+and exits, `Ctrl+s` / `Ctrl+r` search forward / backward.
 
 When in copy mode:
 - The pane border turns **yellow**
 - `[copy mode]` appears in the title
 - A scroll position indicator shows in the top-right corner
 - Mouse drag-select copies to Windows clipboard on release
-
-## Command Prompt
-
-Open with `Prefix + :`:
-
-| Key | Action |
-|-----|--------|
-| `Esc` | Cancel |
-| `Enter` | Execute command (saved to history) |
-| `Backspace` / `Delete` | Delete character |
-| `Left` / `Right` | Move cursor |
-| `Home` / `Ctrl+A` | Start of line |
-| `End` / `Ctrl+E` | End of line |
-| `Up` / `Down` | Cycle command history |
-| `Ctrl+U` | Kill line (clear to start) |
-| `Ctrl+K` | Kill to end of line |
-| `Ctrl+W` | Delete word backward |
 
 ## Mouse Bindings
 
@@ -318,7 +536,7 @@ When `mouse on` (default):
 | Left-click pane | Focus that pane |
 | Left-click/drag border | Resize split interactively |
 | Scroll up/down | Scroll pane (or enter copy mode at prompt) |
-| Mouse drag in copy mode | Select text → auto-copy on release |
+| Mouse drag in copy mode | Select text, auto-copy on release |
 | Right-click | Paste clipboard |
 
 ## Supported Key Names
@@ -337,6 +555,10 @@ Key names for `bind-key` and `send-keys`:
 | Shift+Enter | `S-Enter` (sends proper escape sequence) |
 | Shift+Tab | `BTab` (sends `ESC [ Z`) |
 
+Aliases are accepted for several of these: `Return` for `Enter`, `Esc` for `Escape`,
+`BSpace` for `Backspace`, `PPage` or `PgUp` for `PageUp`, `NPage` or `PgDn` for `PageDown`,
+`IC` for `Insert`, `DC` for `Delete`, `BackTab` for `BTab`.
+
 ## Custom Key Bindings
 
 ```tmux
@@ -347,6 +569,12 @@ bind-key v split-window -v
 # Bind in root table (no prefix needed)
 bind-key -n C-h select-pane -L
 
+# Restore the pre-issue-488 bare PageUp behavior
+bind-key -n PageUp copy-mode -u
+
+# Bind inside copy mode
+bind-key -T copy-mode-vi v send-keys -X begin-selection
+
 # Repeatable binding (stay in prefix mode)
 bind-key -r H resize-pane -L 5
 
@@ -356,6 +584,9 @@ unbind-key C-b
 # Unbind all
 unbind-key -a
 ```
+
+Default bindings are loaded into the `prefix` table like any other binding, so `unbind-key <key>`
+really does remove a default rather than being shadowed by it.
 
 ## Confirmation Prompts (confirm-before)
 

@@ -13,10 +13,10 @@ A: psmux offers session persistence (detach/reattach), synchronized input to mul
 A: Yes! psmux reads `~/.tmux.conf` automatically. Most tmux config options, key bindings, and style settings work as-is.
 
 **Q: Can I use tmux themes?**
-A: Yes. psmux supports 14 style options with 24-bit true color, 256 indexed colors, and text attributes (bold, italic, dim, etc.). Most tmux theme configs are compatible.
+A: Yes. psmux supports 20+ style options with 24-bit true color, 256 indexed colors, and text attributes (bold, italic, dim, etc.). Most tmux theme configs are compatible. See the Style Options table in [configuration.md](configuration.md) for the full set.
 
 **Q: Can I use tmux commands with psmux?**
-A: Yes! psmux includes a `tmux` alias. Commands like `tmux new-session`, `tmux attach`, `tmux ls`, `tmux split-window` all work. 83 commands in total.
+A: Yes! psmux includes a `tmux` alias. Commands like `tmux new-session`, `tmux attach`, `tmux ls`, `tmux split-window` all work. 90+ commands in total. Run `psmux list-commands` to see exactly what your build accepts.
 
 **Q: How fast is psmux?**
 A: Session creation takes < 100ms. New windows/panes add < 80ms overhead. The bottleneck is your shell's startup time, not psmux. Compiled with opt-level 3 and full LTO.
@@ -58,7 +58,7 @@ A: Yes, using the [psmux-resurrect](https://github.com/psmux/psmux-plugins/tree/
 A: Yes. The psmux session server persists even when your SSH connection drops. After reconnecting, run `psmux attach` to reattach to your sessions.
 
 **Q: How do I reload my config without restarting psmux?**
-A: Press `Prefix + :` to open the command prompt, then type `source-file ~/.psmux.conf`. You can also run `psmux source-file ~/.psmux.conf` from another terminal. This re-applies all options, key bindings, and styles immediately.
+A: Press `Prefix + :` to open the command prompt, then type `source-file ~/.psmux.conf`. You can also run `psmux source-file ~/.psmux.conf` from another terminal. Either way, all options, key bindings, and styles are re-applied immediately. To make it a one-key action, bind it: `bind-key R source-file ~/.psmux.conf \; display-message "Config reloaded"`. If a reloaded line seems to have been ignored, check `~/.psmux/config-warnings.log`, described in [diagnostics.md](diagnostics.md).
 
 **Q: How do I run commands from inside a psmux session?**
 A: Press `Prefix + :` to open the command prompt. Type any command (e.g. `split-window -h`, `new-window -n logs`, `set -g status-style "bg=blue"`). You can also run `list-commands` from the prompt to see all available commands.
@@ -111,9 +111,6 @@ A: Add to your config: `set -g prefix C-Space` followed by `unbind-key C-b` and 
 **Q: Why does `Prefix + I` not work for plugin install?**
 A: Make sure you are pressing `Shift+I` (uppercase). Key bindings are case-sensitive: `I` and `i` are distinct bindings.
 
-**Q: How do I reload my config without restarting?**
-A: Press `Prefix + :` and type `source-file ~/.psmux.conf`. This works from within a live session. Alternatively, bind it: `bind-key R source-file ~/.psmux.conf \; display-message "Config reloaded"`.
-
 **Q: Does psmux work with Neovim/Vim?**
 A: Yes. Ctrl+[, Shift+Tab, mouse events, and truecolor rendering all work correctly inside psmux panes. Set `set -g default-terminal "xterm-256color"` for best compatibility.
 
@@ -124,7 +121,10 @@ A: PowerShell 7 automatically sets the terminal title to the current working dir
 A: Yes, use the `-L` flag for server namespaces: `psmux -L work new-session -s dev`. Each namespace gets its own server, sessions, and discovery files.
 
 **Q: How many tmux commands does psmux support?**
-A: 83 tmux-compatible commands including session management, window/pane control, copy mode, display popups/menus, interactive choosers, hooks, environment variables, pipe-pane, wait-for synchronization, and more. See [tmux_args_reference.md](tmux_args_reference.md) for the full list.
+A: 90+ tmux-compatible commands, covering session management, window and pane control, copy mode, popups and menus, interactive choosers, hooks, environment variables, pipe-pane, wait-for synchronization, and more. Rather than trusting a number in a doc, run `psmux list-commands`, which prints exactly what your build accepts. See [tmux_args_reference.md](tmux_args_reference.md) for per-command flags.
+
+**Q: psmux is misbehaving. Where are the logs?**
+A: Under `%USERPROFILE%\.psmux\`. Three files are written without you doing anything: `server-startup.log` (why a server failed to start, including the real Windows error and the path it tried to spawn), `config-warnings.log` (config lines that were silently ignored), and `crash.log` (a panic plus backtrace). Eleven more detailed loggers can be switched on one environment variable at a time, for example `$env:PSMUX_INPUT_DEBUG = "1"`. See [diagnostics.md](diagnostics.md) for the full list and for what to attach to a bug report.
 
 ---
 

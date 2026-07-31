@@ -13,7 +13,7 @@
 
 <p align="center">
   <strong>The native Windows tmux. Born in PowerShell, made in Rust.</strong><br/>
-  Full mouse support · tmux themes · tmux config · 83 commands · blazing fast
+  Full mouse support · tmux themes · tmux config · 90+ commands · blazing fast
 </p>
 
 <p align="center">
@@ -118,17 +118,18 @@ See [docker/README.md](docker/README.md) for full details.
 
 ## Why psmux?
 
-If you've used tmux on Linux/macOS and wished you had something like it on Windows, **this is it**. Split panes, multiple windows, session persistence, full mouse support, tmux themes, 83 commands, 140+ format variables, 53 vim copy-mode keys. Your existing `.tmux.conf` works. Full details: **[docs/features.md](docs/features.md)** · **[docs/compatibility.md](docs/compatibility.md)**
+If you've used tmux on Linux/macOS and wished you had something like it on Windows, **this is it**. Split panes, multiple windows, session persistence, full mouse support, tmux themes, 90+ tmux-compatible commands (run `psmux list-commands` for the live list), 140+ format variables, 53 vim copy-mode keys. Your existing `.tmux.conf` works. Full details: **[docs/features.md](docs/features.md)** · **[docs/compatibility.md](docs/compatibility.md)**
 
 ## Usage
 
-Use `psmux`, `pmux`, or `tmux` — they're identical:
+Use `psmux`, `pmux`, or `tmux`. They're identical:
 
 ```powershell
 psmux                        # Start a new session
 psmux new-session -s work    # Named session
 psmux ls                     # List sessions
 psmux attach -t work         # Attach to a session
+psmux list-commands          # List every command psmux accepts
 psmux --help                 # Show help
 ```
 
@@ -138,7 +139,7 @@ psmux has first-class support for Claude Code agent teams. When Claude Code runs
 
 ```powershell
 psmux new-session -s work    # Start a psmux session
-claude                       # Run Claude Code — agent teams just work
+claude                       # Run Claude Code, agent teams just work
 ```
 
 No extra configuration needed. Full guide: **[docs/claude-code.md](docs/claude-code.md)**
@@ -147,15 +148,24 @@ No extra configuration needed. Full guide: **[docs/claude-code.md](docs/claude-c
 
 | Topic | Description |
 |-------|-------------|
-| **[Windows Use Cases](docs/use-cases.md)** | Practical Windows scenarios — startup services, AI agents, dashboards, remote admin |
-| **[Features](docs/features.md)** | Full feature list — mouse, copy mode, layouts, format engine |
+| **[Windows Use Cases](docs/use-cases.md)** | Practical Windows scenarios: startup services, AI agents, dashboards, remote admin |
+| **[Features](docs/features.md)** | Full feature list: mouse, copy mode, layouts, format engine |
 | **[Compatibility](docs/compatibility.md)** | tmux command/config compatibility matrix |
 | **[Performance](docs/performance.md)** | Benchmarks and optimization details |
 | **[Key Bindings](docs/keybindings.md)** | Default keys and customization |
-| **[Scripting](docs/scripting.md)** | 83 commands, hooks, targets, pipe-pane |
+| **[Scripting](docs/scripting.md)** | Commands, hooks, targets, pipe-pane |
+| **[Command Reference](docs/tmux_args_reference.md)** | Per-command flag tables |
 | **[Configuration](docs/configuration.md)** | Config files, options, environment variables |
-| **[Plugins & Themes](docs/plugins.md)** | Plugin ecosystem — Catppuccin, Dracula, Nord, and more |
+| **[Multi-Shell](docs/multi-shell.md)** | Running pwsh, cmd, Git Bash, WSL, and nushell side by side |
+| **[Pane Titles](docs/pane-titles.md)** | Pane titles, border labels, and why pwsh shows a path |
+| **[Chooser Preview](docs/preview.md)** | Live preview pane in choose-tree and choose-session |
+| **[Warm Sessions](docs/warm-sessions.md)** | The pre-spawned server behind instant session creation |
+| **[Diagnostics](docs/diagnostics.md)** | Debug logs, crash logs, state files, what to attach to a bug report |
+| **[Plugins & Themes](docs/plugins.md)** | Plugin ecosystem: Catppuccin, Dracula, Nord, and more |
 | **[Mouse Over SSH](docs/mouse-ssh.md)** | SSH mouse support and Windows version requirements |
+| **[Control Mode](docs/control-mode.md)** | The `-C` / `-CC` wire protocol for IDE and plugin authors |
+| **[iTerm2 Control Mode](docs/iterm2-control-mode.md)** | Driving psmux from the iTerm2 tmux gateway over SSH |
+| **[Developer Integration](docs/integration.md)** | Driving psmux from Python, Node.js, Go, Rust, and libtmux |
 | **[Claude Code](docs/claude-code.md)** | Agent teams integration guide |
 | **[FAQ](docs/faq.md)** | Common questions and answers |
 
@@ -168,7 +178,7 @@ No extra configuration needed. Full guide: **[docs/claude-code.md](docs/claude-c
         <img src="https://raw.githubusercontent.com/psmux/pstop/master/pstop-demo.gif" width="400" alt="pstop demo" /><br/>
         <b>pstop</b>
       </a><br/>
-      <sub>htop for Windows — real-time system monitor with per-core CPU bars, tree view, 7 color schemes</sub><br/>
+      <sub>htop for Windows: real-time system monitor with per-core CPU bars, tree view, 7 color schemes</sub><br/>
       <code>cargo install pstop</code>
     </td>
     <td align="center" width="50%">
@@ -176,7 +186,7 @@ No extra configuration needed. Full guide: **[docs/claude-code.md](docs/claude-c
         <img src="https://raw.githubusercontent.com/psmux/psnet/master/image.png" width="400" alt="psnet screenshot" /><br/>
         <b>psnet</b>
       </a><br/>
-      <sub>Real-time TUI network monitor — live speed graphs, connections, traffic log, packet sniffer</sub><br/>
+      <sub>Real-time TUI network monitor: live speed graphs, connections, traffic log, packet sniffer</sub><br/>
       <code>cargo install psnet</code>
     </td>
   </tr>
@@ -186,7 +196,7 @@ No extra configuration needed. Full guide: **[docs/claude-code.md](docs/claude-c
         <img src="https://raw.githubusercontent.com/psmux/Tmux-Plugin-Panel/master/screenshot.png" width="400" alt="Tmux Plugin Panel screenshot" /><br/>
         <b>Tmux Plugin Panel</b>
       </a><br/>
-      <sub>TUI plugin & theme manager for tmux and psmux — browse, install, update from your terminal</sub><br/>
+      <sub>TUI plugin & theme manager for tmux and psmux: browse, install, update from your terminal</sub><br/>
       <code>cargo install tmuxpanel</code>
     </td>
     <td align="center" width="50%">
@@ -194,7 +204,7 @@ No extra configuration needed. Full guide: **[docs/claude-code.md](docs/claude-c
         <img src="https://raw.githubusercontent.com/psmux/omp-manager/master/screenshot.png" width="400" alt="OMP Manager screenshot" /><br/>
         <b>OMP Manager</b>
       </a><br/>
-      <sub>Oh My Posh setup wizard — browse 100+ themes, install fonts, configure shells automatically</sub><br/>
+      <sub>Oh My Posh setup wizard: browse 100+ themes, install fonts, configure shells automatically</sub><br/>
       <code>cargo install omp-manager</code>
     </td>
   </tr>
@@ -206,7 +216,9 @@ MIT
 
 ## Contributing
 
-Contributions welcome — bug reports, PRs, docs, and test scripts via [GitHub Issues](https://github.com/psmux/psmux/issues).
+Contributions welcome: bug reports, PRs, docs, and test scripts via [GitHub Issues](https://github.com/psmux/psmux/issues).
+
+Filing a bug? See [docs/diagnostics.md](docs/diagnostics.md) for the logs and state files to attach.
 
 If psmux helps your Windows workflow, consider giving it a ⭐ on GitHub!
 

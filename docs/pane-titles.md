@@ -31,7 +31,9 @@ instead of:
 
 This is not a bug. It is the expected behavior: PowerShell tells the terminal "my title is this path" and psmux faithfully applies it. On Linux, bash and zsh do not send OSC title sequences by default, so tmux users on Linux almost always see the hostname in that position.
 
-**psmux's own default `status-right`** uses `"#H"` (the `#H` hostname shorthand) instead of `"#{=21:pane_title}"`, and **`allow-set-title` defaults to `off`**, so the default psmux experience avoids this issue entirely. You will only encounter this if you set `allow-set-title on` in your config, or if you use a tmux config or theme that enables it and references `#{pane_title}` or `#T` in the status bar.
+**The default psmux experience avoids this issue, but not because of the format string.** psmux's default `status-right` does reference `"#{=21:pane_title}"`, exactly as tmux's does. What protects you is that **`allow-set-title` defaults to `off`**, so PowerShell's OSC title sequence is ignored, `pane_title` keeps its fallback value of the machine hostname, and the status bar shows the hostname. You will only encounter the path in your status bar if you set `allow-set-title on` in your config, or if you use a tmux config or theme that enables it and references `#{pane_title}` or `#T` in the status bar.
+
+> **Note:** `show-options -g status-right` reports the live value, and resetting `status-right` from `customize-mode` restores exactly that same value.
 
 ## Options That Control This Behavior
 
@@ -173,9 +175,8 @@ Many tmux themes (Catppuccin, Dracula, Tokyo Night, etc.) use `#{pane_title}` in
 | Goal | Config |
 |------|--------|
 | Keep hostname in status bar (default) | `allow-set-title` is already `off` by default |
-| Let programs set titles dynamically | `set -g allow-set-title on` |
+| Let programs set titles dynamically (not the default) | `set -g allow-set-title on` |
 | Always show hostname (regardless of config) | Use `#H` instead of `#{pane_title}` |
 | Stop pwsh from setting title | Add `$PSStyle.WindowTitle = ''` to `$PROFILE` |
 | Lock a specific pane's title | `select-pane -T "my title"` |
 | Show CWD in pane borders (useful!) | `set -g pane-border-format " #{pane_index}: #{pane_title} "` |
-| Let programs set titles (default) | `set -g allow-set-title on` |

@@ -6,13 +6,13 @@ psmux is the most tmux-compatible terminal multiplexer on Windows.
 
 | Feature | Support |
 |---------|---------|
-| Commands | **83** tmux commands implemented |
+| Commands | **90+** tmux commands implemented. Run `psmux list-commands` for the live list |
 | Format variables | **140+** variables with full modifier support |
-| Config file | Reads `~/.tmux.conf` directly |
+| Config file | Reads `~/.tmux.conf` directly, including `%if` / `%elif` / `%else` / `%endif` conditionals |
 | Key bindings | `bind-key`/`unbind-key` with key tables, case-sensitive |
-| Hooks | 15+ event hooks (`after-new-window`, etc.) with `set-hook`/`show-hooks` |
+| Hooks | 30 event hooks (`after-new-window`, `pane-died`, `window-linked`, etc.) with `set-hook`/`show-hooks` |
 | Status bar | Full format engine with conditionals, loops, and multi-line support |
-| Themes | 14 style options, 24-bit color, text attributes |
+| Themes | 20+ style options, 24-bit color, text attributes |
 | Layouts | 5 layouts (even-h, even-v, main-h, main-v, tiled) |
 | Copy mode | 53 vim keybindings, search, registers, rectangle select |
 | Targets | `session:window.pane`, `session:window_name`, `%id`, `@id` syntax |
@@ -40,7 +40,7 @@ psmux is the most tmux-compatible terminal multiplexer on Windows.
 | Native Windows shells | ✅ | ✅ | ❌ |
 | Full mouse support | ✅ | ✅ | ⚠️ Partial |
 | Zero dependencies | ✅ | ✅ | ❌ (needs WSL) |
-| Scriptable (83 commands) | ✅ | ❌ | ✅ |
+| Scriptable (90+ commands) | ✅ | ❌ | ✅ |
 | Claude Code agent teams | ✅ | ❌ | ✅ |
 | CJK/IME text input | ✅ | ✅ | ✅ |
 | Warm session pre-spawn | ✅ | N/A | ❌ |
@@ -245,212 +245,27 @@ Named buffers are separate from the default (anonymous) buffer stack. They persi
 
 ## Developer Integration: Using psmux as a tmux Drop-in on Windows
 
-psmux implements the same CLI protocol as tmux. Any tool, library, or script that drives tmux via subprocess commands will work on psmux with minimal or zero changes. This section covers what developers need to know when integrating.
+psmux implements the same CLI protocol as tmux. Any tool, library, or script that drives tmux via
+subprocess commands will work on psmux with minimal or zero changes:
 
-### Same Protocol, Same Commands
+- The command syntax, flags, and output formats are the same, and psmux installs a `tmux.exe` alias
+  so scripts that call `tmux` by name find it on the PATH without any code change.
+- Stable IDs use the same scheme: `$N` for a session, `@N` for a window, `%N` for a pane. They are
+  monotonically increasing and never reused during a server's lifetime.
+- Control mode (`-C` / `-CC`) uses the same wire protocol, with `%begin`/`%end` framing and async
+  notifications.
+- libtmux works against psmux, with one Windows encoding caveat.
 
-psmux accepts the same command syntax as tmux:
+The one thing that is genuinely different on Windows is text encoding. psmux emits UTF-8, but the
+default Windows console code page is often cp1252, so a Python caller that does not pass
+`encoding="utf-8"` will garble non-ASCII output. Set `PYTHONUTF8=1` or pass the encoding explicitly.
+This is what causes libtmux to return empty session lists on Windows.
 
-```python
-# This code works identically with both tmux (Linux/macOS) and psmux (Windows)
-import subprocess
+The full developer guide lives in [integration.md](integration.md), which covers subprocess examples
+in Python, PowerShell, Node.js, Go, and Rust, libtmux setup and its encoding fix, the cross-platform
+project pattern, targeting syntax, psmux extension commands such as `dump-state`, environment
+variable propagation, hooks, `wait-for` synchronization, and troubleshooting. Start there rather than
+here for anything integration related.
 
-def run_mux(cmd):
-    binary = "tmux"  # psmux installs a tmux.exe alias
-    result = subprocess.run([binary] + cmd, capture_output=True, text=True)
-    return result.stdout.strip()
-
-# All of these work on both platforms
-run_mux(["new-session", "-d", "-s", "work"])
-run_mux(["list-sessions"])
-run_mux(["send-keys", "-t", "work", "echo hello", "Enter"])
-run_mux(["capture-pane", "-t", "work", "-p"])
-run_mux(["list-windows", "-F", "#{window_id}:#{window_name}"])
-run_mux(["kill-session", "-t", "work"])
-```
-
-Because psmux installs a `tmux.exe` alias, existing scripts that call `tmux` by name will find psmux on the PATH without any binary name changes.
-
-### Stable IDs: `$N`, `@N`, `%N`
-
-psmux uses the same stable ID scheme as tmux:
-
-| Prefix | Entity | Example |
-|--------|--------|---------|
-| `$` | Session | `$0`, `$1` |
-| `@` | Window | `@0`, `@1`, `@2` |
-| `%` | Pane | `%0`, `%1`, `%2` |
-
-These IDs are monotonically increasing and never reused during a server's lifetime. Use them for reliable targeting:
-
-```powershell
-# Target by session ID
-psmux has-session -t "$0"
-
-# Target by window ID
-psmux select-window -t @2
-
-# Target by pane ID
-psmux send-keys -t %3 "echo hello" Enter
-
-# Compound targets work too
-psmux send-keys -t "$0:@2.%3" "echo hello" Enter
-```
-
-### Format Separator Encoding (Windows UTF-8)
-
-Libraries that parse format output from `list-sessions -F`, `list-windows -F`, or `list-panes -F` should be aware of encoding on Windows.
-
-psmux outputs UTF-8 encoded text. On Linux, tmux also outputs UTF-8, and most tools decode correctly because the system locale is UTF-8. On Windows, the default console code page is often cp1252 or cp437, not UTF-8.
-
-If your library uses `subprocess.Popen(text=True)` in Python without specifying an encoding, Python will use the system default encoding (cp1252 on most Windows systems). This will garble any non-ASCII bytes in the output, including Unicode separator characters like U+241E that some libraries use internally.
-
-**Fix**: Always specify `encoding="utf-8"` when reading psmux output:
-
-```python
-import subprocess
-
-proc = subprocess.Popen(
-    ["psmux", "list-sessions", "-F", "#{session_name}"],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    text=True,
-    encoding="utf-8",       # Required on Windows
-    errors="backslashreplace"
-)
-stdout, stderr = proc.communicate()
-```
-
-Alternatively, set the `PYTHONUTF8=1` environment variable to make Python use UTF-8 everywhere:
-
-```powershell
-$env:PYTHONUTF8 = "1"
-python your_script.py
-```
-
-### libtmux Compatibility
-
-[libtmux](https://github.com/tmux-python/libtmux) is the most popular Python library for programmatically controlling tmux. psmux is compatible with libtmux's API because it implements the same CLI commands and output formats.
-
-#### Setup
-
-```powershell
-pip install libtmux
-```
-
-#### Usage
-
-```python
-import libtmux
-
-# Connect to the running psmux server
-server = libtmux.Server(socket_name="default")
-
-# List sessions
-for session in server.sessions:
-    print(f"Session: {session.name} (ID: {session.id})")
-
-# Get windows and panes
-session = server.sessions[0]
-for window in session.windows:
-    print(f"  Window: {window.name} (ID: {window.id})")
-    for pane in window.panes:
-        print(f"    Pane: {pane.id}")
-
-# Create a new window
-new_win = session.new_window(window_name="build")
-
-# Send keys to a pane
-pane = new_win.panes[0]
-pane.send_keys("echo hello from libtmux")
-
-# Capture pane content
-output = pane.capture_pane()
-print(output)
-
-# Kill the window
-new_win.kill()
-```
-
-#### Windows Encoding Note for libtmux
-
-libtmux internally uses a Unicode separator character (U+241E, `SYMBOL FOR RECORD SEPARATOR`) to split format query results. On Linux, this works transparently because tmux outputs UTF-8 and Python decodes with UTF-8.
-
-On Windows, libtmux's `tmux_cmd` class uses `subprocess.Popen(text=True)` which defaults to cp1252 encoding. The 3-byte UTF-8 sequence for U+241E (0xE2 0x90 0x9E) gets decoded as three separate cp1252 characters, breaking the field parser.
-
-**Workaround**: Patch libtmux's `common.py` to add `encoding="utf-8"` to the Popen call:
-
-```python
-# In libtmux/common.py, tmux_cmd.__init__
-# Change:
-#   subprocess.Popen(cmd, stdout=PIPE, stderr=PIPE, text=True)
-# To:
-subprocess.Popen(cmd, stdout=PIPE, stderr=PIPE, text=True, encoding="utf-8", errors="backslashreplace")
-```
-
-Or set `PYTHONUTF8=1` globally before importing libtmux. This is an upstream libtmux issue (it should specify encoding explicitly for cross-platform support) and not specific to psmux.
-
-### Cross-Platform Project Pattern
-
-For projects that need terminal multiplexing on both Linux/macOS (tmux) and Windows (psmux):
-
-```python
-import platform
-import subprocess
-
-def get_mux_binary():
-    """Get the terminal multiplexer binary for the current platform."""
-    # psmux installs a tmux.exe alias, so "tmux" works everywhere
-    return "tmux"
-
-def mux_run(args, **kwargs):
-    """Run a tmux/psmux command portably."""
-    binary = get_mux_binary()
-    kwargs.setdefault("capture_output", True)
-    kwargs.setdefault("text", True)
-    if platform.system() == "Windows":
-        kwargs.setdefault("encoding", "utf-8")
-    return subprocess.run([binary] + args, **kwargs)
-
-def create_session(name, width=120, height=30):
-    """Create a detached session."""
-    return mux_run(["new-session", "-d", "-s", name, "-x", str(width), "-y", str(height)])
-
-def send_keys(target, keys):
-    """Send keys to a target pane."""
-    return mux_run(["send-keys", "-t", target] + keys)
-
-def capture_pane(target):
-    """Capture pane content."""
-    result = mux_run(["capture-pane", "-t", target, "-p"])
-    return result.stdout
-
-def list_sessions():
-    """List all sessions."""
-    result = mux_run(["list-sessions", "-F", "#{session_name}"])
-    return result.stdout.strip().split("\n") if result.stdout.strip() else []
-
-def kill_session(name):
-    """Kill a session."""
-    return mux_run(["kill-session", "-t", name])
-```
-
-This pattern works identically on Linux (with tmux) and Windows (with psmux) because:
-
-1. psmux installs a `tmux.exe` alias, so the binary name is the same
-2. The CLI protocol (commands, flags, format strings) is identical
-3. Stable IDs (`$N`, `@N`, `%N`) follow the same scheme
-4. Control mode (`-C`/`-CC`) uses the same wire protocol
-
-### What About GUI/IDE Integrations?
-
-If you are building an IDE plugin, VS Code extension, or GUI application that manages terminal sessions:
-
-1. **Use control mode** (`psmux -CC`) for persistent, event-driven integration. See [control-mode.md](control-mode.md).
-2. **Use `dump-state`** (psmux extension) to get the full session state as JSON, including screen content.
-3. **Query format variables** with `display-message -p "#{var}"` for lightweight state reads.
-4. **Set environment variables** with `set-environment -g KEY val` to pass configuration to child processes.
-5. **Use hooks** (`set-hook -g after-new-window ...`) to react to session events.
-6. **Use `wait-for`** for cross-pane synchronization in multi-step automation.
-
-For a complete developer integration guide with examples in Python, PowerShell, Node.js, and more, see [integration.md](integration.md).
+For control mode specifically, see [control-mode.md](control-mode.md), and for the iTerm2 tmux
+gateway see [iterm2-control-mode.md](iterm2-control-mode.md).
