@@ -461,34 +461,23 @@ pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
             match sel_mode {
                 crate::types::SelectionMode::Rect => {
                     let c0 = anchor.1.min(pos.1); let c1 = anchor.1.max(pos.1);
-                    let mut line = String::new();
-                    for c in c0..=c1 {
-                        if let Some(cell) = parser.screen().cell(r, c) { line.push_str(&cell.contents().to_string()); } else { line.push(' '); }
-                    }
+                    let line = capture_row_text(parser.screen(), r, c0..c1.saturating_add(1));
                     text.push_str(line.trim_end());
                     if !is_last { text.push('\n'); }
                 }
                 crate::types::SelectionMode::Line => {
-                    let mut line = String::new();
-                    for c in 0..cols {
-                        if let Some(cell) = parser.screen().cell(r, c) { line.push_str(&cell.contents().to_string()); } else { line.push(' '); }
-                    }
+                    let line = capture_row_text(parser.screen(), r, 0..cols);
                     text.push_str(line.trim_end());
                     text.push('\n');
                 }
                 crate::types::SelectionMode::Char => {
                     if total_lines == 1 {
                         let c0 = anchor.1.min(pos.1); let c1 = anchor.1.max(pos.1);
-                        for c in c0..=c1 {
-                            if let Some(cell) = parser.screen().cell(r, c) { text.push_str(&cell.contents().to_string()); } else { text.push(' '); }
-                        }
+                        text.push_str(&capture_row_text(parser.screen(), r, c0..c1.saturating_add(1)));
                     } else {
                         let line_start = if is_first { top_col } else { 0 };
                         let line_end   = if is_last  { bot_col } else { cols.saturating_sub(1) };
-                        let mut line = String::new();
-                        for c in line_start..=line_end {
-                            if let Some(cell) = parser.screen().cell(r, c) { line.push_str(&cell.contents().to_string()); } else { line.push(' '); }
-                        }
+                        let line = capture_row_text(parser.screen(), r, line_start..line_end.saturating_add(1));
                         text.push_str(line.trim_end());
                         if !is_last { text.push('\n'); }
                     }
@@ -575,9 +564,7 @@ pub fn capture_active_pane(app: &mut AppState) -> io::Result<()> {
     let screen = parser.screen();
     let mut text = String::new();
     for r in 0..p.last_rows {
-        let mut row = String::new();
-        for c in 0..p.last_cols { if let Some(cell) = screen.cell(r, c) { row.push_str(&cell.contents().to_string()); } else { row.push(' '); } }
-        text.push_str(row.trim_end());
+        text.push_str(capture_row_text(screen, r, 0..p.last_cols).trim_end());
         text.push('\n');
     }
     app.paste_buffers.insert(0, text);
@@ -603,6 +590,21 @@ fn push_capture_cell(row: &mut String, cell: Option<&vt100::Cell>) {
     }
 }
 
+/// Serialize grid columns `cols` of `row` with `push_capture_cell` semantics.
+///
+/// Every path that turns grid cells back into user-visible text routes through
+/// here so the blank-cell backfill and wide-glyph handling of issue #443 stay
+/// consistent across `capture-pane` and the copy-mode yanks. Callers that only
+/// need a trimmed line should `trim_end()` the result themselves, since the
+/// range variants of `capture-pane` deliberately keep their padding.
+fn capture_row_text(screen: &vt100::Screen, row: u16, cols: std::ops::Range<u16>) -> String {
+    let mut out = String::with_capacity(cols.len());
+    for c in cols {
+        push_capture_cell(&mut out, screen.cell(row, c));
+    }
+    out
+}
+
 pub fn capture_active_pane_text(app: &mut AppState) -> io::Result<Option<String>> {
     let win = &mut app.windows[app.active_idx];
     let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
@@ -610,9 +612,7 @@ pub fn capture_active_pane_text(app: &mut AppState) -> io::Result<Option<String>
     let screen = parser.screen();
     let mut text = String::new();
     for r in 0..p.last_rows {
-        let mut row = String::new();
-        for c in 0..p.last_cols { push_capture_cell(&mut row, screen.cell(r, c)); }
-        text.push_str(row.trim_end());
+        text.push_str(capture_row_text(screen, r, 0..p.last_cols).trim_end());
         text.push('\n');
     }
     // Trim trailing all-empty lines so iTerm2 doesn't advance its cursor
@@ -925,11 +925,7 @@ pub fn copy_end_of_line(app: &mut AppState) -> io::Result<()> {
     let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(()) };
     let screen = parser.screen();
     let cols = p.last_cols;
-    let mut text = String::new();
-    for col in c..cols {
-        if let Some(cell) = screen.cell(r, col) { text.push_str(&cell.contents().to_string()); } else { text.push(' '); }
-    }
-    let text = text.trim_end().to_string();
+    let text = capture_row_text(screen, r, c..cols).trim_end().to_string();
     app.paste_buffers.insert(0, text.clone());
     if app.paste_buffers.len() > 10 { app.paste_buffers.pop(); }
     copy_to_system_clipboard(&text);
@@ -987,9 +983,7 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
         let screen = parser.screen();
         let mut text = String::new();
         for r in start..=end {
-            let mut row = String::new();
-            for c in 0..cols { push_capture_cell(&mut row, screen.cell(r, c)); }
-            text.push_str(row.trim_end());
+            text.push_str(capture_row_text(screen, r, 0..cols).trim_end());
             text.push('\n');
         }
         // An explicit range (-S/-E) is honored line for line, matching tmux:
@@ -1044,11 +1038,7 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
 
         for aline in read_start..=read_end {
             let r = (aline + actual_sb) as u16;
-            let mut row = String::new();
-            for c in 0..cols {
-                push_capture_cell(&mut row, parser.screen().cell(r, c));
-            }
-            text.push_str(row.trim_end());
+            text.push_str(capture_row_text(parser.screen(), r, 0..cols).trim_end());
             text.push('\n');
         }
         next_abs = read_end + 1;
@@ -1640,3 +1630,7 @@ pub fn select_a_word_big(app: &mut AppState) {
     }
     app.copy_selection_mode = crate::types::SelectionMode::Char;
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue443_blank_cell_capture.rs"]
+mod tests_issue443_blank_cell_capture;
