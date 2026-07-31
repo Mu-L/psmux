@@ -114,7 +114,14 @@ fn restore_terminal() {
     let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
 }
 
-fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> std::io::Result<()> {
+// ratatui 0.30 turned `Backend::Error` into an associated type rather than
+// always being `std::io::Error`, so `?` on `draw` needs the conversion spelled
+// out. The only caller passes a `CrosstermBackend`, whose error already is
+// `std::io::Error`.
+fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> std::io::Result<()>
+where
+    std::io::Error: From<<B as Backend>::Error>,
+{
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
 
