@@ -132,6 +132,44 @@ try {
     Check "an unknown namespace reports no identity" `
         ([string]::IsNullOrWhiteSpace($unknown) -or $unknown -notmatch '^[0-9a-f]{16}$') `
         "got '$unknown'"
+
+    # ---------------------------------------------------------------------
+    # Steady state: the token must survive the server's periodic registry
+    # re-ensure (every ~5s). A lone server with no warm helper sees no live
+    # peers on every tick; a re-ensure that repeated the startup first-server
+    # decision would re-mint the token every interval, signalling a restart
+    # that never happened.
+    # ---------------------------------------------------------------------
+    $ns3 = "${ns}c"
+    $prevNoWarm = $env:PSMUX_NO_WARM
+    try {
+        $env:PSMUX_NO_WARM = '1'
+        & $exe -f NUL -L $ns3 new-session -d -s solo 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 900
+        $observed = @()
+        foreach ($i in 1..5) {
+            $observed += Query $ns3 '#{server_instance}'
+            Start-Sleep -Seconds 3
+        }
+        $distinctObserved = @($observed | Sort-Object -Unique)
+        Check "a lone server's identity survives periodic re-ensure ticks" `
+            ($distinctObserved.Count -eq 1 -and $observed[0] -match '^[0-9a-f]{16}$') `
+            "polled over 12s, saw: $($observed -join ', ')"
+
+        # Self-heal must not fake a restart: delete the token file while the
+        # namespace is up; the next re-ensure restores the SAME identity.
+        $steady = $observed[0]
+        Remove-Item (Join-Path $psmuxDir "instances\$ns3*") -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 7
+        $healed = Query $ns3 '#{server_instance}'
+        Check "a lost token file is restored with the same identity" `
+            ($healed -eq $steady) `
+            "before='$steady' after='$healed'"
+    } finally {
+        $env:PSMUX_NO_WARM = $prevNoWarm
+        Remove-Namespace $ns3
+        Remove-Item (Join-Path $psmuxDir "instances\$ns3*") -Force -ErrorAction SilentlyContinue
+    }
 }
 finally {
     Remove-Namespace $ns

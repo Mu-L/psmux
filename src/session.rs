@@ -466,41 +466,73 @@ fn mint_instance_token() -> String {
 /// therefore self-healing: a token left behind by a namespace that died is
 /// replaced by the next server to start, so nothing needs to delete it on exit
 /// (a server can exit via exit-empty, kill-session, or a crash).
+///
+/// `established` is the token this server already holds from a previous call,
+/// or `None` on the first call of the process. The first-server decision — and
+/// the re-mint it triggers — belongs to server STARTUP only: this function is
+/// also re-run every few seconds by the registry self-heal loop, and a lone
+/// server (single session, no warm helper) sees no live peers on every tick.
+/// Re-deciding there would delete and re-mint its own token every interval,
+/// churning the very identity this feature exists to keep stable. Once a token
+/// is established, re-ensure only restores the file if it was lost — with the
+/// SAME token, so even losing the file does not fake a restart.
 pub fn ensure_namespace_instance_in(
     dir: &Path,
     ns: Option<&str>,
     self_pid: u32,
     creation_of: impl Fn(u32) -> Option<u64>,
+    established: Option<&str>,
 ) -> Option<String> {
     let path = crate::paths::namespace_instance_file(dir, ns);
 
-    let peers = namespace_peer_pids(dir, ns, self_pid);
-    if is_first_server_in_namespace(&peers, creation_of) {
-        // The namespace this token described is gone; do not inherit its identity.
-        let _ = std::fs::remove_file(&path);
-    }
-
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return None;
+    match established {
+        // Steady state: this server already holds the namespace's identity.
+        // While it is alive the namespace cannot have restarted, so never
+        // delete or re-mint — only put the established token back if the file
+        // went missing.
+        Some(token) => {
+            if !write_token_if_missing(&path, token) {
+                return None;
+            }
         }
-    }
-
-    // `create_new` so a concurrent first-start cannot clobber the winner's token.
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut f) => {
-            use std::io::Write as _;
-            let _ = write!(f, "{}", mint_instance_token());
+        // Startup: decide whether this is a fresh namespace or a join.
+        None => {
+            let peers = namespace_peer_pids(dir, ns, self_pid);
+            if is_first_server_in_namespace(&peers, creation_of) {
+                // The namespace this token described is gone; do not inherit its identity.
+                let _ = std::fs::remove_file(&path);
+            }
+            if !write_token_if_missing(&path, &mint_instance_token()) {
+                return None;
+            }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(_) => return None,
     }
 
     read_namespace_instance_in(dir, ns)
+}
+
+/// Create the token file with `token` unless it already exists (`create_new`,
+/// so a concurrent first-start cannot clobber the winner's token). Returns
+/// false only on an unexpected I/O failure.
+fn write_token_if_missing(path: &Path, token: &str) -> bool {
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return false;
+        }
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut f) => {
+            use std::io::Write as _;
+            let _ = write!(f, "{}", token);
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => true,
+        Err(_) => false,
+    }
 }
 
 /// Read a namespace's identity token, or `None` when the namespace has none.
@@ -519,13 +551,26 @@ pub fn read_namespace_instance_in(dir: &Path, ns: Option<&str>) -> Option<String
     }
 }
 
+/// The namespace identity this server process established at startup. One
+/// server process serves exactly one namespace, so a process-wide cell is the
+/// correct scope; it is what makes the periodic registry re-ensure a restore
+/// rather than a fresh first-server decision (see
+/// [`ensure_namespace_instance_in`]).
+static ESTABLISHED_INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// Production wrapper for [`ensure_namespace_instance_in`] against the real data
 /// directory and live process table.
 pub fn ensure_namespace_instance(ns: Option<&str>, self_pid: u32) -> Option<String> {
     let dir = crate::paths::psmux_dir_opt()?;
-    ensure_namespace_instance_in(Path::new(&dir), ns, self_pid, |pid| {
-        crate::platform::process_kill::process_creation_time(pid)
-    })
+    let token = ensure_namespace_instance_in(
+        Path::new(&dir),
+        ns,
+        self_pid,
+        |pid| crate::platform::process_kill::process_creation_time(pid),
+        ESTABLISHED_INSTANCE.get().map(|s| s.as_str()),
+    )?;
+    let _ = ESTABLISHED_INSTANCE.set(token.clone());
+    Some(token)
 }
 
 /// Production wrapper for [`read_namespace_instance_in`].

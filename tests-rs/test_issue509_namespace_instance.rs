@@ -188,7 +188,7 @@ fn one_live_peer_among_dead_ones_is_enough() {
 #[test]
 fn first_server_mints_a_token() {
     let dir = temp_dir();
-    let token = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead);
+    let token = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead, None);
     assert!(token.is_some(), "the first server in a namespace must mint a token");
     assert!(
         !token.as_deref().unwrap_or_default().is_empty(),
@@ -203,7 +203,7 @@ fn later_servers_keep_the_first_servers_token() {
     let dir = temp_dir();
 
     write_pid_entry(&dir, "alpha__one", 100, 11);
-    let first = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead)
+    let first = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead, None)
         .expect("first server mints");
 
     for (pid, ft, base) in [(101u32, 12u64, "alpha__two"), (102, 13, "alpha__three")] {
@@ -213,6 +213,7 @@ fn later_servers_keep_the_first_servers_token() {
             Some("alpha"),
             pid,
             alive(&[(100, 11), (101, 12), (102, 13)]),
+            None,
         );
         assert_eq!(
             seen.as_deref(),
@@ -229,7 +230,7 @@ fn every_server_in_the_namespace_reports_the_same_token() {
     // they all read the same file.
     let dir = temp_dir();
     write_pid_entry(&dir, "alpha__one", 100, 11);
-    let minted = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead).unwrap();
+    let minted = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead, None).unwrap();
 
     let readings: HashSet<String> = [100u32, 101, 102]
         .iter()
@@ -249,10 +250,10 @@ fn a_genuinely_restarted_namespace_gets_a_new_token() {
     // supervisor must be able to see it.
     let dir = temp_dir();
     write_pid_entry(&dir, "alpha__one", 100, 11);
-    let before = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead).unwrap();
+    let before = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead, None).unwrap();
 
     // The namespace goes away; the stale registry entry is left behind.
-    let after = ensure_namespace_instance_in(&dir, Some("alpha"), 500, all_dead).unwrap();
+    let after = ensure_namespace_instance_in(&dir, Some("alpha"), 500, all_dead, None).unwrap();
 
     assert_ne!(
         before, after,
@@ -263,16 +264,16 @@ fn a_genuinely_restarted_namespace_gets_a_new_token() {
 #[test]
 fn namespaces_have_independent_identities() {
     let dir = temp_dir();
-    let a = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead).unwrap();
-    let b = ensure_namespace_instance_in(&dir, Some("beta"), 200, all_dead).unwrap();
+    let a = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead, None).unwrap();
+    let b = ensure_namespace_instance_in(&dir, Some("beta"), 200, all_dead, None).unwrap();
     assert_ne!(a, b, "separate namespaces must not share an identity");
 }
 
 #[test]
 fn default_namespace_has_its_own_identity() {
     let dir = temp_dir();
-    let named = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead).unwrap();
-    let default = ensure_namespace_instance_in(&dir, None, 200, all_dead).unwrap();
+    let named = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead, None).unwrap();
+    let default = ensure_namespace_instance_in(&dir, None, 200, all_dead, None).unwrap();
     assert_ne!(
         named, default,
         "the default namespace must not share the identity of a `-L` namespace"
@@ -306,7 +307,7 @@ fn a_missing_data_dir_is_not_fatal() {
     let mut missing = temp_dir();
     missing.push("does-not-exist");
     // Must not panic, and must not claim an identity it cannot store.
-    let _ = ensure_namespace_instance_in(&missing, Some("alpha"), 100, all_dead);
+    let _ = ensure_namespace_instance_in(&missing, Some("alpha"), 100, all_dead, None);
     let _ = read_namespace_instance_in(&missing, Some("alpha"));
 }
 
@@ -315,8 +316,8 @@ fn a_namespace_name_that_is_not_a_safe_filename_is_still_isolated() {
     // `-L` values come from the user; two different names must never collide on
     // one file, whatever characters they contain.
     let dir = temp_dir();
-    let a = ensure_namespace_instance_in(&dir, Some("a/b"), 100, all_dead);
-    let b = ensure_namespace_instance_in(&dir, Some("a_b"), 200, all_dead);
+    let a = ensure_namespace_instance_in(&dir, Some("a/b"), 100, all_dead, None);
+    let b = ensure_namespace_instance_in(&dir, Some("a_b"), 200, all_dead, None);
     if let (Some(a), Some(b)) = (a, b) {
         assert_ne!(a, b, "distinct namespace names must not share a token file");
     }
@@ -326,12 +327,95 @@ fn a_namespace_name_that_is_not_a_safe_filename_is_still_isolated() {
 fn an_existing_token_is_returned_verbatim() {
     let dir = temp_dir();
     write_pid_entry(&dir, "alpha__one", 100, 11);
-    let minted = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead).unwrap();
+    let minted = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead, None).unwrap();
     let read_back = read_namespace_instance_in(&dir, Some("alpha")).unwrap();
     assert_eq!(minted, read_back, "the stored token must round-trip unchanged");
     assert!(
         !read_back.contains('\n') && !read_back.contains('\r'),
         "the token must be a single line so `display-message -p` output is usable, got {:?}",
         read_back
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Steady state: the periodic registry re-ensure must not churn the token.
+//
+// The server main loop re-runs the ensure every few seconds as part of registry
+// self-heal. A lone server (single session, no warm helper) has no live peers
+// on every one of those ticks; if each tick repeated the startup first-server
+// decision it would delete and re-mint its own token every interval, telling a
+// supervisor the server restarted every few seconds — the exact defect #509 is
+// about. An established token turns the re-ensure into a pure restore.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_lone_servers_periodic_reensure_keeps_its_token() {
+    let dir = temp_dir();
+    let startup = ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead, None)
+        .expect("startup mints");
+    for tick in 0..3 {
+        let seen = ensure_namespace_instance_in(
+            &dir,
+            Some("alpha"),
+            100,
+            all_dead,
+            Some(startup.as_str()),
+        );
+        assert_eq!(
+            seen.as_deref(),
+            Some(startup.as_str()),
+            "re-ensure tick {} with no live peers must keep the established token",
+            tick
+        );
+    }
+}
+
+#[test]
+fn reensure_restores_a_lost_token_file_with_the_same_token() {
+    // Self-heal must not fake a restart: if the file is lost while the
+    // namespace is up, it comes back carrying the SAME identity.
+    let dir = temp_dir();
+    let startup =
+        ensure_namespace_instance_in(&dir, Some("alpha"), 100, all_dead, None).unwrap();
+    std::fs::remove_file(crate::paths::namespace_instance_file(&dir, Some("alpha"))).unwrap();
+    let healed = ensure_namespace_instance_in(
+        &dir,
+        Some("alpha"),
+        100,
+        all_dead,
+        Some(startup.as_str()),
+    );
+    assert_eq!(
+        healed.as_deref(),
+        Some(startup.as_str()),
+        "a restored token file must carry the established identity, not a fresh mint"
+    );
+    assert_eq!(
+        read_namespace_instance_in(&dir, Some("alpha")).as_deref(),
+        Some(startup.as_str()),
+        "the restored file must be readable by every other server"
+    );
+}
+
+#[test]
+fn an_established_reensure_adopts_a_peers_existing_file() {
+    // If another server already holds (or restored) the file, an established
+    // re-ensure must agree with what is on disk rather than overwrite it, so
+    // all servers converge on one value.
+    let dir = temp_dir();
+    let path = crate::paths::namespace_instance_file(&dir, Some("alpha"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "feedfacefeedface").unwrap();
+    let seen = ensure_namespace_instance_in(
+        &dir,
+        Some("alpha"),
+        100,
+        all_dead,
+        Some("0123456789abcdef"),
+    );
+    assert_eq!(
+        seen.as_deref(),
+        Some("feedfacefeedface"),
+        "an existing on-disk token must win over the caller's cached one"
     );
 }
