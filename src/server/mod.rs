@@ -22,7 +22,7 @@ use crate::tree::{self, active_pane, active_pane_mut, resize_all_panes, kill_all
     get_split_mut, path_exists};
 
 use helpers::{collect_pane_paths_server, serialize_bindings_json, json_escape_string,
-    list_windows_json_with_tabs, combined_data_version, take_pane_clipboard, TMUX_COMMANDS};
+    list_windows_json_with_tabs, combined_data_version, TMUX_COMMANDS};
 use options::{get_option_value, render_window_options, apply_set_option};
 
 use crate::input::{send_text_to_active, send_key_to_active, send_paste_to_active, move_focus, move_focus_preserving_zoom, find_best_pane_in_direction, find_wrap_target};
@@ -2169,21 +2169,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     cached_dump_state.clear();
                     cached_dump_state.push_str(&combined_buf);
-                    // Forward OSC 52 from pane child processes (e.g. Claude
-                    // Code's `/copy`).  The pane's parser stages incoming
-                    // OSC 52 onto its Screen; drain it and decode to plain
-                    // text so the existing dump-state injection below
-                    // re-emits it as OSC 52 on the client's stdout to the
-                    // host terminal.  Gated by `set-clipboard` option.
-                    if app.set_clipboard != "off" && app.clipboard_osc52.is_none() {
-                        if let Some((_sel, b64)) = take_pane_clipboard(&app) {
-                            if let Ok(b64_str) = std::str::from_utf8(&b64) {
-                                if let Some(text) = crate::util::base64_decode(b64_str) {
-                                    app.clipboard_osc52 = Some(text);
-                                }
-                            }
-                        }
-                    }
+                    // Ingest OSC 52 from pane child processes (e.g. Claude
+                    // Code's `/copy`): paste buffer add plus staging for the
+                    // dump-state injection below, which re-emits it as OSC 52
+                    // on the client's stdout to the host terminal.  Gated by
+                    // `set-clipboard` inside the helper.
+                    crate::server::helpers::drain_osc52(&mut app);
                     // Inject one-shot clipboard data for OSC 52 delivery to
                     // the client.  Only the *response* includes this field;
                     // the cached copy does not, so subsequent NC frames won't
@@ -5733,18 +5724,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     combined_buf.push('}');
                 }
             }
-            // Forward OSC 52 from pane child processes (e.g. Claude Code
-            // `/copy`).  See sibling block in the dump-state response path
-            // for full context.  Gated by `set-clipboard`.
-            if app.set_clipboard != "off" && app.clipboard_osc52.is_none() {
-                if let Some((_sel, b64)) = take_pane_clipboard(&app) {
-                    if let Ok(b64_str) = std::str::from_utf8(&b64) {
-                        if let Some(text) = crate::util::base64_decode(b64_str) {
-                            app.clipboard_osc52 = Some(text);
-                        }
-                    }
-                }
-            }
+            // Ingest OSC 52 from pane child processes (e.g. Claude Code
+            // `/copy`).  See sibling call in the dump-state response path
+            // for full context.  Gated by `set-clipboard` inside the helper.
+            crate::server::helpers::drain_osc52(&mut app);
             // Inject clipboard data if pending
             if let Some(clip_text) = app.clipboard_osc52.take() {
                 let clip_b64 = base64_encode(&clip_text);
@@ -5900,6 +5883,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // Check if all windows/panes have exited (throttled to every 250ms)
         if last_reap.elapsed() >= Duration::from_millis(100) {
             last_reap = Instant::now();
+            // tmux parity (input_osc_52 paste_add): pane initiated OSC 52
+            // must land in the paste buffer stack even when NO client is
+            // attached, because tmux captures it server side during input
+            // parsing. The dump-state builders only drain while a client
+            // polls, so this tick is what makes show-buffer work for
+            // detached sessions.
+            crate::server::helpers::drain_osc52(&mut app);
             // #450: self-heal the warm pane pool.  The spare shell can die
             // while idling (shell crash, external kill, dead conhost); the
             // consume-time gate in create_window/split then falls back to a

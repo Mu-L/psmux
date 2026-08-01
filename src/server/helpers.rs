@@ -465,6 +465,34 @@ pub(crate) fn active_pane_progress(app: &AppState) -> Option<(u8, u8)> {
     parser.screen().progress()
 }
 
+/// Ingest one staged pane OSC 52 payload: paste buffer plus client forward.
+///
+/// tmux parity (input.c input_osc_52): a pane initiated OSC 52 is BOTH
+/// forwarded to the host terminal AND added to the paste buffer stack via
+/// paste_add, and tmux does this server side during input parsing whether or
+/// not a client is attached. The buffer add here is therefore unconditional.
+/// The one-shot `clipboard_osc52` forward slot is OVERWRITTEN with the
+/// newest payload: a clipboard collapse must keep the latest write, and in a
+/// detached session the slot would otherwise wedge on the first never
+/// delivered payload and serve stale content when a client finally attaches
+/// (every payload still lands in the buffer stack regardless).
+///
+/// Called from the dump-state builders (attached clients, per frame) and
+/// from the main loop's 100ms housekeeping tick (detached sessions).
+pub(crate) fn drain_osc52(app: &mut AppState) {
+    if app.set_clipboard == "off" {
+        return;
+    }
+    let Some((_sel, b64)) = take_pane_clipboard(app) else { return };
+    let Ok(b64_str) = std::str::from_utf8(&b64) else { return };
+    let Some(text) = crate::util::base64_decode(b64_str) else { return };
+    app.paste_buffers.insert(0, text.clone());
+    if app.paste_buffers.len() > 10 {
+        app.paste_buffers.pop();
+    }
+    app.clipboard_osc52 = Some(text);
+}
+
 /// Drain a pending OSC 52 clipboard payload from any pane in the tree.
 /// Returns the first `(selector, base64_data)` found and clears it on the
 /// source pane.  Lets a child process inside any pane (e.g. Claude Code's
