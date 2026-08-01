@@ -25,8 +25,7 @@ fn mouse_log(msg: &str) {
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
     if n > 2000 { return; }
 
-    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
-    let path = format!("{}/.psmux/mouse_debug.log", home);
+    let path = format!("{}/mouse_debug.log", crate::paths::psmux_dir());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "[{}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), msg);
     }

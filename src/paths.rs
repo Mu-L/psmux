@@ -76,6 +76,14 @@ fn windows_profile_dir() -> Option<String> {
 /// call sites that early-exit when home is missing (`.ok()?` /
 /// `Err(_) => return …`). `None` when no home directory is available.
 pub fn psmux_dir_opt() -> Option<String> {
+    if let Some(raw) = std::env::var_os("PSMUX_DATA_DIR") {
+        let path = std::path::PathBuf::from(raw);
+        assert!(
+            path.is_absolute() && !path.as_os_str().is_empty(),
+            "PSMUX_DATA_DIR must be an absolute non-empty path"
+        );
+        return Some(path.to_string_lossy().trim_end_matches(['/', '\\']).to_string());
+    }
     let home = home_dir();
     if home.is_empty() {
         None
