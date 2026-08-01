@@ -104,6 +104,25 @@ pub fn port_file(session: impl AsRef<str>) -> String {
     format!("{}\\{}.port", psmux_dir(), session.as_ref())
 }
 
+/// Directory holding one ownership marker per server process this data dir
+/// started (issue #510).
+///
+/// The startup reaper enumerates candidate servers machine-wide, but its
+/// registry only describes one data dir. Without a per-process record of
+/// "this one is mine" it cannot tell an orphan of its own from another
+/// instance's healthy server, and killing on that ambiguity destroyed live
+/// sessions belonging to a different USERPROFILE/HOME. A server writes its
+/// marker into its OWN data dir, so ownership is self-declared and needs no
+/// inspection of other processes.
+pub fn server_marker_dir() -> String {
+    format!("{}\\servers", psmux_dir())
+}
+
+/// Path to one server process's ownership marker (see `server_marker_dir`).
+pub fn server_marker_file(pid: u32) -> String {
+    format!("{}\\{}", server_marker_dir(), pid)
+}
+
 /// Fallible variant of [`port_file`]: `None` when no data directory can be
 /// determined. Lets a call site early-exit on the same condition without having
 /// to know that `port_file` routes through `psmux_dir`.
