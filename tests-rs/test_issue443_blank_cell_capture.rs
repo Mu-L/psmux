@@ -39,20 +39,47 @@ const COLS: u16 = 40;
 const CUF_PAYLOAD: &[u8] = b"CUFA\x1b[4CCUFB\x1b[4CCUFC";
 const CUF_EXPECTED: &str = "CUFA    CUFB    CUFC";
 
+/// ConPTY creation and the dummy spawn can fail transiently when the full
+/// suite churns many short-lived PTYs in parallel; this file added 14 more
+/// tests to that pool and one full-suite run saw two of them fail while the
+/// same tests pass in isolation every time. Retry with backoff, and when it
+/// still fails surface WHICH stage broke instead of a bare `.expect`.
+fn open_pane_pty(
+    rows: u16,
+    cols: u16,
+) -> (Box<dyn portable_pty::MasterPty + Send>, Box<dyn portable_pty::Child + Send + Sync>, Box<dyn std::io::Write + Send>) {
+    let mut last_err = String::new();
+    for attempt in 0u64..5 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(100 * attempt));
+        }
+        let pty = portable_pty::native_pty_system();
+        let pair = match pty.openpty(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+            Ok(p) => p,
+            Err(e) => { last_err = format!("openpty: {e:?}"); continue; }
+        };
+        let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
+        cmd.arg("/c");
+        cmd.arg("exit");
+        let child = match pair.slave.spawn_command(cmd) {
+            Ok(c) => c,
+            Err(e) => { last_err = format!("spawn dummy: {e:?}"); continue; }
+        };
+        let writer = match pair.master.take_writer() {
+            Ok(w) => w,
+            Err(e) => { last_err = format!("take_writer: {e:?}"); continue; }
+        };
+        return (pair.master, child, writer);
+    }
+    panic!("PTY-backed pane creation failed after 5 attempts under parallel load: {last_err}");
+}
+
 fn make_pane(id: usize, rows: u16, cols: u16) -> crate::types::Pane {
-    let pty = portable_pty::native_pty_system();
-    let pair = pty
-        .openpty(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .expect("openpty");
-    let mut cmd = portable_pty::CommandBuilder::new("cmd.exe");
-    cmd.arg("/c");
-    cmd.arg("exit");
-    let child = pair.slave.spawn_command(cmd).expect("spawn dummy");
-    let writer = pair.master.take_writer().expect("writer");
+    let (master, child, writer) = open_pane_pty(rows, cols);
     let term = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
     let epoch = Instant::now() - Duration::from_secs(2);
     crate::types::Pane {
-        master: pair.master,
+        master,
         writer,
         child,
         term,
