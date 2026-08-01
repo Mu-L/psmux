@@ -33,23 +33,22 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 # SAFETY GATE — please read before removing.
 #
-# This script starts a real server, so it is NOT safe on a machine running
-# psmux sessions you care about, and New-PsmuxTestEnv does not make it safe:
+# This gate originally existed because of issue #510: the startup orphan
+# reaper enumerated servers machine-wide but drew its authority from one data
+# dir, so a New-PsmuxTestEnv invocation (empty .psmux under a throwaway home)
+# terminated every live psmux server on the box. That defect is FIXED as of
+# PR #514 (merge c257249): the reaper now terminates only servers its own data
+# dir positively claims via an identity-gated ownership marker, so this script
+# can no longer harm sessions in the real data dir.
 #
-#   main.rs:223 calls reap_orphaned_servers() on EVERY psmux invocation,
-#   BEFORE -L is parsed. reap_orphaned_servers_in() bails out only when the
-#   data dir does NOT exist (the #474 guard). New-PsmuxTestEnv *creates* an
-#   empty .psmux under the throwaway home, so the guard passes with an empty
-#   registry. The reaper then enumerates loopback listeners MACHINE-WIDE
-#   (GetExtendedTcpTable), keeps every process whose image is psmux/tmux/pmux,
-#   and terminates each one older than ORPHAN_REAP_MIN_AGE that the empty
-#   registry does not account for — i.e. every psmux server on the box, in
-#   every namespace. -L cannot help: it is parsed after the reaper has run.
-#
-# Until that guard also covers "dir exists but registry is empty", this runs
-# only where terminating every server on the box is harmless: a CI runner
-# (detected automatically) or an explicit opt-in for a disposable Windows
-# account or VM:
+# The gate is kept anyway, for two reasons:
+#   1. Anyone running this test against a pre-#514 binary (bisecting, an old
+#      release checkout) would reintroduce the machine-wide kill. The gate is
+#      cheap insurance against exactly the person most likely to run it.
+#   2. psmux servers under a redirected USERPROFILE/HOME self-terminate after
+#      ~10s on Windows (pre-existing, unrelated to the reaper), so on a dev
+#      box this script trades one flake for another. CI is where it earns
+#      its keep.
 #
 #   $env:PSMUX_ALLOW_DESTRUCTIVE_TESTS = '1'
 #
