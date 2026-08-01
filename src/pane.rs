@@ -332,9 +332,14 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     } else {
         build_command(None, app.env_shim, app.allow_predictions)
     };
-    // Override CWD if -c start_dir was specified
+    // Override CWD if -c start_dir was specified. Route it through
+    // usable_start_dir so a UNC or since-deleted directory falls back to home
+    // instead of killing the pane shell at spawn time — see that function for
+    // why this belongs here rather than in each caller.
     if let Some(dir) = start_dir {
-        shell_cmd.cwd(std::path::Path::new(dir));
+        if let Some(usable) = crate::util::usable_start_dir(dir) {
+            shell_cmd.cwd(usable);
+        }
     }
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     apply_user_environment(&mut shell_cmd, &app.environment);
@@ -663,9 +668,14 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
     } else {
         build_command(None, app.env_shim, app.allow_predictions)
     };
-    // Override CWD if -c start_dir was specified
+    // Override CWD if -c start_dir was specified. Route it through
+    // usable_start_dir so a UNC or since-deleted directory falls back to home
+    // instead of killing the pane shell at spawn time — see that function for
+    // why this belongs here rather than in each caller.
     if let Some(dir) = start_dir {
-        shell_cmd.cwd(std::path::Path::new(dir));
+        if let Some(usable) = crate::util::usable_start_dir(dir) {
+            shell_cmd.cwd(usable);
+        }
     }
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     apply_user_environment(&mut shell_cmd, &app.environment);

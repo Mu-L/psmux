@@ -2802,6 +2802,27 @@ match cmd {
         } else {
             trimmed.to_string()
         };
+        // Expand #{...} against live server state (tmux parity). This thread has
+        // no &AppState — it belongs to the server loop — so the expansion makes
+        // a round trip over the control channel. Only pay for it when the
+        // command actually contains a format reference.
+        //
+        // Without this, `run-shell "helper '#{pane_id}'"` passed the helper the
+        // literal text `#{pane_id}`; with `-b` swallowing the spawn result, the
+        // bind then failed completely silently.
+        let shell_cmd = if shell_cmd.contains("#{") {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            if tx.send(CtrlReq::ExpandFormat(shell_cmd.clone(), rtx)).is_ok() {
+                // On timeout fall back to the unexpanded string: running the
+                // command with a literal #{...} is no worse than the old
+                // behaviour, and better than dropping it silently.
+                rrx.recv_timeout(Duration::from_secs(5)).unwrap_or(shell_cmd)
+            } else {
+                shell_cmd
+            }
+        } else {
+            shell_cmd
+        };
         // Expand ~ to home directory + XDG fallback for plugin paths
         let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
         if shell_cmd.is_empty() {
@@ -2812,7 +2833,22 @@ match cmd {
         } else {
             if background {
                 let mut c = crate::commands::build_run_shell_command(&shell_cmd);
-                let _ = c.spawn();
+                // `-b` means "don't wait for it", not "don't tell me it never
+                // started". Swallowing this made a broken background bind
+                // indistinguishable from an unbound key.
+                if let Err(e) = c.spawn() {
+                    // No trailing newline in the message itself: StatusMessage is
+                    // stored verbatim in app.status_message and rendered in the
+                    // status bar, where a stray newline corrupts the line. The
+                    // newline belongs only on the stream write.
+                    let err_msg = format!("run-shell: {}: {}", shell_cmd, e);
+                    if persistent {
+                        let _ = tx.send(CtrlReq::StatusMessage(err_msg));
+                    } else {
+                        let _ = write!(write_stream, "{}\n", err_msg);
+                        let _ = write_stream.flush();
+                    }
+                }
             } else {
                 let mut c = crate::commands::build_run_shell_command(&shell_cmd);
                 let result = c.output();
@@ -2836,11 +2872,13 @@ match cmd {
                         }
                     }
                     Err(e) => {
-                        let err_msg = format!("run-shell: {}\n", e);
+                        // Same newline handling as the -b path above (this one
+                        // predates the branch; fixed alongside for consistency).
+                        let err_msg = format!("run-shell: {}", e);
                         if persistent {
                             let _ = tx.send(CtrlReq::StatusMessage(err_msg));
                         } else {
-                            let _ = write!(write_stream, "{}", err_msg);
+                            let _ = write!(write_stream, "{}\n", err_msg);
                             let _ = write_stream.flush();
                         }
                     }
