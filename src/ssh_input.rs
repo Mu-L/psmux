@@ -1327,6 +1327,41 @@ fn vk_to_keycode(vk: u16) -> Option<KeyCode> {
     }
 }
 
+/// Fold ConPTY's VT-input NUL record onto `C-Space` (issue #508).
+///
+/// With `ENABLE_VIRTUAL_TERMINAL_INPUT` set, conhost re-encodes every
+/// NUL-producing chord — Ctrl+Space, Ctrl+@, Ctrl+2, Ctrl+Shift+2, or a
+/// literal 0x00 byte written by a win32-input-mode terminal such as WezTerm —
+/// as the single KEY_EVENT
+///
+/// ```text
+/// vk=VK_2 (0x32)  u_char=0  ctrl=CTRL|SHIFT
+/// ```
+///
+/// the same encoding issue #504 measured on the native input path.  The
+/// `u_char == 0` branch of the reader cannot hand this to the VT parser
+/// (there is no character to feed), and `vk_to_keycode` has no `VK_2` entry,
+/// so the key evaporated and a `C-Space` prefix was dead under WezTerm.
+///
+/// Mirror tmux (`tty-keys.c`: "C-Space is special"), the Ground-state `'\0'`
+/// arm of the VT parser, and `fold_nul_to_ctrl_space` on the native path:
+/// emit `Char(' ')` with CONTROL, SHIFT stripped, ALT preserved.  ALT-bearing
+/// records are excluded, matching the native fold's AltGr guard.
+#[cfg(windows)]
+fn vk_nul_to_ctrl_space(vk: u16, mods: KeyModifiers) -> Option<(KeyCode, KeyModifiers)> {
+    if vk == 0x32
+        && mods.contains(KeyModifiers::CONTROL)
+        && !mods.contains(KeyModifiers::ALT)
+    {
+        Some((
+            KeyCode::Char(' '),
+            mods.difference(KeyModifiers::SHIFT) | KeyModifiers::CONTROL,
+        ))
+    } else {
+        None
+    }
+}
+
 /// Extract crossterm `KeyModifiers` from Win32 `dwControlKeyState`.
 #[cfg(windows)]
 fn vk_modifiers(state: u32) -> KeyModifiers {
@@ -1745,7 +1780,15 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
                                     parser.cancel_escape();
 
                                     let mods = vk_modifiers(key.control_key_state);
-                                    if let Some(code) = vk_to_keycode(key.virtual_key_code) {
+                                    if let Some((code, folded)) =
+                                        vk_nul_to_ctrl_space(key.virtual_key_code, mods)
+                                    {
+                                        let evt = make_key(code, folded);
+                                        if verbose {
+                                            ssh_debug_log(&format!("  → emit(nul-fold): {:?}", evt));
+                                        }
+                                        if tx.send(evt).is_err() { alive = false; }
+                                    } else if let Some(code) = vk_to_keycode(key.virtual_key_code) {
                                         let evt = make_key(code, mods);
                                         if verbose {
                                             ssh_debug_log(&format!("  → emit(vk): {:?}", evt));
@@ -1837,6 +1880,11 @@ mod tests_windows10_ssh_mouse;
 #[cfg(test)]
 #[path = "../tests-rs/test_pr468_wezterm_vt_input.rs"]
 mod tests_pr468_wezterm_vt_input;
+
+#[cfg(test)]
+#[cfg(windows)]
+#[path = "../tests-rs/test_issue508_wezterm_vt_cspace.rs"]
+mod tests_issue508_wezterm_vt_cspace;
 
 // ─── Raw VT pipe client input — issue #474 / Windows 10 SSH ────────────────
 //
