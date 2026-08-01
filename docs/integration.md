@@ -413,9 +413,22 @@ row per object. The full catalogue, including the human facing status bar variab
 | `#{client_pid}` | `32944` | PID of the attached client |
 | `#{client_key_table}` | `root` | Key table the client is currently in |
 | `#{version}` | `3.3.7` | psmux version, for capability gating |
-| `#{pid}` / `#{server_pid}` | `19004` | PID of the psmux server |
+| `#{pid}` / `#{server_pid}` | `19004` | PID of the server process that answered — **session-scoped**, see below |
+| `#{server_instance}` | `b644f0a347fa5e14` | Stable identity of the `-L` namespace — poll this to detect a real restart |
 | `#{socket_path}` | `C:\Users\me/.psmux/default` | Server discovery path |
 | `#{host}` / `#{host_short}` / `#{user}` | `BOX` / `me` | Host and user identity |
+
+> **Supervising a namespace.** Unlike tmux, psmux runs one server process per
+> session, so `#{pid}` (and its alias `#{server_pid}`) report whichever session's
+> server handled the request — creating a session changes the value even though
+> nothing restarted. A watchdog that polls `#{pid}` to answer *"is this still the
+> server I was talking to?"* will read every new session as a server restart.
+>
+> Poll `#{server_instance}` instead. It is minted by the first server in a `-L`
+> namespace, reported identically by every server in that namespace, and changes
+> only when the namespace has genuinely gone away and come back. An unknown or
+> not-yet-started namespace reports an empty value, which should be treated as
+> *unknown* rather than as a restart.
 
 Any option name also resolves inside `#{...}`, which is usually cheaper and more reliable than
 parsing `show-options` output:
