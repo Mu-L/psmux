@@ -263,8 +263,14 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                         self.callbacks
                             .paste_from_clipboard(&mut self.screen, ty);
                     }
+                    // tmux parity: b64_pton skips ASCII whitespace anywhere
+                    // in an OSC 52 payload, so producers that wrap long
+                    // base64 must still get through this gate. The server
+                    // side decoder applies the same tolerance.
                     (true, data)
-                        if data.iter().all(|c| BASE64.contains(c)) =>
+                        if data.iter().all(|c| {
+                            BASE64.contains(c) || c.is_ascii_whitespace()
+                        }) =>
                     {
                         // Stage the payload on Screen so the psmux server
                         // can drain it and forward an OSC 52 to the host

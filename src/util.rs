@@ -275,7 +275,13 @@ pub fn base64_encode(data: &str) -> String {
 
 pub fn base64_decode(encoded: &str) -> Option<String> {
     let mut result = Vec::new();
-    let chars: Vec<u8> = encoded.bytes().filter(|&b| b != b'=').collect();
+    // tmux parity: b64_pton (compat/base64.c) skips ASCII whitespace anywhere
+    // in the payload, so OSC 52 producers that wrap long base64 still decode.
+    // Any other non-alphabet byte still rejects the whole payload below.
+    let chars: Vec<u8> = encoded
+        .bytes()
+        .filter(|&b| b != b'=' && !b.is_ascii_whitespace())
+        .collect();
     for chunk in chars.chunks(4) {
         if chunk.len() < 2 { break; }
         let b0 = BASE64_CHARS.iter().position(|&c| c == chunk[0])? as u8;
@@ -631,3 +637,7 @@ pub fn color_to_name(c: vt100::Color) -> std::borrow::Cow<'static, str> {
 #[cfg(test)]
 #[path = "../tests-rs/test_run_shell_format_and_start_dir.rs"]
 mod tests_run_shell_format_and_start_dir;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_deps_base64_parity.rs"]
+mod tests_deps_base64_parity;
