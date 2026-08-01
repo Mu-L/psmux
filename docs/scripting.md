@@ -417,7 +417,8 @@ bind-key -n C-h if-shell -F "#{pane_at_left}" "send-keys C-h" "select-pane -L"
 | `#{host}` / `#{hostname}` | Full hostname |
 | `#{host_short}` | Hostname up to the first dot |
 | `#{user}` / `#{username}` | Current user name |
-| `#{pid}` / `#{server_pid}` | PID of the psmux server |
+| `#{pid}` / `#{server_pid}` | PID of the server process that answered the request. psmux runs one server per session, so this is session-scoped and changes when a session is created — use `#{server_instance}` to identify the namespace |
+| `#{server_instance}` | Stable identity of the `-L` namespace. Constant while the namespace is up, whichever of its servers answers; changes only after a genuine restart. Empty for a namespace that has no server |
 | `#{version}` | psmux version, for example `3.3.7` |
 | `#{start_time}` | Server start time |
 | `#{socket_path}` | Path of the server's discovery files |

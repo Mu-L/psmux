@@ -127,6 +127,13 @@ fn ensure_session_registry_files(app: &AppState) {
         let _ = std::fs::write(&pid_path, &pid_value);
     }
 
+    // Establish the namespace's stable identity (issue #509) before the .port
+    // beacon, so a client that sees a ready server can immediately query
+    // `#{server_instance}` and get a value. Minted by the namespace's first
+    // server and left alone by every later one; re-ensured here so it self-heals
+    // if the file is lost while the namespace is still up.
+    let _ = crate::session::ensure_namespace_instance(app.socket_name.as_deref(), self_pid);
+
     // .port goes LAST: it is the readiness beacon (see comment above).
     if std::fs::read_to_string(&port_path)
         .map(|s| s.trim() != port_value)

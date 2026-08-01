@@ -131,6 +131,44 @@ pub fn spawnlock_file(session: impl AsRef<str>) -> String {
     format!("{}\\{}.spawnlock", psmux_dir(), session.as_ref())
 }
 
+/// Directory holding one namespace-identity file per `-L` namespace (issue #509).
+///
+/// A subdirectory rather than a `<ns>.instance` sibling: session files are named
+/// `<ns>__<session>.<ext>`, and the default namespace uses a bare `<session>`,
+/// so any flat naming risks colliding with a legitimately-named session.
+pub fn instance_dir_in(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("instances")
+}
+
+/// Path to a namespace's identity file. `ns` is the `-L` value, or `None` for
+/// the default namespace.
+///
+/// The file name is a readable prefix plus a hash of the *full* namespace name.
+/// `-L` values come from the user and may contain characters that are illegal in
+/// a filename (or that would collide once sanitised — `a/b` and `a_b` both
+/// become `a_b`), so the hash, not the prefix, is what guarantees isolation.
+pub fn namespace_instance_file(dir: &std::path::Path, ns: Option<&str>) -> std::path::PathBuf {
+    let name = match ns {
+        None => "default-0000000000000000".to_string(),
+        Some(n) => {
+            use std::hash::{Hash, Hasher};
+            // A fixed-seed hasher: the file name must be identical across
+            // processes and runs, so `RandomState` (used for the random session
+            // key) is deliberately NOT used here.
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            n.hash(&mut h);
+            let digest = h.finish();
+            let prefix: String = n
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .take(32)
+                .collect();
+            format!("{}-{:016x}", prefix, digest)
+        }
+    };
+    instance_dir_in(dir).join(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

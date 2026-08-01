@@ -1150,6 +1150,10 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
                     .map(|d| d.to_string_lossy().into_owned())
                     .unwrap_or_default(),
                 "pid" | "server_pid" => std::process::id().to_string(),
+                "server_instance" => {
+                    crate::session::read_namespace_instance(app.socket_name.as_deref())
+                        .unwrap_or_default()
+                }
                 "version" => VERSION.to_string(),
                 "host" | "hostname" => hostname_cached(),
                 "host_short" => { let h = hostname_cached(); h.split('.').next().unwrap_or(&h).to_string() }
@@ -1736,7 +1740,18 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "host" | "hostname" => hostname_cached(),
         "host_short" => { let h = hostname_cached(); h.split('.').next().unwrap_or(&h).to_string() }
         "user" | "username" => env::var("USERNAME").or_else(|_| env::var("USER")).unwrap_or_else(|_| "unknown".into()),
+        // NOTE: `#{pid}`/`#{server_pid}` are SESSION-scoped on psmux, not
+        // namespace-scoped as they are on tmux: psmux runs one server process
+        // per session, so this is the pid of whichever session's server answered
+        // the request. Use `#{server_instance}` to identify the namespace.
         "pid" | "server_pid" => std::process::id().to_string(),
+        // Namespace-scoped identity (issue #509): constant for the life of this
+        // `-L` namespace's server set, and different after a genuine restart.
+        // Every server in the namespace reads the same token, so the value does
+        // not depend on which one answered.
+        "server_instance" => {
+            crate::session::read_namespace_instance(app.socket_name.as_deref()).unwrap_or_default()
+        }
         "version" => VERSION.to_string(),
         "start_time" => app.created_at.timestamp().to_string(),
         "socket_path" => {

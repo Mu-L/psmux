@@ -384,6 +384,156 @@ pub fn confirms_identity(queried: Option<u64>, expected: u64) -> bool {
     queried == Some(expected)
 }
 
+/// `.pid` registry entries belonging to namespace `ns`, excluding `self_pid`
+/// (issue #509).
+///
+/// Membership is decided by the file-name convention: a `-L` namespace writes
+/// `<ns>__<session>.pid`, while the default namespace writes a bare
+/// `<session>.pid`. The warm helper is included in both cases — it is a real
+/// server, so while it lives the namespace has not gone away.
+pub fn namespace_peer_pids(dir: &Path, ns: Option<&str>, self_pid: u32) -> Vec<PidTarget> {
+    let mut peers = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return peers; };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e != "pid").unwrap_or(true) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let mine = match ns {
+            Some(n) => stem.starts_with(&format!("{}__", n)),
+            // A bare session name has no `__` separator; the default namespace's
+            // own warm helper is the one exception.
+            None => !stem.contains("__") || stem == "__warm__",
+        };
+        if !mine {
+            continue;
+        }
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if let Some((pid, Some(creation_time))) = parse_pid_file_contents(&contents) {
+                if pid != self_pid {
+                    peers.push(PidTarget { pid, creation_time });
+                }
+            }
+        }
+    }
+    peers
+}
+
+/// Whether the calling server is the first live server in its namespace, i.e.
+/// no peer from the registry is still running under its recorded identity.
+///
+/// `creation_of` supplies each pid's current creation FILETIME (`None` when the
+/// process is gone or unreadable) so the decision is testable without OS process
+/// enumeration. A pid whose creation time no longer matches has been recycled
+/// and is somebody else's process, not our peer.
+pub fn is_first_server_in_namespace(
+    peers: &[PidTarget],
+    creation_of: impl Fn(u32) -> Option<u64>,
+) -> bool {
+    !peers
+        .iter()
+        .any(|p| confirms_identity(creation_of(p.pid), p.creation_time))
+}
+
+/// Mint a fresh namespace identity token.
+fn mint_instance_token() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let s = RandomState::new();
+    let mut h = s.build_hasher();
+    h.write_u64(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64,
+    );
+    h.write_u64(std::process::id() as u64);
+    format!("{:016x}", h.finish())
+}
+
+/// Establish this namespace's stable identity (issue #509), returning the token
+/// now in force.
+///
+/// psmux runs one server process per session, so a per-process value such as
+/// `#{pid}` changes every time a session is created and a supervisor reads that
+/// as a server restart. Every server in a namespace instead reads one shared
+/// token file, so it does not matter which server answers a query.
+///
+/// The token is minted by the namespace's first server and left alone by every
+/// later one. It is re-minted only when no peer is still alive — that is a
+/// genuine restart, and a supervisor must be able to see it. Reclamation is
+/// therefore self-healing: a token left behind by a namespace that died is
+/// replaced by the next server to start, so nothing needs to delete it on exit
+/// (a server can exit via exit-empty, kill-session, or a crash).
+pub fn ensure_namespace_instance_in(
+    dir: &Path,
+    ns: Option<&str>,
+    self_pid: u32,
+    creation_of: impl Fn(u32) -> Option<u64>,
+) -> Option<String> {
+    let path = crate::paths::namespace_instance_file(dir, ns);
+
+    let peers = namespace_peer_pids(dir, ns, self_pid);
+    if is_first_server_in_namespace(&peers, creation_of) {
+        // The namespace this token described is gone; do not inherit its identity.
+        let _ = std::fs::remove_file(&path);
+    }
+
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return None;
+        }
+    }
+
+    // `create_new` so a concurrent first-start cannot clobber the winner's token.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            use std::io::Write as _;
+            let _ = write!(f, "{}", mint_instance_token());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+
+    read_namespace_instance_in(dir, ns)
+}
+
+/// Read a namespace's identity token, or `None` when the namespace has none.
+///
+/// Reading never mints: only a starting server may establish identity, so a
+/// client query against an unknown namespace reports nothing rather than
+/// inventing a value.
+pub fn read_namespace_instance_in(dir: &Path, ns: Option<&str>) -> Option<String> {
+    let path = crate::paths::namespace_instance_file(dir, ns);
+    let contents = std::fs::read_to_string(path).ok()?;
+    let token = contents.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+/// Production wrapper for [`ensure_namespace_instance_in`] against the real data
+/// directory and live process table.
+pub fn ensure_namespace_instance(ns: Option<&str>, self_pid: u32) -> Option<String> {
+    let dir = crate::paths::psmux_dir_opt()?;
+    ensure_namespace_instance_in(Path::new(&dir), ns, self_pid, |pid| {
+        crate::platform::process_kill::process_creation_time(pid)
+    })
+}
+
+/// Production wrapper for [`read_namespace_instance_in`].
+pub fn read_namespace_instance(ns: Option<&str>) -> Option<String> {
+    let dir = crate::paths::psmux_dir_opt()?;
+    read_namespace_instance_in(Path::new(&dir), ns)
+}
+
 /// Terminate live psmux *server* processes that no registry entry accounts for
 /// (issue #448). Complements `cleanup_stale_port_files`, which only removes
 /// registry files for servers already proven dead: this pass finds a live but
@@ -1614,3 +1764,7 @@ mod tests_startup_stale_port_tax;
 #[cfg(test)]
 #[path = "../tests-rs/test_l_socket_tmux_precedence.rs"]
 mod tests_l_socket_tmux_precedence;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue509_namespace_instance.rs"]
+mod tests_issue509_namespace_instance;
