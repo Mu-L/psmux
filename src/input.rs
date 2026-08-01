@@ -2908,6 +2908,47 @@ pub fn send_paste_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Write raw bytes (decoded from `send-keys -H`) to whichever pane would
+/// receive input.
+///
+/// Valid UTF-8 is handed to `send_text_to_active` so every existing mode
+/// (copy, popup, confirm, menu, synchronized input) keeps its semantics.  A
+/// byte run that is not valid UTF-8 bypasses that and goes straight to the
+/// pane: callers that chunk their input can split a multi-byte character
+/// across two `send-keys` calls, and a lossy decode would corrupt it.
+pub fn send_bytes_to_active(app: &mut AppState, bytes: &[u8]) -> io::Result<()> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return send_text_to_active(app, text);
+    }
+    {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(fi) = win.floating_focus {
+            if let Some(fp) = win.floating.get_mut(fi) {
+                let _ = fp.pane.writer.write_all(bytes);
+                let _ = fp.pane.writer.flush();
+                return Ok(());
+            }
+        }
+    }
+    if app.sync_input {
+        let win = &mut app.windows[app.active_idx];
+        fn write_all_panes(node: &mut Node, data: &[u8]) {
+            match node {
+                Node::Leaf(p) => { let _ = p.writer.write_all(data); let _ = p.writer.flush(); }
+                Node::Split { children, .. } => { for c in children { write_all_panes(c, data); } }
+            }
+        }
+        write_all_panes(&mut win.root, bytes);
+    } else {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+            let _ = p.writer.write_all(bytes);
+            let _ = p.writer.flush();
+        }
+    }
+    Ok(())
+}
+
 pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
     // In clock mode, any input exits back to passthrough
     if matches!(app.mode, Mode::ClockMode) {
