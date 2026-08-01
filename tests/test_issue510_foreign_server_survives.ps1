@@ -87,6 +87,18 @@ try {
     }
     Write-Pass "victim survived to eligible age (reaping is now possible)"
 
+    # A real server must have self-declared ownership: the marker is the only
+    # thing that will ever again authorise a reap, so its absence would mean
+    # #448 cleanup silently stopped working for every new server.
+    $markerFile = Join-Path $psmuxDir "servers\$victimPid"
+    if (Test-Path $markerFile) {
+        $markerBody = (Get-Content $markerFile -Raw).Trim()
+        if ($markerBody -match "^$victimPid`:\d+$") { Write-Pass "victim wrote an identity-gated ownership marker ($markerBody)" }
+        else { Write-Fail "marker body is not pid:creation_filetime, got '$markerBody'" }
+    } else {
+        Write-Fail "victim never wrote its ownership marker ($markerFile)"
+    }
+
     # ---- The intruder: an unrelated home that must keep its hands off ------
     $intruderHome = Join-Path $env:TEMP ("psmux_i510intruder_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path (Join-Path $intruderHome '.psmux') -Force | Out-Null
@@ -130,6 +142,24 @@ $liveAfter = @(Get-Process -Name psmux, pmux, tmux -EA SilentlyContinue | ForEac
 $lost = @($liveBefore | Where-Object { $_ -notin $liveAfter })
 if ($lost.Count -eq 0) { Write-Pass "no pre-existing psmux server was terminated by this test" }
 else { Write-Fail "pre-existing psmux servers were terminated: $($lost -join ', ')" }
+
+# The dead victim's marker must be reconciled away on a reap pass from OUR
+# home, so the marker dir tracks live servers rather than growing forever.
+# The victim may still be mid-exit right after kill-server, and a claim on a
+# still-live process is correctly retained, so wait for the process to be
+# fully gone before judging the prune.
+if ($victimPid) {
+    for ($i = 0; $i -lt 40 -and (Is-PidAlive $victimPid); $i++) { Start-Sleep -Milliseconds 250 }
+    $markerFile = Join-Path $psmuxDir "servers\$victimPid"
+    $pruned = $false
+    for ($i = 0; $i -lt 3; $i++) {
+        & $exe -L i510prunepass list-sessions 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 500
+        if (-not (Test-Path $markerFile)) { $pruned = $true; break }
+    }
+    if ($pruned) { Write-Pass "dead victim's marker was pruned on a reap pass" }
+    else { Write-Fail "dead victim's marker lingered across reap passes ($markerFile)" }
+}
 
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
 Write-Host "  Passed: $($script:Passed)" -ForegroundColor Green
