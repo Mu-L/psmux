@@ -1915,7 +1915,10 @@ pub fn parse_x11_color(s: &str) -> Option<(u8, u8, u8)> {
 /// that are not being piped pay nothing. The server handler (`CtrlReq::PipePane`)
 /// pushes/removes `(pane_id, child_stdin)` entries and keeps the count in sync.
 pub static PIPE_PANE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-pub static PIPE_WRITERS: Mutex<Vec<(usize, std::process::ChildStdin)>> = Mutex::new(Vec::new());
+/// Writers are boxed so the same tee path serves both pipe-pane child stdins
+/// and cross-session forward tunnels (TcpStream) without a second reader
+/// competing for the ConPTY output pipe.
+pub static PIPE_WRITERS: Mutex<Vec<(usize, Box<dyn std::io::Write + Send>)>> = Mutex::new(Vec::new());
 
 /// Tracked persistent client TCP streams.
 /// Connection handlers register clones here so the server can explicitly

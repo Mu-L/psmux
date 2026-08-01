@@ -94,7 +94,15 @@ pub fn orchestrate_cross_session_join(
             format!("extract failed: {}", extract_resp)));
     }
 
-    let parts: Vec<&str> = extract_resp.splitn(8, ' ').collect();
+    // The screen base64 payload follows the FORWARD line after a newline.
+    // Split it off FIRST: tokenizing the whole response would glue
+    // "<screen_b64_len>\n<payload>" into one token whose parse() fails and
+    // silently discards the screen snapshot (the pre-fix behavior).
+    let (forward_line, payload_after_nl) = match extract_resp.find('\n') {
+        Some(nl_pos) => (&extract_resp[..nl_pos], Some(&extract_resp[nl_pos + 1..])),
+        None => (extract_resp, None),
+    };
+    let parts: Vec<&str> = forward_line.trim_end().splitn(8, ' ').collect();
     if parts.len() < 8 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad FORWARD response"));
     }
@@ -106,21 +114,16 @@ pub fn orchestrate_cross_session_join(
     let cols: u16 = parts[6].parse().unwrap_or(80);
     let screen_b64_len: usize = parts[7].parse().unwrap_or(0);
 
-    // Read screen base64 data if present (may follow the FORWARD line)
-    let screen_b64 = if screen_b64_len > 0 {
-        // The screen data follows after the first newline in the response
-        if let Some(nl_pos) = extract_resp.find('\n') {
-            let data = &extract_resp[nl_pos + 1..];
-            if data.len() >= screen_b64_len {
-                Some(data[..screen_b64_len].to_string())
+    let screen_b64 = match (screen_b64_len, payload_after_nl) {
+        (0, _) | (_, None) => None,
+        (len, Some(data)) => {
+            let data = data.trim_end();
+            if data.len() >= len {
+                Some(data[..len].to_string())
             } else {
                 Some(data.to_string())
             }
-        } else {
-            None
         }
-    } else {
-        None
     };
 
     // 3. Build inject command for target
@@ -131,8 +134,18 @@ pub fn orchestrate_cross_session_join(
     };
     let h_flag = if horizontal { " -h" } else { "" };
     let screen_payload = screen_b64.as_deref().unwrap_or("");
+    // The server reads commands line by line, and its inject handler collects
+    // the payload from the remaining same-line tokens (connection.rs). Base64
+    // contains no spaces, so ship it as one trailing token on the command
+    // line; a "\n<payload>" continuation would be consumed as a bogus
+    // follow-up command and the snapshot silently dropped.
+    let payload_token = if screen_payload.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", screen_payload)
+    };
     let inject_cmd = format!(
-        "pane-forward-inject {} {} {} {} {} {} {} {} {} {}{}\n{}",
+        "pane-forward-inject {} {} {} {} {} {} {} {} {} {}{}{}",
         src_session,
         src_addr,
         src_key,
@@ -144,7 +157,7 @@ pub fn orchestrate_cross_session_join(
         cols,
         screen_payload.len(),
         h_flag,
-        screen_payload,
+        payload_token,
     );
 
     // 4. Tell target to create proxy pane

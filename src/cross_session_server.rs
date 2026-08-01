@@ -106,50 +106,43 @@ pub fn handle_pane_forward_extract(
     let shutdown = Arc::new(AtomicBool::new(false));
     let fwd_id = app.next_forward_id;
     app.next_forward_id += 1;
-    // Get reader from MasterPty and use the already-taken writer from the Pane
-    let pty_reader = match pane.master.try_clone_reader() {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = resp.send(format!("ERR reader: {}", e));
-            return;
-        }
-    };
     // The writer was already taken during pane creation and stored in pane.writer
     let pty_writer = pane.writer;
-    // Start forwarding threads
+    let pane_local_id = pane.id;
+    // Start the forwarding thread.
+    //
+    // PTY output -> TCP does NOT clone a second reader: the pane's original
+    // reader thread (spawn_reader_thread) keeps sole ownership of the ConPTY
+    // output pipe. A cloned reader raced it for every chunk and the tunnel
+    // starved, so the proxy pane on the target session stayed permanently
+    // blank. Instead the tunnel registers as a tee writer in PIPE_WRITERS
+    // (the pipe-pane mechanism): the original reader forwards every chunk it
+    // reads, and drops the entry when a write fails after the tunnel closes.
+    // Output between the screen snapshot above and the accept below goes only
+    // to the detached local parser; the snapshot already covers the visible
+    // screen at extract time.
     let sd_clone = shutdown.clone();
     std::thread::spawn(move || {
         // Accept one connection for I/O forwarding
         if let Ok((stream, _)) = listener.accept() {
             let _ = stream.set_nodelay(true);
-            let sd = sd_clone;
-            // Spawn reader: PTY output -> TCP
-            let mut tcp_writer = match stream.try_clone() {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            let mut pty_reader = pty_reader;
-            let sd2 = sd.clone();
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 65536];
-                loop {
-                    if sd2.load(std::sync::atomic::Ordering::Relaxed) { break; }
-                    match pty_reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if tcp_writer.write_all(&buf[..n]).is_err() { break; }
-                            let _ = tcp_writer.flush();
-                        }
-                        Err(_) => break,
+            match stream.try_clone() {
+                Ok(tcp_writer) => {
+                    if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
+                        writers.push((pane_local_id, Box::new(tcp_writer)));
+                        crate::types::PIPE_PANE_COUNT
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
-            });
-            // Writer: TCP -> PTY input (same 64K buffer as reader for symmetric throughput)
+                Err(_) => return,
+            }
+            // Writer: TCP -> PTY input (same 64K buffer as the reader side for
+            // symmetric throughput)
             let mut tcp_reader = stream;
             let mut pty_writer = pty_writer;
             let mut buf = [0u8; 65536];
             loop {
-                if sd.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                if sd_clone.load(std::sync::atomic::Ordering::Relaxed) { break; }
                 match tcp_reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
@@ -159,6 +152,10 @@ pub fn handle_pane_forward_extract(
                     Err(_) => break,
                 }
             }
+            // Tunnel is down. Fully close the socket so the next tee write
+            // fails and the pane's reader thread unregisters the entry and
+            // re-syncs the PIPE_PANE_COUNT gate.
+            let _ = tcp_reader.shutdown(std::net::Shutdown::Both);
         }
     });
     // Store forwarded pane state

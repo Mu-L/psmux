@@ -4172,7 +4172,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             if let Some(child) = process.as_mut() {
                                 if let Some(stdin_handle) = child.stdin.take() {
                                     if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
-                                        writers.push((pane_id, stdin_handle));
+                                        writers.push((pane_id, Box::new(stdin_handle)));
                                         crate::types::PIPE_PANE_COUNT
                                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     }
