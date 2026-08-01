@@ -203,6 +203,50 @@ pub(crate) fn pane_content_inner(area: Rect, border_status: &str, border_format:
     }
 }
 
+/// Screen rect of the centred display-popup overlay.
+///
+/// The draw pass and the post-draw cursor write both need this rect and must
+/// agree on it to the cell, or the cursor lands off the popup it belongs to
+/// (#507), so both call this instead of recomputing the geometry.
+pub(crate) fn popup_overlay_rect(content_chunk: Rect, want_w: u16, want_h: u16) -> Rect {
+    let w = want_w.min(content_chunk.width.saturating_sub(2));
+    let h = want_h.min(content_chunk.height.saturating_sub(2));
+    Rect {
+        x: content_chunk.x + (content_chunk.width.saturating_sub(w)) / 2,
+        y: content_chunk.y + (content_chunk.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// Screen position of a PTY popup's cursor, given the popup-inner cursor cell
+/// reported by the server.
+///
+/// Returns `None` when the cell is not currently on screen (scrolled away, or
+/// outside a popup too small to have an interior), in which case the caller
+/// leaves the cursor hidden rather than parking it somewhere arbitrary.
+pub(crate) fn popup_cursor_screen_pos(
+    content_chunk: Rect,
+    want_w: u16,
+    want_h: u16,
+    scroll: u16,
+    cursor: (u16, u16),
+) -> Option<(u16, u16)> {
+    let (cc, cr) = cursor;
+    let popup_area = popup_overlay_rect(content_chunk, want_w, want_h);
+    let inner_w = popup_area.width.saturating_sub(2);
+    let inner_h = popup_area.height.saturating_sub(2);
+    if inner_w == 0 || inner_h == 0 {
+        return None;
+    }
+    // Same scroll offset the popup paragraph is drawn with.
+    let row = cr.checked_sub(scroll)?;
+    if row >= inner_h || cc >= inner_w {
+        return None;
+    }
+    Some((popup_area.x + 1 + cc, popup_area.y + 1 + row))
+}
+
 fn collect_leaves<'a>(node: &'a LayoutJson, area: Rect, out: &mut Vec<PaneLeaf<'a>>) {
     match node {
         LayoutJson::Leaf { rows_v2, .. } => {
@@ -1627,6 +1671,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut srv_floats: Vec<FloatJson> = Vec::new();
     #[allow(unused_assignments)]
     let mut srv_popup_has_pty = false;
+    #[allow(unused_assignments)]
+    let mut srv_popup_cursor: Option<(u16, u16)> = None; // popup-inner (col, row)
     let mut srv_popup_scroll: u16 = 0;
     #[allow(unused_assignments)]
     let mut srv_confirm_active = false;
@@ -1902,6 +1948,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         popup_rows: Vec<crate::layout::RowRunsJson>,
         #[serde(default)]
         popup_has_pty: bool,
+        /// Cursor of the process running inside a PTY popup, relative to the
+        /// popup's inner (inside-the-border) area.
+        #[serde(default)]
+        popup_cursor_row: Option<u16>,
+        #[serde(default)]
+        popup_cursor_col: Option<u16>,
+        #[serde(default)]
+        popup_hide_cursor: bool,
         /// Floating panes (tmux new-pane) overlaid on the active window.
         #[serde(default)]
         floats: Vec<FloatJson>,
@@ -4804,6 +4858,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             srv_popup_scroll = 0;
         }
         srv_popup_has_pty = new_popup_has_pty;
+        // A PTY popup owns the cursor while it is up; a static popup has no
+        // editable cursor and must not steal it from the pane underneath.
+        srv_popup_cursor = match (srv_popup_active && new_popup_has_pty && !state.popup_hide_cursor,
+                                  state.popup_cursor_col, state.popup_cursor_row) {
+            (true, Some(cc), Some(cr)) => Some((cc, cr)),
+            _ => None,
+        };
         srv_confirm_active = state.confirm_active;
         srv_confirm_prompt = state.confirm_prompt.unwrap_or_default();
         srv_menu_active = state.menu_active;
@@ -5999,14 +6060,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 render_float_overlays(f, content_chunk, &srv_floats);
             }
             if srv_popup_active {
-                let w = srv_popup_width.min(content_chunk.width.saturating_sub(2));
-                let h = srv_popup_height.min(content_chunk.height.saturating_sub(2));
-                let popup_area = Rect {
-                    x: content_chunk.x + (content_chunk.width.saturating_sub(w)) / 2,
-                    y: content_chunk.y + (content_chunk.height.saturating_sub(h)) / 2,
-                    width: w,
-                    height: h,
-                };
+                let popup_area = popup_overlay_rect(content_chunk, srv_popup_width, srv_popup_height);
+                let w = popup_area.width;
                 let title = if srv_popup_command.is_empty() { "Popup".to_string() } else { let max_title = (w as usize).saturating_sub(4); if srv_popup_command.len() > max_title { format!("{}...", &srv_popup_command[..max_title.saturating_sub(3)]) } else { srv_popup_command.clone() } };
                 let block = Block::default()
                     .borders(Borders::ALL)
@@ -6375,7 +6430,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             }
             let effective = find_active_cursor_shape(&root)
                 .unwrap_or_else(|| state_cursor_style_code.unwrap_or_else(crate::rendering::configured_cursor_code));
-            let active_pane_area: Option<Rect> = {
+            let content_chunk = {
                 let sz = terminal.size().unwrap_or_default();
                 let constraints = if status_at_top {
                     vec![Constraint::Length(status_lines as u16), Constraint::Min(1)]
@@ -6384,11 +6439,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 };
                 let chunks = Layout::default().direction(Direction::Vertical)
                     .constraints(constraints).split(sz.into());
-                let content_chunk = if status_at_top { chunks[1] } else { chunks[0] };
-                compute_active_rect_json_zoom_aware(&root, content_chunk, client_zoomed)
+                if status_at_top { chunks[1] } else { chunks[0] }
             };
+            let active_pane_area: Option<Rect> =
+                compute_active_rect_json_zoom_aware(&root, content_chunk, client_zoomed);
             // Compute screen-global cursor position from pane-local coords.
-            let cursor_visible = if let (Some((cc, cr)), Some(outer)) = (post_draw_cursor, active_pane_area) {
+            //
+            // A PTY popup is modal and takes the keystrokes, so while it is up
+            // the cursor belongs to the process inside it, not to the pane
+            // underneath (tmux does the same in server_client_reset_state by
+            // taking both the cursor and the cursor mode from the overlay).
+            // Leaving it on the pane underneath is what made the popup look
+            // like it had no cursor at all (#507).
+            let cursor_visible = if srv_popup_active && srv_popup_has_pty {
+                srv_popup_cursor.and_then(|c| {
+                    popup_cursor_screen_pos(content_chunk, srv_popup_width, srv_popup_height, srv_popup_scroll, c)
+                })
+            } else if let (Some((cc, cr)), Some(outer)) = (post_draw_cursor, active_pane_area) {
                 // Content lives inside the border-label reservation; use the render's inner rect.
                 let inner = pane_content_inner(outer, &client_border_status, &client_border_format);
                 let cy = inner.y + cr.min(inner.height.saturating_sub(1));
@@ -6659,3 +6726,7 @@ mod test_issue361_osc8_overlay;
 #[cfg(test)]
 #[path = "../tests-rs/test_pane_wants_mouse_selection.rs"]
 mod test_pane_wants_mouse_selection;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue507_popup_cursor.rs"]
+mod test_issue507_popup_cursor;

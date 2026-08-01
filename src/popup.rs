@@ -278,9 +278,20 @@ pub fn serialize_popup_overlay(app: &AppState) -> String {
 
             if let Some(pane) = popup_pane {
                 // PTY popup: serialize using the shared pane screen serializer
+                // The popup child owns the cursor while the popup is up (tmux
+                // popup_mode_cb), so publish its position and visibility too.
+                // Without them the client has nothing to place the cursor on
+                // and leaves it parked on the pane underneath (#507).
+                let mut cur_row: u16 = 0;
+                let mut cur_col: u16 = 0;
+                let mut cur_hidden = false;
                 out.push_str(",\"popup_rows\":[");
                 if let Ok(parser) = pane.term.lock() {
                     let screen = parser.screen();
+                    let (cr, cc) = screen.cursor_position();
+                    cur_row = cr;
+                    cur_col = cc;
+                    cur_hidden = screen.hide_cursor();
                     let rows_data = serialize_screen_rows(screen, inner_h, inner_w);
                     for (i, row) in rows_data.iter().enumerate() {
                         if i > 0 {
@@ -309,6 +320,15 @@ pub fn serialize_popup_overlay(app: &AppState) -> String {
                 out.push(']');
                 out.push_str(",\"popup_lines\":[]");
                 out.push_str(",\"popup_has_pty\":true");
+                let _ = std::fmt::Write::write_fmt(
+                    &mut out,
+                    format_args!(
+                        ",\"popup_cursor_row\":{},\"popup_cursor_col\":{},\"popup_hide_cursor\":{}",
+                        cur_row.min(inner_h.saturating_sub(1)),
+                        cur_col.min(inner_w.saturating_sub(1)),
+                        cur_hidden
+                    ),
+                );
             } else {
                 // Static (non-PTY) popup: plain text lines
                 out.push_str(",\"popup_rows\":[]");
