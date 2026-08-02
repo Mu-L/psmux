@@ -836,6 +836,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // commands spawned by load_config can connect back to the server.
     let (tx, rx) = mpsc::channel::<CtrlReq>();
     app.control_rx = Some(rx);
+    // Keep a sender in AppState so loop-resident code can queue follow-up work
+    // (see the field's doc comment — copy-mode key tables need this).
+    app.control_tx = Some(tx.clone());
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     app.control_port = Some(port);
