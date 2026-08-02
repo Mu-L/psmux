@@ -114,16 +114,29 @@ fn decode_send_command(line: &str) -> Option<(String, Vec<u8>)> {
     }
 
     let literal = any_short('l');
+    // -H marks every operand as one raw hexadecimal byte (tmux KEYC_LITERAL).
+    let literal_byte = any_short('H');
     let mut bytes: Vec<u8> = Vec::new();
     for (i, a) in args.iter().enumerate() {
         if a.starts_with('-') { continue; }
         if prev_consumes_operand(i) { continue; }
         // Hex codepoint?
         let s = *a;
+        if literal_byte {
+            match u8::from_str_radix(s, 16) {
+                Ok(byte) => { bytes.push(byte); continue; }
+                // Malformed operand: refuse to coalesce and let the send-keys
+                // handler decide what to do with the whole command.
+                Err(_) => return None,
+            }
+        }
         if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
             if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                // `0xNN` is a codepoint (iTerm2's encoding for typed
+                // characters), so it is UTF-8 encoded here.  Raw bytes only
+                // ever arrive through -H above.  Encoding every value keeps
+                // 0x80-0xFF correct: they are Latin-1 codepoints, not bytes.
                 if let Ok(n) = u32::from_str_radix(rest, 16) {
-                    if n <= 0xff { bytes.push(n as u8); continue; }
                     if let Some(c) = char::from_u32(n) {
                         let mut buf = [0u8; 4];
                         bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
@@ -140,14 +153,6 @@ fn decode_send_command(line: &str) -> Option<(String, Vec<u8>)> {
     }
 
     Some((target.unwrap_or_else(|| String::new()), bytes))
-}
-
-/// Quote a byte string as a single-quoted shell argument so it survives
-/// re-parsing by `parse_command_line`.  Embedded single quotes are escaped
-/// with the standard `'\''` trick.
-fn shell_quote_bytes(b: &[u8]) -> String {
-    let s: String = b.iter().map(|&c| c as char).collect();
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Re-join already-tokenized command args into a single command string,
@@ -188,9 +193,14 @@ fn coalesce_send_commands(parts: Vec<String>) -> Vec<String> {
 
     fn flush(out: &mut Vec<String>, acc: &mut Vec<u8>, target: &mut Option<String>) {
         if acc.is_empty() { return; }
+        // Re-emit as `send -H`: a byte-exact, pure-ASCII command line.  The
+        // previous `send -l '<latin1>'` form ran every byte through a latin-1
+        // char round trip, which double-encoded anything the decoder had
+        // already turned into UTF-8 (a `send 0x4e2d` arrived as "ä¸­").
+        let hex: Vec<String> = acc.iter().map(|b| format!("{:02x}", b)).collect();
         let line = match target.as_deref() {
-            Some(t) if !t.is_empty() => format!("send -lt {} {}", t, shell_quote_bytes(acc)),
-            _ => format!("send -l {}", shell_quote_bytes(acc)),
+            Some(t) if !t.is_empty() => format!("send -H -t {} {}", t, hex.join(" ")),
+            _ => format!("send -H {}", hex.join(" ")),
         };
         out.push(line);
         acc.clear();
@@ -1339,6 +1349,7 @@ match cmd {
         let literal = flag_has('l');
         let paste_mode = flag_has('p');
         let has_x = flag_has('X');
+        let hex_mode = flag_has('H');
         // Parse -N <count> for repeat (look for any cluster ending in 'N')
         let mut repeat_count: usize = 1;
         if let Some(n_pos) = args.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.ends_with('N')) {
@@ -1346,7 +1357,26 @@ match cmd {
                 repeat_count = count_str.parse::<usize>().unwrap_or(1).max(1);
             }
         }
-        if has_x {
+        if hex_mode {
+            // tmux `send-keys -H`: every operand is one hexadecimal BYTE value.
+            // tmux tags these keys KEYC_LITERAL and writes them to the pty as
+            // single bytes ("can't be more than 8 bits"), so this is a byte
+            // channel, not a codepoint channel.  Decode here and pass the raw
+            // bytes through untouched so UTF-8 sequences and escape sequences
+            // survive verbatim.
+            let mut bytes: Vec<u8> = Vec::new();
+            for (i, a) in args.iter().enumerate() {
+                if a.starts_with('-') || prev_consumes_operand(i) { continue; }
+                // A malformed operand is dropped rather than leaked into the
+                // pane as its literal token text.
+                if let Ok(byte) = u8::from_str_radix(a, 16) { bytes.push(byte); }
+            }
+            if !bytes.is_empty() {
+                for _ in 0..repeat_count {
+                    let _ = tx.send(CtrlReq::SendBytes(bytes.clone()));
+                }
+            }
+        } else if has_x {
             // send-keys -X copy-mode-command
             let cmd_parts: Vec<&str> = args.iter().enumerate()
                 .filter(|(i, a)| !a.starts_with('-') && !prev_consumes_operand(*i))
@@ -3445,6 +3475,25 @@ fn dispatch_control_command(
                 false
             };
             let literal = flag_has('l');
+            if flag_has('H') {
+                // tmux `send-keys -H`: every operand is one hexadecimal BYTE value.
+                // tmux tags these keys KEYC_LITERAL and writes them to the pty as
+                // single bytes ("can't be more than 8 bits"), so this is a byte
+                // channel, not a codepoint channel.  Decode here and pass the raw
+                // bytes through untouched so UTF-8 sequences and escape sequences
+                // survive verbatim.
+                let mut bytes: Vec<u8> = Vec::new();
+                for (i, a) in args.iter().enumerate() {
+                    if a.starts_with('-') || prev_consumes_operand(i) { continue; }
+                    // A malformed operand is dropped rather than leaked into the
+                    // pane as its literal token text.
+                    if let Ok(byte) = u8::from_str_radix(a, 16) { bytes.push(byte); }
+                }
+                if !bytes.is_empty() {
+                    let _ = tx.send(CtrlReq::SendBytes(bytes));
+                }
+                return true;
+            }
             // Convert real-tmux 0xNN hex codepoint syntax (used by iTerm2 for
             // every keystroke: `send -t %1 0xd` etc.) into literal characters.
             let keys: Vec<String> = args.iter().enumerate().filter(|(i, a)| {
@@ -4181,3 +4230,7 @@ fn dispatch_control_command(
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue476_bindkey_quoting.rs"]
 mod tests_issue476_bindkey_quoting;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_send_keys_literal_byte.rs"]
+mod tests_send_keys_literal_byte;
