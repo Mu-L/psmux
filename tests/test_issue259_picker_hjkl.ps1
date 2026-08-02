@@ -55,7 +55,9 @@ $sc_k = $src -match "KeyCode::Char\('k'\)\s+if\s+session_chooser\s*=>\s*\{\s*if\
 Add-Result "session_chooser k -> up" $sc_k ""
 
 Write-Test "session_chooser: KeyCode::Char('j') increments session_selected"
-$sc_j = $src -match "KeyCode::Char\('j'\)\s+if\s+session_chooser\s*=>\s*\{\s*if\s+session_selected\s*\+\s*1\s*<\s*session_entries\.len\(\)\s*\{\s*session_selected\s*\+=\s*1"
+# Post-ea71e75 down-navigation is bounded by the filtered list length
+# (session_filtered_indices), not raw session_entries.
+$sc_j = $src -match "KeyCode::Char\('j'\)\s+if\s+session_chooser\s*=>\s*\{\s*let\s+visible_len\s*=\s*session_filtered_indices\(&session_entries,\s*&session_filter\)\.len\(\);\s*if\s+session_selected\s*\+\s*1\s*<\s*visible_len\s*\{\s*session_selected\s*\+=\s*1"
 Add-Result "session_chooser j -> down" $sc_j ""
 
 Write-Test "session_chooser: KeyCode::Char('h') navigates up (tmux mode-tree parity)"
@@ -63,14 +65,18 @@ $sc_h = $src -match "KeyCode::Char\('h'\)\s+if\s+session_chooser\s*=>\s*\{\s*if\
 Add-Result "session_chooser h -> up" $sc_h ""
 
 Write-Test "session_chooser: KeyCode::Char('l') navigates down (tmux mode-tree parity)"
-$sc_l = $src -match "KeyCode::Char\('l'\)\s+if\s+session_chooser\s*=>\s*\{\s*if\s+session_selected\s*\+\s*1\s*<\s*session_entries\.len"
+$sc_l = $src -match "KeyCode::Char\('l'\)\s+if\s+session_chooser\s*=>\s*\{\s*let\s+visible_len\s*=\s*session_filtered_indices\(&session_entries,\s*&session_filter\)\.len\(\);\s*if\s+session_selected\s*\+\s*1\s*<\s*visible_len\s*\{\s*session_selected\s*\+=\s*1"
 Add-Result "session_chooser l -> down" $sc_l ""
 
 Write-Test "session_chooser: g/G map to Home/End"
-$sc_g = $src -match "KeyCode::Char\('g'\)\s+if\s+session_chooser\s*=>\s*\{\s*session_selected\s*=\s*0"
-$sc_G = $src -match "KeyCode::Char\('G'\)\s+if\s+session_chooser\s*=>\s*\{\s*session_selected\s*=\s*session_entries\.len\(\)\.saturating_sub\(1\)"
-Add-Result "session_chooser g -> top" $sc_g ""
-Add-Result "session_chooser G -> bottom" $sc_G ""
+# NOTE: PowerShell variable names are case-insensitive, so $sc_g and $sc_G
+# were the SAME variable and the "g -> top" check silently reported the G
+# result. Distinct names keep both checks real. G is bounded by the filtered
+# list (session_filtered_indices) post-ea71e75.
+$sc_g_top = $src -match "KeyCode::Char\('g'\)\s+if\s+session_chooser\s*=>\s*\{\s*session_selected\s*=\s*0"
+$sc_G_bottom = $src -match "KeyCode::Char\('G'\)\s+if\s+session_chooser\s*=>\s*\{\s*session_selected\s*=\s*session_filtered_indices\(&session_entries,\s*&session_filter\)\.len\(\)\.saturating_sub\(1\)"
+Add-Result "session_chooser g -> top" $sc_g_top ""
+Add-Result "session_chooser G -> bottom" $sc_G_bottom ""
 
 # --- tree_chooser ---
 Write-Test "tree_chooser: KeyCode::Char('k') decrements tree_selected"
@@ -90,10 +96,11 @@ $tc_l = $src -match "KeyCode::Char\('l'\)\s+if\s+tree_chooser\s*=>\s*\{\s*if\s+t
 Add-Result "tree_chooser l -> down" $tc_l ""
 
 Write-Test "tree_chooser: g/G map to Home/End"
-$tc_g = $src -match "KeyCode::Char\('g'\)\s+if\s+tree_chooser\s*=>\s*\{\s*tree_selected\s*=\s*0"
-$tc_G = $src -match "KeyCode::Char\('G'\)\s+if\s+tree_chooser\s*=>\s*\{\s*tree_selected\s*=\s*tree_entries\.len\(\)\.saturating_sub\(1\)"
-Add-Result "tree_chooser g -> top" $tc_g ""
-Add-Result "tree_chooser G -> bottom" $tc_G ""
+# Distinct names: $tc_g/$tc_G collide (PS vars are case-insensitive).
+$tc_g_top = $src -match "KeyCode::Char\('g'\)\s+if\s+tree_chooser\s*=>\s*\{\s*tree_selected\s*=\s*0"
+$tc_G_bottom = $src -match "KeyCode::Char\('G'\)\s+if\s+tree_chooser\s*=>\s*\{\s*tree_selected\s*=\s*tree_entries\.len\(\)\.saturating_sub\(1\)"
+Add-Result "tree_chooser g -> top" $tc_g_top ""
+Add-Result "tree_chooser G -> bottom" $tc_G_bottom ""
 
 # --- buffer_chooser ---
 Write-Test "buffer_chooser: existing j/k still wired"
@@ -110,10 +117,11 @@ $bc_l = $src -match "KeyCode::Char\('l'\)\s+if\s+buffer_chooser\s*=>\s*\{\s*if\s
 Add-Result "buffer_chooser l -> down" $bc_l ""
 
 Write-Test "buffer_chooser: g/G map to Home/End"
-$bc_g = $src -match "KeyCode::Char\('g'\)\s+if\s+buffer_chooser\s*=>\s*\{\s*buffer_selected\s*=\s*0"
-$bc_G = $src -match "KeyCode::Char\('G'\)\s+if\s+buffer_chooser"
-Add-Result "buffer_chooser g -> top" $bc_g ""
-Add-Result "buffer_chooser G -> bottom" $bc_G ""
+# Distinct names: $bc_g/$bc_G collide (PS vars are case-insensitive).
+$bc_g_top = $src -match "KeyCode::Char\('g'\)\s+if\s+buffer_chooser\s*=>\s*\{\s*buffer_selected\s*=\s*0"
+$bc_G_bottom = $src -match "KeyCode::Char\('G'\)\s+if\s+buffer_chooser\s*=>\s*\{\s*buffer_selected\s*=\s*buffer_entries\.len\(\)\.saturating_sub\(1\)"
+Add-Result "buffer_chooser g -> top" $bc_g_top ""
+Add-Result "buffer_chooser G -> bottom" $bc_G_bottom ""
 
 # --- keys_viewer ---
 Write-Test "keys_viewer: hjkl all wired"
