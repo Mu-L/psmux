@@ -329,35 +329,48 @@ if ($opencodePath) {
     Start-Sleep -Seconds 15  # Wait for response to generate
     
     $capOC2 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-    
+
+    # PRECONDITION: the prompt must actually have rendered a response.
+    # When opencode's model backend is unreachable (e.g. the configured
+    # local ollama endpoint is down) the viewport never fills, there is
+    # nothing to scroll, and the capture diff oracle would misreport that
+    # as "scroll broken". Require visible response growth first.
+    # Line-count based: opencode's spinner and clock redraw make raw capture
+    # equality useless as a content signal (captures differ while the
+    # viewport is still effectively empty).
+    $ocLines = @($capOC2 -split "`n" | Where-Object { $_.Trim().Length -gt 0 }).Count
+    if ($ocLines -lt 15) {
+        Write-Host "  [SKIP] opencode produced no scrollable content ($ocLines non-empty lines); model backend likely unreachable. Scroll checks skipped." -ForegroundColor DarkYellow
+    } else {
     # Test 5: Mouse wheel in opencode with mouse-selection ON
     Write-Host "`n[Test 5] Mouse wheel UP in opencode with mouse-selection ON" -ForegroundColor Yellow
     & $mouseInjector $proc.Id "up" 10 40 15
     Start-Sleep -Seconds 2
-    
+
     $capOC3 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($capOC3 -ne $capOC2) {
         Write-Pass "Opencode responded to mouse wheel UP (scroll works)"
     } else {
         Write-Fail "Mouse wheel UP had no effect in opencode - BUG CONFIRMED (#277)"
     }
-    
+
     # Test 6: Set mouse-selection OFF and test scroll in opencode
     Write-Host "`n[Test 6] Mouse wheel UP in opencode with mouse-selection OFF" -ForegroundColor Yellow
     & $PSMUX set-option -g mouse-selection off -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
-    
+
     $capOC4 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     & $mouseInjector $proc.Id "up" 10 40 15
     Start-Sleep -Seconds 2
-    
+
     $capOC5 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
     if ($capOC5 -ne $capOC4) {
         Write-Pass "Opencode scroll works with mouse-selection OFF"
     } else {
         Write-Fail "Mouse wheel had NO EFFECT in opencode with mouse-selection OFF - BUG CONFIRMED"
     }
-    
+    }
+
     # Exit opencode
     & $PSMUX send-keys -t $SESSION C-c 2>&1 | Out-Null
     Start-Sleep -Seconds 2

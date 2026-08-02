@@ -16,10 +16,26 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SESSION = "test_issue58_sep"
 $psmuxDir = "$env:USERPROFILE\.psmux"
-$PLUGIN = "$env:LOCALAPPDATA\Temp\psmux-plugins-check\psmux-theme-everforest\psmux-theme-everforest.ps1"
+$PLUGIN_BASE = "$env:USERPROFILE\.psmux\plugins\psmux-plugins"
+$PLUGIN = "$PLUGIN_BASE\psmux-theme-everforest\psmux-theme-everforest.ps1"
 $script:Pass = 0; $script:Fail = 0
 function Write-Pass($m){ Write-Host "  [PASS] $m" -ForegroundColor Green; $script:Pass++ }
 function Write-Fail($m){ Write-Host "  [FAIL] $m" -ForegroundColor Red; $script:Fail++ }
+
+# The theme .ps1 fixture is an external psmux-plugins checkout. Use the durable
+# ~\.psmux\plugins location (same fixture as test_real_plugins.ps1, which
+# survives Windows Temp cleanup) and auto-clone it if missing.
+if (-not (Test-Path $PLUGIN_BASE)) {
+    Write-Host "[INFO] Cloning psmux-plugins repo into $PLUGIN_BASE ..." -ForegroundColor Cyan
+    git clone https://github.com/psmux/psmux-plugins $PLUGIN_BASE 2>&1 | Out-Null
+}
+# Guard on the actual .ps1 FILE: with the fixture absent, "identical config
+# across separator values" would just be three runs of psmux defaults, which
+# would falsely prove leblocks' no-op claim. Skip instead.
+if (-not (Test-Path $PLUGIN)) {
+    Write-Host "[SKIP] psmux-plugins theme checkout not present at $PLUGIN (clone https://github.com/psmux/psmux-plugins there to run this suite)" -ForegroundColor Yellow
+    exit 0
+}
 
 function Cleanup { & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null; Start-Sleep -Milliseconds 400; Remove-Item "$psmuxDir\$SESSION.*" -Force -EA SilentlyContinue }
 
@@ -45,6 +61,13 @@ foreach ($sep in @('arrow','rounded','slant')) {
     & $PSMUX set-option -g @everforest-separator $sep -t $SESSION 2>&1 | Out-Null
     # Run the real plugin script; it reads the option and re-applies all status formats
     & pwsh -NoProfile -File $PLUGIN 2>&1 | Out-Null
+    # Capture the plugin's exit code immediately, before any psmux call
+    # overwrites $LASTEXITCODE: a plugin that failed to launch would leave the
+    # config untouched across all three separator values, and byte-identical
+    # defaults must never masquerade as "separator is a no-op".
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "plugin did not execute (exit $LASTEXITCODE) for separator=$sep"
+    }
     Start-Sleep -Milliseconds 500
     $cfg = Get-ThemeConfig
     $results[$sep] = $cfg

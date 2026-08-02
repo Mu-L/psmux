@@ -12,7 +12,7 @@
 # same thread that delivers keystrokes to ConPTY. The sync branch writes the TTL
 # cache but deliberately does not read it, so every push spawns a fresh process.
 #
-# TMUX PARITY (C:\Users\godwin\Documents\workspace\tmux, format.c format_job_get)
+# TMUX PARITY (local tmux source checkout, format.c format_job_get)
 # tmux ALWAYS runs #() via job_run(..., JOB_NOWAIT, ...) and rate limits it to at
 # most once per second. It never runs a #() inline on the event loop.
 #

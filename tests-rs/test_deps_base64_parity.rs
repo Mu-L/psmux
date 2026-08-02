@@ -9,7 +9,7 @@
 //   2. Hand-rolled base64_encode/base64_decode in util.rs for the OSC 52
 //      clipboard protocol and the send-paste/send-raw TCP protocol.
 //
-// tmux parity oracle (C:\Users\godwin\Documents\workspace\tmux):
+// tmux parity oracle (local tmux source checkout):
 //   input.c input_osc_52_parse() decodes with b64_pton (compat/base64.c):
 //     - invalid characters reject the whole payload (returns -1)
 //     - whitespace is skipped anywhere in the payload
