@@ -133,18 +133,19 @@ if ($hasWin0 -and $hasWin1) {
 }
 
 # ============================================================
-# FIX 4: resize-window  HONEST ASSESSMENT
-# tmux: actually resizes the window
-# psmux: no-op on Windows (terminal controls size)
+# FIX 4: resize-window  FUNCTIONAL PROOF
+# tmux and psmux both put the target window in manual sizing mode.
 # ============================================================
-Write-Host "`n=== FIX 4: resize-window FLAGS (WINDOWS LIMITATION) ===" -ForegroundColor Cyan
+Write-Host "`n=== FIX 4: resize-window GEOMETRY ===" -ForegroundColor Cyan
 
-Write-Host "[4a] resize-window is forwarded to server (was silently dropped before)" -ForegroundColor Yellow
-& $PSMUX resize-window -t $SESSION -x 80 -y 24 2>&1 | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    Write-Skip "resize-window flags forwarded but no-op on Windows (terminal controls size)"
+Write-Host "[4a] resize-window changes the target window" -ForegroundColor Yellow
+$resizeOutput = & $PSMUX resize-window -t $SESSION -x 96 -y 31 2>&1
+$resizeWidth = (& $PSMUX display-message -t $SESSION -p '#{window_width}' 2>&1 | Out-String).Trim()
+$resizeHeight = (& $PSMUX display-message -t $SESSION -p '#{window_height}' 2>&1 | Out-String).Trim()
+if ($resizeWidth -eq "96" -and $resizeHeight -eq "31") {
+    Write-Pass "resize-window changed the target to ${resizeWidth}x${resizeHeight}"
 } else {
-    Write-Fail "resize-window -x -y returned error"
+    Write-Fail "Expected 96x31, got ${resizeWidth}x${resizeHeight}; output: $resizeOutput"
 }
 
 # ============================================================
@@ -384,7 +385,7 @@ Write-Host "`n  FUNCTIONAL STATUS PER FLAG:" -ForegroundColor White
 Write-Host "    list-sessions -F: " -NoNewline; Write-Host "FUNCTIONAL" -ForegroundColor Green -NoNewline; Write-Host " (format variable substitution works)"
 Write-Host "    list-sessions -f: " -NoNewline; Write-Host "FUNCTIONAL" -ForegroundColor Green -NoNewline; Write-Host " (substring filter works)"
 Write-Host "    list-panes -s:    " -NoNewline; Write-Host "FUNCTIONAL" -ForegroundColor Green -NoNewline; Write-Host " (cross-window scope works)"
-Write-Host "    resize-window:    " -NoNewline; Write-Host "NO-OP" -ForegroundColor Yellow -NoNewline; Write-Host " (Windows platform limitation, by design)"
+Write-Host "    resize-window:    " -NoNewline; Write-Host "FUNCTIONAL" -ForegroundColor Green -NoNewline; Write-Host " (manual window and ConPTY geometry)"
 Write-Host "    list-keys -T:     " -NoNewline; Write-Host "FUNCTIONAL" -ForegroundColor Green -NoNewline; Write-Host " (table filtering works)"
 Write-Host "    display-msg -d:   " -NoNewline; Write-Host "FUNCTIONAL" -ForegroundColor Green -NoNewline; Write-Host " (per-message duration override implemented)"
 Write-Host "    display-msg -I:   " -NoNewline; Write-Host "CONSUMED ONLY" -ForegroundColor Yellow -NoNewline; Write-Host " (prevents corruption, input not implemented)"
