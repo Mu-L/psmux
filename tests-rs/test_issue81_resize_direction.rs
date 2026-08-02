@@ -28,6 +28,8 @@ fn app_with_split(kind: LayoutKind, active_child: usize) -> AppState {
         active_path: vec![active_child],
         name: "test".to_string(),
         id: 0,
+        area: ratatui::layout::Rect::new(0, 0, 120, 30),
+        window_size: None,
         activity_flag: false,
         bell_flag: false,
         silence_flag: false,

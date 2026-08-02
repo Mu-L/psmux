@@ -229,13 +229,13 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     // ── Empty window (tmux new-window -E): a new window whose single pane has
     // no command/process. It renders blank until respawn-pane gives it one. ──
     if empty {
-        let area = app.last_window_area;
+        let area = app.client_area;
         let rows = (if area.height > 1 { area.height } else { 30 }).max(MIN_PANE_DIM);
         let cols = (if area.width > 1 { area.width } else { 120 }).max(MIN_PANE_DIM);
         let pane_id = app.next_pane_id;
         if let Some(pane) = crate::popup::create_empty_pane(rows, cols, pane_id) {
             app.next_pane_id += 1;
-            app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: hostname_cached(), id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
+            app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: hostname_cached(), id: app.next_win_id, area: app.client_area, window_size: None, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
             app.next_win_id += 1;
             app.active_idx = app.windows.len() - 1;
             app.on_window_appended();
@@ -266,7 +266,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     if command.is_none() && extra_env.is_empty() && !default_shell_needs_fresh_eval(&app.default_shell) && app.warm_pane.is_some() {
         let mut wp = app.warm_pane.take().unwrap();
         // Resize to current terminal dimensions if they changed since pre-spawn
-        let area = app.last_window_area;
+        let area = app.client_area;
         let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
         let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
         let need_resize = rows != wp.rows || cols != wp.cols;
@@ -302,7 +302,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
             }
             let win_name = default_shell_name(None, configured_shell);
             let initial_pane_id = wp.pane_id;
-            app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![initial_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
+            app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![initial_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
             app.next_win_id += 1;
             app.active_idx = app.windows.len() - 1;
             app.on_window_appended();
@@ -313,7 +313,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     }
     // ── Normal path: spawn a new ConPTY + shell synchronously ──
     // Use actual terminal size if known, otherwise fall back to defaults
-    let area = app.last_window_area;
+    let area = app.client_area;
     let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
     let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
@@ -388,7 +388,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
     app.next_pane_id += 1;
     let win_name = command.map(|c| default_shell_name(Some(c), None)).unwrap_or_else(|| default_shell_name(None, configured_shell));
-    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
+    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
     app.on_window_appended();
@@ -413,7 +413,7 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
     if !app.warm_enabled {
         return Err(io::Error::new(io::ErrorKind::Other, "warm panes disabled"));
     }
-    let area = app.last_window_area;
+    let area = app.client_area;
     let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
     let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
@@ -468,7 +468,7 @@ pub fn split_active(app: &mut AppState, kind: LayoutKind) -> io::Result<()> {
 
 /// Create a new window with a raw command (program + args, no shell wrapping)
 pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, raw_args: &[String]) -> io::Result<()> {
-    let area = app.last_window_area;
+    let area = app.client_area;
     let rows = if area.height > 1 { area.height } else { 30 };
     let cols = if area.width > 1 { area.width } else { 120 };
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
@@ -518,7 +518,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
     app.next_pane_id += 1;
     let win_name = std::path::Path::new(&raw_args[0]).file_stem().and_then(|s| s.to_str()).unwrap_or(&raw_args[0]).to_string();
-    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![raw_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
+    app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![raw_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
     app.on_window_appended();

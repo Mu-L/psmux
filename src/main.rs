@@ -31,6 +31,7 @@ mod client;
 mod ssh_input;
 mod debug_log;
 mod control;
+mod resize_window;
 mod proxy_pane;
 mod cross_session;
 mod cross_session_server;
@@ -3797,16 +3798,16 @@ fn run_main() -> io::Result<()> {
                 let mut cmd = "resize-window".to_string();
                 let mut i = 1;
                 while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
+                    let arg = cmd_args[i].as_str();
+                    match arg {
                         "-x" | "-y" => {
                             if let Some(v) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" {} {}", cmd_args[i], v));
+                                cmd.push_str(&format!(" {} {}", arg, v));
                                 i += 1;
                             }
                         }
                         "-t" => { i += 1; } // target handled globally
-                        "-A" | "-D" | "-U" => { cmd.push_str(&format!(" {}", cmd_args[i])); }
-                        _ => {}
+                        _ => { cmd.push_str(&format!(" {}", arg)); }
                     }
                     i += 1;
                 }

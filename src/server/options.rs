@@ -214,6 +214,12 @@ pub(crate) fn get_window_option_value_for(
             }
         }
     }
+    if name == "window-size" {
+        let idx = target_window.unwrap_or(app.active_idx);
+        if let Some(value) = app.windows.get(idx).and_then(|window| window.window_size.as_ref()) {
+            return value.clone();
+        }
+    }
     get_option_value(app, name)
 }
 
@@ -237,7 +243,7 @@ pub(crate) fn render_window_options(app: &AppState) -> String {
 
     let mut output = String::new();
     for name in names {
-        output.push_str(&format!("{} {}\n", name, get_option_value(app, name)));
+        output.push_str(&format!("{} {}\n", name, get_window_option_value(app, name)));
     }
     output
 }

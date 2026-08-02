@@ -324,7 +324,7 @@ fn spawn_warm_server(app: &AppState) {
     }
     // Pass current terminal dimensions so the warm server's first window
     // and warm pane are spawned at the right size.
-    let area = app.last_window_area;
+    let area = app.client_area;
     if area.width > 1 && area.height > 1 {
         args.push("-x".into());
         args.push(area.width.to_string());
@@ -376,34 +376,6 @@ fn parse_popup_dim(spec: &str, term_dim: u16, default: u16) -> u16 {
     }
 }
 
-/// Compute the effective display size from all connected clients' terminal sizes.
-/// Returns None if no clients have reported sizes.
-fn compute_effective_client_size(app: &AppState) -> Option<(u16, u16)> {
-    if app.client_sizes.is_empty() { return None; }
-    match app.window_size.as_str() {
-        "smallest" => Some((
-            app.client_sizes.values().map(|s| s.0).min().unwrap(),
-            app.client_sizes.values().map(|s| s.1).min().unwrap(),
-        )),
-        "largest" => Some((
-            app.client_sizes.values().map(|s| s.0).max().unwrap(),
-            app.client_sizes.values().map(|s| s.1).max().unwrap(),
-        )),
-        _ => {
-            // "latest" — use latest client's size, fall back to smallest
-            if let Some(cid) = app.latest_client_id {
-                if let Some(&size) = app.client_sizes.get(&cid) {
-                    return Some(size);
-                }
-            }
-            Some((
-                app.client_sizes.values().map(|s| s.0).min().unwrap(),
-                app.client_sizes.values().map(|s| s.1).min().unwrap(),
-            ))
-        }
-    }
-}
-
 /// Process a single CtrlReq during the post-config plugin drain loop.
 /// Handles the subset of requests that plugin scripts send (set, show, bind,
 /// source-file) and silently drops others.
@@ -425,6 +397,9 @@ fn drain_plugin_req(
             if option == "pane-border-status" {
                 resize_all_panes(app);
             }
+            if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(app) {
+                resize_all_panes(app);
+            }
         }
         CtrlReq::SetOptionQuiet(option, value, quiet) => {
             apply_set_option(app, &option, &value, quiet);
@@ -435,6 +410,9 @@ fn drain_plugin_req(
                 }
             }
             if option == "pane-border-status" {
+                resize_all_panes(app);
+            }
+            if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(app) {
                 resize_all_panes(app);
             }
         }
@@ -953,7 +931,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // Apply initial dimensions BEFORE warm pane spawn so spawn_warm_pane()
     // uses the correct terminal size.
     if let Some((w, h)) = init_size {
-        app.last_window_area = ratatui::layout::Rect { x: 0, y: 0, width: w, height: h };
+        let area = ratatui::layout::Rect { x: 0, y: 0, width: w, height: h };
+        app.client_area = area;
+        app.last_window_area = area;
     }
 
     // Apply -e environment variables BEFORE pane spawn so the first pane
@@ -1460,6 +1440,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Err(e) = create_window_with_env(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref(), empty, &env_sets) {
                         eprintln!("psmux: new-window error: {e}");
                     }
+                    crate::resize_window::refresh_dynamic_window_sizes(&mut app);
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     if let Some(n) = name { app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
                     // -T: set the new pane's title at creation (tmux new-window -T).
@@ -1488,6 +1469,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Err(e) = create_window_with_env(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref(), empty, &env_sets) {
                         eprintln!("psmux: new-window error: {e}");
                     }
+                    crate::resize_window::refresh_dynamic_window_sizes(&mut app);
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     if let Some(n) = name { app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
                     if let Some(t) = title {
@@ -1803,6 +1785,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     if let Some(internal_idx) = app.win_pos(wid) {
                         app.active_idx = internal_idx;
+                        app.last_window_area = app.windows[internal_idx].area;
                     }
                 }
                 CtrlReq::FocusWindowByNameTemp(ref name) => {
@@ -1815,6 +1798,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.name == *name) {
                         app.active_idx = internal_idx;
+                        app.last_window_area = app.windows[internal_idx].area;
                     }
                 }
                 CtrlReq::FocusWindowByIdTemp(id) => {
@@ -1827,6 +1811,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.id == id) {
                         app.active_idx = internal_idx;
+                        app.last_window_area = app.windows[internal_idx].area;
                     }
                 }
                 CtrlReq::FocusPaneTemp(pid) => {
@@ -1909,9 +1894,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // `attached_clients` or re-run the destroy-unattached path.
                     // Side effects run only on a real reap.
                     if app.reap_client(cid) {
-                        // Recompute effective size from remaining clients
-                        if let Some((w, h)) = compute_effective_client_size(&app) {
-                            app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                        // Recompute dynamic windows from the remaining clients.
+                        if crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
                             resize_all_panes(&mut app);
                         }
                         hook_event = Some("client-detached");
@@ -2271,19 +2255,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ClientSize(cid, w, h) => { 
                     app.client_sizes.insert(cid, (w, h));
                     app.latest_client_id = Some(cid);
+                    app.latest_size_client_id = Some(cid);
+                    app.client_area = Rect::new(0, 0, w, h);
                     // Update registry with new size and activity timestamp
                     if let Some(info) = app.client_registry.get_mut(&cid) {
                         info.width = w;
                         info.height = h;
                         info.last_activity = std::time::Instant::now();
                     }
-                    let (ew, eh) = compute_effective_client_size(&app).unwrap_or((w, h));
-                    app.last_window_area = Rect { x: 0, y: 0, width: ew, height: eh };
+                    crate::resize_window::refresh_dynamic_window_sizes(&mut app);
                     resize_all_panes(&mut app);
                     // Reconcile warm pane dimensions through the central
                     // policy module so resize uses the same code path as
                     // every other warm-pane invalidation (#271).
-                    let sync = crate::warm_pane_sync::for_resize(&app, eh, ew);
+                    let sync = crate::warm_pane_sync::for_resize(
+                        &app,
+                        app.client_area.height,
+                        app.client_area.width,
+                    );
                     crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
                     hook_event = Some("client-resized");
                 }
@@ -3529,6 +3518,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::BreakPane => {
                     unzoom_if_zoomed(&mut app);
                     break_pane_to_window(&mut app);
+                    crate::resize_window::refresh_dynamic_window_sizes(&mut app);
                     hook_event = Some("after-break-pane");
                     meta_dirty = true;
                 }
@@ -3744,8 +3734,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if option == "pane-border-status" {
                         resize_all_panes(&mut app);
                     }
+                    if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
+                        resize_all_panes(&mut app);
+                    }
                     meta_dirty = true;
                     state_dirty = true;
+                }
+                CtrlReq::SetWindowSize(value) => {
+                    match crate::resize_window::set_active_window_size_mode(&mut app, value) {
+                        Ok(()) => {
+                            meta_dirty = true;
+                            state_dirty = true;
+                        }
+                        Err(error) => {
+                            app.status_message = Some((error, Instant::now(), None));
+                        }
+                    }
                 }
                 CtrlReq::SetOptionQuiet(option, value, quiet) => {
                     apply_set_option(&mut app, &option, &value, quiet);
@@ -3765,6 +3769,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     // pane-border-status changes the effective content height (#288)
                     if option == "pane-border-status" {
+                        resize_all_panes(&mut app);
+                    }
+                    if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
                         resize_all_panes(&mut app);
                     }
                     meta_dirty = true;
@@ -4270,9 +4277,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     // Shut down the TCP stream to force disconnect
                     crate::types::shutdown_client_stream(target_cid);
-                    // Recompute effective size from remaining clients
-                    if let Some((w, h)) = compute_effective_client_size(&app) {
-                        app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                    // Recompute dynamic windows from the remaining clients.
+                    if crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
                         resize_all_panes(&mut app);
                     }
                     // Fire detach notification
@@ -4318,8 +4324,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             app.latest_client_id = app.client_registry.keys().max().copied();
                         }
                         crate::types::shutdown_client_stream(cid);
-                        if let Some((w, h)) = compute_effective_client_size(&app) {
-                            app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                        if crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
                             resize_all_panes(&mut app);
                         }
                         control::emit_notification(&app, crate::types::ControlNotification::ClientDetached {
@@ -4360,8 +4365,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if app.latest_client_id.map_or(false, |c| !app.client_registry.contains_key(&c)) {
                             app.latest_client_id = app.client_registry.keys().max().copied();
                         }
-                        if let Some((w, h)) = compute_effective_client_size(&app) {
-                            app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                        if crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
                             resize_all_panes(&mut app);
                         }
                         hook_event = Some("client-detached");
@@ -4410,8 +4414,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if !targets.is_empty() {
                         app.latest_client_id = None;
                         app.client_prefix_active = false;
-                        if let Some((w, h)) = compute_effective_client_size(&app) {
-                            app.last_window_area = Rect { x: 0, y: 0, width: w, height: h };
+                        if crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
                             resize_all_panes(&mut app);
                         }
                         hook_event = Some("client-detached");
@@ -5102,33 +5105,64 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Return message log (tmux stores recent log messages)
                     let _ = resp.send(String::new());
                 }
-                CtrlReq::ResizeWindow(_dim, _size) => {
-                    // On Windows, window size is controlled by the terminal emulator;
-                    // resize-window is a no-op since we adapt to the terminal size.
-                }
-                CtrlReq::ControlClientResize(w, h) => {
-                    // iTerm2 (or another -CC client) is the authoritative
-                    // source for window geometry: it sends `refresh-client
-                    // -C w,h` on attach and `resize-window -x w -y h -t @N`
-                    // whenever the user drag-resizes its window.  Update
-                    // last_window_area, resize all panes, and emit
-                    // %layout-change so iTerm2 can repaint splits.
-                    if w > 0 && h > 0 {
-                        let new_area = ratatui::layout::Rect { x: 0, y: 0, width: w, height: h };
-                        if app.last_window_area != new_area {
-                            app.last_window_area = new_area;
-                            resize_all_panes(&mut app);
+                CtrlReq::ResizeWindow(request, resp) => {
+                    let result = crate::resize_window::apply_resize_window(&mut app, &request);
+                    match result {
+                        Ok(resized) => {
                             state_dirty = true;
                             meta_dirty = true;
-                            if !app.control_clients.is_empty() {
-                                for w_ref in &app.windows {
-                                    let layout = control::window_layout_string(w_ref, new_area);
-                                    control::emit_notification(&app, crate::types::ControlNotification::LayoutChange {
-                                        window_id: w_ref.id,
-                                        layout,
-                                    });
-                                }
+                            if let Some(window) = app.windows.get(resized.window_index) {
+                                let layout = control::window_layout_string(window, resized.area);
+                                control::emit_notification(&app, crate::types::ControlNotification::LayoutChange {
+                                    window_id: resized.window_id,
+                                    layout,
+                                });
                             }
+                            let _ = resp.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = resp.send(Err(error));
+                        }
+                    }
+                }
+                CtrlReq::ControlClientResize { client_id, window_id, size } => {
+                    let old_areas: std::collections::HashMap<usize, Rect> = app
+                        .windows
+                        .iter()
+                        .map(|window| (window.id, window.area))
+                        .collect();
+                    if let Some(client) = app.control_clients.get_mut(&client_id) {
+                        if let Some(window_id) = window_id {
+                            if let Some(size) = size {
+                                client.window_sizes.insert(window_id, size);
+                            } else {
+                                client.window_sizes.remove(&window_id);
+                            }
+                        } else {
+                            client.size = size;
+                        }
+                        if size.is_some() {
+                            app.latest_size_client_id = Some(client_id);
+                        }
+                        if window_id.is_none() {
+                            if let Some((width, height)) = size {
+                                app.client_area = Rect::new(0, 0, width, height);
+                            }
+                        }
+                        let geometry_changed = crate::resize_window::refresh_dynamic_window_sizes(&mut app);
+                        if geometry_changed {
+                            resize_all_panes(&mut app);
+                        }
+                        state_dirty = true;
+                        meta_dirty = true;
+                        for window in app.windows.iter().filter(|window| {
+                            old_areas.get(&window.id).copied() != Some(window.area)
+                        }) {
+                            let layout = control::window_layout_string(window, window.area);
+                            control::emit_notification(&app, crate::types::ControlNotification::LayoutChange {
+                                window_id: window.id,
+                                layout,
+                            });
                         }
                     }
                 }
@@ -5277,6 +5311,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         pause_after_secs: None,
                         output_paused_panes: std::collections::HashSet::new(),
                         pane_last_output: std::collections::HashMap::new(),
+                        size: None,
+                        window_sizes: std::collections::HashMap::new(),
                     });
                     // Register control clients with the same idempotent
                     // counter/registry invariant as normal TUI clients.
@@ -5335,6 +5371,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Idempotent reap keeps the counter in lock-step with the
                     // registry even if a control client is deregistered twice.
                     app.reap_client(client_id);
+                    if crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
+                        resize_all_panes(&mut app);
+                        state_dirty = true;
+                        meta_dirty = true;
+                    }
                 }
                 CtrlReq::CustomizeMode => {
                     let options = crate::server::option_catalog::build_option_list(&app);
@@ -5508,10 +5549,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         "after-split-window" | "after-resize-pane" | "after-break-pane"
                         | "after-join-pane" | "after-rotate-window" | "after-swap-pane" => {
-                            let area = app.last_window_area;
                             let layout = if let Some(w) = app.windows.iter().find(|w| w.id == win_id) {
-                                control::window_layout_string(w, area)
+                                control::window_layout_string(w, w.area)
                             } else {
+                                let area = app.last_window_area;
                                 format!("0000,{}x{},0,0", area.width, area.height)
                             };
                             control::emit_notification(&app, crate::types::ControlNotification::LayoutChange {
@@ -5546,6 +5587,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if let Some(path) = crate::tree::find_path_by_id(&win.root, restore_pane_id) {
                             win.active_path = path;
                         }
+                        app.last_window_area = win.area;
                         // If the pane was killed, keep whatever active_path
                         // kill_pane_at_path already set (MRU target).
                     }
@@ -5973,13 +6015,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 resize_all_panes(&mut app);
                 // Notify any attached control-mode clients about the diff.
                 if !app.control_clients.is_empty() {
-                    let area = app.last_window_area;
                     for (win_id, prev_active, prev_leaves) in &pre_reap {
                         if let Some(w) = app.windows.iter().find(|w| w.id == *win_id) {
                             let new_leaves = tree::count_panes(&w.root);
                             let new_active = tree::get_active_pane_id(&w.root, &w.active_path);
                             if new_leaves != *prev_leaves {
-                                let layout = control::window_layout_string(w, area);
+                                let layout = control::window_layout_string(w, w.area);
                                 control::emit_notification(&app, crate::types::ControlNotification::LayoutChange {
                                     window_id: *win_id,
                                     layout,

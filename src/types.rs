@@ -90,6 +90,10 @@ pub struct ControlClient {
     pub output_paused_panes: HashSet<usize>,
     /// Timestamp of last output sent per pane (for pause-after age tracking).
     pub pane_last_output: HashMap<usize, Instant>,
+    /// Default viewport reported by `refresh-client -C`.
+    pub size: Option<(u16, u16)>,
+    /// Per-window viewport overrides reported as `refresh-client -C @id:WxH`.
+    pub window_sizes: HashMap<usize, (u16, u16)>,
 }
 
 /// Per-client metadata stored in the server's client registry.
@@ -262,6 +266,10 @@ pub struct Window {
     pub active_path: Vec<usize>,
     pub name: String,
     pub id: usize,
+    /// Actual tmux-style window geometry, independent from any client viewport.
+    pub area: Rect,
+    /// Per-window `window-size` override. `resize-window` sets this to manual.
+    pub window_size: Option<String>,
     /// Activity flag: set when pane output is received while window is not active
     pub activity_flag: bool,
     /// Bell flag: set when a bell (\x07) is detected in a pane
@@ -484,6 +492,8 @@ pub struct AppState {
     pub drag: Option<DragState>,
     /// In-progress mouse drag on a floating pane (move/resize), if any.
     pub float_drag: Option<FloatDrag>,
+    /// Most recently reported client viewport. New dynamic windows inherit it.
+    pub client_area: Rect,
     pub last_window_area: Rect,
     pub mouse_enabled: bool,
     /// bold-is-bright: when on (default), rewrite crossterm's 256-indexed
@@ -617,6 +627,8 @@ pub struct AppState {
     pub client_sizes: std::collections::HashMap<u64, (u16, u16)>,
     /// The most recently active client ID (for window_size="latest").
     pub latest_client_id: Option<u64>,
+    /// Most recent client that explicitly reported a viewport size.
+    pub latest_size_client_id: Option<u64>,
     /// Client registry: all active PERSISTENT and CONTROL clients.
     pub client_registry: std::collections::HashMap<u64, ClientInfo>,
     pub created_at: chrono::DateTime<Local>,
@@ -775,6 +787,9 @@ pub struct AppState {
     pub status_format: Vec<String>,
     /// window-size: "smallest", "largest", "manual", "latest" (default "latest")
     pub window_size: String,
+    /// Requested manual geometry, keyed by window ID. The visible geometry may
+    /// be smaller while a control client has a per-window size constraint.
+    pub manual_window_sizes: std::collections::HashMap<usize, (u16, u16)>,
     /// allow-passthrough: "on", "off", "all" (default "off")
     pub allow_passthrough: String,
     /// copy-command: command to pipe yanked text to (default empty)
@@ -928,8 +943,8 @@ impl AppState {
         let tty = format!("/dev/pts/{}", cid);
         self.client_registry.insert(cid, ClientInfo {
             id: cid,
-            width: self.last_window_area.width,
-            height: self.last_window_area.height,
+            width: self.client_area.width,
+            height: self.client_area.height,
             connected_at: std::time::Instant::now(),
             last_activity: std::time::Instant::now(),
             tty_name: tty,
@@ -1102,6 +1117,10 @@ impl AppState {
                 self.renumber_windows_contiguous();
             }
         }
+        let live_ids: std::collections::HashSet<usize> =
+            self.windows.iter().map(|window| window.id).collect();
+        self.manual_window_sizes
+            .retain(|window_id, _| live_ids.contains(window_id));
     }
 
     /// Create a new AppState with sensible defaults.
@@ -1122,6 +1141,7 @@ impl AppState {
             allow_predictions: false,
             drag: None,
             float_drag: None,
+            client_area: Rect { x: 0, y: 0, width: 120, height: 30 },
             last_window_area: Rect { x: 0, y: 0, width: 120, height: 30 },
             mouse_enabled: true,
             bold_is_bright: true,
@@ -1176,6 +1196,7 @@ impl AppState {
             attached_clients: 0,
             client_sizes: std::collections::HashMap::new(),
             latest_client_id: None,
+            latest_size_client_id: None,
             client_registry: std::collections::HashMap::new(),
             created_at: Local::now(),
             next_win_id: 1,
@@ -1261,6 +1282,7 @@ impl AppState {
             status_lines: 1,
             status_format: Vec::new(),
             window_size: "latest".to_string(),
+            manual_window_sizes: std::collections::HashMap::new(),
             allow_passthrough: "off".to_string(),
             copy_command: String::new(),
             command_aliases: std::collections::HashMap::new(),
@@ -1559,6 +1581,8 @@ pub enum CtrlReq {
     SetOptionUnset(String),  // set-option -u
     SetOptionAppend(String, String),  // set-option -a
     SetOptionOnlyIfUnset(String, String),  // set-option -o
+    /// Per-window `window-size` override; None unsets the local value.
+    SetWindowSize(Option<String>),
     ShowOptions(mpsc::Sender<String>),
     ShowWindowOptions(mpsc::Sender<String>),
     SourceFile(String),
@@ -1704,12 +1728,18 @@ pub enum CtrlReq {
     PrevLayout,
     SwitchClientTable(String),
     ListCommands(mpsc::Sender<String>),
-    ResizeWindow(String, u16),
-    /// Control-mode client (iTerm2 etc.) reports its viewport size in cells.
-    /// Sent on connect (`refresh-client -C w,h`) and whenever the user
-    /// drag-resizes the iTerm2 window (`resize-window -x w -y h`).
-    /// Updates `app.last_window_area` and resizes all panes accordingly.
-    ControlClientResize(u16, u16),
+    ResizeWindow(
+        crate::resize_window::ResizeWindowRequest,
+        mpsc::Sender<Result<(), String>>,
+    ),
+    /// Control-mode client viewport update from `refresh-client -C`.
+    /// `window_id = None` changes the default; a per-window `size = None`
+    /// clears that override.
+    ControlClientResize {
+        client_id: u64,
+        window_id: Option<usize>,
+        size: Option<(u16, u16)>,
+    },
     RespawnWindow,
     FocusIn,
     FocusOut,
@@ -2105,12 +2135,12 @@ pub fn remove_directive_channel(client_id: u64) {
     }
 }
 
-/// Global counter for control mode client IDs.
-static NEXT_CONTROL_CLIENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// Global counter shared by interactive and control-mode clients.
+static NEXT_CLIENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Allocate a unique control mode client ID.
-pub fn next_control_client_id() -> u64 {
-    NEXT_CONTROL_CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+/// Allocate a process-wide unique client ID.
+pub fn next_client_id() -> u64 {
+    NEXT_CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Wait-for operation types
