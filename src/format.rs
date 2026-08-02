@@ -515,7 +515,7 @@ fn expand_expression(expr: &str, app: &AppState, win_idx: usize) -> String {
         return result;
     }
 
-    // Plain variable or option name
+    // Plain variable or option name. Unknown names render empty (tmux parity).
     expand_var(expr, app, win_idx)
 }
 
@@ -919,8 +919,14 @@ fn expand_var_or_format(target: &str, app: &AppState, win_idx: usize) -> String 
         if target.is_empty() || target.parse::<f64>().is_ok() {
             return target.to_string();
         }
-        let val = expand_var(target, app, win_idx);
-        if val.is_empty() && !target.is_empty() {
+        // Use the inner form so a REAL variable that is merely empty is
+        // distinguishable from a name that is not a variable at all. Testing
+        // `val.is_empty()` conflated them, so `#{b:pane_path}` rendered the
+        // literal text "pane_path" whenever no OSC 7 had arrived yet — every
+        // modifier over an optional variable echoed its own name instead of
+        // rendering nothing.
+        let val = expand_var_inner(target, app, win_idx);
+        if val == UNKNOWN_VAR {
             // Try as option
             if let Some(opt_val) = lookup_option(target, app) {
                 return opt_val;
@@ -1137,7 +1143,29 @@ fn find_comparison_in_cond(cond: &str) -> Option<(&str, &str, &str)> {
 // ─────────────────── variable expansion ──────────────────────────
 
 /// Expand a named variable.
+/// Sentinel returned by [`expand_var_inner`] for a name that is not a format
+/// variable at all, as distinct from a real variable whose value happens to be
+/// empty.
+///
+/// Those two cases used to be indistinguishable — both came back as `""` — and
+/// [`expand_var_or_format`] treated any empty result as "unknown name" and fell
+/// back to echoing the name as a literal. The visible consequence was that a
+/// modifier over an optional variable printed the variable's own name:
+/// `#{b:pane_path}` rendered the text `pane_path` whenever the shell had not
+/// yet sent an OSC 7. A bare `#{pane_path}` rendered correctly (empty), so the
+/// bug only appeared once a modifier was involved.
+///
+/// Contains a NUL so it can never collide with a real expansion.
+const UNKNOWN_VAR: &str = "\u{0}psmux:unknown-var";
+
+/// Expand a plain variable name. Unknown names expand to the empty string,
+/// matching tmux.
 pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
+    let v = expand_var_inner(var, app, win_idx);
+    if v == UNKNOWN_VAR { String::new() } else { v }
+}
+
+fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
     let win = match app.windows.get(win_idx) {
         Some(w) => w,
         None => {
@@ -1158,6 +1186,10 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
                 "host" | "hostname" => hostname_cached(),
                 "host_short" => { let h = hostname_cached(); h.split('.').next().unwrap_or(&h).to_string() }
                 _ => {
+                    // Not "unknown": with no window we simply cannot resolve a
+                    // window/pane variable. Reporting UNKNOWN_VAR here would
+                    // make a modifier chain echo the variable's name, so treat
+                    // an unresolvable-but-real variable as empty.
                     if let Some(v) = lookup_option(var, app) { v } else { String::new() }
                 }
             };
@@ -1798,10 +1830,10 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "line" | "command" | "command_list_name" | "command_list_alias" | "command_list_usage" | "config_files" => String::new(),
         "current_file" => crate::config::current_config_file(),
 
-        // Anything else: try as option, then env
+        // Anything else: try as option, then report "not a variable at all".
         _ => {
             if let Some(val) = lookup_option(var, app) { val }
-            else { String::new() }
+            else { UNKNOWN_VAR.to_string() }
         }
     }
 }
@@ -2011,3 +2043,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue272_format_shell_cache.rs"]
 mod tests_issue272_format_shell_cache;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_modifier_over_empty_var.rs"]
+mod tests_modifier_over_empty_var;
