@@ -18,12 +18,20 @@ $ErrorActionPreference="Continue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $PSMUX=(Get-Command psmux).Source
-$base="$env:LOCALAPPDATA\Temp\psmux-plugins-check"
-# The theme .ps1 fixtures are external psmux-plugins checkouts (cloned into a
-# Temp dir by hand); when they are absent there is nothing real to test, so
-# skip instead of reporting one phantom failure per theme.
-if(-not(Test-Path "$base\psmux-theme-everforest")){
-  Write-Host "[SKIP] psmux-plugins theme checkouts not present at $base (clone psmux-plugins there to run this suite)" -ForegroundColor Yellow
+$base="$env:USERPROFILE\.psmux\plugins\psmux-plugins"
+# The theme .ps1 fixtures are an external psmux-plugins checkout. Use the
+# durable ~\.psmux\plugins location (same fixture as test_real_plugins.ps1,
+# which survives Windows Temp cleanup) and auto-clone it if missing.
+if(-not(Test-Path $base)){
+  Write-Host "[INFO] Cloning psmux-plugins repo into $base ..." -ForegroundColor Cyan
+  git clone https://github.com/psmux/psmux-plugins $base 2>&1 | Out-Null
+}
+# Guard on the actual everforest .ps1 FILE (a gutted checkout can leave the
+# directory behind with every .ps1 deleted); if it is still missing after the
+# bootstrap there is nothing real to test, so skip instead of reporting one
+# phantom failure per theme.
+if(-not(Test-Path "$base\psmux-theme-everforest\psmux-theme-everforest.ps1")){
+  Write-Host "[SKIP] psmux-plugins theme .ps1 fixtures not present under $base (clone https://github.com/psmux/psmux-plugins there to run this suite)" -ForegroundColor Yellow
   exit 0
 }
 $S="issue58_all"
@@ -68,11 +76,17 @@ foreach($t in $withSwitch){
 Write-Host "`n=== Themes WITHOUT separator option ===" -ForegroundColor Cyan
 foreach($t in $noSwitch){
   $ps1="$base\psmux-theme-$t\psmux-theme-$t.ps1"
+  if(-not(Test-Path $ps1)){ F "$t plugin file missing at $ps1"; continue }
   $err=& pwsh -NoProfile -File $ps1 2>&1
+  # Capture the plugin's exit code IMMEDIATELY: the psmux show-options calls
+  # below overwrite $LASTEXITCODE, which previously let a failed plugin run
+  # pass vacuously against psmux's default status options.
+  $pluginExit=$LASTEXITCODE
   Start-Sleep -Milliseconds 150
   $stOn=(& $PSMUX show-options -g -v status -t $S 2>&1|Out-String).Trim()
   $sl=(& $PSMUX show-options -g -v status-left -t $S 2>&1|Out-String).Trim()
-  if($LASTEXITCODE -eq 0 -and $stOn -eq 'on' -and $sl.Length -gt 0){ P "${t}: applies cleanly, status on (uses hardcoded half-blocks)" }
+  if($pluginExit -ne 0){ F "${t}: plugin exited nonzero ($pluginExit): $err" }
+  elseif($stOn -eq 'on' -and $sl.Length -gt 0){ P "${t}: applies cleanly, status on (uses hardcoded half-blocks)" }
   else{ F "${t}: failed to apply" }
 }
 

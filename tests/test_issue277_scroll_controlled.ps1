@@ -275,54 +275,70 @@ Start-Sleep -Seconds 1
 # ================================================================
 Write-Host "`n--- SCENARIO 3: opencode in c:\\cctest (issue #277 specific) ---" -ForegroundColor Yellow
 
-# Reset settings
-& $PSMUX set-option -g mouse-selection on -t $SESSION 2>&1 | Out-Null
-Start-Sleep -Milliseconds 500
-
-& $PSMUX send-keys -t $SESSION "cd C:\cctest" Enter 2>&1 | Out-Null
-Start-Sleep -Seconds 1
-& $PSMUX send-keys -t $SESSION "opencode" Enter 2>&1 | Out-Null
-Start-Sleep -Seconds 8
-
-# Give it a prompt to generate scrollable content
-& $PSMUX send-keys -t $SESSION "say hello and list 50 numbers" Enter 2>&1 | Out-Null
-Start-Sleep -Seconds 20
-
-# Now capture state before and after scroll
-$capBefore = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-Write-Host "  [INFO] Pre-scroll capture ($($capBefore.Length) chars)" -ForegroundColor DarkGray
-
-# Test 3a: Scroll up in opencode
-Write-Host "`n[Test 3a] Mouse wheel UP in opencode (mouse-selection ON)" -ForegroundColor Yellow
-& $mouseInjector $proc.Id "up" 8 40 15
-Start-Sleep -Seconds 3
-
-$capAfter = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-if ($capAfter -ne $capBefore) {
-    Write-Pass "Opencode content changed after mouse wheel UP"
+# opencode is an external dependency; without it there is nothing to test here.
+$opencodeCmd = Get-Command opencode -EA SilentlyContinue
+if (-not $opencodeCmd) {
+    Write-Host "  [SKIP] opencode not found in PATH; scenario 3 skipped" -ForegroundColor DarkYellow
 } else {
-    Write-Fail "No change after mouse wheel in opencode - SCROLL BROKEN (#277)"
+    # Reset settings
+    & $PSMUX set-option -g mouse-selection on -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    & $PSMUX send-keys -t $SESSION "cd C:\cctest" Enter 2>&1 | Out-Null
+    Start-Sleep -Seconds 1
+    & $PSMUX send-keys -t $SESSION "opencode" Enter 2>&1 | Out-Null
+    Start-Sleep -Seconds 8
+
+    # Give it a prompt to generate scrollable content
+    & $PSMUX send-keys -t $SESSION "say hello and list 50 numbers" Enter 2>&1 | Out-Null
+    Start-Sleep -Seconds 20
+
+    # Now capture state before and after scroll
+    $capBefore = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+    Write-Host "  [INFO] Pre-scroll capture ($($capBefore.Length) chars)" -ForegroundColor DarkGray
+
+    # PRECONDITION: the prompt must actually have rendered a response.
+    # When opencode's model backend is unreachable (e.g. the configured
+    # local ollama endpoint is down) the viewport stays essentially empty,
+    # there is nothing to scroll, and the capture diff oracle would
+    # misreport that as "scroll broken". Require a filled viewport first.
+    $ocLines = @($capBefore -split "`n" | Where-Object { $_.Trim().Length -gt 0 }).Count
+    if ($ocLines -lt 15) {
+        Write-Host "  [SKIP] opencode produced no scrollable content ($ocLines non-empty lines); model backend likely unreachable. Scroll checks skipped." -ForegroundColor DarkYellow
+    } else {
+        # Test 3a: Scroll up in opencode
+        Write-Host "`n[Test 3a] Mouse wheel UP in opencode (mouse-selection ON)" -ForegroundColor Yellow
+        & $mouseInjector $proc.Id "up" 8 40 15
+        Start-Sleep -Seconds 3
+
+        $capAfter = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+        if ($capAfter -ne $capBefore) {
+            Write-Pass "Opencode content changed after mouse wheel UP"
+        } else {
+            Write-Fail "No change after mouse wheel in opencode - SCROLL BROKEN (#277)"
+        }
+
+        # Test 3b: With mouse-selection OFF
+        Write-Host "`n[Test 3b] Mouse wheel UP in opencode (mouse-selection OFF)" -ForegroundColor Yellow
+        & $PSMUX set-option -g mouse-selection off -t $SESSION 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 500
+
+        $capBefore2 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+        & $mouseInjector $proc.Id "up" 8 40 15
+        Start-Sleep -Seconds 3
+
+        $capAfter2 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+        if ($capAfter2 -ne $capBefore2) {
+            Write-Pass "Opencode scrolled with mouse-selection OFF"
+        } else {
+            Write-Fail "Opencode scroll broken with mouse-selection OFF - BUG (#245+#277)"
+        }
+    }
+
+    # Exit opencode
+    & $PSMUX send-keys -t $SESSION C-c 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
 }
-
-# Test 3b: With mouse-selection OFF
-Write-Host "`n[Test 3b] Mouse wheel UP in opencode (mouse-selection OFF)" -ForegroundColor Yellow
-& $PSMUX set-option -g mouse-selection off -t $SESSION 2>&1 | Out-Null
-Start-Sleep -Milliseconds 500
-
-$capBefore2 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-& $mouseInjector $proc.Id "up" 8 40 15
-Start-Sleep -Seconds 3
-
-$capAfter2 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-if ($capAfter2 -ne $capBefore2) {
-    Write-Pass "Opencode scrolled with mouse-selection OFF"
-} else {
-    Write-Fail "Opencode scroll broken with mouse-selection OFF - BUG (#245+#277)"
-}
-
-# Exit opencode
-& $PSMUX send-keys -t $SESSION C-c 2>&1 | Out-Null
-Start-Sleep -Seconds 3
 
 # === TEARDOWN ===
 Write-Host "`n--- Cleanup ---" -ForegroundColor Yellow
