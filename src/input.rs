@@ -79,21 +79,30 @@ pub fn copy_mode_binding(app: &AppState, key: (KeyCode, KeyModifiers)) -> Option
 pub fn run_copy_mode_binding(app: &mut AppState, action: &crate::types::Action) -> bool {
     use crate::types::Action;
     if let Action::Command(cmd) = action {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        if matches!(parts.first(), Some(&"send-keys") | Some(&"send"))
-            && parts.iter().any(|p| *p == "-X")
+        let parts = crate::commands::parse_command_line(cmd);
+        if matches!(parts.first().map(|s| s.as_str()), Some("send-keys") | Some("send"))
+            && parts.iter().any(|p| p == "-X")
         {
-            // Everything after the flags is the copy-mode command name plus its
-            // arguments, e.g. `copy-pipe-and-cancel "clip.exe"`. Rebuild it from
-            // the ORIGINAL string rather than the whitespace split so a quoted
-            // argument containing spaces survives.
-            if let Some(x_pos) = cmd.find("-X") {
-                let rest = cmd[x_pos + 2..].trim();
-                if !rest.is_empty() {
-                    if let Some(tx) = app.control_tx.as_ref() {
-                        let _ = tx.send(crate::types::CtrlReq::SendKeysX(rest.to_string()));
-                        return true;
-                    }
+            // Mirror the TCP dispatcher's `has_x` arm exactly: tokens with
+            // their quote grouping already stripped, flags dropped, joined
+            // with spaces. The `SendKeysX` arm hands everything after the
+            // copy-mode command name to `pwsh -Command` verbatim, so a quote
+            // character that survives to this point turns the pipe command
+            // into a string literal pwsh evaluates and discards.
+            let mut rest: Vec<&str> = Vec::new();
+            let mut skip_operand = false;
+            for p in parts.iter().skip(1) {
+                if skip_operand { skip_operand = false; continue; }
+                match p.as_str() {
+                    "-t" | "-N" => { skip_operand = true; }
+                    s if s.starts_with('-') => {}
+                    s => rest.push(s),
+                }
+            }
+            if !rest.is_empty() {
+                if let Some(tx) = app.control_tx.as_ref() {
+                    let _ = tx.send(crate::types::CtrlReq::SendKeysX(rest.join(" ")));
+                    return true;
                 }
             }
             // No sender (or nothing after -X): fall through to the built-ins

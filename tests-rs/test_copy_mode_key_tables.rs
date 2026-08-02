@@ -146,11 +146,24 @@ fn a_quoted_argument_with_spaces_survives() {
     run_copy_mode_binding(&mut a, &action);
 
     match rx.try_recv() {
-        Ok(crate::types::CtrlReq::SendKeysX(cmd)) => assert!(
-            cmd.contains("-NoProfile") && cmd.contains("Set-Clipboard"),
-            "multi-word pipe command was truncated: {:?}",
-            cmd
-        ),
+        Ok(crate::types::CtrlReq::SendKeysX(cmd)) => {
+            assert!(
+                cmd.contains("-NoProfile") && cmd.contains("Set-Clipboard"),
+                "multi-word pipe command was truncated: {:?}",
+                cmd
+            );
+            // The SendKeysX arm hands the tail after the copy-mode command
+            // name to `pwsh -Command` verbatim. A surviving quote character
+            // turns the pipe command into a string literal that pwsh
+            // evaluates and discards, so the queued command must carry the
+            // words with their quote grouping stripped, exactly like the TCP
+            // dispatcher's `has_x` arm.
+            assert!(
+                !cmd.contains('"'),
+                "quote characters must not reach the SendKeysX arm: {:?}",
+                cmd
+            );
+        }
         _ => panic!("expected a queued SendKeysX"),
     }
 }
