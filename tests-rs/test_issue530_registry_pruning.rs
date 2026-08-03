@@ -55,7 +55,7 @@ fn a_sid_orphaned_by_teardown_is_pruned() {
     let dir = scratch_dir("sid");
     write(&dir, "ns__work.sid", "3");
 
-    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, all_dead);
+    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, usize::MAX, all_dead);
 
     assert_eq!(pruned, 1, "the orphaned .sid should have been removed");
     assert!(
@@ -75,7 +75,7 @@ fn a_complete_registry_set_with_a_port_is_left_alone() {
     write(&dir, "ns__work.sid", "3");
     write(&dir, "ns__work.pid", "4242:134301758043996634");
 
-    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, all_dead);
+    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, usize::MAX, all_dead);
 
     assert_eq!(pruned, 0, "a set with a .port must not be pruned");
     for f in ["ns__work.port", "ns__work.key", "ns__work.sid", "ns__work.pid"] {
@@ -94,7 +94,7 @@ fn a_freshly_written_orphan_is_kept_until_the_grace_period_elapses() {
     write(&dir, "ns__starting.key", "abc123");
 
     let pruned =
-        prune_orphaned_registry_files_in_with(&dir, Duration::from_secs(3600), all_dead);
+        prune_orphaned_registry_files_in_with(&dir, Duration::from_secs(3600), usize::MAX, all_dead);
 
     assert_eq!(pruned, 0, "files inside the grace window must be kept");
     assert!(exists(&dir, "ns__starting.sid"));
@@ -110,7 +110,7 @@ fn an_orphan_whose_pid_anchor_is_alive_is_kept() {
     write(&dir, "ns__wedged.pid", "4242:134301758043996634");
     write(&dir, "ns__wedged.sid", "9");
 
-    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, |pid| pid == 4242);
+    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, usize::MAX, |pid| pid == 4242);
 
     assert_eq!(pruned, 0, "a live PID anchor must protect the whole set");
     assert!(exists(&dir, "ns__wedged.pid"));
@@ -128,7 +128,7 @@ fn an_orphan_whose_pid_anchor_is_dead_is_pruned() {
     write(&dir, "ns__gone.pid", "4242:134301758043996634");
     write(&dir, "ns__gone.sid", "9");
 
-    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, all_dead);
+    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, usize::MAX, all_dead);
 
     assert_eq!(pruned, 2, "both satellites of a dead server should go");
     assert!(!exists(&dir, "ns__gone.pid"));
@@ -143,11 +143,11 @@ fn a_spawnlock_is_pruned_when_its_holder_is_dead_and_kept_while_alive() {
     let dir = scratch_dir("lock");
     write(&dir, "ns____warm__.spawnlock", "22532");
 
-    let kept = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, |pid| pid == 22532);
+    let kept = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, usize::MAX, |pid| pid == 22532);
     assert_eq!(kept, 0, "a lock held by a live process must be kept");
     assert!(exists(&dir, "ns____warm__.spawnlock"));
 
-    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, all_dead);
+    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, usize::MAX, all_dead);
     assert_eq!(pruned, 1, "a lock whose holder died must be reclaimed");
     assert!(!exists(&dir, "ns____warm__.spawnlock"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -164,7 +164,7 @@ fn non_registry_files_are_never_touched() {
     let _ = std::fs::create_dir_all(dir.join("instances"));
     let _ = std::fs::create_dir_all(dir.join("servers"));
 
-    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, all_dead);
+    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, usize::MAX, all_dead);
 
     assert_eq!(pruned, 0, "no bystander file should have been removed");
     assert!(exists(&dir, "next_session_id"));
@@ -186,7 +186,7 @@ fn a_backlog_of_dead_namespaces_is_cleared_without_harming_the_live_one() {
     write(&dir, "live__work.port", "51234");
     write(&dir, "live__work.sid", "2");
 
-    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, all_dead);
+    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, usize::MAX, all_dead);
 
     assert_eq!(pruned, 50, "every orphaned namespace should be cleared");
     assert!(exists(&dir, "live__work.port"));
@@ -237,7 +237,7 @@ fn a_token_for_a_dead_namespace_is_pruned() {
     let dir = scratch_dir("tok-dead");
     let t = token(&dir, Some("throwaway-42"), "a1b2c3d4e5f60718");
 
-    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO);
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO, usize::MAX);
 
     assert_eq!(pruned, 1, "the dead namespace's token should be removed");
     assert!(!t.exists());
@@ -253,7 +253,7 @@ fn a_token_for_a_live_namespace_is_kept() {
     let dead = token(&dir, Some("gone"), "2222222222222222");
     write(&dir, "alive__work.port", "51234");
 
-    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO);
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO, usize::MAX);
 
     assert_eq!(pruned, 1, "only the namespace with no server should be pruned");
     assert!(live.exists(), "a live namespace must keep its token");
@@ -269,7 +269,7 @@ fn a_namespace_known_only_by_its_warm_helper_is_kept() {
     let live = token(&dir, Some("ns_a"), "3333333333333333");
     write(&dir, "ns_a____warm__.port", "51235");
 
-    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO);
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO, usize::MAX);
 
     assert_eq!(pruned, 0);
     assert!(
@@ -287,13 +287,13 @@ fn the_default_token_is_kept_while_any_server_lives() {
     let def = token(&dir, None, "4444444444444444");
     write(&dir, "work.port", "51236");
 
-    assert_eq!(prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO), 0);
+    assert_eq!(prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO, usize::MAX), 0);
     assert!(def.exists());
 
     // With nothing left running it is collectable like any other: the next
     // server to start re-mints, which is what a genuine restart should look like.
     std::fs::remove_file(dir.join("work.port")).unwrap();
-    assert_eq!(prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO), 1);
+    assert_eq!(prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO, usize::MAX), 1);
     assert!(!def.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -305,7 +305,7 @@ fn a_freshly_minted_token_is_inside_the_grace_window() {
     let dir = scratch_dir("tok-grace");
     let t = token(&dir, Some("starting"), "5555555555555555");
 
-    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::from_secs(3600));
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::from_secs(3600), usize::MAX);
 
     assert_eq!(pruned, 0, "a young token must survive the grace window");
     assert!(t.exists());
@@ -323,7 +323,7 @@ fn a_backlog_of_disposable_namespace_tokens_collapses_to_the_live_ones() {
     let keep = token(&dir, Some("keeper"), "7777777777777777");
     write(&dir, "keeper__work.port", "51237");
 
-    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO);
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO, usize::MAX);
 
     assert_eq!(pruned, 200);
     assert!(keep.exists());
@@ -340,9 +340,82 @@ fn the_token_sweep_never_touches_session_files() {
     write(&dir, "next_session_id", "12");
     token(&dir, Some("dead"), "8888888888888888");
 
-    prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO);
+    prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO, usize::MAX);
 
     assert!(exists(&dir, "orphan.sid"), "satellite sweep owns .sid, not this one");
     assert!(exists(&dir, "next_session_id"), "the id counter is not a registry satellite");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The token sweep is bounded the same way the satellite sweep is, and the two
+/// share one budget so a single invocation cannot exceed it across both passes.
+#[test]
+fn the_token_sweep_respects_its_budget() {
+    let dir = scratch_dir("tok-budget");
+    for i in 0..40 {
+        token(&dir, Some(&format!("dead-{i}")), "9999999999999999");
+    }
+
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO, 10);
+
+    assert_eq!(pruned, 10, "the token sweep must stop once its budget is spent");
+    let left = std::fs::read_dir(crate::paths::instance_dir_in(&dir)).unwrap().count();
+    assert_eq!(left, 30, "the rest drains over the following sweeps");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A sweep must stay cheap. Every psmux invocation runs it, including trivial
+/// ones like `psmux -V`, so a large backlog has to drain over several sweeps
+/// instead of making one arbitrary command delete thousands of files.
+#[test]
+fn a_single_sweep_removes_no_more_than_its_budget() {
+    let dir = scratch_dir("budget");
+    for i in 0..40 {
+        write(&dir, &format!("ns{i}__work.sid"), "1");
+    }
+
+    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, 10, all_dead);
+
+    assert_eq!(pruned, 10, "the sweep must stop once its budget is spent");
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        30,
+        "the rest of the backlog must survive for the next sweep"
+    );
+
+    let mut total = 10;
+    for _ in 0..3 {
+        total += prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, 10, all_dead);
+    }
+    assert_eq!(total, 40, "successive sweeps must clear the whole backlog");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The stamp keeps the directory walk off the hot path: psmux commands are run
+/// constantly by scripts, and orphans only appear at session teardown.
+#[test]
+fn a_sweep_is_rate_limited_by_its_stamp() {
+    let dir = scratch_dir("stamp");
+
+    assert!(
+        registry_sweep_due(&dir, Duration::from_secs(300)),
+        "with no stamp present a sweep is due"
+    );
+    assert!(
+        !registry_sweep_due(&dir, Duration::from_secs(300)),
+        "the stamp written by the first call must suppress the next one"
+    );
+    assert!(
+        registry_sweep_due(&dir, Duration::ZERO),
+        "once the interval has elapsed a sweep is due again"
+    );
+
+    let pruned = prune_orphaned_registry_files_in_with(&dir, Duration::ZERO, usize::MAX, all_dead);
+    assert_eq!(pruned, 0, "the stamp is not a registry satellite");
+    assert!(
+        exists(&dir, ".registry_sweep"),
+        "the stamp must survive the sweep it schedules"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

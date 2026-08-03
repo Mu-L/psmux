@@ -274,6 +274,27 @@ const ORPHAN_REGISTRY_EXTS: &[&str] = &["sid", "key", "pid", "spawnlock"];
 /// still clearing the backlog on the next CLI invocation.
 const ORPHAN_REGISTRY_GRACE: Duration = Duration::from_secs(60);
 
+/// Most files a single sweep may remove.
+///
+/// psmux CLI commands are invoked constantly by scripts and prompts, and the
+/// backlog this fix targets can run to thousands of files. Deleting all of it
+/// inside one arbitrary invocation — `psmux -V`, say — makes a trivial command
+/// do a surprising amount of destructive work and stalls it on I/O. The budget
+/// keeps any one invocation cheap and bounded; the backlog drains across
+/// successive sweeps instead, which is just as effective and far less abrupt.
+const ORPHAN_REGISTRY_SWEEP_BUDGET: usize = 256;
+
+/// Minimum interval between sweeps, tracked by [`ORPHAN_REGISTRY_SWEEP_STAMP`].
+///
+/// Without this, every psmux invocation pays a full directory walk. Orphans are
+/// produced only by session teardown, so there is nothing to gain from looking
+/// more often than this.
+const ORPHAN_REGISTRY_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Marker file recording when the last sweep ran. Leading dot, so it has no
+/// extension and can never be mistaken for a registry satellite.
+const ORPHAN_REGISTRY_SWEEP_STAMP: &str = ".registry_sweep";
+
 /// Delete per-session registry files whose `.port` entry is already gone
 /// (issue #530).
 ///
@@ -292,30 +313,71 @@ pub fn prune_orphaned_registry_files() {
     let Some(psmux_dir) = crate::paths::psmux_dir_opt() else {
         return;
     };
-    prune_orphaned_registry_files_in(Path::new(&psmux_dir));
+    let psmux_dir = Path::new(&psmux_dir);
+    if !registry_sweep_due(psmux_dir, ORPHAN_REGISTRY_SWEEP_INTERVAL) {
+        return;
+    }
+    prune_orphaned_registry_files_in(psmux_dir);
+}
+
+/// Whether a sweep is due, re-stamping the marker when it is.
+///
+/// The stamp is written BEFORE the sweep runs, not after: if the process is
+/// killed partway through, the next invocation waits a full interval rather
+/// than immediately retrying the same work.
+fn registry_sweep_due(psmux_dir: &Path, interval: Duration) -> bool {
+    let stamp = psmux_dir.join(ORPHAN_REGISTRY_SWEEP_STAMP);
+    let swept_recently = stamp
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|age| age < interval)
+        .unwrap_or(false); // missing or unreadable stamp -> sweep
+    if swept_recently {
+        return false;
+    }
+    let _ = std::fs::write(&stamp, b"");
+    true
 }
 
 fn prune_orphaned_registry_files_in(psmux_dir: &Path) -> usize {
-    let satellites =
-        prune_orphaned_registry_files_in_with(psmux_dir, ORPHAN_REGISTRY_GRACE, pid_owns_live_server);
+    let satellites = prune_orphaned_registry_files_in_with(
+        psmux_dir,
+        ORPHAN_REGISTRY_GRACE,
+        ORPHAN_REGISTRY_SWEEP_BUDGET,
+        pid_owns_live_server,
+    );
     // Namespace tokens are the same leak in a subdirectory: bounded by distinct
     // namespace NAMES, which is unbounded for disposable `-L` namespaces (#530).
-    // Run it after the satellite sweep so it sees the `.port` set that pass left.
-    satellites + prune_orphaned_instance_tokens_in_with(psmux_dir, ORPHAN_REGISTRY_GRACE)
+    // Run it after the satellite sweep so it sees the `.port` set that pass left,
+    // and give it whatever is left of this sweep's budget so the two passes
+    // together stay bounded rather than each costing a full budget.
+    satellites
+        + prune_orphaned_instance_tokens_in_with(
+            psmux_dir,
+            ORPHAN_REGISTRY_GRACE,
+            ORPHAN_REGISTRY_SWEEP_BUDGET.saturating_sub(satellites),
+        )
 }
 
-/// Core of [`prune_orphaned_registry_files`], with the grace period and the
-/// liveness oracle injected so tests can drive it deterministically.
+/// Core of [`prune_orphaned_registry_files`], with the grace period, the
+/// per-sweep budget and the liveness oracle injected so tests can drive it
+/// deterministically.
 ///
 /// Returns the number of files removed.
 fn prune_orphaned_registry_files_in_with<F>(
     psmux_dir: &Path,
     grace: Duration,
+    budget: usize,
     mut is_live: F,
 ) -> usize
 where
     F: FnMut(u32) -> bool,
 {
+    if budget == 0 {
+        return 0;
+    }
     let Ok(entries) = std::fs::read_dir(psmux_dir) else {
         return 0;
     };
@@ -364,6 +426,11 @@ where
                         path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
                     ),
                 );
+            }
+            // Budget spent: leave the rest for the next sweep so no single
+            // invocation does an unbounded amount of destructive work.
+            if pruned >= budget {
+                break;
             }
         }
     }
@@ -465,11 +532,20 @@ fn live_instance_token_names(psmux_dir: &Path) -> std::collections::HashSet<std:
 /// (`ensure_namespace_instance_in` re-decides when it finds no live peer),
 /// deleting it early is observationally identical and keeps the directory
 /// bounded by LIVE namespaces rather than by every name ever used.
-fn prune_orphaned_instance_tokens_in_with(psmux_dir: &Path, grace: Duration) -> usize {
-    let live = live_instance_token_names(psmux_dir);
+fn prune_orphaned_instance_tokens_in_with(
+    psmux_dir: &Path,
+    grace: Duration,
+    budget: usize,
+) -> usize {
+    if budget == 0 {
+        return 0;
+    }
     let Ok(entries) = std::fs::read_dir(crate::paths::instance_dir_in(psmux_dir)) else {
+        // No instances dir: skip the parent walk `live_instance_token_names`
+        // would otherwise pay for nothing.
         return 0;
     };
+    let live = live_instance_token_names(psmux_dir);
     let mut pruned = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -503,6 +579,11 @@ fn prune_orphaned_instance_tokens_in_with(psmux_dir: &Path, grace: Duration) -> 
                         name.to_string_lossy()
                     ),
                 );
+            }
+            // Same budget rule as the satellite sweep: leave the rest for the
+            // next one rather than doing unbounded destructive work here.
+            if pruned >= budget {
+                break;
             }
         }
     }

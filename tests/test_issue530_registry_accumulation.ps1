@@ -71,11 +71,14 @@ function Wait-SessionPort {
     return $false
 }
 
-# Everything in the data dir EXCEPT the live warm server's own set.
+# Everything in the data dir EXCEPT the live warm server's own set and the
+# fixed bookkeeping files (the id counter, the sweep stamp), which are one file
+# each for the life of the directory rather than one per session.
 function Get-Residue {
     if (-not (Test-Path $PSMUXDIR)) { return @() }
-    Get-ChildItem $PSMUXDIR -File -EA SilentlyContinue |
-        Where-Object { $_.Name -notlike "*__warm__*" -and $_.Name -ne "next_session_id" -and $_.Extension -ne ".log" }
+    $fixed = @("next_session_id", "next_session_id.lock", ".registry_sweep", "last_session")
+    Get-ChildItem $PSMUXDIR -File -Force -EA SilentlyContinue |
+        Where-Object { $_.Name -notlike "*__warm__*" -and $fixed -notcontains $_.Name -and $_.Extension -ne ".log" }
 }
 
 function Show-Dir {
@@ -92,6 +95,25 @@ function Show-Dir {
 function Clear-Dir {
     Get-ChildItem $PSMUXDIR -File -EA SilentlyContinue |
         Where-Object { $_.Name -notlike "*__warm__*" } | Remove-Item -Force -EA SilentlyContinue
+}
+
+# The sweep is rate limited by a `.registry_sweep` stamp so it never runs on
+# every invocation. Removing the stamp stands in for the interval having
+# elapsed, which is what lets these scenarios assert a sweep without waiting.
+function Enable-Sweep {
+    Remove-Item (Join-Path $PSMUXDIR ".registry_sweep") -Force -EA SilentlyContinue
+}
+
+# Run psmux until the sweep has nothing left to do. One sweep is deliberately
+# capped at a budget of files so no single invocation does unbounded work, so a
+# large backlog legitimately drains over several passes.
+function Invoke-SweepUntilDrained {
+    param([int]$MaxPasses = 40)
+    for ($p = 0; $p -lt $MaxPasses; $p++) {
+        Enable-Sweep
+        Invoke-Psmux @("list-sessions") | Out-Null
+        Start-Sleep -Milliseconds 150
+    }
 }
 
 function Cleanup-Sandbox {
@@ -199,9 +221,11 @@ foreach ($ext in @("sid", "pid", "key", "spawnlock")) {
 Write-Info "fabricated $($fab.Count) orphaned registry files, all 21 days old, no .port anywhere"
 
 $sw2 = "sweeper"
+Enable-Sweep
 Invoke-Psmux @("new-session", "-d", "-s", $sw2) | Out-Null
 Wait-SessionPort $sw2 | Out-Null
 Start-Sleep -Seconds 3
+Enable-Sweep
 Invoke-Psmux @("list-sessions") | Out-Null
 Invoke-Psmux @("kill-session", "-t", $sw2) | Out-Null
 Start-Sleep -Seconds 2
@@ -246,6 +270,7 @@ if (Wait-SessionPort $hk) {
         if ($lock) { $lock.LastWriteTime = (Get-Date).AddMinutes(-30) }
 
         $sw3 = "postkill"
+        Enable-Sweep
         Invoke-Psmux @("new-session", "-d", "-s", $sw3) | Out-Null
         Wait-SessionPort $sw3 | Out-Null
         Start-Sleep -Seconds 2
@@ -276,6 +301,7 @@ if (Wait-SessionPort "keepme__work") {
         Get-ChildItem $instDirEarly -File -EA SilentlyContinue |
             ForEach-Object { try { $_.LastWriteTime = (Get-Date).AddMinutes(-30) } catch {} }
     }
+    Enable-Sweep
     Invoke-Psmux @("list-sessions") | Out-Null
     Start-Sleep -Milliseconds 600
     $tokAfter = @(Get-ChildItem $instDirEarly -File -EA SilentlyContinue | Where-Object { $_.Name -like "keepme*" })
@@ -330,8 +356,7 @@ if (Test-Path $instDir) {
     Get-ChildItem $instDir -File -EA SilentlyContinue |
         ForEach-Object { try { $_.LastWriteTime = (Get-Date).AddMinutes(-30) } catch {} }
 }
-Invoke-Psmux @("list-sessions") | Out-Null
-Start-Sleep -Milliseconds 800
+Invoke-SweepUntilDrained -MaxPasses 6
 Show-Dir "after a sweep pass"
 
 $instCount = 0
@@ -395,8 +420,7 @@ if (Wait-SessionPort $live) {
         ForEach-Object { $_.LastWriteTime = (Get-Date).AddMinutes(-30) }
     Invoke-Psmux @("kill-session", "-t", $live) | Out-Null
     Start-Sleep -Seconds 2
-    Invoke-Psmux @("list-sessions") | Out-Null
-    Start-Sleep -Milliseconds 500
+    Invoke-SweepUntilDrained -MaxPasses 20
     $junkLeft = (Get-ChildItem $PSMUXDIR -Filter "junk*.sid" -File -EA SilentlyContinue).Count
     if ($junkLeft -eq 0) { Write-Pass "G3: the aged 3000 orphan backlog was reclaimed" }
     else { Write-Fail "G3: $junkLeft / 3000 orphan .sid files still on disk" }
@@ -440,8 +464,7 @@ if (Wait-SessionPort $tui) {
         Where-Object { $_.Extension -eq ".key" -or $_.Extension -eq ".sid" } |
         ForEach-Object { $_.LastWriteTime = (Get-Date).AddDays(-9) }
 
-    Invoke-Psmux @("list-sessions") | Out-Null
-    Start-Sleep -Milliseconds 800
+    Invoke-SweepUntilDrained -MaxPasses 3
     Show-Dir "after the sweep ran with the TUI session attached"
 
     $decoysLeft = (Get-ChildItem $PSMUXDIR -Filter "decoy*" -File -EA SilentlyContinue).Count

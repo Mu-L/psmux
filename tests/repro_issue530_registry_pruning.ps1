@@ -104,7 +104,14 @@ try {
     Set-Content -Path (Join-Path $dataDir 'next_session_id') -Value '41'
     Backdate (Join-Path $dataDir 'next_session_id') 10
 
-    # Any psmux invocation runs the sweep at startup.
+    # The sweep is rate-limited by a stamp file so it never runs on every
+    # invocation. An earlier command in this scenario already stamped it, so
+    # backdate the stamp to stand in for the interval having elapsed.
+    $stamp = Join-Path $dataDir '.registry_sweep'
+    if (-not (Test-Path $stamp)) { Set-Content -Path $stamp -Value '' }
+    Backdate $stamp 10
+
+    # Any psmux invocation runs the sweep at startup once it is due.
     & $psmux -L $ns list-sessions 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
 

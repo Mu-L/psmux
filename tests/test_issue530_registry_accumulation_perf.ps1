@@ -84,38 +84,57 @@ try {
     # --- With the reported backlog ------------------------------------------
     Write-Host "  planting $Backlog aged orphan .sid files..." -ForegroundColor DarkGray
     Plant-Backlog $Backlog
-    $filesBefore = (Get-ChildItem $PSMUXDIR -File).Count
+    $filesBefore = (Get-ChildItem $PSMUXDIR -File -Force).Count
 
+    # A single sweep is capped by a per-invocation budget, and sweeps are rate
+    # limited by a stamp file. Clear the stamp to stand in for the interval
+    # having elapsed, then time ONE sweep over the backlog.
+    Remove-Item (Join-Path $PSMUXDIR ".registry_sweep") -Force -EA SilentlyContinue
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     Invoke-Psmux @("display-message", "-t", $SESSION, "-p", "#{session_name}") | Out-Null
     $sw.Stop()
     $firstMs = $sw.Elapsed.TotalMilliseconds
-    Metric "first call over a $Backlog file backlog" $firstMs
+    Metric "one sweep over a $Backlog file backlog" $firstMs
+
+    $afterOne = (Get-ChildItem $PSMUXDIR -File -Force).Count
+    $perSweep = $filesBefore - $afterOne
+    Write-Host ("  files after one sweep: {0} -> {1} (removed {2})" -f $filesBefore, $afterOne, $perSweep) -ForegroundColor DarkGray
+
+    if ($perSweep -eq 0) {
+        Write-Host "  (unfixed binary: nothing is ever reclaimed, so every call pays the backlog forever)" -ForegroundColor Yellow
+        Write-Fail "$Backlog / $Backlog orphans still on disk after a sweep opportunity"
+    } else {
+        Write-Pass "a single sweep removed $perSweep files and then stopped (bounded work per invocation)"
+    }
+
+    if ($firstMs -lt 1000) { Write-Pass ("one bounded sweep cost {0:N0}ms" -f $firstMs) }
+    else { Write-Fail ("one sweep took {0:N0}ms, over the 1000ms budget" -f $firstMs) }
+
+    # Drain the rest and confirm the backlog really does go away.
+    $sweeps = 1
+    while ((Get-ChildItem $PSMUXDIR -Filter "hist*.sid" -File -EA SilentlyContinue).Count -gt 0 -and $sweeps -lt 200) {
+        Remove-Item (Join-Path $PSMUXDIR ".registry_sweep") -Force -EA SilentlyContinue
+        Invoke-Psmux @("display-message", "-t", $SESSION, "-p", "#{session_name}") | Out-Null
+        $sweeps++
+    }
+    $remaining = (Get-ChildItem $PSMUXDIR -Filter "hist*.sid" -File -EA SilentlyContinue).Count
+    Write-Host ("  sweeps needed to drain {0} files: {1}" -f $Backlog, $sweeps) -ForegroundColor DarkGray
+    if ($remaining -eq 0) { Write-Pass "the backlog drained completely over $sweeps bounded sweeps" }
+    else { Write-Fail "$remaining files still on disk after $sweeps sweeps" }
 
     $after = Measure-Cli
     $afterP50 = Percentile $after 50
     $afterP90 = Percentile $after 90
-    Metric "subsequent calls p50" $afterP50
-    Metric "subsequent calls p90" $afterP90
-
-    $filesAfter = (Get-ChildItem $PSMUXDIR -File).Count
+    Metric "post-drain p50" $afterP50
+    Metric "post-drain p90" $afterP90
+    $filesAfter = (Get-ChildItem $PSMUXDIR -File -Force).Count
     Write-Host ("  files: {0} -> {1}" -f $filesBefore, $filesAfter) -ForegroundColor DarkGray
 
-    $swept = ($filesBefore - $filesAfter)
-    if ($swept -ge $Backlog) {
-        Write-Pass "backlog of $Backlog reclaimed, and the cost is paid once"
-        if ($afterP90 -le ($cleanP90 * 1.5 + 15)) {
-            Write-Pass ("post-sweep latency back to baseline (p90 {0:N1}ms vs clean {1:N1}ms)" -f $afterP90, $cleanP90)
-        } else {
-            Write-Fail ("post-sweep latency did not return to baseline: p90 {0:N1}ms vs clean {1:N1}ms" -f $afterP90, $cleanP90)
-        }
+    if ($afterP90 -le ($cleanP90 * 1.5 + 15)) {
+        Write-Pass ("post-drain latency back to baseline (p90 {0:N1}ms vs clean {1:N1}ms)" -f $afterP90, $cleanP90)
     } else {
-        Write-Host "  (unfixed binary: backlog is never reclaimed, so every call pays it forever)" -ForegroundColor Yellow
-        Write-Fail "$($Backlog - $swept) / $Backlog orphans still on disk"
+        Write-Fail ("post-drain latency did not return to baseline: p90 {0:N1}ms vs clean {1:N1}ms" -f $afterP90, $cleanP90)
     }
-
-    if ($firstMs -lt 3000) { Write-Pass ("the one-time sweep of $Backlog files cost {0:N0}ms" -f $firstMs) }
-    else { Write-Fail ("one-time sweep took {0:N0}ms, over the 3000ms budget" -f $firstMs) }
 
     $metrics = @{
         binary = $PSMUX; backlog = $Backlog
