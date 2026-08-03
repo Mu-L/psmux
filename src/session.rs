@@ -256,6 +256,259 @@ fn cleanup_stale_port_files_in(psmux_dir: &Path) {
     cleanup_stale_port_files_in_with(psmux_dir, probe_session_for_cleanup);
 }
 
+/// Registry file extensions that only ever exist as satellites of a `.port`
+/// entry. Anything else in the data dir (`next_session_id`, its `.lock`, debug
+/// logs, the `instances/` and `servers/` subdirectories) is never touched.
+const ORPHAN_REGISTRY_EXTS: &[&str] = &["sid", "key", "pid", "spawnlock"];
+
+/// How long a `.port`-less registry file must sit untouched before it is
+/// considered abandoned (issue #530).
+///
+/// `ensure_session_registry_files` writes `.sid`/`.key`/`.pid` BEFORE the
+/// `.port` beacon, so a perfectly healthy server that is still coming up
+/// briefly looks exactly like an orphan, and it is only during that window that
+/// this bound is load-bearing (the 5s registry self-heal re-writes a file only
+/// when its contents changed, so a live server's mtimes do NOT keep advancing).
+/// Once the server is up its `.port` is present and the whole set is skipped
+/// outright. One minute is therefore far beyond any legitimate window while
+/// still clearing the backlog on the next CLI invocation.
+const ORPHAN_REGISTRY_GRACE: Duration = Duration::from_secs(60);
+
+/// Delete per-session registry files whose `.port` entry is already gone
+/// (issue #530).
+///
+/// Every other sweep in this module enumerates `.port` files and deletes the
+/// siblings it finds. That makes the `.port` file the sole entry point to the
+/// registry, so the moment one is removed while a sibling survives, the
+/// survivor becomes permanently unreachable: no code path ever looks at it
+/// again, and nothing can ever delete it. Teardown paths that remove
+/// `.port`/`.key`/`.pid` but not `.sid` therefore leak one file per session
+/// forever.
+///
+/// The cost is not only disk. `resolve_session_by_id` scans every `.sid` file
+/// in the directory to map `$N` to a session, so each leaked file is paid for
+/// on every lookup.
+pub fn prune_orphaned_registry_files() {
+    let Some(psmux_dir) = crate::paths::psmux_dir_opt() else {
+        return;
+    };
+    prune_orphaned_registry_files_in(Path::new(&psmux_dir));
+}
+
+fn prune_orphaned_registry_files_in(psmux_dir: &Path) -> usize {
+    let satellites =
+        prune_orphaned_registry_files_in_with(psmux_dir, ORPHAN_REGISTRY_GRACE, pid_owns_live_server);
+    // Namespace tokens are the same leak in a subdirectory: bounded by distinct
+    // namespace NAMES, which is unbounded for disposable `-L` namespaces (#530).
+    // Run it after the satellite sweep so it sees the `.port` set that pass left.
+    satellites + prune_orphaned_instance_tokens_in_with(psmux_dir, ORPHAN_REGISTRY_GRACE)
+}
+
+/// Core of [`prune_orphaned_registry_files`], with the grace period and the
+/// liveness oracle injected so tests can drive it deterministically.
+///
+/// Returns the number of files removed.
+fn prune_orphaned_registry_files_in_with<F>(
+    psmux_dir: &Path,
+    grace: Duration,
+    mut is_live: F,
+) -> usize
+where
+    F: FnMut(u32) -> bool,
+{
+    let Ok(entries) = std::fs::read_dir(psmux_dir) else {
+        return 0;
+    };
+    let mut pruned = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !ORPHAN_REGISTRY_EXTS.contains(&ext) {
+            continue;
+        }
+        // A surviving `.port` means this entry still belongs to the port-driven
+        // sweep, which owns the liveness decision for the whole set.
+        if path.with_extension("port").exists() {
+            continue;
+        }
+        // Too young to judge: could be a server mid-startup that hasn't
+        // published its port yet. Leave it for a later invocation.
+        let old_enough = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .map(|age| age >= grace)
+            .unwrap_or(false); // unreadable mtime -> keep
+        if !old_enough {
+            continue;
+        }
+        // If the set still names a live psmux process, the server exists but is
+        // not publishing a port (still binding, or wedged). Reaping that is
+        // #448's job, not ours — deleting its identity files would only make it
+        // harder to find.
+        if let Some(pid) = orphan_anchor_pid(&path, ext) {
+            if is_live(pid) {
+                continue;
+            }
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            pruned += 1;
+            if crate::debug_log::session_log_enabled() {
+                crate::debug_log::session_log(
+                    "cleanup",
+                    &format!(
+                        "pruned orphaned '{}': no .port sibling and no live owner",
+                        path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
+                    ),
+                );
+            }
+        }
+    }
+    pruned
+}
+
+/// PID that owns an orphaned registry file, when one can be determined.
+///
+/// A `.spawnlock` records its holder's PID directly; every other satellite is
+/// anchored by the sibling `.pid` sentinel. `.sid`/`.key` orphans left by a
+/// teardown that already removed the `.pid` have no anchor at all, which is
+/// precisely the abandoned case.
+fn orphan_anchor_pid(path: &Path, ext: &str) -> Option<u32> {
+    let body = if ext == "spawnlock" {
+        std::fs::read_to_string(path).ok()?
+    } else {
+        std::fs::read_to_string(path.with_extension("pid")).ok()?
+    };
+    parse_pid_file_contents(&body)
+        .map(|(pid, _creation)| pid)
+        .or_else(|| body.trim().parse::<u32>().ok())
+}
+
+/// True when `pid` is a live process running a psmux server image.
+///
+/// The process-table query is Windows-only. Elsewhere this answers "live", so
+/// an orphan that still carries a PID anchor is kept rather than deleted on a
+/// guess. Orphans with no anchor — the overwhelming majority, and the ones
+/// #530 is about — are unaffected by the platform and prune everywhere.
+fn pid_owns_live_server(pid: u32) -> bool {
+    if !cfg!(windows) {
+        return true;
+    }
+    match crate::platform::process_info::get_process_name(pid) {
+        None => false,
+        Some(name) => PSMUX_SERVER_IMAGE_NAMES.contains(&name.to_ascii_lowercase().as_str()),
+    }
+}
+
+/// Instance-token file names (`instances/<prefix>-<hash>`) that a namespace with
+/// a live server could be using.
+///
+/// A token file name is a hash of the namespace, so it cannot be read backwards
+/// into one. The mapping is therefore built forwards from the live `.port`
+/// files: a registry base is `<ns>__<session>` for a `-L` namespace and a bare
+/// `<session>` for the default one, and BOTH halves may themselves contain
+/// `__`, so every prefix ending at a `__` is claimed. Over-claiming is the safe
+/// direction: it can only keep a token that nothing is using, never delete one
+/// that a live namespace depends on.
+fn live_instance_token_names(psmux_dir: &Path) -> std::collections::HashSet<std::ffi::OsString> {
+    let mut live = std::collections::HashSet::new();
+    let Ok(entries) = std::fs::read_dir(psmux_dir) else {
+        return live;
+    };
+    fn claim(
+        dir: &Path,
+        ns: Option<&str>,
+        set: &mut std::collections::HashSet<std::ffi::OsString>,
+    ) {
+        if let Some(name) = crate::paths::namespace_instance_file(dir, ns).file_name() {
+            set.insert(name.to_os_string());
+        }
+    }
+    let mut any_port = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e != "port").unwrap_or(true) {
+            continue;
+        }
+        any_port = true;
+        let Some(base) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let bytes = base.as_bytes();
+        for i in 1..bytes.len().saturating_sub(1) {
+            // `_` is ASCII, so a match is always a char boundary.
+            if bytes[i] == b'_' && bytes[i + 1] == b'_' {
+                claim(psmux_dir, Some(&base[..i]), &mut live);
+            }
+        }
+    }
+    // Any live server at all may be a default-namespace one: a bare `<session>`
+    // base is indistinguishable from a namespaced base whose split we cannot
+    // pin down, so the default token is kept whenever anything is running.
+    if any_port {
+        claim(psmux_dir, None, &mut live);
+    }
+    live
+}
+
+/// Delete namespace identity tokens (issue #509's `instances/`) for namespaces
+/// that have no live server left (issue #530).
+///
+/// #509 argued that tokens need no teardown because the next server in a
+/// namespace re-mints one anyway. That holds for a fixed set of namespace
+/// names; it does not for callers that mint a throwaway `-L` namespace per run,
+/// which is exactly what namespaces are good for. Since a token for a dead
+/// namespace is discarded and re-minted the moment that namespace is used again
+/// (`ensure_namespace_instance_in` re-decides when it finds no live peer),
+/// deleting it early is observationally identical and keeps the directory
+/// bounded by LIVE namespaces rather than by every name ever used.
+fn prune_orphaned_instance_tokens_in_with(psmux_dir: &Path, grace: Duration) -> usize {
+    let live = live_instance_token_names(psmux_dir);
+    let Ok(entries) = std::fs::read_dir(crate::paths::instance_dir_in(psmux_dir)) else {
+        return 0;
+    };
+    let mut pruned = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name() else { continue };
+        if live.contains(name) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        // Same startup guard as the satellite sweep: a server establishes its
+        // namespace identity before it publishes a `.port`, so a young token
+        // may belong to a namespace that is still coming up.
+        let old_enough = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|age| age >= grace)
+            .unwrap_or(false); // unreadable mtime -> keep
+        if !old_enough {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            pruned += 1;
+            if crate::debug_log::session_log_enabled() {
+                crate::debug_log::session_log(
+                    "cleanup",
+                    &format!(
+                        "pruned namespace token '{}': no live server in that namespace",
+                        name.to_string_lossy()
+                    ),
+                );
+            }
+        }
+    }
+    pruned
+}
+
 /// Image-name stems (lower-case, no extension) that count as a psmux server for
 /// the orphan reaper. Only processes whose executable matches one of these are
 /// ever candidates for termination — an unrelated app that happens to hold a
@@ -926,7 +1179,12 @@ fn registry_base(port_path: &Path) -> &str {
     port_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
 }
 
-fn remove_session_registry_files(port_path: &Path) {
+/// Remove a session's entire registry set, given its `.port` path.
+///
+/// Teardown paths must go through this rather than deleting extensions
+/// individually: the `.port` file is the only entry point the sweeps know, so
+/// any satellite left behind when it disappears is unreachable forever (#530).
+pub(crate) fn remove_session_registry_files(port_path: &Path) {
     let _ = std::fs::remove_file(port_path);
     let key_path = port_path.with_extension("key");
     let _ = std::fs::remove_file(&key_path);
@@ -1913,3 +2171,7 @@ mod tests_issue509_namespace_instance;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue510_reaper_attribution.rs"]
 mod tests_issue510_reaper_attribution;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue530_registry_pruning.rs"]
+mod tests_issue530_registry_pruning;

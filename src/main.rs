@@ -216,6 +216,11 @@ fn run_main() -> io::Result<()> {
 
     // Clean up any stale port files at startup
     cleanup_stale_port_files();
+    // Then drop registry files whose `.port` entry is already gone (issue
+    // #530). The sweep above is the only thing that can reach them, and it
+    // finds entries BY their `.port` file — so a satellite that outlives its
+    // port is invisible to it and accumulates forever.
+    crate::session::prune_orphaned_registry_files();
     // Then reap any LIVE but orphaned server processes (issue #448): duplicates
     // or crashed-client headless servers that cleanup_stale_port_files cannot
     // see because they have no registry file. Bounds the process count so
@@ -533,19 +538,17 @@ fn run_main() -> io::Result<()> {
                             }
                         }
                     }
-                    // Remove port/key/pid files regardless
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(path.with_extension("key"));
-                    let _ = std::fs::remove_file(path.with_extension("pid"));
+                    // Remove the whole registry set regardless. Deleting only
+                    // port/key/pid used to strand the `.sid`, which no sweep can
+                    // reach once its `.port` is gone (#530).
+                    crate::session::remove_session_registry_files(&path);
                 })
             }).collect();
             // Wait for all threads to complete
             for h in handles { let _ = h.join(); }
-            // Clean up stale port/key/pid files
+            // Clean up stale registry sets (whole set, including `.sid` — #530)
             for path in &stale_ports {
-                let _ = std::fs::remove_file(path);
-                let _ = std::fs::remove_file(path.with_extension("key"));
-                let _ = std::fs::remove_file(path.with_extension("pid"));
+                crate::session::remove_session_registry_files(path);
             }
             // Force-kill any wedged server that ignored the graceful kill. The
             // candidates were read from this data dir's (and, with -L, this
@@ -715,10 +718,10 @@ fn run_main() -> io::Result<()> {
                                                     println!("{}", display_name); 
                                                 }
                                             } else if refused {
-                                                // Actively refused → truly dead; remove stale port + key.
-                                                let _ = std::fs::remove_file(e.path());
-                                                let key_path = e.path().with_extension("key");
-                                                let _ = std::fs::remove_file(&key_path);
+                                                // Actively refused → truly dead. Remove the WHOLE
+                                                // set: dropping the `.port` alone would strand its
+                                                // siblings where no sweep can reach them (#530).
+                                                crate::session::remove_session_registry_files(&e.path());
                                             }
                                         }
                                     }
@@ -1882,9 +1885,8 @@ fn run_main() -> io::Result<()> {
                                                     }
                                                 }
                                             } else if refused {
-                                                let _ = std::fs::remove_file(e.path());
-                                                let key_path = e.path().with_extension("key");
-                                                let _ = std::fs::remove_file(&key_path);
+                                                // Whole set, not just port+key (#530).
+                                                crate::session::remove_session_registry_files(&e.path());
                                             }
                                         }
                                     }
@@ -2002,9 +2004,8 @@ fn run_main() -> io::Result<()> {
                                                     }
                                                 }
                                             } else if refused {
-                                                let _ = std::fs::remove_file(e.path());
-                                                let key_path = e.path().with_extension("key");
-                                                let _ = std::fs::remove_file(&key_path);
+                                                // Whole set, not just port+key (#530).
+                                                crate::session::remove_session_registry_files(&e.path());
                                             }
                                         }
                                     }
