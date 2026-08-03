@@ -95,7 +95,7 @@ Start-Sleep -Seconds 2
 if (-not (Is-PidAlive $orphanPid)) { Write-Pass "reaper TERMINATED the orphaned server $orphanPid" }
 else {
     Write-Fail "orphaned server $orphanPid survived the reaper"
-    Stop-Process -Id $orphanPid -Force -EA SilentlyContinue
+    Stop-Process -Id ([int](Parse-Pid $orphanPid)) -Force -EA SilentlyContinue
 }
 
 # === TEST 3: a legitimate session is NEVER reaped ===
@@ -118,7 +118,8 @@ $env:PSMUX_NO_WARM = "1"   # force a cold spawn so the PROCESS is genuinely youn
 Start-Sleep -Seconds 3
 $env:PSMUX_NO_WARM = $null
 $youngPid = (Get-Content "$psmuxDir\reap_young.pid" -Raw).Trim()
-$p = Get-Process -Id $youngPid -EA SilentlyContinue
+$youngNum = Parse-Pid $youngPid    # .pid holds pid:creation_filetime; Get-Process needs the pid alone
+$p = Get-Process -Id ([int]$youngNum) -EA SilentlyContinue
 $age = if ($p) { ((Get-Date) - $p.StartTime).TotalSeconds } else { 999 }
 Write-Host ("    young cold server PID=$youngPid age={0:N1}s" -f $age) -ForegroundColor DarkGray
 Remove-Item "$psmuxDir\reap_young.*" -Force -EA SilentlyContinue
@@ -127,7 +128,7 @@ Start-Sleep -Seconds 1
 if ($age -lt 10 -and (Is-PidAlive $youngPid)) { Write-Pass "young orphan (age $([math]::Round($age,1))s) SPARED by grace window (mid-boot safe)" }
 elseif ($age -ge 10) { Write-Host "  [SKIP] process was not young enough to exercise grace (age $([math]::Round($age,1))s)" -ForegroundColor DarkYellow }
 else { Write-Fail "young orphan $youngPid was reaped despite grace window" }
-Stop-Process -Id $youngPid -Force -EA SilentlyContinue   # manual cleanup of the young orphan
+Stop-Process -Id ([int]$youngNum) -Force -EA SilentlyContinue   # manual cleanup of the young orphan
 
 # ===========================================================================
 # Win32 TUI VISUAL VERIFICATION — a real visible window stays functional while
