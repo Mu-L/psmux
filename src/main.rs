@@ -718,10 +718,10 @@ fn run_main() -> io::Result<()> {
                                                     println!("{}", display_name); 
                                                 }
                                             } else if refused {
-                                                // Actively refused → truly dead; remove stale port + key.
-                                                let _ = std::fs::remove_file(e.path());
-                                                let key_path = e.path().with_extension("key");
-                                                let _ = std::fs::remove_file(&key_path);
+                                                // Actively refused → truly dead. Remove the WHOLE
+                                                // set: dropping the `.port` alone would strand its
+                                                // siblings where no sweep can reach them (#530).
+                                                crate::session::remove_session_registry_files(&e.path());
                                             }
                                         }
                                     }
@@ -1885,9 +1885,8 @@ fn run_main() -> io::Result<()> {
                                                     }
                                                 }
                                             } else if refused {
-                                                let _ = std::fs::remove_file(e.path());
-                                                let key_path = e.path().with_extension("key");
-                                                let _ = std::fs::remove_file(&key_path);
+                                                // Whole set, not just port+key (#530).
+                                                crate::session::remove_session_registry_files(&e.path());
                                             }
                                         }
                                     }
@@ -2005,9 +2004,8 @@ fn run_main() -> io::Result<()> {
                                                     }
                                                 }
                                             } else if refused {
-                                                let _ = std::fs::remove_file(e.path());
-                                                let key_path = e.path().with_extension("key");
-                                                let _ = std::fs::remove_file(&key_path);
+                                                // Whole set, not just port+key (#530).
+                                                crate::session::remove_session_registry_files(&e.path());
                                             }
                                         }
                                     }

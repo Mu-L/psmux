@@ -215,3 +215,134 @@ fn removing_a_registry_set_leaves_nothing_behind() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// instances/ — the same leak, one directory down.
+//
+// #509 left namespace identity tokens unpruned on the argument that they are
+// bounded by distinct namespace names. Disposable `-L` namespaces make that set
+// unbounded, which is what the reporter of #530 came back to correct.
+// ---------------------------------------------------------------------------
+
+fn token(dir: &std::path::Path, ns: Option<&str>, body: &str) -> std::path::PathBuf {
+    let p = crate::paths::namespace_instance_file(dir, ns);
+    std::fs::create_dir_all(p.parent().unwrap()).expect("create instances dir");
+    std::fs::write(&p, body).expect("write token");
+    p
+}
+
+/// A namespace with no `.port` anywhere has no server, so its token goes.
+#[test]
+fn a_token_for_a_dead_namespace_is_pruned() {
+    let dir = scratch_dir("tok-dead");
+    let t = token(&dir, Some("throwaway-42"), "a1b2c3d4e5f60718");
+
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO);
+
+    assert_eq!(pruned, 1, "the dead namespace's token should be removed");
+    assert!(!t.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A namespace that still has a live server keeps its identity: re-minting it
+/// would look like a server restart to a supervisor watching #{server_instance}.
+#[test]
+fn a_token_for_a_live_namespace_is_kept() {
+    let dir = scratch_dir("tok-live");
+    let live = token(&dir, Some("alive"), "1111111111111111");
+    let dead = token(&dir, Some("gone"), "2222222222222222");
+    write(&dir, "alive__work.port", "51234");
+
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO);
+
+    assert_eq!(pruned, 1, "only the namespace with no server should be pruned");
+    assert!(live.exists(), "a live namespace must keep its token");
+    assert!(!dead.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The namespace warm helper is `<ns>____warm__`, so the split that recovers
+/// the namespace has to survive a run of underscores on both sides.
+#[test]
+fn a_namespace_known_only_by_its_warm_helper_is_kept() {
+    let dir = scratch_dir("tok-warm");
+    let live = token(&dir, Some("ns_a"), "3333333333333333");
+    write(&dir, "ns_a____warm__.port", "51235");
+
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO);
+
+    assert_eq!(pruned, 0);
+    assert!(
+        live.exists(),
+        "a namespace whose only server is its warm helper is still live"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The default namespace cannot be recovered from a bare `<session>` base, so
+/// it is kept whenever anything at all is running.
+#[test]
+fn the_default_token_is_kept_while_any_server_lives() {
+    let dir = scratch_dir("tok-default");
+    let def = token(&dir, None, "4444444444444444");
+    write(&dir, "work.port", "51236");
+
+    assert_eq!(prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO), 0);
+    assert!(def.exists());
+
+    // With nothing left running it is collectable like any other: the next
+    // server to start re-mints, which is what a genuine restart should look like.
+    std::fs::remove_file(dir.join("work.port")).unwrap();
+    assert_eq!(prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO), 1);
+    assert!(!def.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A token written seconds ago may belong to a namespace still coming up: its
+/// server establishes identity before it publishes a `.port`.
+#[test]
+fn a_freshly_minted_token_is_inside_the_grace_window() {
+    let dir = scratch_dir("tok-grace");
+    let t = token(&dir, Some("starting"), "5555555555555555");
+
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::from_secs(3600));
+
+    assert_eq!(pruned, 0, "a young token must survive the grace window");
+    assert!(t.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Disposable namespaces are the reported workload: N throwaway names must
+/// collapse to only the ones still running.
+#[test]
+fn a_backlog_of_disposable_namespace_tokens_collapses_to_the_live_ones() {
+    let dir = scratch_dir("tok-backlog");
+    for i in 0..200 {
+        token(&dir, Some(&format!("jefe-probe-{i}")), "6666666666666666");
+    }
+    let keep = token(&dir, Some("keeper"), "7777777777777777");
+    write(&dir, "keeper__work.port", "51237");
+
+    let pruned = prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO);
+
+    assert_eq!(pruned, 200);
+    assert!(keep.exists());
+    let left = std::fs::read_dir(crate::paths::instance_dir_in(&dir)).unwrap().count();
+    assert_eq!(left, 1, "instances/ is bounded by LIVE namespaces, not by names ever used");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The sweep must not wander out of `instances/` into the registry itself.
+#[test]
+fn the_token_sweep_never_touches_session_files() {
+    let dir = scratch_dir("tok-scope");
+    write(&dir, "orphan.sid", "9");
+    write(&dir, "next_session_id", "12");
+    token(&dir, Some("dead"), "8888888888888888");
+
+    prune_orphaned_instance_tokens_in_with(&dir, Duration::ZERO);
+
+    assert!(exists(&dir, "orphan.sid"), "satellite sweep owns .sid, not this one");
+    assert!(exists(&dir, "next_session_id"), "the id counter is not a registry satellite");
+    let _ = std::fs::remove_dir_all(&dir);
+}

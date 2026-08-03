@@ -266,10 +266,12 @@ const ORPHAN_REGISTRY_EXTS: &[&str] = &["sid", "key", "pid", "spawnlock"];
 ///
 /// `ensure_session_registry_files` writes `.sid`/`.key`/`.pid` BEFORE the
 /// `.port` beacon, so a perfectly healthy server that is still coming up
-/// briefly looks exactly like an orphan. A live server also rewrites its whole
-/// set on the 5s self-heal tick, so its files can never age past this bound.
-/// One minute is therefore far beyond any legitimate window while still
-/// clearing the backlog on the next CLI invocation.
+/// briefly looks exactly like an orphan, and it is only during that window that
+/// this bound is load-bearing (the 5s registry self-heal re-writes a file only
+/// when its contents changed, so a live server's mtimes do NOT keep advancing).
+/// Once the server is up its `.port` is present and the whole set is skipped
+/// outright. One minute is therefore far beyond any legitimate window while
+/// still clearing the backlog on the next CLI invocation.
 const ORPHAN_REGISTRY_GRACE: Duration = Duration::from_secs(60);
 
 /// Delete per-session registry files whose `.port` entry is already gone
@@ -294,7 +296,12 @@ pub fn prune_orphaned_registry_files() {
 }
 
 fn prune_orphaned_registry_files_in(psmux_dir: &Path) -> usize {
-    prune_orphaned_registry_files_in_with(psmux_dir, ORPHAN_REGISTRY_GRACE, pid_owns_live_server)
+    let satellites =
+        prune_orphaned_registry_files_in_with(psmux_dir, ORPHAN_REGISTRY_GRACE, pid_owns_live_server);
+    // Namespace tokens are the same leak in a subdirectory: bounded by distinct
+    // namespace NAMES, which is unbounded for disposable `-L` namespaces (#530).
+    // Run it after the satellite sweep so it sees the `.port` set that pass left.
+    satellites + prune_orphaned_instance_tokens_in_with(psmux_dir, ORPHAN_REGISTRY_GRACE)
 }
 
 /// Core of [`prune_orphaned_registry_files`], with the grace period and the
@@ -394,6 +401,112 @@ fn pid_owns_live_server(pid: u32) -> bool {
         None => false,
         Some(name) => PSMUX_SERVER_IMAGE_NAMES.contains(&name.to_ascii_lowercase().as_str()),
     }
+}
+
+/// Instance-token file names (`instances/<prefix>-<hash>`) that a namespace with
+/// a live server could be using.
+///
+/// A token file name is a hash of the namespace, so it cannot be read backwards
+/// into one. The mapping is therefore built forwards from the live `.port`
+/// files: a registry base is `<ns>__<session>` for a `-L` namespace and a bare
+/// `<session>` for the default one, and BOTH halves may themselves contain
+/// `__`, so every prefix ending at a `__` is claimed. Over-claiming is the safe
+/// direction: it can only keep a token that nothing is using, never delete one
+/// that a live namespace depends on.
+fn live_instance_token_names(psmux_dir: &Path) -> std::collections::HashSet<std::ffi::OsString> {
+    let mut live = std::collections::HashSet::new();
+    let Ok(entries) = std::fs::read_dir(psmux_dir) else {
+        return live;
+    };
+    fn claim(
+        dir: &Path,
+        ns: Option<&str>,
+        set: &mut std::collections::HashSet<std::ffi::OsString>,
+    ) {
+        if let Some(name) = crate::paths::namespace_instance_file(dir, ns).file_name() {
+            set.insert(name.to_os_string());
+        }
+    }
+    let mut any_port = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e != "port").unwrap_or(true) {
+            continue;
+        }
+        any_port = true;
+        let Some(base) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let bytes = base.as_bytes();
+        for i in 1..bytes.len().saturating_sub(1) {
+            // `_` is ASCII, so a match is always a char boundary.
+            if bytes[i] == b'_' && bytes[i + 1] == b'_' {
+                claim(psmux_dir, Some(&base[..i]), &mut live);
+            }
+        }
+    }
+    // Any live server at all may be a default-namespace one: a bare `<session>`
+    // base is indistinguishable from a namespaced base whose split we cannot
+    // pin down, so the default token is kept whenever anything is running.
+    if any_port {
+        claim(psmux_dir, None, &mut live);
+    }
+    live
+}
+
+/// Delete namespace identity tokens (issue #509's `instances/`) for namespaces
+/// that have no live server left (issue #530).
+///
+/// #509 argued that tokens need no teardown because the next server in a
+/// namespace re-mints one anyway. That holds for a fixed set of namespace
+/// names; it does not for callers that mint a throwaway `-L` namespace per run,
+/// which is exactly what namespaces are good for. Since a token for a dead
+/// namespace is discarded and re-minted the moment that namespace is used again
+/// (`ensure_namespace_instance_in` re-decides when it finds no live peer),
+/// deleting it early is observationally identical and keeps the directory
+/// bounded by LIVE namespaces rather than by every name ever used.
+fn prune_orphaned_instance_tokens_in_with(psmux_dir: &Path, grace: Duration) -> usize {
+    let live = live_instance_token_names(psmux_dir);
+    let Ok(entries) = std::fs::read_dir(crate::paths::instance_dir_in(psmux_dir)) else {
+        return 0;
+    };
+    let mut pruned = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name() else { continue };
+        if live.contains(name) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        // Same startup guard as the satellite sweep: a server establishes its
+        // namespace identity before it publishes a `.port`, so a young token
+        // may belong to a namespace that is still coming up.
+        let old_enough = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|age| age >= grace)
+            .unwrap_or(false); // unreadable mtime -> keep
+        if !old_enough {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            pruned += 1;
+            if crate::debug_log::session_log_enabled() {
+                crate::debug_log::session_log(
+                    "cleanup",
+                    &format!(
+                        "pruned namespace token '{}': no live server in that namespace",
+                        name.to_string_lossy()
+                    ),
+                );
+            }
+        }
+    }
+    pruned
 }
 
 /// Image-name stems (lower-case, no extension) that count as a psmux server for
