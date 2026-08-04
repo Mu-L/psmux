@@ -1559,6 +1559,7 @@ pub enum CtrlReq {
     SetOptionUnset(String),  // set-option -u
     SetOptionAppend(String, String),  // set-option -a
     SetOptionOnlyIfUnset(String, String),  // set-option -o
+    SetOptionToggle(String),  // set-option <bool-option> with no value (#535)
     ShowOptions(mpsc::Sender<String>),
     ShowWindowOptions(mpsc::Sender<String>),
     SourceFile(String),

@@ -249,6 +249,7 @@ pub(crate) fn is_boolean_option(name: &str) -> bool {
     matches!(
         name,
         "mouse"
+            | "bold-is-bright"
             | "scroll-enter-copy-mode"
             | "pwsh-mouse-selection"
             | "mouse-selection"
@@ -277,6 +278,22 @@ pub(crate) fn is_boolean_option(name: &str) -> bool {
             | "claude-code-force-interactive"
             | "status"
     )
+}
+
+/// How a `set-option` that names an option but supplies **no value** must be
+/// handled (issue #535). tmux 3.4 splits this case in two:
+///
+/// * boolean/flag options toggle silently and exit 0 (`set -g mouse` flips
+///   on<->off). psmux already did this for config-file lines (#278);
+/// * every other option is an error: `empty value` on stderr, exit 1.
+///
+/// `-q` deliberately does **not** enter into it. Both psmux's own CLI help and
+/// tmux's manual scope `-q` to "errors about unknown or ambiguous options";
+/// verified against tmux 3.4, where `set -gq @foo` still fails with
+/// `empty value`. Callers must route the no-value case through here rather
+/// than dropping it, which is what let #535 pass silently with exit 0.
+pub(crate) fn missing_value_toggles(option: &str) -> bool {
+    is_boolean_option(option)
 }
 
 /// Toggle a boolean option: read current value and flip it.
@@ -598,3 +615,7 @@ mod tests_issue266_per_window_autorename;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue278_toggle_bool_option.rs"]
 mod tests_issue278_toggle_bool_option;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue535_setoption_no_value.rs"]
+mod tests_issue535_setoption_no_value;

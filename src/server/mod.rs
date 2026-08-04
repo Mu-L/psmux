@@ -456,6 +456,14 @@ fn drain_plugin_req(
                 app.user_options.remove(&option);
             }
         }
+        CtrlReq::SetOptionToggle(option) => {
+            // `set -g <bool-option>` with no value flips it (#535). The client
+            // cannot compute the new value itself: only the server knows the
+            // current one, so the toggle has to happen here.
+            if crate::server::options::toggle_option(app, &option) {
+                app.user_set_options.insert(option.clone());
+            }
+        }
         CtrlReq::SetOptionOnlyIfUnset(option, value) => {
             // Only set if the option hasn't been explicitly set by user/config.
             // For @-prefixed user options, check if the key exists.
@@ -3826,6 +3834,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "window-status-current-format" => { app.window_status_current_format.push_str(&value); }
                             _ => {}
                         }
+                    }
+                }
+                CtrlReq::SetOptionToggle(option) => {
+                    // `set -g <bool-option>` with no value flips it (#535).
+                    // Only the server knows the current value, so the flip has
+                    // to happen here rather than client-side.
+                    if crate::server::options::toggle_option(&mut app, &option) {
+                        app.user_set_options.insert(option.clone());
+                        let sync = crate::warm_pane_sync::for_option_change(&option, &app);
+                        crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+                        meta_dirty = true;
+                        state_dirty = true;
                     }
                 }
                 CtrlReq::SetOptionOnlyIfUnset(option, value) => {

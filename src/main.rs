@@ -3000,15 +3000,49 @@ fn run_main() -> io::Result<()> {
                         "pane-base-index", "status-left-length", "status-right-length",
                         "history-file-limit",
                     ];
-                    // Collect positional (non-flag) args, skipping -t's value.
+                    // Collect positional (non-flag) args, skipping -t/-p values.
+                    // `@user-options` start with '@', not '-', so they are
+                    // positionals; an explicit empty string ("") is a real
+                    // value and must stay in the list (tmux accepts
+                    // `set -g @foo ""`).
                     let mut positionals: Vec<&str> = Vec::new();
+                    let mut flags = String::new();
                     let mut j = 1;
                     while j < cmd_args.len() {
                         let a = cmd_args[j].as_str();
-                        if a == "-t" { j += 2; continue; }
-                        if a.starts_with('-') { j += 1; continue; }
+                        if a == "-t" || a == "-p" { j += 2; continue; }
+                        if a.starts_with('-') && a.len() > 1 {
+                            flags.push_str(&a[1..]);
+                            j += 1;
+                            continue;
+                        }
                         positionals.push(a);
                         j += 1;
+                    }
+                    let has_unset = flags.contains('u') || flags.contains('U');
+                    let has_append = flags.contains('a');
+                    // Issue #535: a set-option carrying no value used to be
+                    // dropped in silence: nothing set, empty stderr, exit 0.
+                    // That turned a one-character mistake (PowerShell eats a
+                    // bare `@name` as the splatting operator, so `set -g
+                    // @pill $undefined` arrives as `set -g <text>`) into an
+                    // undebuggable no-op. tmux fails these loudly, so we do
+                    // too. `-q` is NOT consulted: both tmux's manual and our
+                    // own -q help text scope it to unknown/ambiguous options,
+                    // and tmux 3.4 still errors on `set -gq @foo`.
+                    if positionals.is_empty() {
+                        eprintln!("psmux: set-option: too few arguments (need at least 1)");
+                        std::process::exit(1);
+                    }
+                    if positionals.len() == 1 && !has_unset {
+                        let name = positionals[0];
+                        // Boolean flags legitimately take no value: they
+                        // toggle (tmux parity, #278). Everything else is an
+                        // error. `-a` appends, so it always needs a value.
+                        if has_append || !crate::server::options::missing_value_toggles(name) {
+                            eprintln!("psmux: set-option: empty value for '{}'", name);
+                            std::process::exit(1);
+                        }
                     }
                     if let (Some(name), Some(val)) = (positionals.first(), positionals.get(1)) {
                         if INT_OPTS.contains(name) && val.parse::<i64>().is_err() {
@@ -3019,7 +3053,13 @@ fn run_main() -> io::Result<()> {
                 }
                 let cmd_str: String = cmd_args.iter().map(|s| {
                     let s = s.as_str();
-                    if s.contains(' ') {
+                    // An explicitly empty argument must be re-quoted, or it
+                    // collapses into the joining whitespace and the server
+                    // re-splits one positional short, so `set -g @foo ""`
+                    // (tmux: clear the option) silently kept the old value.
+                    // parse_command_line already preserves a quoted empty
+                    // token, see #177.
+                    if s.is_empty() || s.contains(' ') {
                         format!("\"{}\"", s.replace('"', "\\\""))
                     } else {
                         s.to_string()

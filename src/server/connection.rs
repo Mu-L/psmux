@@ -2187,8 +2187,20 @@ match cmd {
             } else {
                 let _ = tx.send(CtrlReq::SetOptionQuiet(option, value, has_q));
             }
-        } else if non_flag_args.len() == 1 && has_q {
-            // set -q <option> with no value — silently ignore
+        } else if non_flag_args.len() == 1 {
+            // An option name with no value (#535). Previously this fell off the
+            // end of the chain and the command vanished: no option set, no
+            // warning, exit 0. tmux 3.4 splits it two ways, and so do we.
+            let option = non_flag_args[0];
+            if crate::server::options::missing_value_toggles(option) {
+                // Boolean flag: `set -g mouse` toggles it (tmux parity, #278).
+                // The config-file parser already did this; the CLI/TCP path
+                // dropped it, so `psmux set -g mouse` was a no-op.
+                let _ = tx.send(CtrlReq::SetOptionToggle(option.to_string()));
+            }
+            // Otherwise it is an error ("empty value"). The CLI reports it on
+            // stderr with exit 1 before it ever reaches us (main.rs), which is
+            // the only place an exit code exists; nothing to apply here.
         }
     }
     "show-options" | "show" | "show-window-options" | "showw" => {
@@ -3623,6 +3635,13 @@ fn dispatch_control_command(
                     let _ = tx.send(CtrlReq::SetOptionQuiet(key, val, quiet));
                 } else {
                     let _ = tx.send(CtrlReq::SetOption(key, val));
+                }
+            } else if positional.len() == 1 && !unset && !append {
+                // Option name, no value (#535), see the matching arm above.
+                // Boolean options toggle; anything else is an "empty value"
+                // error the CLI has already reported with exit 1.
+                if crate::server::options::missing_value_toggles(positional[0]) {
+                    let _ = tx.send(CtrlReq::SetOptionToggle(positional[0].to_string()));
                 }
             }
             let _ = resp_tx.send(String::new());
