@@ -101,6 +101,16 @@ pub trait MasterPty: Downcast + Send {
     /// It is invalid to take the writer more than once.
     fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>, Error>;
 
+    /// Whether this is a ConPTY created with passthrough mode enabled.
+    ///
+    /// `None` means that the pty implementation is not ConPTY, or does not
+    /// expose this implementation-specific detail.  The result should be
+    /// queried after spawning a child: ConPTY can fall back to a newly-created
+    /// non-passthrough console when process creation rejects passthrough mode.
+    fn conpty_passthrough_mode(&self) -> Option<bool> {
+        None
+    }
+
     /// If applicable to the type of the tty, return the local process id
     /// of the process group or session leader
     #[cfg(unix)]
@@ -124,6 +134,18 @@ pub trait MasterPty: Downcast + Send {
     }
 }
 impl_downcast!(MasterPty);
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_conpty_master_reports_no_passthrough_mode() {
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+
+        assert_eq!(pair.master.conpty_passthrough_mode(), None);
+    }
+}
 
 /// Represents a child process spawned into the pty.
 /// This handle can be used to wait for or terminate that child process.
