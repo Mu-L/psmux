@@ -458,20 +458,21 @@ if ($allLines.Count -ge $prefixLines.Count) {
 }
 
 # ============================================================
-# GAP 8: resize-window -x/-y (intentional no-op on Windows)
+# GAP 8: resize-window -x/-y
 # tmux: cmd-resize-window.c
 #   -x width, -y height: set manual window size
-#   On psmux/Windows: terminal controls viewport, this is a documented no-op
+#   psmux keeps client viewport and target-window geometry separate.
 # ============================================================
-Write-Host "`n=== GAP 8: resize-window (Windows No-Op) ===" -ForegroundColor Cyan
+Write-Host "`n=== GAP 8: resize-window geometry ===" -ForegroundColor Cyan
 
-Write-Host "[8a] resize-window -x -y accepted without error" -ForegroundColor Yellow
+Write-Host "[8a] resize-window -x -y changes the target geometry" -ForegroundColor Yellow
 $err8 = & $PSMUX resize-window -t $S1 -x 200 -y 50 2>&1
-& $PSMUX has-session -t $S1 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Pass "resize-window accepted, session alive (no-op on Windows is by design)"
+$width8 = (& $PSMUX display-message -t $S1 -p '#{window_width}' 2>&1 | Out-String).Trim()
+$height8 = (& $PSMUX display-message -t $S1 -p '#{window_height}' 2>&1 | Out-String).Trim()
+if ($width8 -eq "200" -and $height8 -eq "50") {
+    Write-Pass "resize-window changed the target to ${width8}x${height8}"
 } else {
-    Write-Fail "Session died after resize-window!"
+    Write-Fail "Expected 200x50, got ${width8}x${height8}; output: $err8"
 }
 
 # ============================================================

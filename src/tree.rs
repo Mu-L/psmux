@@ -238,11 +238,9 @@ pub fn compute_rects(node: &Node, area: Rect, out: &mut Vec<(Vec<usize>, Rect)>)
     rec(node, area, &mut path, out);
 }
 
-/// Resize all panes in the current window to match their computed areas
-pub fn resize_all_panes(app: &mut AppState) {
-    if app.windows.is_empty() { return; }
-    let area = app.last_window_area;
-    if area.width == 0 || area.height == 0 { return; }
+/// Resize all panes in one window to match the supplied window area.
+pub fn resize_window_panes(app: &mut AppState, window_index: usize, area: Rect) {
+    if window_index >= app.windows.len() || area.width == 0 || area.height == 0 { return; }
     // Reserve 1 row per leaf pane when pane-border-status is enabled (#288)
     let border_status_rows: u16 = match app.user_options.get("pane-border-status").map(|s| s.as_str()) {
         Some("top") | Some("bottom") => 1,
@@ -301,31 +299,35 @@ pub fn resize_all_panes(app: &mut AppState) {
         }
     }
     
-    // Only resize the active window immediately — background windows will be
-    // resized lazily when switched to.  This avoids O(total_panes) ConPTY
-    // resize syscalls on every structural change.
-    if app.active_idx < app.windows.len() {
-        let win = &mut app.windows[app.active_idx];
-        let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
-        compute_rects(&win.root, area, &mut rects);
-        // When the window is zoomed, split_with_gaps still subtracts the
-        // separator gap (1 px) AND the minimum-size steal (1 px) from the
-        // visible pane, making it 2 rows/cols shorter than the full viewport.
-        // The client renders the zoomed pane using the full area, so the PTY
-        // must also be sized to the full area — otherwise the bottom/right
-        // edge shows blank rows/columns.
-        let zoom_active_path = if win.zoom_saved.is_some() {
-            let active_path = win.active_path.clone();
-            if let Some((_, rect)) = rects.iter_mut().find(|(p, _)| *p == active_path) {
-                *rect = area;
-            }
-            Some(active_path)
-        } else {
-            None
-        };
-        let mut path = Vec::new();
-        resize_node(&mut win.root, &rects, &mut path, border_status_rows, zoom_active_path.as_ref());
-    }
+    let win = &mut app.windows[window_index];
+    let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
+    compute_rects(&win.root, area, &mut rects);
+    // When the window is zoomed, split_with_gaps still subtracts the
+    // separator gap (1 px) AND the minimum-size steal (1 px) from the
+    // visible pane, making it 2 rows/cols shorter than the full viewport.
+    // The client renders the zoomed pane using the full area, so the PTY
+    // must also be sized to the full area — otherwise the bottom/right
+    // edge shows blank rows/columns.
+    let zoom_active_path = if win.zoom_saved.is_some() {
+        let active_path = win.active_path.clone();
+        if let Some((_, rect)) = rects.iter_mut().find(|(p, _)| *p == active_path) {
+            *rect = area;
+        }
+        Some(active_path)
+    } else {
+        None
+    };
+    let mut path = Vec::new();
+    resize_node(&mut win.root, &rects, &mut path, border_status_rows, zoom_active_path.as_ref());
+}
+
+/// Resize the active window. Its stored geometry is authoritative, including
+/// when a previous `resize-window` put it in manual mode.
+pub fn resize_all_panes(app: &mut AppState) {
+    if app.active_idx >= app.windows.len() { return; }
+    let area = app.windows[app.active_idx].area;
+    app.last_window_area = area;
+    resize_window_panes(app, app.active_idx, area);
 }
 
 pub fn kill_all_children(node: &mut Node) {

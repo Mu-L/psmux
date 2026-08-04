@@ -1256,9 +1256,9 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "window_id" => format!("@{}", win.id),
         "window_activity_flag" => if win.activity_flag { "1".into() } else { "0".into() },
         "window_zoomed_flag" => if win.zoom_saved.is_some() { "1".into() } else { "0".into() },
-        "window_layout" | "window_visible_layout" => generate_window_layout(&win.root, app.last_window_area),
-        "window_width" => app.last_window_area.width.to_string(),
-        "window_height" => app.last_window_area.height.to_string(),
+        "window_layout" | "window_visible_layout" => generate_window_layout(&win.root, win.area),
+        "window_width" => win.area.width.to_string(),
+        "window_height" => win.area.height.to_string(),
         "window_format" => "1".into(),
         "window_activity" => app.created_at.timestamp().to_string(),
         "window_silence_flag" => if win.silence_flag { "1".into() } else { "0".into() },
@@ -1269,7 +1269,13 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "window_last_flag" => if win_idx == app.last_window_idx { "1".into() } else { "0".into() },
         "window_start_flag" => if win_idx == 0 { "1".into() } else { "0".into() },
         "window_end_flag" => if win_idx == app.windows.len().saturating_sub(1) { "1".into() } else { "0".into() },
-        "window_bigger" => "0".into(),
+        "window_bigger" => {
+            if win.area.width > app.client_area.width || win.area.height > app.client_area.height {
+                "1".into()
+            } else {
+                "0".into()
+            }
+        }
         "window_cell_width" => "8".into(),
         "window_cell_height" => "16".into(),
         "window_offset_x" | "window_offset_y" | "window_stack_index" => "0".into(),
@@ -1422,7 +1428,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "pane_left" => {
             if let Some(p) = target_pane() {
                 let mut rects = Vec::new();
-                crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                crate::tree::compute_rects(&win.root, win.area, &mut rects);
                 if let Some((_, rect)) = rects.iter().find(|(path, _)| {
                     crate::tree::get_active_pane_id_at_path(&win.root, path) == Some(p.id)
                 }) { rect.x.to_string() } else { "0".into() }
@@ -1431,7 +1437,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "pane_top" => {
             if let Some(p) = target_pane() {
                 let mut rects = Vec::new();
-                crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                crate::tree::compute_rects(&win.root, win.area, &mut rects);
                 if let Some((_, rect)) = rects.iter().find(|(path, _)| {
                     crate::tree::get_active_pane_id_at_path(&win.root, path) == Some(p.id)
                 }) { rect.y.to_string() } else { "0".into() }
@@ -1440,7 +1446,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "pane_right" => {
             if let Some(p) = target_pane() {
                 let mut rects = Vec::new();
-                crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                crate::tree::compute_rects(&win.root, win.area, &mut rects);
                 if let Some((_, rect)) = rects.iter().find(|(path, _)| {
                     crate::tree::get_active_pane_id_at_path(&win.root, path) == Some(p.id)
                 }) { (rect.x + rect.width).saturating_sub(1).to_string() } else { "79".into() }
@@ -1449,7 +1455,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "pane_bottom" => {
             if let Some(p) = target_pane() {
                 let mut rects = Vec::new();
-                crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                crate::tree::compute_rects(&win.root, win.area, &mut rects);
                 if let Some((_, rect)) = rects.iter().find(|(path, _)| {
                     crate::tree::get_active_pane_id_at_path(&win.root, path) == Some(p.id)
                 }) { (rect.y + rect.height).saturating_sub(1).to_string() } else { "23".into() }
@@ -1458,23 +1464,23 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "pane_at_top" => {
             if let Some(p) = target_pane() {
                 let mut rects = Vec::new();
-                crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                crate::tree::compute_rects(&win.root, win.area, &mut rects);
                 if let Some((_, rect)) = rects.iter().find(|(path, _)| {
                     crate::tree::get_active_pane_id_at_path(&win.root, path) == Some(p.id)
                 }) {
-                    if rect.y == app.last_window_area.y { "1".into() } else { "0".into() }
+                    if rect.y == win.area.y { "1".into() } else { "0".into() }
                 } else { "1".into() }
             } else { "1".into() }
         }
         "pane_at_bottom" => {
             if let Some(p) = target_pane() {
                 let mut rects = Vec::new();
-                crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                crate::tree::compute_rects(&win.root, win.area, &mut rects);
                 if let Some((_, rect)) = rects.iter().find(|(path, _)| {
                     crate::tree::get_active_pane_id_at_path(&win.root, path) == Some(p.id)
                 }) {
                     let bottom = rect.y + rect.height;
-                    let win_bottom = app.last_window_area.y + app.last_window_area.height;
+                    let win_bottom = win.area.y + win.area.height;
                     if bottom >= win_bottom { "1".into() } else { "0".into() }
                 } else { "1".into() }
             } else { "1".into() }
@@ -1482,23 +1488,23 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "pane_at_left" => {
             if let Some(p) = target_pane() {
                 let mut rects = Vec::new();
-                crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                crate::tree::compute_rects(&win.root, win.area, &mut rects);
                 if let Some((_, rect)) = rects.iter().find(|(path, _)| {
                     crate::tree::get_active_pane_id_at_path(&win.root, path) == Some(p.id)
                 }) {
-                    if rect.x == app.last_window_area.x { "1".into() } else { "0".into() }
+                    if rect.x == win.area.x { "1".into() } else { "0".into() }
                 } else { "1".into() }
             } else { "1".into() }
         }
         "pane_at_right" => {
             if let Some(p) = target_pane() {
                 let mut rects = Vec::new();
-                crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                crate::tree::compute_rects(&win.root, win.area, &mut rects);
                 if let Some((_, rect)) = rects.iter().find(|(path, _)| {
                     crate::tree::get_active_pane_id_at_path(&win.root, path) == Some(p.id)
                 }) {
                     let right = rect.x + rect.width;
-                    let win_right = app.last_window_area.x + app.last_window_area.width;
+                    let win_right = win.area.x + win.area.width;
                     if right >= win_right { "1".into() } else { "0".into() }
                 } else { "1".into() }
             } else { "1".into() }
@@ -1572,7 +1578,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                         let cols = p.last_cols;
                         // Convert screen-absolute mouse_y to pane-relative row
                         let mut rects = Vec::new();
-                        crate::tree::compute_rects(&w.root, app.last_window_area, &mut rects);
+                        crate::tree::compute_rects(&w.root, w.area, &mut rects);
                         let pane_y_offset = rects.iter()
                             .find(|(path, _)| crate::tree::get_active_pane_id_at_path(&w.root, path) == Some(p.id))
                             .map(|(_, rect)| rect.y)
@@ -1598,7 +1604,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                         let screen = parser.screen();
                         let cols = p.last_cols;
                         let mut rects = Vec::new();
-                        crate::tree::compute_rects(&w.root, app.last_window_area, &mut rects);
+                        crate::tree::compute_rects(&w.root, w.area, &mut rects);
                         let (pane_x_offset, pane_y_offset) = rects.iter()
                             .find(|(path, _)| crate::tree::get_active_pane_id_at_path(&w.root, path) == Some(p.id))
                             .map(|(_, rect)| (rect.x, rect.y))
@@ -1743,8 +1749,8 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "buffer_created" => app.created_at.timestamp().to_string(),
 
         // ── Client ──
-        "client_width" => app.last_window_area.width.to_string(),
-        "client_height" => (app.last_window_area.height + if app.status_visible { 1 } else { 0 }).to_string(),
+        "client_width" => app.client_area.width.to_string(),
+        "client_height" => (app.client_area.height + if app.status_visible { 1 } else { 0 }).to_string(),
         "client_session" | "client_last_session" => app.session_name.clone(),
         "client_name" | "client_tty" => "client0".into(),
         "client_pid" => std::process::id().to_string(),

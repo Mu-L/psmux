@@ -322,8 +322,8 @@ fn generate_list_clients(app: &AppState) -> String {
     format!("/dev/pts/0: {}: {} [{}x{}] (utf8)\n",
         app.session_name,
         app.windows[app.active_idx].name,
-        app.last_window_area.width,
-        app.last_window_area.height)
+        app.client_area.width,
+        app.client_area.height)
 }
 
 /// Generate show-hooks output from AppState.
@@ -467,7 +467,7 @@ fn generate_list_commands() -> String {
 pub fn build_choose_tree(app: &AppState) -> Vec<crate::session::TreeEntry> {
     let current_windows: Vec<(String, usize, String, bool, usize)> = app.windows.iter().enumerate().map(|(i, w)| {
         let panes = crate::tree::count_panes(&w.root);
-        let size = format!("{}x{}", app.last_window_area.width, app.last_window_area.height);
+        let size = format!("{}x{}", w.area.width, w.area.height);
         (w.name.clone(), panes, size, i == app.active_idx, app.win_display_index(i))
     }).collect();
     list_all_sessions_tree(&app.session_name, &current_windows)
@@ -2279,7 +2279,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                     server_args.push(cmd.clone());
                 }
                 // Pass current terminal dimensions
-                let area = app.last_window_area;
+                let area = app.client_area;
                 if area.width > 1 && area.height > 1 {
                     server_args.push("-x".into());
                     server_args.push(area.width.to_string());

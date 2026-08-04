@@ -48,7 +48,7 @@ fn append_layout_body(node: &Node, area: Rect, out: &mut String) {
 }
 
 /// Build a complete tmux layout string for a window: `<csum>,<body>`.
-/// `area` is normally `app.last_window_area`.
+/// `area` is the target window's stored geometry.
 pub fn window_layout_string(window: &Window, area: Rect) -> String {
     let mut body = String::new();
     append_layout_body(&window.root, area, &mut body);
@@ -396,6 +396,8 @@ mod tests {
             pause_after_secs: None,
             output_paused_panes: std::collections::HashSet::new(),
             pane_last_output: std::collections::HashMap::new(),
+            size: None,
+            window_sizes: std::collections::HashMap::new(),
         });
         assert!(has_control_clients(&app));
     }
@@ -416,6 +418,8 @@ mod tests {
             pause_after_secs: None,
             output_paused_panes: std::collections::HashSet::new(),
             pane_last_output: std::collections::HashMap::new(),
+            size: None,
+            window_sizes: std::collections::HashMap::new(),
         });
         emit_notification(&app, ControlNotification::WindowAdd { window_id: 5 });
         let notif = rx.try_recv().unwrap();
@@ -440,6 +444,8 @@ mod tests {
             pause_after_secs: None,
             output_paused_panes: std::collections::HashSet::new(),
             pane_last_output: std::collections::HashMap::new(),
+            size: None,
+            window_sizes: std::collections::HashMap::new(),
         });
         // Output for paused pane 3 should be dropped
         emit_notification(&app, ControlNotification::Output { pane_id: 3, data: "test".into() });

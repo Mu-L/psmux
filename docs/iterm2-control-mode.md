@@ -106,7 +106,7 @@ For a one-click experience:
 - ✅ Drag-resizing the native iTerm2 window resizes all panes
   inside it. iTerm2 sends `refresh-client -C w,h` (on attach) and
   `resize-window -x w -y h -t @N` (on every drag) and psmux
-  propagates the new geometry to every pane and emits
+  applies the viewport and target-window geometry separately, then emits
   `%layout-change` so the splits repaint.
 - ✅ Typing `exit` (or otherwise terminating the shell) in a pane
   removes that split natively in iTerm2. psmux diffs window state
@@ -195,8 +195,7 @@ These are the pieces of psmux that make iTerm2's `tmux -CC` happy:
   CONTROL_NOECHO handshake + raw-mode setup + stdin `\r→\n`
   translation + `cc_debug.log`.
 - **iTerm CC command surface** in `src/server/connection.rs`:
-  - `phony-command`, `copy-mode`, `resize-window` no-op handlers
-    (iTerm2 sends these during kickoff).
+  - `phony-command` and `copy-mode` compatibility handlers.
   - `send` alias for `send-keys` (iTerm uses the short form).
   - `0xNN` hex codepoint argument decoding (every iTerm keystroke).
   - Combined short-flag clusters where the **last** char takes a
@@ -204,10 +203,10 @@ These are the pieces of psmux that make iTerm2's `tmux -CC` happy:
     `capture-pane -peqJN -t %1 -S -1000`, `send -lt %1 X` etc.
     Parsed by `cli::has_short_flag` and the cluster-tail branch
     of `cli::extract_flag_value`.
-  - `refresh-client -C w,h` and `resize-window -x w -y h -t @N`
-    update `app.last_window_area`, run `resize_all_panes`, and
-    emit `%layout-change` so the gateway always stays in sync
-    with the iTerm2 window's actual cell dimensions.
+  - `refresh-client -C` tracks each control client's default and
+    per-window viewport. `resize-window -x w -y h -t @N` changes only
+    the target window, switches it to manual sizing, resizes its PTYs,
+    and emits `%layout-change`.
   - Top-level `;` command separation with a queue (one
     `%begin/%end` pair per sub-command).
   - **Send-coalescing**: consecutive `send`/`send-keys` sub-commands

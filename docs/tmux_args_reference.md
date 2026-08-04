@@ -87,7 +87,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `rename-session` | `rename` | none, takes the new name as a positional argument | CLI, SRV, CFG, CTL |
 | `rename-window` | `renamew` | none, takes the new name as a positional argument | CLI, SRV, CFG, CTL |
 | `resize-pane` | `resizep` | `UDLRZx:y:t:` | CLI, SRV, CFG, CTL |
-| `resize-window` | `resizew` | `ADUx:y:t:` | CLI, SRV, CFG, CTL |
+| `resize-window` | `resizew` | `aADLRUx:y:t:` | CLI, SRV, CFG, CTL |
 | `respawn-pane` | `respawnp`, `resp` | `kc:t:` plus `-- <command>` | CLI, SRV, CFG, CTL |
 | `respawn-window` | `respawnw` | none | CLI, SRV, CFG |
 | `rotate-window` | `rotatew` | `UDt:` | CLI, SRV, CFG, CTL |
@@ -253,8 +253,10 @@ Five mouse wire commands are an exception and are genuinely usable for scripting
 - Not accepted: `-Z`
 
 **resize-window** (`resizew`)
-- Boolean: `-A`, `-D`, `-U` (passed through to the server)
+- Boolean: `-A` (largest client), `-a` (smallest client), `-L`, `-R`, `-U`, `-D`
 - Value: `-x` (width), `-y` (height), `-t` (target window)
+- Positional: optional positive adjustment for `-L`, `-R`, `-U`, or `-D` (default `1`)
+- The target window enters manual sizing; later client viewport changes do not overwrite it.
 
 **find-window** (`findw`)
 - The first positional argument is the search pattern. That is the only thing that has an effect.

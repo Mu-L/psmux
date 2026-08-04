@@ -1,6 +1,5 @@
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::net::TcpStream;
 
@@ -8,8 +7,6 @@ use crate::types::{CtrlReq, LayoutKind, WaitForOp, ControlNotification};
 use crate::cli::{parse_target, extract_flag_value};
 use crate::util::base64_decode;
 use crate::control;
-
-static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Append-only AUTH diagnostics, gated by PSMUX_AUTH_DEBUG=1. Written to
 /// %TEMP%\psmux_auth_debug.log so concurrent processes never truncate each
@@ -289,7 +286,7 @@ pub(crate) fn handle_connection(
     session_key: &str,
     aliases: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
 ) {
-let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+let client_id = crate::types::next_client_id();
 // Enable TCP_NODELAY for low-latency responses
 let _ = stream.set_nodelay(true);
 // Clone stream for writing, original goes into BufReader for reading
@@ -488,7 +485,7 @@ if control_echo || control_noecho {
     let _ = write_stream.set_nodelay(true);
     let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(5000)));
 
-    let ctrl_client_id = crate::types::next_control_client_id();
+    let ctrl_client_id = crate::types::next_client_id();
     crate::types::register_persistent_stream(ctrl_client_id, &write_stream);
 
     let (notif_tx, notif_rx) = std::sync::mpsc::sync_channel::<ControlNotification>(4096);
@@ -687,6 +684,7 @@ if control_echo || control_noecho {
 
         // Apply target focus
         let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp");
+        let skip_target_focus = matches!(cmd_name, "resize-window" | "resizew");
         if let Some(wid) = ctrl_target_win {
             if is_focus_cmd {
                 if ctrl_target_win_is_id {
@@ -694,7 +692,7 @@ if control_echo || control_noecho {
                 } else {
                     let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
                 }
-            } else {
+            } else if !skip_target_focus {
                 if ctrl_target_win_is_id {
                     let _ = tx_ctrl.send(CtrlReq::FocusWindowByIdTemp(wid));
                 } else {
@@ -704,7 +702,7 @@ if control_echo || control_noecho {
         } else if let Some(ref wname) = ctrl_target_win_name {
             if is_focus_cmd {
                 let _ = tx_ctrl.send(CtrlReq::FocusWindowByName(wname.clone()));
-            } else {
+            } else if !skip_target_focus {
                 let _ = tx_ctrl.send(CtrlReq::FocusWindowByNameTemp(wname.clone()));
             }
         }
@@ -715,7 +713,7 @@ if control_echo || control_noecho {
                 } else {
                     let _ = tx_ctrl.send(CtrlReq::FocusPaneByIndex(pid));
                 }
-            } else if !matches!(cmd_name, "swap-pane" | "swapp") {
+            } else if !matches!(cmd_name, "swap-pane" | "swapp" | "resize-window" | "resizew") {
                 // swap-pane resolves its own target and swaps it with the *current*
                 // active pane.  Temporarily focusing the target here would make
                 // active == target, turning the swap into a no-op (so skip it).
@@ -931,7 +929,7 @@ let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "
 // would restore the old focus after the batch and silently undo the switch.
 let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "movep"
     | "move-window" | "movew" | "swap-window" | "swapw"
-    | "switch-client" | "switchc");
+    | "switch-client" | "switchc" | "resize-window" | "resizew");
 if let Some(wid) = target_win {
     if is_focus_cmd {
         if target_win_is_id {
@@ -2164,6 +2162,7 @@ match cmd {
         let has_a = combined_has_set('a');
         let has_q = combined_has_set('q');
         let has_o = combined_has_set('o');
+        let global = combined_has_set('g');
         // Skip -t TARGET / -p PANE values (TARGET is not a positional option/value).
         // Note: -w is a scope flag (window), not a target flag — it does NOT
         // consume the next argument.
@@ -2175,12 +2174,18 @@ match cmd {
             .copied().collect();
         if has_u {
             if let Some(option) = non_flag_args.first() {
-                let _ = tx.send(CtrlReq::SetOptionUnset(option.to_string()));
+                if *option == "window-size" && !global {
+                    let _ = tx.send(CtrlReq::SetWindowSize(None));
+                } else {
+                    let _ = tx.send(CtrlReq::SetOptionUnset(option.to_string()));
+                }
             }
         } else if non_flag_args.len() >= 2 {
             let option = non_flag_args[0].to_string();
             let value = non_flag_args[1..].join(" ");
-            if has_a {
+            if option == "window-size" && !global {
+                let _ = tx.send(CtrlReq::SetWindowSize(Some(value)));
+            } else if has_a {
                 let _ = tx.send(CtrlReq::SetOptionAppend(option, value));
             } else if has_o {
                 let _ = tx.send(CtrlReq::SetOptionOnlyIfUnset(option, value));
@@ -3210,12 +3215,36 @@ match cmd {
         let _ = tx.send(CtrlReq::PrevLayout);
     }
     "resize-window" | "resizew" => {
-        let abs_x = args.windows(2).find(|w| w[0] == "-x").and_then(|w| w[1].parse::<u16>().ok());
-        let abs_y = args.windows(2).find(|w| w[0] == "-y").and_then(|w| w[1].parse::<u16>().ok());
-        if let Some(xv) = abs_x {
-            let _ = tx.send(CtrlReq::ResizeWindow("x".to_string(), xv));
-        } else if let Some(yv) = abs_y {
-            let _ = tx.send(CtrlReq::ResizeWindow("y".to_string(), yv));
+        match crate::resize_window::parse_resize_window(&args, raw_target.as_deref()) {
+            Ok(request) => {
+                let (resize_tx, resize_rx) = mpsc::channel();
+                if tx.send(CtrlReq::ResizeWindow(request, resize_tx)).is_ok() {
+                    match resize_rx.recv_timeout(Duration::from_secs(5)) {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            if persistent {
+                                let _ = tx.send(CtrlReq::StatusMessage(error));
+                            } else {
+                                let _ = writeln!(write_stream, "ERROR: {}", error);
+                                let _ = write_stream.flush();
+                            }
+                        }
+                        Err(_) if !persistent => {
+                            let _ = writeln!(write_stream, "ERROR: resize-window timed out");
+                            let _ = write_stream.flush();
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+            Err(error) => {
+                if persistent {
+                    let _ = tx.send(CtrlReq::StatusMessage(error));
+                } else {
+                    let _ = writeln!(write_stream, "ERROR: {}", error);
+                    let _ = write_stream.flush();
+                }
+            }
         }
     }
     "respawn-window" | "respawnw" => {
@@ -3310,7 +3339,7 @@ fn dispatch_control_command(
     resp_tx: mpsc::Sender<String>,
     target_pane: Option<usize>,
     pane_is_id: bool,
-    _raw_target: Option<&str>,
+    raw_target: Option<&str>,
     client_id: u64,
 ) -> bool {
     match cmd {
@@ -3615,19 +3644,26 @@ fn dispatch_control_command(
             let append = combined_has_set2('a');
             let global = combined_has_set2('g');
             let only_if_unset = combined_has_set2('o');
-            // Skip values that follow flag args (-t TARGET, -p PANE, -w WINDOW)
+            // Skip values that follow target flags. `-w` selects window scope
+            // and does not consume the next argument.
             let t_vals2: std::collections::HashSet<&str> = args.windows(2)
-                .filter(|w| w[0] == "-t" || w[0] == "-p" || w[0] == "-w")
+                .filter(|w| w[0] == "-t" || w[0] == "-p")
                 .map(|w| w[1]).collect();
             let positional: Vec<&str> = args.iter()
                 .filter(|a| (!a.starts_with('-') || a.starts_with('@')) && !t_vals2.contains(*a))
                 .copied().collect();
             if unset && !positional.is_empty() {
-                let _ = tx.send(CtrlReq::SetOptionUnset(positional[0].to_string()));
+                if positional[0] == "window-size" && !global {
+                    let _ = tx.send(CtrlReq::SetWindowSize(None));
+                } else {
+                    let _ = tx.send(CtrlReq::SetOptionUnset(positional[0].to_string()));
+                }
             } else if positional.len() >= 2 {
                 let key = positional[0].to_string();
                 let val = positional[1].trim_matches('"').to_string();
-                if append {
+                if key == "window-size" && !global {
+                    let _ = tx.send(CtrlReq::SetWindowSize(Some(val)));
+                } else if append {
                     let _ = tx.send(CtrlReq::SetOptionAppend(key, val));
                 } else if only_if_unset {
                     let _ = tx.send(CtrlReq::SetOptionOnlyIfUnset(key, val));
@@ -3876,7 +3912,7 @@ fn dispatch_control_command(
             let dst = dst_inline.or_else(|| target_pane.map(|p| (p, pane_is_id)));
             if let (Some((sv, sid)), Some((dv, did))) = (src, dst) {
                 let _ = tx.send(CtrlReq::SwapPaneSrcDst { src: sv, src_is_id: sid, dst: dv, dst_is_id: did, detach });
-            } else if let Some(tok) = _raw_target.filter(|t| t.starts_with('{')) {
+            } else if let Some(tok) = raw_target.filter(|t| t.starts_with('{')) {
                 let _ = tx.send(CtrlReq::SwapPanePosition(tok.to_string()));
             } else {
                 let resolved = dst;
@@ -4177,17 +4213,26 @@ fn dispatch_control_command(
                     i += 2;
                     continue;
                 }
-                // Parse -C w,h (control client viewport size).  iTerm2 sends
-                // this on attach and after every drag-resize so the server
-                // knows the gateway window dimensions and can size panes
-                // accordingly.
+                // Parse control client viewport sizes. tmux accepts a default
+                // `WxH`/`W,H`, a per-window `@id:WxH`, and `@id:` to clear it.
                 if args[i] == "-C" {
-                    if let Some(spec) = args.get(i + 1) {
-                        let spec = spec.trim_matches('"').trim_matches('\'');
-                        if let Some((w_s, h_s)) = spec.split_once(',') {
-                            if let (Ok(w), Ok(h)) = (w_s.parse::<u16>(), h_s.parse::<u16>()) {
-                                let _ = tx.send(CtrlReq::ControlClientResize(w, h));
+                    match args.get(i + 1) {
+                        Some(spec) => match crate::resize_window::parse_control_client_size(spec) {
+                            Ok((window_id, size)) => {
+                                let _ = tx.send(CtrlReq::ControlClientResize {
+                                    client_id,
+                                    window_id,
+                                    size,
+                                });
                             }
+                            Err(error) => {
+                                let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", error));
+                                return true;
+                            }
+                        },
+                        None => {
+                            let _ = resp_tx.send("\u{0001}ERR\u{0001}missing size argument".to_string());
+                            return true;
                         }
                     }
                     i += 2;
@@ -4223,17 +4268,28 @@ fn dispatch_control_command(
             let _ = resp_tx.send(String::new());
             true
         }
-        // resize-window is sent by iTerm2 (e.g. `resize-window -x 120 -y 30 -t @1`)
-        // when the user drag-resizes its native window.  Update the server's
-        // window geometry and resize all panes so iTerm2's view stays in
-        // sync with what psmux thinks the terminal size is.
         "resize-window" | "resizew" => {
-            let w = args.windows(2).find(|w| w[0] == "-x").and_then(|w| w[1].parse::<u16>().ok());
-            let h = args.windows(2).find(|w| w[0] == "-y").and_then(|w| w[1].parse::<u16>().ok());
-            if let (Some(w), Some(h)) = (w, h) {
-                let _ = tx.send(CtrlReq::ControlClientResize(w, h));
+            let response = match crate::resize_window::parse_resize_window(args, raw_target) {
+                Ok(request) => {
+                    let (resize_tx, resize_rx) = mpsc::channel();
+                    if tx.send(CtrlReq::ResizeWindow(request, resize_tx)).is_err() {
+                        Err("server unavailable".to_string())
+                    } else {
+                        resize_rx
+                            .recv_timeout(Duration::from_secs(5))
+                            .unwrap_or_else(|_| Err("resize-window timed out".to_string()))
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            match response {
+                Ok(()) => {
+                    let _ = resp_tx.send(String::new());
+                }
+                Err(error) => {
+                    let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", error));
+                }
             }
-            let _ = resp_tx.send(String::new());
             true
         }
         _ => {
