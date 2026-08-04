@@ -954,13 +954,15 @@ fn run_main() -> io::Result<()> {
                 // A detached (-d) session does not take over the current terminal,
                 // so it is allowed to be created from inside an existing session,
                 // matching tmux (which only warns for commands that grab the pty).
-                if !detached && env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1") {
-                    if env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1")
-                        || env::var("PSMUX_SESSION").ok().filter(|v| !v.is_empty()).is_some()
-                    {
-                        eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
-                        return Ok(());
-                    }
+                // A popup is not a pane, so a session started from one is not
+                // nested — util::inside_psmux_pane() draws the same line tmux
+                // draws with its all_window_panes tty walk (#537).
+                if !detached
+                    && env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1")
+                    && crate::util::inside_psmux_pane()
+                {
+                    eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
+                    return Ok(());
                 }
 
                 let name = session_name.unwrap_or_else(|| {
@@ -4103,15 +4105,14 @@ fn run_main() -> io::Result<()> {
     // Prevent nesting: similar to tmux checking $TMUX.
     // PSMUX_ACTIVE is set on the client process itself.
     // PSMUX_SESSION is set on child panes spawned by the server.
-    // Both indicate we are already inside psmux.
+    // Both indicate we are already inside a psmux PANE; a display-popup child
+    // is not one, and tmux attaches happily from there (#537).
     // Override with PSMUX_ALLOW_NESTING=1 if nesting is intentional.
-    if env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1") {
-        if env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1")
-            || env::var("PSMUX_SESSION").ok().filter(|v| !v.is_empty()).is_some()
-        {
-            eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
-            return Ok(());
-        }
+    if env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1")
+        && crate::util::inside_psmux_pane()
+    {
+        eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
+        return Ok(());
     }
     env::set_var("PSMUX_ACTIVE", "1");
 

@@ -76,6 +76,11 @@ pub fn create_popup_pane(
     cmd_builder.env("TERM", "xterm-256color");
     cmd_builder.env("COLORTERM", "truecolor");
     cmd_builder.env("PSMUX_SESSION", session_name);
+    // A popup pty is not a window pane, so a client started in here is not a
+    // nested session — tmux allows `attach` inside a popup because the popup
+    // pty never appears in all_window_panes.  Mark the child so the psmux
+    // nested-session guard can make the same distinction (#537).
+    cmd_builder.env(crate::util::POPUP_CHILD_ENV, "1");
     crate::pane::apply_user_environment(&mut cmd_builder, environment);
     // NOTE: the interactive-shell-for-empty-command behavior (tmux parity, #351)
     // is handled above where cmd_builder is constructed: an empty command uses

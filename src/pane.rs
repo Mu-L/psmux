@@ -861,6 +861,9 @@ pub fn set_tmux_env(builder: &mut CommandBuilder, pane_id: usize, control_port: 
     // real session name.  Tools like Claude Code can use PSMUX_SESSION for explicit
     // psmux detection (e.g. `if (process.env.PSMUX_SESSION) return 'psmux'`).
     builder.env("PSMUX_SESSION", session_name);
+    // This child IS a window pane, so it must never inherit the popup marker a
+    // server started from inside a popup would still be carrying (#537).
+    builder.env_remove(crate::util::POPUP_CHILD_ENV);
     // Prevent MSYS2/Git-Bash from path-mangling the TMUX value (which starts
     // with /tmp/ and would be rewritten to a Windows path otherwise).
     builder.env("MSYS2_ENV_CONV_EXCL", "TMUX");

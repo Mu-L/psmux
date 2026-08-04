@@ -634,9 +634,42 @@ pub fn color_to_name(c: vt100::Color) -> std::borrow::Cow<'static, str> {
     }
 }
 
+/// Environment marker put on a popup/float child so it is not mistaken for a
+/// pane child by the nested-session guard.  See [`inside_psmux_pane`].
+pub const POPUP_CHILD_ENV: &str = "PSMUX_POPUP";
+
+/// True when this process runs inside a psmux **pane**, i.e. when a client that
+/// grabs this terminal would genuinely nest a session inside another one.
+///
+/// tmux's `server_client_check_nested()` needs BOTH conditions to hold: `$TMUX`
+/// is set AND the client's tty is the tty of one of the server's window panes.
+/// A `display-popup` runs on a pty created by `job_run()`, which is never
+/// registered in `all_window_panes`, so the tty half of the test fails and tmux
+/// lets `tmux attach -t other` through inside a popup.  That is precisely what
+/// makes the popup scratch-session idiom work upstream.
+///
+/// psmux has no ttys to compare, so the popup child carries
+/// [`POPUP_CHILD_ENV`] instead (set in `popup::create_popup_pane`, cleared for
+/// every real pane child in `pane::set_tmux_env`), and a popup child is treated
+/// as not-in-a-pane exactly like tmux treats it (#537).
+pub fn inside_psmux_pane() -> bool {
+    if std::env::var(POPUP_CHILD_ENV).ok().as_deref() == Some("1") {
+        return false;
+    }
+    std::env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1")
+        || std::env::var("PSMUX_SESSION")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+}
+
 #[cfg(test)]
 #[path = "../tests-rs/test_run_shell_format_and_start_dir.rs"]
 mod tests_run_shell_format_and_start_dir;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue537_popup_attach.rs"]
+mod tests_issue537_popup_attach;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_deps_base64_parity.rs"]
