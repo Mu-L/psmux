@@ -767,10 +767,11 @@ pub(crate) fn read_fresh_config_warnings(since_epoch: u64) -> Vec<String> {
 /// Release before acquiring so renaming a session onto a name it already holds
 /// cannot block on itself. A refused acquire is not fatal: the rename has
 /// already happened, so we simply run unguarded rather than abandon the session.
-/// Warm servers stay exempt (the pool intentionally runs several at once).
+/// Warm servers are guarded too: a namespace holds exactly one `__warm__`
+/// server, and releasing that name here is precisely what lets the replacement
+/// warm spawned after a claim acquire it (issue #459).
 fn rekey_session_guard(guard: &mut Option<crate::platform::SessionMutex>, new_base: &str) {
     *guard = None; // drop releases + closes the old name's mutex
-    if crate::session::is_warm_session(new_base) { return; }
     *guard = crate::platform::acquire_session_mutex(new_base);
     if guard.is_none() {
         warm_debug(&format!("session guard: '{}' already owned by a live server — running unguarded", new_base));
@@ -821,15 +822,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // a cold-spawn race (has-session false-negatived under load, or two
     // `new-session -s X` raced) — exit cleanly so the winner stays the single
     // source of truth. Two servers on one name desync the .port/.key files and
-    // wedge the session ("appears lost"). Warm (standby) servers are exempt (the
-    // warm pool intentionally runs several). Fail-open: any FFI hiccup yields a
-    // live guard, never a blocked legitimate start.
+    // wedge the session ("appears lost"). Warm (standby) servers are guarded on
+    // the same terms: `__warm__.port` is a single file, so a namespace can only
+    // ever publish one warm server, and an unguarded warm name let every failed
+    // or slow registration strand another live process (issue #459). Fail-open:
+    // any FFI hiccup yields a live guard, never a blocked legitimate start.
     // Re-keyed on every rename/claim, see rekey_session_guard (issue #505).
     let mut session_guard = {
         let base = app.port_file_base();
-        if crate::session::is_warm_session(&base) {
-            None
-        } else {
+        {
             match crate::platform::acquire_session_mutex(&base) {
                 Some(g) => Some(g),
                 None => {
@@ -3173,8 +3174,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = std::fs::write(&new_path, port.to_string());
                     }
                     app.session_name = name;
-                    // A warm server skipped the startup guard (the pool runs several),
-                    // so the name it just claimed picks the guard up here (#505).
+                    // Move the guard from `__warm__` onto the claimed name (#505).
+                    // Releasing the warm name is what frees it for the replacement
+                    // warm spawned further below (issue #459).
                     rekey_session_guard(&mut session_guard, &app.port_file_base());
                     // Warm server's created_at is the warm process start time, not the
                     // user's session-creation time — reset on claim or list-sessions /
@@ -6106,3 +6108,7 @@ mod test_issue167_startup_log;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue370_startup_error_passthrough.rs"]
 mod test_issue370_startup_error_passthrough;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue459_warm_single_instance.rs"]
+mod test_issue459_warm_single_instance;
