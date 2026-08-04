@@ -1223,11 +1223,20 @@ impl Screen {
             // don't even try to draw control characters
             return;
         }
-        let width = width
+        let width: u16 = width
             .unwrap_or(1)
             .try_into()
             // width() can only return 0, 1, or 2
             .unwrap();
+
+        // A glyph wider than the whole row can never be represented: there is
+        // nowhere to put its continuation, and `size.cols - width` underflows
+        // just below (#534, reachable once a pane is shrunk to one column).
+        // tmux drops the glyph in this situation, showing nothing for a CJK
+        // character in a one column pane, so do the same.
+        if width > size.cols {
+            return;
+        }
 
         // it doesn't make any sense to wrap if the last column in a row
         // didn't already have contents. don't try to handle the case where a

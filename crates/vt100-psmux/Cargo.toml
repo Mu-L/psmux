@@ -54,6 +54,10 @@ name = "issue533_vs16_width"
 path = "tests/issue533_vs16_width.rs"
 
 [[test]]
+name = "issue534_shrink_wide_erase"
+path = "tests/issue534_shrink_wide_erase.rs"
+
+[[test]]
 name = "issue502_altscreen_attrs"
 path = "tests/issue502_altscreen_attrs.rs"
 
