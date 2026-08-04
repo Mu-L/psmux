@@ -162,20 +162,34 @@ pub fn load_config(app: &mut AppState) {
     // If -f flag was used, load that specific config file instead of default search
     if let Ok(config_file) = env::var("PSMUX_CONFIG_FILE") {
         let expanded = if config_file.starts_with('~') {
-            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-            config_file.replacen('~', &home, 1)
+            config_file.replacen('~', &crate::paths::home_dir(), 1)
         } else {
             config_file
         };
         set_current_config_file(&expanded);
-        if let Ok(content) = std::fs::read_to_string(&expanded) {
-            parse_config_content(app, &content);
+        match std::fs::read_to_string(&expanded) {
+            Ok(content) => parse_config_content(app, &content),
+            // An explicitly requested config file that cannot be read is a
+            // mistake worth surfacing — the user named this path on purpose.
+            Err(e) => {
+                // Route through warn_config for consistent formatting. It prefixes
+                // current_config_file (set to `expanded` above); no config line is
+                // in play at initial load, so the result is `<path>: cannot read: ...`.
+                warn_config(app, format!("cannot read: {}", e));
+            }
         }
         set_current_config_file("");
         return;
     }
 
-    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+    // Use the canonical resolver rather than reading USERPROFILE/HOME directly.
+    // `paths::home_dir()` deliberately demotes HOME to a last resort (issue
+    // #474): under MSYS2/Git Bash, HOME is a POSIX path like /home/user, and
+    // joining it with the backslash-separated names below produced
+    // `/home/user\.config\psmux\psmux.conf`, which never matches anything — so
+    // psmux silently started with NO config at all while every other part of it
+    // used the real Windows profile directory.
+    let home = crate::paths::home_dir();
     let paths = vec![
         format!("{}\\.psmux.conf", home),
         format!("{}\\.psmuxrc", home),
@@ -1845,8 +1859,31 @@ pub fn source_file(app: &mut AppState, path: &str) {
     let prev_file = current_config_file();
     set_current_config_file(&expanded_path);
 
-    if let Ok(content) = std::fs::read_to_string(&expanded_path) {
-        parse_config_content(app, &content);
+    match std::fs::read_to_string(&expanded_path) {
+        Ok(content) => parse_config_content(app, &content),
+        Err(e) => {
+            // A `source-file` naming a path that cannot be read used to be a
+            // silent no-op: no warning, no log line, nothing. Since the whole
+            // keybinding layer of a split config lives behind one such line, a
+            // typo or a moved repo produced a psmux with stock defaults and no
+            // indication why. Record it like any other config warning so it
+            // reaches ~/.psmux/config-warnings.log and the attach-time stderr
+            // summary.
+            //
+            // tmux parity note: tmux errors on a missing source-file too, but
+            // only when the path is not a glob. psmux has no glob support here,
+            // so every miss is a real miss.
+            //
+            // Route through warn_config for consistent formatting, but point it
+            // at the source-file directive itself — the parent file and line,
+            // where the user's fix belongs — not the child that couldn't be
+            // read. current_config_file was switched to the child above, and
+            // config_warn_line still holds the parent's line (source_file runs
+            // inside parse_config_content's per-line loop), so restore the parent
+            // file first; then name the missing child in the message.
+            set_current_config_file(&prev_file);
+            warn_config(app, format!("cannot source {}: {}", expanded_path, e));
+        }
     }
 
     set_current_config_file(&prev_file);
