@@ -1480,9 +1480,11 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
         fn GetStdHandle(nStdHandle: u32) -> *mut c_void;
         fn GetConsoleMode(h: *mut c_void, mode: *mut u32) -> i32;
         fn SetConsoleMode(h: *mut c_void, mode: u32) -> i32;
+        // *mut c_void buffer to match the declaration in platform.rs: the two
+        // modules each define their own INPUT_RECORD view of the same ABI.
         fn ReadConsoleInputW(
             h: *mut c_void,
-            buf: *mut INPUT_RECORD,
+            buf: *mut c_void,
             len: u32,
             read: *mut u32,
         ) -> i32;
@@ -1714,7 +1716,7 @@ fn start_ssh_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
                 let ok = unsafe {
                     ReadConsoleInputW(
                         handle,
-                        records.as_mut_ptr(),
+                        records.as_mut_ptr() as *mut _,
                         records.len() as u32,
                         &mut count,
                     )
@@ -2041,9 +2043,11 @@ fn start_pipe_reader() -> io::Result<std::sync::mpsc::Receiver<Event>> {
     extern "system" {
         fn GetStdHandle(n: u32) -> *mut c_void;
         fn ReadFile(h: *mut c_void, buf: *mut u8, len: u32, read: *mut u32, ovl: *mut c_void) -> i32;
+        // *mut u8 buffer to match the PeekNamedPipe declarations in main.rs
+        // (clashing_extern_declarations).
         fn PeekNamedPipe(
             h: *mut c_void,
-            buf: *mut c_void,
+            buf: *mut u8,
             len: u32,
             read: *mut u32,
             avail: *mut u32,

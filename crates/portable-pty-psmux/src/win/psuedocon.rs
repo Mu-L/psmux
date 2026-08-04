@@ -24,6 +24,9 @@ use winapi::um::winnt::HANDLE;
 
 pub type HPCON = HANDLE;
 
+/// Deliberately absent from base_flags() (see the doc comment there): only the
+/// regression test asserting that absence references it, hence test-gated.
+#[cfg(test)]
 pub const PSUEDOCONSOLE_INHERIT_CURSOR: DWORD = 0x1;
 pub const PSEUDOCONSOLE_RESIZE_QUIRK: DWORD = 0x2;
 pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;

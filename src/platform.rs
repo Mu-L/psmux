@@ -483,7 +483,10 @@ fn query_host_terminal_colors_impl() -> Option<String> {
         fn GetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, lpMode: *mut u32) -> i32;
         fn SetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, dwMode: u32) -> i32;
         fn GetNumberOfConsoleInputEvents(hConsoleInput: *mut std::ffi::c_void, lpcNumberOfEvents: *mut u32) -> i32;
-        fn ReadConsoleInputW(hConsoleInput: *mut std::ffi::c_void, lpBuffer: *mut InputRecord, nLength: u32, lpNumberOfEventsRead: *mut u32) -> i32;
+        // Buffer is untyped at the ABI: each module keeps its own view of
+        // INPUT_RECORD, so every extern declaration of this function in the
+        // crate uses *mut c_void (clashing_extern_declarations).
+        fn ReadConsoleInputW(hConsoleInput: *mut std::ffi::c_void, lpBuffer: *mut std::ffi::c_void, nLength: u32, lpNumberOfEventsRead: *mut u32) -> i32;
     }
 
     unsafe {
@@ -530,7 +533,7 @@ fn query_host_terminal_colors_impl() -> Option<String> {
                 continue;
             }
             let mut read: u32 = 0;
-            if ReadConsoleInputW(h_in, records.as_mut_ptr(), 64, &mut read) == 0 { break; }
+            if ReadConsoleInputW(h_in, records.as_mut_ptr() as *mut _, 64, &mut read) == 0 { break; }
             for rec in records.iter().take(read as usize) {
                 if rec.event_type != KEY_EVENT || rec.event.key_down == 0 { continue; }
                 let wch = rec.event.u_char;
@@ -3579,7 +3582,7 @@ fn push_dec_u16(out: &mut Vec<u8>, mut v: u16) {
 fn rewrite_sgr_params(params: &[u8], out: &mut Vec<u8>) {
     let tokens: Vec<&[u8]> = params.split(|&c| c == b';').collect();
     let mut first = true;
-    let mut push = |tok: &[u8], out: &mut Vec<u8>, first: &mut bool| {
+    let push = |tok: &[u8], out: &mut Vec<u8>, first: &mut bool| {
         if !*first {
             out.push(b';');
         }
