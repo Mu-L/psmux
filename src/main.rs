@@ -3059,7 +3059,15 @@ fn run_main() -> io::Result<()> {
                     // (tmux: clear the option) silently kept the old value.
                     // parse_command_line already preserves a quoted empty
                     // token, see #177.
-                    if s.is_empty() || s.contains(' ') {
+                    //
+                    // The test is any Unicode whitespace, not just an ASCII
+                    // space: the server re-splits on char::is_whitespace(), so
+                    // a value whose only separators were NBSPs used to arrive
+                    // unquoted, get re-split, and come back collapsed AND
+                    // rewritten to ASCII spaces. Whether a value survived
+                    // depended on whether it happened to contain an ASCII
+                    // space (#536).
+                    if s.is_empty() || s.chars().any(char::is_whitespace) {
                         format!("\"{}\"", s.replace('"', "\\\""))
                     } else {
                         s.to_string()

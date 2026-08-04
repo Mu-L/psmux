@@ -87,6 +87,33 @@ psmux new-session -s py -- python
 psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 ```
 
+## Quoting Option Values
+
+A quoted option value is stored exactly as written, including runs of spaces
+and any leading or trailing space. This is the same in a config file as it is
+on the command line:
+
+```bash
+# Both of these store the twelve spaces
+set -g status-right "left            right"
+```
+
+```bash
+psmux set -g status-right "left            right"
+```
+
+Details worth knowing:
+
+- Quotes are only stripped when they wrap the whole value. `a"b"c` stores
+  `a"b"c` literally.
+- Inside double quotes, `\"` and `\\` are unescaped. Inside single quotes
+  nothing is unescaped, so `'a\b'` stores `a\b`.
+- An unquoted value is taken as written but with trailing whitespace removed.
+- A trailing `# comment` is stripped, unless the `#` is inside quotes or
+  escaped, so `"#{session_name}"` and `"#[fg=red]"` are safe.
+- `#{p<n>:}` still pads at render time and remains useful for padding that
+  should follow the rendered width rather than a fixed number of spaces.
+
 ## All Set Options
 
 | Option | Type | Default | Description |
