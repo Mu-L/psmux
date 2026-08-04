@@ -1545,7 +1545,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let cmdstr = cmd.clone().unwrap_or_default();
                         let sd = start_dir.clone().map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                         let pane_id = app.next_pane_id;
-                        if let Some(mut pane) = crate::popup::create_popup_pane(&cmdstr, sd.as_deref(), inner_h, inner_w, pane_id, &app.session_name, &app.environment) {
+                        if let Some(mut pane) = crate::popup::create_popup_pane(&cmdstr, sd.as_deref(), inner_h, inner_w, pane_id, &app.session_name, &app.environment, app.host_colors.as_ref()) {
                             app.next_pane_id += 1;
                             let t = title.clone().unwrap_or_default();
                             if !t.is_empty() { pane.title = t.clone(); pane.title_locked = true; }
@@ -4926,6 +4926,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.next_pane_id,
                         &app.session_name,
                         &app.environment,
+                        app.host_colors.as_ref(),
                     );
                     if let Some(prev) = saved_dir { let _ = env::set_current_dir(prev); }
 
@@ -4989,6 +4990,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             pane_id,
                             &app.session_name,
                             &app.environment,
+                            app.host_colors.as_ref(),
                         )
                     };
                     if let Some(mut pane) = pane_opt {

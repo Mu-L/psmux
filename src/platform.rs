@@ -424,6 +424,23 @@ pub fn query_host_terminal_colors() -> Option<String> {
             return Some(hc.to_spec());
         }
     }
+    // Never interrogate psmux itself.  When this client runs inside a psmux
+    // pane or popup, the "host terminal" is psmux, and psmux answers these
+    // queries by injecting the replies as console KEY_EVENT records into the
+    // child's input buffer (server::helpers::answer_color_queries ->
+    // send_vt_response).  That injection is asynchronous: it happens on a later
+    // server tick, routinely after the 500ms drain below has given up, because
+    // psmux never answers the DA1 sentinel that would end the drain early.
+    // Whatever lands late stays queued in the console input buffer, and the
+    // client's normal input pump then reads it as keystrokes and forwards it to
+    // the session it is attached to, typing `ESC]10;rgb:...` garbage into that
+    // pane.  The parent server plants the real terminal's colors in
+    // PSMUX_HOST_COLORS instead (pane::set_host_colors_env), which the
+    // short-circuit above picks up, so nesting keeps the right palette without
+    // ever putting a query on the wire.
+    if crate::util::psmux_drawn_terminal() {
+        return None;
+    }
     query_host_terminal_colors_impl()
 }
 

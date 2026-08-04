@@ -342,6 +342,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
         }
     }
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
+    set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
     // new-window -e KEY=VALUE (#489): pane-scoped env, applied last so it
     // overrides the session environment, matching tmux.
@@ -430,6 +431,7 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
     let pane_id = app.next_pane_id;
     app.next_pane_id += 1;
     set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
+    set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair.slave
         .spawn_command(shell_cmd)
@@ -478,6 +480,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
 
     let mut shell_cmd = build_raw_command(raw_args);
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
+    set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair
         .slave
@@ -678,6 +681,7 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
         }
     }
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
+    set_host_colors_env(&mut shell_cmd, app.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &app.environment);
     // split-window -e KEY=VALUE (#489): pane-scoped env, applied last so it
     // overrides the session environment, matching tmux.
@@ -842,6 +846,24 @@ pub fn apply_bare_env_if_set(builder: &mut CommandBuilder) -> bool {
         }
     }
     true
+}
+
+/// Hand the real terminal's colors down to a child that psmux itself will draw.
+///
+/// A psmux client started in a pane or popup cannot ask its terminal what the
+/// colors are, because its terminal is psmux and the reply would arrive as
+/// injected console input long after the client stopped draining
+/// (`platform::query_host_terminal_colors`).  Planting the parent's already
+/// known values here keeps the nested client's palette correct with no query on
+/// the wire.  Clearing the variable when the parent knows nothing is what stops
+/// a stale palette from outliving the terminal it was measured on.
+pub fn set_host_colors_env(builder: &mut CommandBuilder, host_colors: Option<&crate::types::HostColors>) {
+    match host_colors {
+        Some(hc) if hc.has_any() || hc.dark.is_some() => {
+            builder.env("PSMUX_HOST_COLORS", hc.to_spec());
+        }
+        _ => builder.env_remove("PSMUX_HOST_COLORS"),
+    }
 }
 
 /// Set TMUX, TMUX_PANE, and PSMUX_SESSION environment variables on a CommandBuilder.
