@@ -653,10 +653,38 @@ pub const POPUP_CHILD_ENV: &str = "PSMUX_POPUP";
 /// every real pane child in `pane::set_tmux_env`), and a popup child is treated
 /// as not-in-a-pane exactly like tmux treats it (#537).
 pub fn inside_psmux_pane() -> bool {
-    if std::env::var(POPUP_CHILD_ENV).ok().as_deref() == Some("1") {
+    if in_popup_child() {
         return false;
     }
     std::env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1")
+        || std::env::var("PSMUX_SESSION")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+}
+
+/// True when this process was spawned as a popup/float child.
+pub fn in_popup_child() -> bool {
+    std::env::var(POPUP_CHILD_ENV).ok().as_deref() == Some("1")
+}
+
+/// True when the terminal this process talks to is drawn by psmux itself: a
+/// pane child or a popup/float child.
+///
+/// Use this, not [`inside_psmux_pane`], for anything that treats the terminal
+/// as a terminal (querying it and waiting for a reply). The two differ on
+/// purpose in both directions:
+///
+///   * a popup counts here but not there, because a popup is not a nested
+///     session yet its terminal is still psmux (#537), and
+///   * `PSMUX_ACTIVE` counts there but NOT here. That variable only says "this
+///     process is a psmux client", which every top-level client sets on itself
+///     before it queries its real terminal. Treating it as evidence that psmux
+///     draws the terminal would suppress the host-color query for EVERY client
+///     and quietly undo #473. Only what the server plants on the children it
+///     spawns is evidence about who draws the terminal.
+pub fn psmux_drawn_terminal() -> bool {
+    in_popup_child()
         || std::env::var("PSMUX_SESSION")
             .ok()
             .filter(|v| !v.is_empty())
@@ -670,6 +698,10 @@ mod tests_run_shell_format_and_start_dir;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue537_popup_attach.rs"]
 mod tests_issue537_popup_attach;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_nested_client_color_query.rs"]
+mod tests_nested_client_color_query;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_deps_base64_parity.rs"]

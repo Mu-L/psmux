@@ -44,6 +44,7 @@ pub fn create_popup_pane(
     pane_id: usize,
     session_name: &str,
     environment: &std::collections::HashMap<String, String>,
+    host_colors: Option<&crate::types::HostColors>,
 ) -> Option<Pane> {
     let pty_sys = portable_pty::native_pty_system();
     let pty_size = portable_pty::PtySize {
@@ -81,6 +82,9 @@ pub fn create_popup_pane(
     // pty never appears in all_window_panes.  Mark the child so the psmux
     // nested-session guard can make the same distinction (#537).
     cmd_builder.env(crate::util::POPUP_CHILD_ENV, "1");
+    // A psmux client can now legitimately run in here (#537), and it must not
+    // query psmux for the terminal colors, so hand it the ones we already know.
+    crate::pane::set_host_colors_env(&mut cmd_builder, host_colors);
     crate::pane::apply_user_environment(&mut cmd_builder, environment);
     // NOTE: the interactive-shell-for-empty-command behavior (tmux parity, #351)
     // is handled above where cmd_builder is constructed: an empty command uses

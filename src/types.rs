@@ -1513,6 +1513,17 @@ pub enum CtrlReq {
     ListAllPanes(mpsc::Sender<String>),
     ListAllPanesFormat(mpsc::Sender<String>, String),
     KillWindow,
+    /// kill-window with an explicit window target. The server resolves the
+    /// target itself and reports an unresolvable one as an error instead of
+    /// killing whatever window happens to be active (tmux parity: tmux says
+    /// "can't find window: X" and kills nothing). `win` carries an index or,
+    /// when `win_is_id` is set, an @id; `name` carries a window-name target.
+    KillWindowTarget {
+        win: Option<usize>,
+        win_is_id: bool,
+        name: Option<String>,
+        resp: mpsc::Sender<Result<(), String>>,
+    },
     KillSession,
     HasSession(mpsc::Sender<bool>),
     RenameSession(String),

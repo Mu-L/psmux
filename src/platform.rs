@@ -424,6 +424,23 @@ pub fn query_host_terminal_colors() -> Option<String> {
             return Some(hc.to_spec());
         }
     }
+    // Never interrogate psmux itself.  When this client runs inside a psmux
+    // pane or popup, the "host terminal" is psmux, and psmux answers these
+    // queries by injecting the replies as console KEY_EVENT records into the
+    // child's input buffer (server::helpers::answer_color_queries ->
+    // send_vt_response).  That injection is asynchronous: it happens on a later
+    // server tick, routinely after the 500ms drain below has given up, because
+    // psmux never answers the DA1 sentinel that would end the drain early.
+    // Whatever lands late stays queued in the console input buffer, and the
+    // client's normal input pump then reads it as keystrokes and forwards it to
+    // the session it is attached to, typing `ESC]10;rgb:...` garbage into that
+    // pane.  The parent server plants the real terminal's colors in
+    // PSMUX_HOST_COLORS instead (pane::set_host_colors_env), which the
+    // short-circuit above picks up, so nesting keeps the right palette without
+    // ever putting a query on the wire.
+    if crate::util::psmux_drawn_terminal() {
+        return None;
+    }
     query_host_terminal_colors_impl()
 }
 
@@ -466,7 +483,10 @@ fn query_host_terminal_colors_impl() -> Option<String> {
         fn GetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, lpMode: *mut u32) -> i32;
         fn SetConsoleMode(hConsoleHandle: *mut std::ffi::c_void, dwMode: u32) -> i32;
         fn GetNumberOfConsoleInputEvents(hConsoleInput: *mut std::ffi::c_void, lpcNumberOfEvents: *mut u32) -> i32;
-        fn ReadConsoleInputW(hConsoleInput: *mut std::ffi::c_void, lpBuffer: *mut InputRecord, nLength: u32, lpNumberOfEventsRead: *mut u32) -> i32;
+        // Buffer is untyped at the ABI: each module keeps its own view of
+        // INPUT_RECORD, so every extern declaration of this function in the
+        // crate uses *mut c_void (clashing_extern_declarations).
+        fn ReadConsoleInputW(hConsoleInput: *mut std::ffi::c_void, lpBuffer: *mut std::ffi::c_void, nLength: u32, lpNumberOfEventsRead: *mut u32) -> i32;
     }
 
     unsafe {
@@ -513,7 +533,7 @@ fn query_host_terminal_colors_impl() -> Option<String> {
                 continue;
             }
             let mut read: u32 = 0;
-            if ReadConsoleInputW(h_in, records.as_mut_ptr(), 64, &mut read) == 0 { break; }
+            if ReadConsoleInputW(h_in, records.as_mut_ptr() as *mut _, 64, &mut read) == 0 { break; }
             for rec in records.iter().take(read as usize) {
                 if rec.event_type != KEY_EVENT || rec.event.key_down == 0 { continue; }
                 let wch = rec.event.u_char;
@@ -3562,7 +3582,7 @@ fn push_dec_u16(out: &mut Vec<u8>, mut v: u16) {
 fn rewrite_sgr_params(params: &[u8], out: &mut Vec<u8>) {
     let tokens: Vec<&[u8]> = params.split(|&c| c == b';').collect();
     let mut first = true;
-    let mut push = |tok: &[u8], out: &mut Vec<u8>, first: &mut bool| {
+    let push = |tok: &[u8], out: &mut Vec<u8>, first: &mut bool| {
         if !*first {
             out.push(b';');
         }

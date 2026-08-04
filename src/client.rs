@@ -1668,6 +1668,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut srv_popup_lines: Vec<String> = Vec::new();
     #[allow(unused_assignments)]
     let mut srv_popup_rows: Vec<crate::layout::RowRunsJson> = Vec::new();
+    #[allow(unused_assignments)]
     let mut srv_floats: Vec<FloatJson> = Vec::new();
     #[allow(unused_assignments)]
     let mut srv_popup_has_pty = false;

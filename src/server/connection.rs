@@ -684,7 +684,7 @@ if control_echo || control_noecho {
 
         // Apply target focus
         let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp");
-        let skip_target_focus = matches!(cmd_name, "resize-window" | "resizew");
+        let skip_target_focus = matches!(cmd_name, "resize-window" | "resizew" | "kill-window" | "killw");
         if let Some(wid) = ctrl_target_win {
             if is_focus_cmd {
                 if ctrl_target_win_is_id {
@@ -929,7 +929,8 @@ let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "
 // would restore the old focus after the batch and silently undo the switch.
 let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "movep"
     | "move-window" | "movew" | "swap-window" | "swapw"
-    | "switch-client" | "switchc" | "resize-window" | "resizew");
+    | "switch-client" | "switchc" | "resize-window" | "resizew"
+    | "kill-window" | "killw");
 if let Some(wid) = target_win {
     if is_focus_cmd {
         if target_win_is_id {
@@ -1511,7 +1512,31 @@ match cmd {
         }
         if !persistent { break; }
     }
-    "kill-window" | "killw" => { let _ = tx.send(CtrlReq::KillWindow); }
+    "kill-window" | "killw" => {
+        // Resolve the -t target server-side. The generic temp-focus block is
+        // skipped for kill-window (see skip_target_focus): focusing a target
+        // that fails to resolve silently left the PREVIOUS window focused and
+        // the bare KillWindow then killed it — `kill-window -t sess:typo`
+        // destroyed whatever was active (tmux: "can't find window", no kill).
+        if target_win.is_some() || target_win_name.is_some() {
+            let (resp_s, resp_r) = mpsc::channel();
+            let _ = tx.send(CtrlReq::KillWindowTarget {
+                win: target_win,
+                win_is_id: target_win_is_id,
+                name: target_win_name.clone(),
+                resp: resp_s,
+            });
+            if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+                if !persistent {
+                    let _ = writeln!(write_stream, "ERROR: {}", e);
+                    let _ = write_stream.flush();
+                }
+                // persistent clients see it in the status bar (set server-side)
+            }
+        } else {
+            let _ = tx.send(CtrlReq::KillWindow);
+        }
+    }
     "kill-session" | "kill-ses" => {
         // If -t <target> is given, kill that session instead of self.
         // The target may be specified without the -L socket-name namespace
@@ -3595,8 +3620,29 @@ fn dispatch_control_command(
             true
         }
         "kill-window" | "killw" => {
-            let _ = tx.send(CtrlReq::KillWindow);
-            let _ = resp_tx.send(String::new());
+            // Resolve any -t target server-side and error on a miss instead
+            // of killing the active window (same fix as the one-shot path).
+            let parsed = raw_target.map(parse_target);
+            let (t_win, t_win_is_id, t_name) = match parsed {
+                Some(pt) => (pt.window, pt.window_is_id, pt.window_name),
+                None => (None, false, None),
+            };
+            if t_win.is_some() || t_name.is_some() {
+                let (resp_s, resp_r) = mpsc::channel();
+                let _ = tx.send(CtrlReq::KillWindowTarget {
+                    win: t_win,
+                    win_is_id: t_win_is_id,
+                    name: t_name,
+                    resp: resp_s,
+                });
+                match resp_r.recv_timeout(Duration::from_secs(5)) {
+                    Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                    _ => { let _ = resp_tx.send(String::new()); }
+                }
+            } else {
+                let _ = tx.send(CtrlReq::KillWindow);
+                let _ = resp_tx.send(String::new());
+            }
             true
         }
         "unlink-window" | "unlinkw" => {
