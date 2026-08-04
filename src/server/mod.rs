@@ -752,6 +752,25 @@ pub(crate) fn read_fresh_config_warnings(since_epoch: u64) -> Vec<String> {
 /// Warm servers are guarded too: a namespace holds exactly one `__warm__`
 /// server, and releasing that name here is precisely what lets the replacement
 /// warm spawned after a claim acquire it (issue #459).
+/// Remove the window at Vec position `pos`, killing its children. The last
+/// window's children are killed in place (the empty-session reaper then ends
+/// the server), matching the historical kill-window behavior. `active_idx`
+/// shifts down when a window before it is removed so focus stays on the same
+/// window; it only moves when the active window itself was the target.
+fn kill_window_at(app: &mut AppState, pos: usize) {
+    if pos >= app.windows.len() { return; }
+    if app.windows.len() > 1 {
+        let mut win = app.windows.remove(pos);
+        kill_all_children(&mut win.root);
+        app.on_window_removed(pos);
+        if app.active_idx > pos { app.active_idx -= 1; }
+        if app.active_idx >= app.windows.len() { app.active_idx = app.windows.len() - 1; }
+    } else {
+        // Last window: kill all children; reaper will detect empty session and exit
+        kill_all_children(&mut app.windows[0].root);
+    }
+}
+
 fn rekey_session_guard(guard: &mut Option<crate::platform::SessionMutex>, new_base: &str) {
     *guard = None; // drop releases + closes the old name's mutex
     *guard = crate::platform::acquire_session_mutex(new_base);
@@ -3029,16 +3048,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(lines.join("\n"));
                 }
                 CtrlReq::KillWindow => {
-                    if app.windows.len() > 1 {
-                        let removed_pos = app.active_idx;
-                        let mut win = app.windows.remove(removed_pos);
-                        kill_all_children(&mut win.root);
-                        app.on_window_removed(removed_pos);
-                        if app.active_idx >= app.windows.len() { app.active_idx = app.windows.len() - 1; }
-                    } else {
-                        // Last window: kill all children; reaper will detect empty session and exit
-                        kill_all_children(&mut app.windows[0].root);
-                    }
+                    let active = app.active_idx;
+                    kill_window_at(&mut app, active);
                     // Killing a window changes the active window and the window
                     // list, so resize the now-active window's panes and force a
                     // status-bar/window-list rebuild + push to attached clients.
@@ -3052,6 +3063,49 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                     state_dirty = true;
                     hook_event = Some("window-closed");
+                }
+                CtrlReq::KillWindowTarget { win, win_is_id, name, resp } => {
+                    // Resolve the target here, on live state. An unresolvable
+                    // target must be an error, never a fallback to the active
+                    // window: the old temp-focus-then-kill dance silently
+                    // no-opped the focus on a bad name/index/@id and then
+                    // killed whatever was focused (session death when it was
+                    // the last window). tmux: "can't find window: X", kills
+                    // nothing, exit 1.
+                    let resolved = if let Some(w) = win {
+                        if win_is_id {
+                            app.windows.iter().position(|x| x.id == w)
+                        } else {
+                            app.win_pos(w)
+                        }
+                    } else if let Some(ref n) = name {
+                        app.windows.iter().position(|x| x.name == *n)
+                    } else {
+                        Some(app.active_idx)
+                    };
+                    match resolved {
+                        Some(pos) => {
+                            kill_window_at(&mut app, pos);
+                            resize_all_panes(&mut app);
+                            meta_dirty = true;
+                            state_dirty = true;
+                            hook_event = Some("window-closed");
+                            let _ = resp.send(Ok(()));
+                        }
+                        None => {
+                            let spec = if let Some(w) = win {
+                                if win_is_id { format!("@{}", w) } else { w.to_string() }
+                            } else {
+                                name.clone().unwrap_or_default()
+                            };
+                            let msg = format!("can't find window: {}", spec);
+                            // Surface in the status bar for attached clients,
+                            // same convention as join-pane (#437).
+                            app.status_message = Some((msg.clone(), Instant::now(), None));
+                            state_dirty = true;
+                            let _ = resp.send(Err(msg));
+                        }
+                    }
                 }
                 CtrlReq::KillSession => {
                     // Fire session-closed hook before cleanup

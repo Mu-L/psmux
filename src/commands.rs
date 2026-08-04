@@ -983,13 +983,44 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             let _ = kill_active_pane(app);
         }
         "kill-window" | "killw" => {
-            if app.windows.len() > 1 {
-                let removed_pos = app.active_idx;
-                let mut win = app.windows.remove(removed_pos);
-                kill_all_children(&mut win.root);
-                app.on_window_removed(removed_pos);
-                if app.active_idx >= app.windows.len() {
-                    app.active_idx = app.windows.len() - 1;
+            // Resolve an explicit -t here; an unresolvable target is an error,
+            // not a fallback to the active window (tmux: "can't find window").
+            let mut removed_pos = Some(app.active_idx);
+            if let Some(t_pos) = parts.iter().position(|p| *p == "-t") {
+                if let Some(t) = parts.get(t_pos + 1) {
+                    let pt = crate::cli::parse_target(t);
+                    removed_pos = if let Some(w) = pt.window {
+                        if pt.window_is_id {
+                            app.windows.iter().position(|x| x.id == w)
+                        } else {
+                            app.win_pos(w)
+                        }
+                    } else if let Some(ref n) = pt.window_name {
+                        app.windows.iter().position(|x| x.name == *n)
+                    } else {
+                        // Bare session target: the active window, like tmux.
+                        Some(app.active_idx)
+                    };
+                    if removed_pos.is_none() {
+                        app.status_message = Some((
+                            format!("can't find window: {}", t),
+                            std::time::Instant::now(),
+                            None,
+                        ));
+                    }
+                }
+            }
+            if let Some(pos) = removed_pos {
+                if app.windows.len() > 1 && pos < app.windows.len() {
+                    let mut win = app.windows.remove(pos);
+                    kill_all_children(&mut win.root);
+                    app.on_window_removed(pos);
+                    if app.active_idx > pos {
+                        app.active_idx -= 1;
+                    }
+                    if app.active_idx >= app.windows.len() {
+                        app.active_idx = app.windows.len() - 1;
+                    }
                 }
             }
         }
@@ -2631,3 +2662,7 @@ mod tests_issue426_split_pane_alias;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue470_menu_popup.rs"]
 mod tests_issue470_menu_popup;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_killwindow_bad_target.rs"]
+mod tests_killwindow_bad_target;
