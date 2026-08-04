@@ -497,6 +497,10 @@ fn drain_plugin_req(
             app.key_tables.clear();
             crate::config::populate_default_bindings(app);
             crate::config::source_file(app, &path);
+            // A runtime source-file can record warnings (e.g. an unreadable
+            // path); flush them like the startup load does or they never
+            // reach config-warnings.log and the attach-time summary.
+            write_config_warnings_log(&app.config_warnings);
             // source-file may change pane-border-status (#288)
             resize_all_panes(app);
         }
@@ -4022,6 +4026,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         crate::config::source_file(&mut app, &path);
                     }
+                    // A runtime source-file can record warnings (e.g. an
+                    // unreadable path); flush them like the startup load does
+                    // or they never reach config-warnings.log.
+                    write_config_warnings_log(&app.config_warnings);
                     // source-file may change pane-border-status which
                     // affects pane content height (#288)
                     resize_all_panes(&mut app);
