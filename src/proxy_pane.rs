@@ -250,7 +250,7 @@ pub fn create_proxy_pane(
     let epoch = Instant::now() - Duration::from_secs(2);
     Ok(crate::types::Pane {
         master: Box::new(proxy_master),
-        writer: Box::new(writer),
+        writer: crate::pane::spawn_pane_write_queue(Box::new(writer)),
         child: Box::new(proxy_child),
         term,
         last_rows: rows,

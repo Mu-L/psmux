@@ -31,6 +31,60 @@ pub fn conpty_preemptive_dsr_response(_writer: &mut dyn std::io::Write) {
     // no-op: reactive CPR responder handles all ESC[6n queries (#313)
 }
 
+/// Non-blocking pane writer: queues bytes to a dedicated flush thread.
+///
+/// The ConPTY input pipe has a fixed 64KB buffer. A pane child that stops
+/// reading stdin (e.g. a TUI busy with a long redraw) makes a direct
+/// `write_all` on the server thread block, wedging every session on the
+/// server. tmux never has this problem because pty writes go through a
+/// libevent bufferevent that buffers in memory and flushes asynchronously;
+/// this queue mirrors that contract: writes always complete immediately,
+/// bytes are delivered in order, and backpressure is absorbed by memory
+/// exactly like tmux's event buffer.
+struct QueuedPaneWriter {
+    tx: std::sync::mpsc::Sender<Vec<u8>>,
+}
+
+impl std::io::Write for QueuedPaneWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.tx.send(buf.to_vec()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pane writer thread exited")
+        })?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Wrap a raw PTY writer in a queue drained by a dedicated thread. The thread
+/// exits when the queue side is dropped or the underlying pipe write fails
+/// (child gone), after which queued writes report `BrokenPipe`.
+pub fn spawn_pane_write_queue(
+    mut inner: Box<dyn std::io::Write + Send>,
+) -> Box<dyn std::io::Write + Send> {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let _ = std::thread::Builder::new()
+        .name("pane-writer".to_string())
+        .spawn(move || {
+            while let Ok(mut buf) = rx.recv() {
+                // Coalesce whatever else is already queued into one write.
+                while let Ok(more) = rx.try_recv() {
+                    buf.extend_from_slice(&more);
+                }
+                if inner.write_all(&buf).is_err() {
+                    break;
+                }
+                let _ = inner.flush();
+            }
+        });
+    Box::new(QueuedPaneWriter { tx })
+}
+
 /// Cached resolved shell path to avoid repeated `which::which()` PATH scans.
 /// Resolved once on first use, reused for all subsequent pane spawns.
 static CACHED_SHELL_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -381,8 +435,8 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
 
     let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
-    let mut pty_writer = pair.master.take_writer()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
+    let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let pane_id = app.next_pane_id;
@@ -458,8 +512,8 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
     spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id);
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
-    let mut pty_writer = pair.master.take_writer()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
+    let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
     Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, bell_pending, cpr_pending, color_query_pending, child_pid, pane_id, rows, cols, output_ring })
 }
@@ -513,8 +567,8 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id);
 
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
-    let mut pty_writer = pair.master.take_writer()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
+    let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let raw_pane_id = app.next_pane_id;

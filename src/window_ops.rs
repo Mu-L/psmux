@@ -1964,7 +1964,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     crate::pane::spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id);
     pane.output_ring = output_ring;
 
-    let mut pty_writer = pair.master.take_writer().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
+    let mut pty_writer = crate::pane::spawn_pane_write_queue(pair.master.take_writer().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     crate::pane::conpty_preemptive_dsr_response(&mut *pty_writer);
 
     pane.master = pair.master;
@@ -2036,7 +2036,7 @@ pub fn heal_respawn_pane(
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
     crate::pane::spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id);
 
-    let mut pty_writer = pair.master.take_writer().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
+    let mut pty_writer = crate::pane::spawn_pane_write_queue(pair.master.take_writer().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     crate::pane::conpty_preemptive_dsr_response(&mut *pty_writer);
 
     // Re-acquire the pane and swap in the fresh shell.
