@@ -61,9 +61,14 @@ impl std::io::Write for QueuedPaneWriter {
     }
 }
 
-/// Wrap a raw PTY writer in a queue drained by a dedicated thread. The thread
-/// exits when the queue side is dropped or the underlying pipe write fails
-/// (child gone), after which queued writes report `BrokenPipe`.
+/// Wrap a raw PTY writer in a queue drained by a dedicated thread.
+///
+/// The inner writer's lifetime must match the pane's: dropping the ConPTY
+/// master writer closes the child's input pipe, which a shell reads as EOF
+/// and exits on — closing the whole window. A transient write error (e.g.
+/// while a TUI child is tearing down) must therefore NOT end the thread;
+/// it only stops further writes. The thread — and with it the inner
+/// writer — goes away only when the queue side is dropped with the pane.
 pub fn spawn_pane_write_queue(
     mut inner: Box<dyn std::io::Write + Send>,
 ) -> Box<dyn std::io::Write + Send> {
@@ -71,13 +76,18 @@ pub fn spawn_pane_write_queue(
     let _ = std::thread::Builder::new()
         .name("pane-writer".to_string())
         .spawn(move || {
+            let mut broken = false;
             while let Ok(mut buf) = rx.recv() {
                 // Coalesce whatever else is already queued into one write.
                 while let Ok(more) = rx.try_recv() {
                     buf.extend_from_slice(&more);
                 }
+                if broken {
+                    continue;
+                }
                 if inner.write_all(&buf).is_err() {
-                    break;
+                    broken = true;
+                    continue;
                 }
                 let _ = inner.flush();
             }
