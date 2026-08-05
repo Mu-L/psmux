@@ -1032,10 +1032,13 @@ fn run_main() -> io::Result<()> {
                 // Skipped when PSMUX_NO_WARM=1 is set or config has 'set -g warm off'.
                 // Also skipped when a custom config file is specified (-f or PSMUX_CONFIG_FILE)
                 // because the warm server loaded the default config, not the custom one.
+                // Also skipped when -x/-y request an explicit size: the warm server
+                // was spawned with the default geometry, and tmux guarantees that
+                // `new-session -d -x W -y H` yields a session of exactly that size.
                 let warm_disabled = std::env::var("PSMUX_NO_WARM").map(|v| v == "1" || v == "true").unwrap_or(false)
                     || crate::config::is_warm_disabled_by_config();
                 let has_custom_config = f_config_file.is_some() || std::env::var("PSMUX_CONFIG_FILE").is_ok();
-                let claimed_warm = if !warm_disabled && !has_custom_config && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() && env_vars.is_empty() {
+                let claimed_warm = if !warm_disabled && !has_custom_config && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() && env_vars.is_empty() && init_width.is_none() && init_height.is_none() {
                     let warm_base = if let Some(ref l) = l_socket_name {
                         format!("{}____warm__", l)
                     } else {
