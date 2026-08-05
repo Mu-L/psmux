@@ -97,9 +97,11 @@ if ($capture2 -match "hello cursor test") {
 # Check cursor shape via dump-state
 Log ""
 Log "=== Test 4: Cursor shape via dump-state ==="
-$home = $env:USERPROFILE
-$portFile = "$home\.psmux\$SESSION.port"
-$keyFile = "$home\.psmux\$SESSION.key"
+# $home is a read-only automatic variable in pwsh 7; assigning to it throws
+# and fails the whole script with every test already passed.
+$profileDir = $env:USERPROFILE
+$portFile = "$profileDir\.psmux\$SESSION.port"
+$keyFile = "$profileDir\.psmux\$SESSION.key"
 if (Test-Path $portFile) {
     $port = (Get-Content $portFile).Trim()
     $key = (Get-Content $keyFile).Trim()

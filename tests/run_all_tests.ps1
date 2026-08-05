@@ -37,6 +37,14 @@ if ($env:PSMUX_TEST_SANDBOX -ne '1') {
 $ErrorActionPreference = "Continue"
 $startTime = Get-Date
 
+# NO_COLOR poisons every color assertion in the tree: psmux honors it and
+# strips SGR, so a runner launched from a shell that sets it (AI agent tool
+# shells do) fakes a machine-wide "psmux drops all colour" regression across
+# the issue2/263/425/451 families. Proven 2026-08-05: 12 suites red with it,
+# all green without, identical binary. Scrub it for this process and every
+# suite we spawn.
+Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
+
 # ── Logging setup ──────────────────────────────────────────────
 # All logs go to $env:TEMP\psmux-test-logs\ (never inside the repo).
 # Each run gets a timestamped folder with:
