@@ -70,6 +70,9 @@ path = "tests-rs/test_pr469_osc_command_safety.rs"
 name = "test_issue494_copymode_freeze"
 path = "tests-rs/test_issue494_copymode_freeze.rs"
 
+[dev-dependencies]
+parking_lot = "0.12"
+
 # Windows only
 [target.'cfg(not(windows))'.dependencies]
 [target.'cfg(windows)'.dependencies]

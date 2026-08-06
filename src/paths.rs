@@ -233,3 +233,7 @@ mod tests {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue474_home_resolution.rs"]
 mod tests_issue474_home_resolution;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_data_dir_override.rs"]
+mod tests_data_dir_override;

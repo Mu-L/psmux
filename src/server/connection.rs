@@ -4365,3 +4365,7 @@ mod tests_issue476_bindkey_quoting;
 #[cfg(test)]
 #[path = "../../tests-rs/test_send_keys_literal_byte.rs"]
 mod tests_send_keys_literal_byte;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_refresh_client_flags.rs"]
+mod tests_refresh_client_flags;
