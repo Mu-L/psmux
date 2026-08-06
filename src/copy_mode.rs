@@ -605,14 +605,39 @@ fn capture_row_text(screen: &vt100::Screen, row: u16, cols: std::ops::Range<u16>
     out
 }
 
-pub fn capture_active_pane_text(app: &mut AppState) -> io::Result<Option<String>> {
-    let win = &mut app.windows[app.active_idx];
-    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
+/// Resolve the (window index, tree path) a capture should read.
+///
+/// An explicit `-t %N` pane id wins and is searched across every window
+/// (same pane-by-id lookup as kill-pane); a missing or unresolvable id
+/// falls back to the active pane of the active window, keeping the
+/// pre-targeting behavior and error shape.
+fn capture_target(app: &AppState, pane_id: Option<usize>) -> (usize, Vec<usize>) {
+    if let Some(pid) = pane_id {
+        if let Some((wi, path)) = app.windows.iter().enumerate().find_map(|(wi, win)| {
+            crate::tree::find_path_by_id(&win.root, pid).map(|path| (wi, path))
+        }) {
+            return (wi, path);
+        }
+    }
+    (app.active_idx, app.windows[app.active_idx].active_path.clone())
+}
+
+pub fn capture_active_pane_text(app: &mut AppState, pane_id: Option<usize>, preserve_trailing: bool) -> io::Result<Option<String>> {
+    let (win_idx, path) = capture_target(app, pane_id);
+    let win = &mut app.windows[win_idx];
+    let p = match active_pane_mut(&mut win.root, &path) { Some(p) => p, None => return Ok(None) };
     let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
     let screen = parser.screen();
     let mut text = String::new();
     for r in 0..p.last_rows {
-        text.push_str(capture_row_text(screen, r, 0..p.last_cols).trim_end());
+        let row = capture_row_text(screen, r, 0..p.last_cols);
+        // -N (preserve_trailing) keeps the full row width, trailing spaces
+        // included; without it, trim like tmux does by default.
+        if preserve_trailing {
+            text.push_str(&row);
+        } else {
+            text.push_str(row.trim_end());
+        }
         text.push('\n');
     }
     // Trim trailing all-empty lines so iTerm2 doesn't advance its cursor
@@ -968,9 +993,10 @@ pub fn compute_capture_range(s: Option<i32>, e: Option<i32>, last_row: u16) -> (
     (start, end)
 }
 
-pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i32>) -> io::Result<Option<String>> {
-    let win = &mut app.windows[app.active_idx];
-    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
+pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, preserve_trailing: bool) -> io::Result<Option<String>> {
+    let (win_idx, path) = capture_target(app, pane_id);
+    let win = &mut app.windows[win_idx];
+    let p = match active_pane_mut(&mut win.root, &path) { Some(p) => p, None => return Ok(None) };
     let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
     let rows = p.last_rows;
     let cols = p.last_cols;
@@ -983,7 +1009,13 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
         let screen = parser.screen();
         let mut text = String::new();
         for r in start..=end {
-            text.push_str(capture_row_text(screen, r, 0..cols).trim_end());
+            let row = capture_row_text(screen, r, 0..cols);
+            // -N keeps trailing spaces per row; default trims them.
+            if preserve_trailing {
+                text.push_str(&row);
+            } else {
+                text.push_str(row.trim_end());
+            }
             text.push('\n');
         }
         // An explicit range (-S/-E) is honored line for line, matching tmux:
@@ -1038,7 +1070,13 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
 
         for aline in read_start..=read_end {
             let r = (aline + actual_sb) as u16;
-            text.push_str(capture_row_text(parser.screen(), r, 0..cols).trim_end());
+            let row = capture_row_text(parser.screen(), r, 0..cols);
+            // -N keeps trailing spaces per row; default trims them.
+            if preserve_trailing {
+                text.push_str(&row);
+            } else {
+                text.push_str(row.trim_end());
+            }
             text.push('\n');
         }
         next_abs = read_end + 1;
@@ -1058,12 +1096,15 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
     Ok(Some(text))
 }
 
-/// Capture the active pane's screen content with ANSI escape sequences preserved.
+/// Capture a pane's screen content with ANSI escape sequences preserved.
 /// This is the `-e` flag for capture-pane.  Supports optional start/end range.
 /// Negative -S values read from scrollback history; i32::MIN means all retained history.
-pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<i32>) -> io::Result<Option<String>> {
-    let win = &mut app.windows[app.active_idx];
-    let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
+/// `pane_id` is an explicit `-t %N` target (None = active pane); `preserve_trailing`
+/// is the `-N` flag (keep trailing spaces per row, styled ones included).
+pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, preserve_trailing: bool) -> io::Result<Option<String>> {
+    let (win_idx, path) = capture_target(app, pane_id);
+    let win = &mut app.windows[win_idx];
+    let p = match active_pane_mut(&mut win.root, &path) { Some(p) => p, None => return Ok(None) };
     let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
     let rows = p.last_rows;
     let cols = p.last_cols;
@@ -1165,8 +1206,15 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                 row_chars.push(" ".to_string());
             }
         }
-        let last_non_ws = row_chars.iter().rposition(|s| !s.is_empty() && s.trim() != "");
-        let trim_end = match last_non_ws { Some(pos) => pos + 1, None => 0 };
+        // -N (preserve_trailing): emit the full row width so styled trailing
+        // spaces (e.g. a TUI's background fill painted to end-of-line) keep
+        // their SGR when the capture is replayed. Without -N, trim after the
+        // last non-whitespace cell like tmux does by default.
+        let trim_end = if preserve_trailing {
+            row_chars.len()
+        } else {
+            match row_chars.iter().rposition(|s| !s.is_empty() && s.trim() != "") { Some(pos) => pos + 1, None => 0 }
+        };
         for c in 0..trim_end {
             if let Some(ref sgr) = row_sgr[c] { text.push_str(sgr); }
             text.push_str(&row_chars[c]);
@@ -1634,3 +1682,7 @@ pub fn select_a_word_big(app: &mut AppState) {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue443_blank_cell_capture.rs"]
 mod tests_issue443_blank_cell_capture;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_capture_pane_fidelity.rs"]
+mod tests_capture_pane_fidelity;

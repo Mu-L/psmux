@@ -1409,8 +1409,13 @@ pub enum CtrlReq {
     },
     KillPane,
     KillPaneById(usize),
-    CapturePane(mpsc::Sender<String>),
-    CapturePaneStyled(mpsc::Sender<String>, Option<i32>, Option<i32>),
+    /// Capture a pane's plain text. Fields: resp, target pane id
+    /// (`-t %N`, None = active pane), preserve trailing spaces (`-N`).
+    CapturePane(mpsc::Sender<String>, Option<usize>, bool),
+    /// Capture a pane's text with ANSI SGR sequences. Fields: resp,
+    /// start (-S), end (-E), target pane id (`-t %N`, None = active pane),
+    /// preserve trailing spaces (`-N`).
+    CapturePaneStyled(mpsc::Sender<String>, Option<i32>, Option<i32>, Option<usize>, bool),
     FocusWindow(usize),
     /// Focus window by @N id lookup
     FocusWindowById(usize),
@@ -1432,7 +1437,10 @@ pub enum CtrlReq {
     /// string. Drop-in compat with iTerm2 and other CC clients that always
     /// pass `-F` to get structured output.
     SessionInfoFormat(mpsc::Sender<String>, String),
-    CapturePaneRange(mpsc::Sender<String>, Option<i32>, Option<i32>),
+    /// Capture a plain-text row range. Fields: resp, start (-S), end (-E),
+    /// target pane id (`-t %N`, None = active pane), preserve trailing
+    /// spaces (`-N`).
+    CapturePaneRange(mpsc::Sender<String>, Option<i32>, Option<i32>, Option<usize>, bool),
     ClientAttach(u64),
     ClientDetach(u64),
     DumpLayout(mpsc::Sender<String>),

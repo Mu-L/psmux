@@ -713,10 +713,13 @@ if control_echo || control_noecho {
                 } else {
                     let _ = tx_ctrl.send(CtrlReq::FocusPaneByIndex(pid));
                 }
-            } else if !matches!(cmd_name, "swap-pane" | "swapp" | "resize-window" | "resizew") {
+            } else if !matches!(cmd_name, "swap-pane" | "swapp" | "resize-window" | "resizew")
+                && !(ctrl_pane_is_id && matches!(cmd_name, "capture-pane" | "capturep")) {
                 // swap-pane resolves its own target and swaps it with the *current*
                 // active pane.  Temporarily focusing the target here would make
                 // active == target, turning the swap into a no-op (so skip it).
+                // capture-pane with a -t %N target resolves the pane id inside
+                // the capture itself, so a temporary focus is not needed.
                 if ctrl_pane_is_id {
                     let _ = tx_ctrl.send(CtrlReq::FocusPaneTemp(pid));
                 } else {
@@ -957,9 +960,14 @@ let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_i
 } else {
     None
 };
+// capture-pane resolves a -t %N target by pane id inside the capture
+// itself (any window), so a temporary focus would only churn the active
+// window for other clients. Non-id targets (-t 0.1) still use the
+// temporary-focus path below.
+let capture_pane_by_id = matches!(cmd, "capture-pane" | "capturep") && pane_is_id && target_pane.is_some();
 // swap-pane swaps the target with the *current* active pane; focusing the
 // target first would make active == target and turn the swap into a no-op.
-let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus;
+let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || capture_pane_by_id;
 if !skip_pane_focus && targeted_kill_pane_id.is_none() {
     if let Some(pid) = target_pane {
         if is_focus_cmd {
@@ -1066,6 +1074,10 @@ match cmd {
         let print_stdout = crate::cli::has_short_flag(&args, 'p');
         let join_lines = crate::cli::has_short_flag(&args, 'J');
         let escape_seqs = crate::cli::has_short_flag(&args, 'e');
+        // -N: preserve trailing spaces at the end of each line (tmux parity).
+        let preserve_trailing = crate::cli::has_short_flag(&args, 'N');
+        // -t %N target: resolved server-side by pane id across all windows.
+        let capture_pane_id = if pane_is_id { target_pane } else { None };
         // Parse -S start and -E end (negative = scrollback offset, - = entire scrollback)
         let s_arg = args.windows(2).find(|w| w[0] == "-S").map(|w| w[1]);
         let e_arg = args.windows(2).find(|w| w[0] == "-E").map(|w| w[1]);
@@ -1081,11 +1093,11 @@ match cmd {
         };
         let (rtx, rrx) = mpsc::channel::<String>();
         if escape_seqs {
-            let _ = tx.send(CtrlReq::CapturePaneStyled(rtx, start, end));
+            let _ = tx.send(CtrlReq::CapturePaneStyled(rtx, start, end, capture_pane_id, preserve_trailing));
         } else if s_arg.is_some() || e_arg.is_some() {
-            let _ = tx.send(CtrlReq::CapturePaneRange(rtx, start, end));
+            let _ = tx.send(CtrlReq::CapturePaneRange(rtx, start, end, capture_pane_id, preserve_trailing));
         } else {
-            let _ = tx.send(CtrlReq::CapturePane(rtx));
+            let _ = tx.send(CtrlReq::CapturePane(rtx, capture_pane_id, preserve_trailing));
         }
         if let Ok(mut text) = rrx.recv() {
             if join_lines {
@@ -3595,13 +3607,17 @@ fn dispatch_control_command(
             let start = args.windows(2).find(|w| w[0] == "-S").and_then(|w| if w[1] == "-" { Some(i32::MIN) } else { w[1].parse::<i32>().ok() });
             let end = args.windows(2).find(|w| w[0] == "-E").and_then(|w| w[1].parse::<i32>().ok());
             let styled = crate::cli::has_short_flag(&args, 'e');
+            // -N: preserve trailing spaces at the end of each line (tmux parity).
+            let preserve_trailing = crate::cli::has_short_flag(&args, 'N');
+            // -t %N target: resolved server-side by pane id across all windows.
+            let capture_pane_id = if pane_is_id { target_pane } else { None };
             let (rtx, rrx) = mpsc::channel::<String>();
             if styled {
-                let _ = tx.send(CtrlReq::CapturePaneStyled(rtx, start, end));
+                let _ = tx.send(CtrlReq::CapturePaneStyled(rtx, start, end, capture_pane_id, preserve_trailing));
             } else if start.is_some() || end.is_some() {
-                let _ = tx.send(CtrlReq::CapturePaneRange(rtx, start, end));
+                let _ = tx.send(CtrlReq::CapturePaneRange(rtx, start, end, capture_pane_id, preserve_trailing));
             } else {
-                let _ = tx.send(CtrlReq::CapturePane(rtx));
+                let _ = tx.send(CtrlReq::CapturePane(rtx, capture_pane_id, preserve_trailing));
             }
             if let Ok(text) = rrx.recv_timeout(Duration::from_secs(5)) {
                 let _ = resp_tx.send(text);
