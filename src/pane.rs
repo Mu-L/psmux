@@ -2488,3 +2488,11 @@ mod tests_issue495_cwd_hook_gate;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue495_direct_spawn_cwd_hook.rs"]
 mod tests_issue495_direct_spawn_cwd_hook;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_writer_queue.rs"]
+mod tests_pane_writer_queue;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_writer_transient_error.rs"]
+mod tests_pane_writer_transient_error;
