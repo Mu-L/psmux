@@ -543,6 +543,11 @@ fn drain_plugin_req(
 ///
 /// Best-effort: any error writing the log is swallowed (we are already
 /// reporting the original failure up the call chain).
+///
+/// Windows-only: the log exists to explain detached-server spawn failures
+/// (ConPTY `CreateProcessW` errors); the diagnostic it collects
+/// (`encode_wide` environment sizes) is meaningless elsewhere.
+#[cfg(windows)]
 pub(crate) fn write_startup_error_log(err: &dyn std::fmt::Display) {
     let Some(dir) = crate::paths::psmux_dir_opt() else {
         return;
@@ -1103,6 +1108,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // failure to a log file the user can find with their next breath
         // ("look in ~/.psmux/server-startup.log") instead of asking them
         // to rerun `psmux server` interactively to see the error.
+        #[cfg(windows)]
         write_startup_error_log(&e);
         // Clean up port and key files so stale entries are not left
         // behind when the pane command fails to spawn (issue #204).
@@ -6207,6 +6213,7 @@ mod test_issue202;
 mod test_new_session_env;
 
 #[cfg(test)]
+#[cfg(windows)]
 #[path = "../../tests-rs/test_issue167_startup_log.rs"]
 mod test_issue167_startup_log;
 
