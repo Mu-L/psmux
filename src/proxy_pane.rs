@@ -99,6 +99,18 @@ impl MasterPty for ProxyMasterPty {
             .map(|s| -> Box<dyn Write + Send> { Box::new(s) })
             .ok_or_else(|| anyhow::anyhow!("writer already taken"))
     }
+
+    // The proxied PTY lives in another process; there is no local fd or
+    // termios to expose. `pid_t` is `i32` on every unix target, so the
+    // plain alias is written out to avoid a `libc` dependency here.
+    #[cfg(unix)]
+    fn process_group_leader(&self) -> Option<i32> { None }
+
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<std::os::unix::io::RawFd> { None }
+
+    #[cfg(unix)]
+    fn tty_name(&self) -> Option<std::path::PathBuf> { None }
 }
 
 // ── ProxyChild ──────────────────────────────────────────────────────────

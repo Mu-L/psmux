@@ -1405,6 +1405,11 @@ fn ssh_debug_log(msg: &str) {
     }
 }
 
+/// No-op on non-Windows: the SSH reader thread and its log file are
+/// Windows-only (`SSH_LOG` above is not built there).
+#[cfg(not(windows))]
+fn ssh_debug_log(_msg: &str) {}
+
 /// True when verbose per-event logging is enabled.
 #[cfg(windows)]
 fn ssh_verbose() -> bool {

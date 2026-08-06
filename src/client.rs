@@ -1637,7 +1637,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut paste_stage2_last_len: usize = 0;
     // Suppression window: after right-click copy, discard text key events
     // for a short period to prevent VS Code ConPTY duplicate injection.
-    #[cfg(windows)]
+    // Declared on every platform because the right-click handler assigns it
+    // unconditionally; only the Windows code paths ever read it.
+    #[allow(unused_variables)]
     let mut paste_suppress_until: Option<Instant> = None;
 
     // Track whether a modified Enter Press was already handled this keypress

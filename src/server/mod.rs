@@ -543,6 +543,11 @@ fn drain_plugin_req(
 ///
 /// Best-effort: any error writing the log is swallowed (we are already
 /// reporting the original failure up the call chain).
+///
+/// Windows-only: the log exists to explain detached-server spawn failures
+/// (ConPTY `CreateProcessW` errors); the diagnostic it collects
+/// (`encode_wide` environment sizes) is meaningless elsewhere.
+#[cfg(windows)]
 pub(crate) fn write_startup_error_log(err: &dyn std::fmt::Display) {
     let Some(dir) = crate::paths::psmux_dir_opt() else {
         return;
@@ -1103,6 +1108,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // failure to a log file the user can find with their next breath
         // ("look in ~/.psmux/server-startup.log") instead of asking them
         // to rerun `psmux server` interactively to see the error.
+        #[cfg(windows)]
         write_startup_error_log(&e);
         // Clean up port and key files so stale entries are not left
         // behind when the pane command fails to spawn (issue #204).
@@ -1713,20 +1719,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(cmds) = app.hooks.get("before-kill-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     unzoom_if_zoomed(&mut app); let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane");
                 }
-                CtrlReq::CapturePane(resp) => {
+                CtrlReq::CapturePane(resp, pane_id, preserve_trailing) => {
                     // Note: do NOT gate on is_active_pane_squelched here.
                     // Returning empty during the cd+cls squelch window makes
                     // iTerm2's initial attach paint a blank screen, since
                     // capture-pane is only requested once on attach.  Return
                     // current parser screen content; it's just cell text and
                     // any stale frame is harmless (subsequent %output rewrites).
-                    if let Some(text) = capture_active_pane_text(&mut app)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
+                    if let Some(text) = capture_active_pane_text(&mut app, pane_id, preserve_trailing)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
-                CtrlReq::CapturePaneStyled(resp, s, e) => {
-                    if let Some(text) = capture_active_pane_styled(&mut app, s, e)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
+                CtrlReq::CapturePaneStyled(resp, s, e, pane_id, preserve_trailing) => {
+                    if let Some(text) = capture_active_pane_styled(&mut app, s, e, pane_id, preserve_trailing)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
-                CtrlReq::CapturePaneRange(resp, s, e) => {
-                    if let Some(text) = capture_active_pane_range(&mut app, s, e)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
+                CtrlReq::CapturePaneRange(resp, s, e, pane_id, preserve_trailing) => {
+                    if let Some(text) = capture_active_pane_range(&mut app, s, e, pane_id, preserve_trailing)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
                 CtrlReq::FocusWindow(wid) => {
                     // wid is a display index (same as tmux window number), convert to internal array index
@@ -6207,6 +6213,7 @@ mod test_issue202;
 mod test_new_session_env;
 
 #[cfg(test)]
+#[cfg(windows)]
 #[path = "../../tests-rs/test_issue167_startup_log.rs"]
 mod test_issue167_startup_log;
 
