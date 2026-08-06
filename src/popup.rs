@@ -133,7 +133,7 @@ pub fn create_popup_pane(
         }
     }
 
-    let pty_writer = pair.master.take_writer().ok()?;
+    let pty_writer = crate::pane::spawn_pane_write_queue(pair.master.take_writer().ok()?);
 
     // Brief delay so the reader thread processes initial output before the
     // first frame is serialized to clients.
@@ -214,7 +214,7 @@ pub fn create_empty_pane(rows: u16, cols: u16, pane_id: usize) -> Option<Pane> {
     let pty_sys = portable_pty::native_pty_system();
     let pty_size = portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
     let pair = pty_sys.openpty(pty_size).ok()?;
-    let pty_writer = pair.master.take_writer().ok()?;
+    let pty_writer = crate::pane::spawn_pane_write_queue(pair.master.take_writer().ok()?);
     // Drop the slave: with no child attached the pty stays inert; we never read.
     drop(pair.slave);
     let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
