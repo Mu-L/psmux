@@ -2525,7 +2525,17 @@ match cmd {
         let _ = tx.send(CtrlReq::LockClient);
     }
     "refresh-client" | "refresh" => {
-        let _ = tx.send(CtrlReq::RefreshClient);
+        // tmux restricts -C/-B/-A/-f to control-mode clients. A one-shot CLI
+        // client is not one, so reject the flag instead of silently ignoring
+        // it and letting the caller believe the size/subscription was applied.
+        if let Some(flag) = args.iter().find(|a| matches!(**a, "-C" | "-B" | "-A" | "-f")) {
+            if !persistent {
+                let _ = writeln!(write_stream, "ERROR: refresh-client {}: not a control client", flag);
+                let _ = write_stream.flush();
+            }
+        } else {
+            let _ = tx.send(CtrlReq::RefreshClient);
+        }
     }
     "suspend-client" | "suspendc" => {
         let _ = tx.send(CtrlReq::SuspendClient);
@@ -4371,3 +4381,7 @@ mod tests_issue476_bindkey_quoting;
 #[cfg(test)]
 #[path = "../../tests-rs/test_send_keys_literal_byte.rs"]
 mod tests_send_keys_literal_byte;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_refresh_client_flags.rs"]
+mod tests_refresh_client_flags;
