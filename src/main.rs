@@ -1583,6 +1583,7 @@ fn run_main() -> io::Result<()> {
                         "-p" => { cmd.push_str(" -p"); print_stdout = true; }
                         "-e" => { cmd.push_str(" -e"); }
                         "-J" => { cmd.push_str(" -J"); }
+                        "-N" => { cmd.push_str(" -N"); }
                         "-b" => {
                             if let Some(buf) = cmd_args.get(i + 1) {
                                 cmd.push_str(&format!(" -b {}", buf));
@@ -1592,7 +1593,7 @@ fn run_main() -> io::Result<()> {
                         a if a.len() > 2
                             && a.starts_with('-')
                             && !a.starts_with("--")
-                            && a.chars().skip(1).all(|c| matches!(c, 'p' | 'e' | 'J')) =>
+                            && a.chars().skip(1).all(|c| matches!(c, 'p' | 'e' | 'J' | 'N')) =>
                         {
                             // POSIX cluster of capture-pane booleans (-ep, -pe, -pJ, -eJ,
                             // -epJ, ...). -t/-S/-E/-b take a value, so they are NOT
@@ -1600,6 +1601,7 @@ fn run_main() -> io::Result<()> {
                             if a.contains('p') { cmd.push_str(" -p"); print_stdout = true; }
                             if a.contains('e') { cmd.push_str(" -e"); }
                             if a.contains('J') { cmd.push_str(" -J"); }
+                            if a.contains('N') { cmd.push_str(" -N"); }
                         }
                         // Cluster ending in a value-taking flag: -pt <target>,
                         // -pet <target>, -pS <start>, etc.
@@ -1609,7 +1611,7 @@ fn run_main() -> io::Result<()> {
                             && {
                                 let last = a.chars().last().unwrap_or(' ');
                                 matches!(last, 't' | 'S' | 'E' | 'b')
-                                    && a[1..a.len()-1].chars().all(|c| matches!(c, 'p' | 'e' | 'J'))
+                                    && a[1..a.len()-1].chars().all(|c| matches!(c, 'p' | 'e' | 'J' | 'N'))
                             } =>
                         {
                             let last = a.chars().last().unwrap();
@@ -1617,6 +1619,7 @@ fn run_main() -> io::Result<()> {
                             if a.contains('p') { cmd.push_str(" -p"); print_stdout = true; }
                             if a.contains('e') { cmd.push_str(" -e"); }
                             if a.contains('J') { cmd.push_str(" -J"); }
+                            if a.contains('N') { cmd.push_str(" -N"); }
                             // Consume the next arg as the value for the trailing flag
                             if let Some(val) = cmd_args.get(i + 1) {
                                 cmd.push_str(&format!(" -{} {}", last, val));
