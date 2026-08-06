@@ -65,6 +65,10 @@ path = "tests/issue502_altscreen_attrs.rs"
 name = "issue502_decsc_altscreen"
 path = "tests/issue502_decsc_altscreen.rs"
 
+[[test]]
+name = "osc7_windows_path"
+path = "tests/osc7_windows_path.rs"
+
 [dependencies.itoa]
 version = "1.0.15"
 
