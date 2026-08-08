@@ -164,6 +164,78 @@ fn cli_pane_index_exists(idx_spec: &str) -> Option<bool> {
     if any { Some(false) } else { None }
 }
 
+/// Issue #545: validate the window/pane component of the global -t target for
+/// commands that require the target to exist. Exits 1 with tmux's diagnostic
+/// ("can't find window: X" / "can't find pane: X") when the target
+/// definitively does not resolve. Conservative by design: relative/special
+/// specifiers (+, -, ^, !, $, {, *, =) are never validated, and an
+/// unreachable server (None from the validators) never blocks the command.
+/// The server-side FocusTargetTemp check independently prevents execution
+/// against the wrong window for anything not validated here.
+fn cli_validate_window_pane_target() {
+    let full = match std::env::var("PSMUX_TARGET_FULL") {
+        Ok(f) if !f.is_empty() => f,
+        _ => return,
+    };
+    let special = |s: &str| matches!(s.chars().next(),
+        Some('+') | Some('-') | Some('^') | Some('!') | Some('$') | Some('{') | Some('*') | Some('='));
+    // Bare "%<id>" pane target: globally unique, validate across all panes.
+    if full.starts_with('%') {
+        if cli_pane_id_exists(&full) == Some(false) {
+            eprintln!("psmux: can't find pane: {}", full);
+            std::process::exit(1);
+        }
+        return;
+    }
+    if let Some(ci) = full.find(':') {
+        let rest = &full[ci + 1..];
+        if rest.is_empty() { return; }
+        // Split off a pane component only when it is unambiguous (digits or
+        // %id after the last dot) — window names may legitimately contain
+        // dots, and a wrong split would false-error on a real window.
+        let (win_part, pane_part): (&str, Option<&str>) = match rest.rfind('.') {
+            Some(d) => {
+                let p = &rest[d + 1..];
+                if !p.is_empty() && (p.starts_with('%') || p.chars().all(|c| c.is_ascii_digit())) {
+                    (&rest[..d], Some(p))
+                } else {
+                    (rest, None)
+                }
+            }
+            None => (rest, None),
+        };
+        if !win_part.is_empty() && !special(win_part) && cli_window_exists(win_part) == Some(false) {
+            eprintln!("psmux: can't find window: {}", win_part);
+            std::process::exit(1);
+        }
+        if let Some(p) = pane_part {
+            if p.starts_with('%') && cli_pane_id_exists(p) == Some(false) {
+                eprintln!("psmux: can't find pane: {}", p);
+                std::process::exit(1);
+            }
+            // A numeric pane index inside an explicit window is validated
+            // server-side (it is positional within that window, which the
+            // active-window-scoped cli_pane_index_exists cannot check).
+        }
+    } else if let Some(dot) = full.rfind('.') {
+        // "<session>.<index>" form (no window component): the pane index
+        // refers to the active window.
+        let pane_part = &full[dot + 1..];
+        if pane_part.starts_with('%') {
+            if cli_pane_id_exists(pane_part) == Some(false) {
+                eprintln!("psmux: can't find pane: {}", pane_part);
+                std::process::exit(1);
+            }
+        } else if !pane_part.is_empty()
+            && pane_part.chars().all(|c| c.is_ascii_digit())
+            && cli_pane_index_exists(pane_part) == Some(false)
+        {
+            eprintln!("psmux: can't find pane: {}", full);
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Probe whether a session's server is still alive and responding.
 /// Returns true only if we can connect+auth (server is up); a connection
 /// refusal or a missing port file means the session is gone. A *timeout*
@@ -392,7 +464,24 @@ fn run_main() -> io::Result<()> {
     };
     
     let cmd = cmd_args.first().map(|s| s.as_str()).unwrap_or("");
-    
+
+    // Issue #545: commands that operate on an EXISTING window/pane must fail
+    // loudly (nonzero exit + stderr, tmux parity) when the -t target does not
+    // resolve, instead of the server-side temp focus silently no-opping and
+    // the command running against the active window. Same validators the
+    // select-window/select-pane branches already use. Commands whose -t names
+    // a destination that need not exist yet (move-window, break-pane, ...) or
+    // that resolve their own targets are deliberately NOT listed.
+    if matches!(cmd,
+        "send-keys" | "send" | "capture-pane" | "capturep"
+        | "rename-window" | "renamew" | "kill-pane" | "killp"
+        | "clear-history" | "clearhist" | "list-panes" | "lsp"
+        | "respawn-pane" | "respawnp" | "pipe-pane" | "pipep"
+        | "resize-pane" | "resizep" | "display-message" | "display")
+    {
+        cli_validate_window_pane_target();
+    }
+
     // Handle help and version flags first
     match cmd {
         "-h" | "--help" | "help" => {

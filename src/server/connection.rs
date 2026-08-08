@@ -684,64 +684,82 @@ if control_echo || control_noecho {
 
         // Apply target focus
         let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp");
-        let skip_target_focus = matches!(cmd_name, "resize-window" | "resizew" | "kill-window" | "killw");
-        if let Some(wid) = ctrl_target_win {
-            if is_focus_cmd {
+        // Same skip list as the one-shot path below. The two lists had
+        // diverged (issue #545 sub-note): join-pane/move-pane/move-window/
+        // swap-window/switch-client resolve their own targets (or name a
+        // destination that need not exist yet), so temp-focusing here would
+        // either undo the change (#483) or misdirect it (#442) for
+        // control-mode clients exactly as it did for one-shot ones.
+        let skip_target_focus = matches!(cmd_name, "join-pane" | "joinp" | "move-pane" | "movep"
+            | "move-window" | "movew" | "swap-window" | "swapw"
+            | "switch-client" | "switchc" | "resize-window" | "resizew"
+            | "kill-window" | "killw");
+        // capture-pane -t %N resolves the pane id inside the capture itself;
+        // swap-pane resolves its own target and swaps it with the *current*
+        // active pane (temp-focusing the target would make active == target
+        // and turn the swap into a no-op).
+        let ctrl_capture_by_id = matches!(cmd_name, "capture-pane" | "capturep") && ctrl_pane_is_id && ctrl_target_pane.is_some();
+        let skip_pane_focus = matches!(cmd_name, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || ctrl_capture_by_id;
+        let mut focus_err: Option<String> = None;
+        if is_focus_cmd {
+            if let Some(wid) = ctrl_target_win {
                 if ctrl_target_win_is_id {
                     let _ = tx_ctrl.send(CtrlReq::FocusWindowById(wid));
                 } else {
                     let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
                 }
-            } else if !skip_target_focus {
-                if ctrl_target_win_is_id {
-                    let _ = tx_ctrl.send(CtrlReq::FocusWindowByIdTemp(wid));
-                } else {
-                    let _ = tx_ctrl.send(CtrlReq::FocusWindowTemp(wid));
-                }
-            }
-        } else if let Some(ref wname) = ctrl_target_win_name {
-            if is_focus_cmd {
+            } else if let Some(ref wname) = ctrl_target_win_name {
                 let _ = tx_ctrl.send(CtrlReq::FocusWindowByName(wname.clone()));
-            } else if !skip_target_focus {
-                let _ = tx_ctrl.send(CtrlReq::FocusWindowByNameTemp(wname.clone()));
             }
-        }
-        if let Some(pid) = ctrl_target_pane {
-            if is_focus_cmd {
+            if let Some(pid) = ctrl_target_pane {
                 if ctrl_pane_is_id {
                     let _ = tx_ctrl.send(CtrlReq::FocusPane(pid));
                 } else {
                     let _ = tx_ctrl.send(CtrlReq::FocusPaneByIndex(pid));
                 }
-            } else if !matches!(cmd_name, "swap-pane" | "swapp" | "resize-window" | "resizew")
-                && !(ctrl_pane_is_id && matches!(cmd_name, "capture-pane" | "capturep")) {
-                // swap-pane resolves its own target and swaps it with the *current*
-                // active pane.  Temporarily focusing the target here would make
-                // active == target, turning the swap into a no-op (so skip it).
-                // capture-pane with a -t %N target resolves the pane id inside
-                // the capture itself, so a temporary focus is not needed.
-                if ctrl_pane_is_id {
-                    let _ = tx_ctrl.send(CtrlReq::FocusPaneTemp(pid));
-                } else {
-                    let _ = tx_ctrl.send(CtrlReq::FocusPaneByIndexTemp(pid));
+            }
+        } else {
+            // Validated temporary focus (issue #545): on an unresolvable
+            // window/pane target the command must not run — reply %error
+            // instead of silently executing against the active window.
+            let want_win = (ctrl_target_win.is_some() || ctrl_target_win_name.is_some()) && !skip_target_focus;
+            let want_pane = ctrl_target_pane.is_some() && !skip_pane_focus;
+            if want_win || want_pane {
+                let (focus_s, focus_r) = mpsc::channel::<Result<(), String>>();
+                let _ = tx_ctrl.send(CtrlReq::FocusTargetTemp {
+                    win: if want_win { ctrl_target_win } else { None },
+                    win_is_id: ctrl_target_win_is_id,
+                    win_name: if want_win { ctrl_target_win_name.clone() } else { None },
+                    pane: if want_pane { ctrl_target_pane } else { None },
+                    pane_is_id: ctrl_pane_is_id,
+                    resp: focus_s,
+                });
+                if let Ok(Err(e)) = focus_r.recv_timeout(Duration::from_secs(5)) {
+                    focus_err = Some(e);
                 }
             }
         }
 
         // Dispatch command (use a oneshot for the response)
         let (resp_s, resp_r) = mpsc::channel::<String>();
-        let dispatched = dispatch_control_command(
-            cmd_name, &filtered_args, &tx_ctrl, resp_s,
-            ctrl_target_pane, ctrl_pane_is_id, ctrl_raw_target.as_deref(),
-            ctrl_client_id,
-        );
-
-        // Collect the response BEFORE acquiring the write lock, so the
-        // notification thread can still write while we wait.
-        let response_result = if dispatched {
-            Some(resp_r.recv_timeout(Duration::from_secs(5)))
+        let response_result = if let Some(err) = focus_err {
+            // Unresolvable -t target: skip dispatch entirely and surface
+            // the diagnostic through the %error path (sentinel encoding,
+            // same as dispatcher-signalled errors).
+            Some(Ok(format!("\u{0001}ERR\u{0001}{}", err)))
         } else {
-            None
+            let dispatched = dispatch_control_command(
+                cmd_name, &filtered_args, &tx_ctrl, resp_s,
+                ctrl_target_pane, ctrl_pane_is_id, ctrl_raw_target.as_deref(),
+                ctrl_client_id,
+            );
+            // Collect the response BEFORE acquiring the write lock, so the
+            // notification thread can still write while we wait.
+            if dispatched {
+                Some(resp_r.recv_timeout(Duration::from_secs(5)))
+            } else {
+                None
+            }
         };
 
         // Acquire write lock for the ENTIRE %begin … %end sequence so
@@ -934,27 +952,6 @@ let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "mov
     | "move-window" | "movew" | "swap-window" | "swapw"
     | "switch-client" | "switchc" | "resize-window" | "resizew"
     | "kill-window" | "killw");
-if let Some(wid) = target_win {
-    if is_focus_cmd {
-        if target_win_is_id {
-            let _ = tx.send(CtrlReq::FocusWindowById(wid));
-        } else {
-            let _ = tx.send(CtrlReq::FocusWindow(wid));
-        }
-    } else if !skip_target_focus {
-        if target_win_is_id {
-            let _ = tx.send(CtrlReq::FocusWindowByIdTemp(wid));
-        } else {
-            let _ = tx.send(CtrlReq::FocusWindowTemp(wid));
-        }
-    }
-} else if let Some(ref wname) = target_win_name {
-    if is_focus_cmd {
-        let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
-    } else if !skip_target_focus {
-        let _ = tx.send(CtrlReq::FocusWindowByNameTemp(wname.clone()));
-    }
-}
 let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_id {
     target_pane
 } else {
@@ -968,20 +965,50 @@ let capture_pane_by_id = matches!(cmd, "capture-pane" | "capturep") && pane_is_i
 // swap-pane swaps the target with the *current* active pane; focusing the
 // target first would make active == target and turn the swap into a no-op.
 let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || capture_pane_by_id;
-if !skip_pane_focus && targeted_kill_pane_id.is_none() {
-    if let Some(pid) = target_pane {
-        if is_focus_cmd {
-            if pane_is_id {
-                let _ = tx.send(CtrlReq::FocusPane(pid));
-            } else {
-                let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
-            }
+if is_focus_cmd {
+    if let Some(wid) = target_win {
+        if target_win_is_id {
+            let _ = tx.send(CtrlReq::FocusWindowById(wid));
         } else {
-            if pane_is_id {
-                let _ = tx.send(CtrlReq::FocusPaneTemp(pid));
-            } else {
-                let _ = tx.send(CtrlReq::FocusPaneByIndexTemp(pid));
-            }
+            let _ = tx.send(CtrlReq::FocusWindow(wid));
+        }
+    } else if let Some(ref wname) = target_win_name {
+        let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
+    }
+    if let Some(pid) = target_pane {
+        if pane_is_id {
+            let _ = tx.send(CtrlReq::FocusPane(pid));
+        } else {
+            let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
+        }
+    }
+} else {
+    // Validated temporary focus (issue #545): the server resolves the
+    // window/pane target and replies Err on a miss, in which case the
+    // command must NOT run — the old fire-and-forget temp focus silently
+    // no-opped on a bad target and the untargeted command then executed
+    // against the ACTIVE window (kill-pane destroyed it, send-keys typed
+    // into it, capture-pane read it) at rc=0.
+    let want_win = (target_win.is_some() || target_win_name.is_some()) && !skip_target_focus;
+    let want_pane = target_pane.is_some() && !skip_pane_focus && targeted_kill_pane_id.is_none();
+    if want_win || want_pane {
+        let (focus_s, focus_r) = mpsc::channel::<Result<(), String>>();
+        let _ = tx.send(CtrlReq::FocusTargetTemp {
+            win: if want_win { target_win } else { None },
+            win_is_id: target_win_is_id,
+            win_name: if want_win { target_win_name.clone() } else { None },
+            pane: if want_pane { target_pane } else { None },
+            pane_is_id,
+            resp: focus_s,
+        });
+        if let Ok(Err(e)) = focus_r.recv_timeout(Duration::from_secs(5)) {
+            // Unresolvable target: report (tmux: "can't find window: X",
+            // exit 1, zero side effects) and skip the command entirely.
+            let _ = writeln!(write_stream, "ERROR: {}", e);
+            let _ = write_stream.flush();
+            if !persistent { break; }
+            line.clear();
+            continue;
         }
     }
 }

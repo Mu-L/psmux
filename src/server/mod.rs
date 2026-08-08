@@ -1429,8 +1429,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         | CtrlReq::WindowDump(..)
                         | CtrlReq::WindowLayout(..)
                     );
-                    let is_temp_focus = matches!(&req,
-                        CtrlReq::FocusWindowTemp(_) | CtrlReq::FocusWindowByIdTemp(_) | CtrlReq::FocusWindowByNameTemp(_) | CtrlReq::FocusPaneTemp(_) | CtrlReq::FocusPaneByIndexTemp(_));
+                    let is_temp_focus = matches!(&req, CtrlReq::FocusTargetTemp { .. });
                     let mut hook_event: Option<&str> = None;
                     // Track active_idx changes for debugging window-switch issues
                     let _prev_active_idx = app.active_idx;
@@ -1441,16 +1440,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         CtrlReq::FocusWindow(_) => "FocusWindow",
                         CtrlReq::FocusWindowById(_) => "FocusWindowById",
                         CtrlReq::FocusWindowByName(_) => "FocusWindowByName",
-                        CtrlReq::FocusWindowTemp(_) => "FocusWindowTemp",
-                        CtrlReq::FocusWindowByIdTemp(_) => "FocusWindowByIdTemp",
-                        CtrlReq::FocusWindowByNameTemp(_) => "FocusWindowByNameTemp",
+                        CtrlReq::FocusTargetTemp { .. } => "FocusTargetTemp",
                         CtrlReq::FocusWindowCmd(_) => "FocusWindowCmd",
                         CtrlReq::LastWindow => "LastWindow",
                         CtrlReq::MouseDown(..) => "MouseDown",
                         CtrlReq::MouseDownRight(..) => "MouseDownRight",
                         CtrlReq::MouseDownMiddle(..) => "MouseDownMiddle",
                         CtrlReq::FocusPane(_) => "FocusPane",
-                        CtrlReq::FocusPaneTemp(_) => "FocusPaneTemp",
                         CtrlReq::NewWindow(..) => "NewWindow",
                         CtrlReq::KillWindow => "KillWindow",
                         CtrlReq::KillPane => "KillPane",
@@ -1808,72 +1804,97 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     meta_dirty = true;
                 }
-                // ── Temporary focus variants for -t targeting ────────────
-                // These switch active_idx/active_path so the NEXT command
-                // in the batch operates on the correct window/pane.
-                // After the entire pending batch is processed, we restore
-                // the original focus (see temp_focus_restore below).
-                CtrlReq::FocusWindowTemp(wid) => {
-                    if temp_focus_restore.is_none() {
-                        let pane_id = crate::tree::get_active_pane_id(
-                            &app.windows[app.active_idx].root,
-                            &app.windows[app.active_idx].active_path,
-                        ).unwrap_or(usize::MAX);
-                        temp_focus_restore = Some((app.active_idx, pane_id));
+                // ── Temporary focus for -t targeting ─────────────────────
+                // Switches active_idx/active_path so the NEXT command in
+                // the batch operates on the correct window/pane. After the
+                // entire pending batch is processed, we restore the original
+                // focus (see temp_focus_restore below).
+                //
+                // Resolution happens BEFORE any focus change: an
+                // unresolvable target must be an error with zero side
+                // effects, never a silent fallback to the active window
+                // (issue #545 — the old per-kind Temp handlers had no miss
+                // path, so the untargeted command that followed ran against
+                // whatever was focused). Same convention as KillWindowTarget.
+                CtrlReq::FocusTargetTemp { win, win_is_id, win_name, pane, pane_is_id, resp } => {
+                    let win_idx: Option<usize> = if let Some(w) = win {
+                        if win_is_id {
+                            app.windows.iter().position(|x| x.id == w)
+                        } else {
+                            app.win_pos(w)
+                        }
+                    } else if let Some(ref n) = win_name {
+                        app.windows.iter().position(|x| x.name == *n)
+                    } else {
+                        Some(app.active_idx)
+                    };
+                    let err: Option<String> = match win_idx {
+                        None => {
+                            let spec = if let Some(w) = win {
+                                if win_is_id { format!("@{}", w) } else { w.to_string() }
+                            } else {
+                                win_name.clone().unwrap_or_default()
+                            };
+                            Some(format!("can't find window: {}", spec))
+                        }
+                        Some(idx) => match pane {
+                            Some(p) if pane_is_id => {
+                                if crate::tree::find_pane_by_id_global(&app, p).is_none() {
+                                    Some(format!("can't find pane: %{}", p))
+                                } else {
+                                    None
+                                }
+                            }
+                            Some(p) => {
+                                // Positional index within the target window,
+                                // matching what focus_pane_by_index resolves.
+                                if p >= crate::tree::count_panes(&app.windows[idx].root) {
+                                    Some(format!("can't find pane: {}", p))
+                                } else {
+                                    None
+                                }
+                            }
+                            None => None,
+                        },
+                    };
+                    match err {
+                        Some(msg) => {
+                            // Surface in the status bar for attached clients,
+                            // same convention as join-pane (#437) and
+                            // kill-window (8edd1cb). The Err reply makes the
+                            // connection thread skip the follow-on command.
+                            app.status_message = Some((msg.clone(), Instant::now(), None));
+                            state_dirty = true;
+                            let _ = resp.send(Err(msg));
+                        }
+                        None => {
+                            if temp_focus_restore.is_none() {
+                                let pane_id = crate::tree::get_active_pane_id(
+                                    &app.windows[app.active_idx].root,
+                                    &app.windows[app.active_idx].active_path,
+                                ).unwrap_or(usize::MAX);
+                                temp_focus_restore = Some((app.active_idx, pane_id));
+                            }
+                            if win.is_some() || win_name.is_some() {
+                                if let Some(internal_idx) = win_idx {
+                                    app.active_idx = internal_idx;
+                                    app.last_window_area = app.windows[internal_idx].area;
+                                }
+                            }
+                            match pane {
+                                Some(p) if pane_is_id => {
+                                    // Use no-MRU variant: temporary -t targeting
+                                    // should not pollute the recency list (#71).
+                                    focus_pane_by_id_no_mru(&mut app, p);
+                                }
+                                Some(p) => {
+                                    focus_pane_by_index(&mut app, p);
+                                }
+                                None => {}
+                            }
+                            let _ = resp.send(Ok(()));
+                        }
                     }
-                    if let Some(internal_idx) = app.win_pos(wid) {
-                        app.active_idx = internal_idx;
-                        app.last_window_area = app.windows[internal_idx].area;
-                    }
-                }
-                CtrlReq::FocusWindowByNameTemp(ref name) => {
-                    if temp_focus_restore.is_none() {
-                        let pane_id = crate::tree::get_active_pane_id(
-                            &app.windows[app.active_idx].root,
-                            &app.windows[app.active_idx].active_path,
-                        ).unwrap_or(usize::MAX);
-                        temp_focus_restore = Some((app.active_idx, pane_id));
-                    }
-                    if let Some(internal_idx) = app.windows.iter().position(|w| w.name == *name) {
-                        app.active_idx = internal_idx;
-                        app.last_window_area = app.windows[internal_idx].area;
-                    }
-                }
-                CtrlReq::FocusWindowByIdTemp(id) => {
-                    if temp_focus_restore.is_none() {
-                        let pane_id = crate::tree::get_active_pane_id(
-                            &app.windows[app.active_idx].root,
-                            &app.windows[app.active_idx].active_path,
-                        ).unwrap_or(usize::MAX);
-                        temp_focus_restore = Some((app.active_idx, pane_id));
-                    }
-                    if let Some(internal_idx) = app.windows.iter().position(|w| w.id == id) {
-                        app.active_idx = internal_idx;
-                        app.last_window_area = app.windows[internal_idx].area;
-                    }
-                }
-                CtrlReq::FocusPaneTemp(pid) => {
-                    if temp_focus_restore.is_none() {
-                        let pane_id = crate::tree::get_active_pane_id(
-                            &app.windows[app.active_idx].root,
-                            &app.windows[app.active_idx].active_path,
-                        ).unwrap_or(usize::MAX);
-                        temp_focus_restore = Some((app.active_idx, pane_id));
-                    }
-                    // Use no-MRU variant: temporary -t targeting should not
-                    // pollute the recency list (#71 — split-window -t was
-                    // incorrectly touching the target pane's MRU rank).
-                    focus_pane_by_id_no_mru(&mut app, pid);
-                }
-                CtrlReq::FocusPaneByIndexTemp(idx) => {
-                    if temp_focus_restore.is_none() {
-                        let pane_id = crate::tree::get_active_pane_id(
-                            &app.windows[app.active_idx].root,
-                            &app.windows[app.active_idx].active_path,
-                        ).unwrap_or(usize::MAX);
-                        temp_focus_restore = Some((app.active_idx, pane_id));
-                    }
-                    focus_pane_by_index(&mut app, idx);
                 }
                 CtrlReq::SessionInfo(resp) => {
                     let num_attached = app.client_registry.len();

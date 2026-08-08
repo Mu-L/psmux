@@ -1421,17 +1421,28 @@ pub enum CtrlReq {
     FocusWindowById(usize),
     /// Focus window by name lookup
     FocusWindowByName(String),
-    /// Temporary focus for -t targeting: server saves/restores active_idx
-    FocusWindowTemp(usize),
-    /// Temporary focus by @N id for -t targeting
-    FocusWindowByIdTemp(usize),
-    /// Temporary focus by name for -t targeting
-    FocusWindowByNameTemp(String),
     FocusPane(usize),
     FocusPaneByIndex(usize),
-    /// Temporary pane focus for -t targeting
-    FocusPaneTemp(usize),
-    FocusPaneByIndexTemp(usize),
+    /// Temporary focus for generic -t targeting, with validation (issue #545).
+    /// The server resolves the window and/or pane FIRST and replies Err when
+    /// the target does not exist, so the connection thread can report
+    /// "can't find window/pane: X" and skip the follow-on command instead of
+    /// letting it run against whatever window happens to be active (the old
+    /// FocusWindow*Temp handlers silently no-opped on a miss, so kill-pane,
+    /// send-keys, rename-window, capture-pane etc. with a stale target
+    /// destroyed/typed-into/read the ACTIVE window at rc=0). On success the
+    /// focus is applied with the same temp-restore bookkeeping as before.
+    /// `win` carries an index or, when `win_is_id` is set, an @id; `win_name`
+    /// carries a window-name target. `pane` carries a %id when `pane_is_id`
+    /// is set, otherwise a positional pane index within the target window.
+    FocusTargetTemp {
+        win: Option<usize>,
+        win_is_id: bool,
+        win_name: Option<String>,
+        pane: Option<usize>,
+        pane_is_id: bool,
+        resp: mpsc::Sender<Result<(), String>>,
+    },
     SessionInfo(mpsc::Sender<String>),
     /// `list-sessions -F <fmt>` — render the session row using a tmux format
     /// string. Drop-in compat with iTerm2 and other CC clients that always
