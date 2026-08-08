@@ -32,7 +32,7 @@ pub fn resolve_session(session_name: &str) -> io::Result<(u16, String)> {
 }
 
 /// Send a command to a specific session and return the full response.
-fn send_to_session(port: u16, key: &str, cmd: &str) -> io::Result<String> {
+pub(crate) fn send_to_session(port: u16, key: &str, cmd: &str) -> io::Result<String> {
     let addr = format!("127.0.0.1:{}", port);
     let mut stream = TcpStream::connect_timeout(
         &addr.parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{}", e)))?,
@@ -62,6 +62,97 @@ fn send_to_session(port: u16, key: &str, cmd: &str) -> io::Result<String> {
     }
     let r = String::from_utf8_lossy(&buf).to_string();
     Ok(if r.starts_with("OK\n") { r[3..].to_string() } else { r })
+}
+
+/// Issue #555: resolve a cross-session switch-client target's window/pane
+/// components on the DESTINATION server before the switch is signalled.
+/// Returns Err("can't find window/pane: X") when a component definitively
+/// does not resolve there. Conservative on query trouble: an unreachable or
+/// unparseable destination returns Ok so a transient failure never blocks a
+/// switch the old path would have performed (the destination session's own
+/// existence is the caller's check). One `list-panes -a` round trip carries
+/// every fact needed: window identity per row for index/@id/name matching,
+/// pane indexes scoped to their window, global pane ids, and the active
+/// window for pane-only targets.
+pub fn validate_switch_target(
+    port: u16,
+    key: &str,
+    pt: &crate::types::ParsedTarget,
+) -> Result<(), String> {
+    if pt.pane.is_none() && pt.window.is_none() && pt.window_name.is_none() {
+        return Ok(());
+    }
+    let resp = match send_to_session(
+        port,
+        key,
+        "list-panes -a -F #{window_active}|#{window_id}|#{window_index}|#{window_name}|#{pane_index}|#{pane_id}",
+    ) {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    struct Row {
+        active: bool,
+        wid: String,
+        widx: String,
+        wname: String,
+        pidx: String,
+        pid: String,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    for line in resp.lines() {
+        let parts: Vec<&str> = line.trim().splitn(6, '|').collect();
+        if parts.len() != 6 || !parts[1].starts_with('@') {
+            continue;
+        }
+        rows.push(Row {
+            active: parts[0] == "1",
+            wid: parts[1].to_string(),
+            widx: parts[2].to_string(),
+            wname: parts[3].to_string(),
+            pidx: parts[4].to_string(),
+            pid: parts[5].to_string(),
+        });
+    }
+    if rows.is_empty() {
+        return Ok(()); // nothing parseable; do not block
+    }
+    let win_match = |r: &Row| -> bool {
+        if let Some(w) = pt.window {
+            if pt.window_is_id {
+                r.wid == format!("@{}", w)
+            } else {
+                r.widx == w.to_string()
+            }
+        } else if let Some(ref n) = pt.window_name {
+            r.wname == *n
+        } else {
+            // Pane-only target: the pane index resolves against the
+            // destination's active window, matching select-pane semantics.
+            r.active
+        }
+    };
+    if (pt.window.is_some() || pt.window_name.is_some()) && !rows.iter().any(&win_match) {
+        let spec = if let Some(w) = pt.window {
+            if pt.window_is_id {
+                format!("@{}", w)
+            } else {
+                w.to_string()
+            }
+        } else {
+            pt.window_name.clone().unwrap_or_default()
+        };
+        return Err(format!("can't find window: {}", spec));
+    }
+    if let Some(p) = pt.pane {
+        if pt.pane_is_id {
+            if !rows.iter().any(|r| r.pid == format!("%{}", p)) {
+                return Err(format!("can't find pane: %{}", p));
+            }
+        } else if !rows.iter().any(|r| win_match(r) && r.pidx == p.to_string()) {
+            return Err(format!("can't find pane: {}", p));
+        }
+    }
+    Ok(())
 }
 
 /// Orchestrate a cross-session pane transfer.

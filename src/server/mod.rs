@@ -4655,32 +4655,47 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         Some(dest) => {
                             let same_session = dest == current;
                             if !same_session {
-                                // Cross-session: if the target also names a
-                                // window/pane, pre-select it on the DESTINATION
+                                // Cross-session (#483): if the target also names
+                                // a window/pane, pre-select it on the DESTINATION
                                 // server (one server per session) so the client
-                                // lands there after it re-attaches (#483). Then
-                                // signal the client to re-attach to dest.
-                                if pt.pane.is_some() || pt.window.is_some() || pt.window_name.is_some() {
-                                    if let Ok(port_str) = std::fs::read_to_string(crate::paths::port_file(&dest)) {
-                                        if let Ok(port) = port_str.trim().parse::<u16>() {
-                                            if let Ok(key) = crate::session::read_session_key(&dest) {
-                                                let sel = if pt.pane.is_some() { "select-pane" } else { "select-window" };
-                                                let msg = format!("TARGET {}\n{}\n", raw, sel);
-                                                let _ = crate::session::send_control_to_port(port, &msg, &key);
+                                // lands there after it re-attaches, then signal
+                                // the client to re-attach to dest.
+                                //
+                                // #555: the window/pane component is resolved on
+                                // the destination BEFORE anything is signalled.
+                                // The old shape forwarded the pre-select
+                                // fire-and-forget (FocusWindow silently no-ops on
+                                // a miss) and emitted SWITCH unconditionally, so
+                                // an unresolvable cross-session component exited
+                                // 0 and switched anyway, while the identical
+                                // same-session target correctly errored — a
+                                // driver's exit code was right exactly half the
+                                // time. resolve_session also replaces the
+                                // hand-rolled port-file/key reads.
+                                match crate::cross_session::resolve_session(&dest) {
+                                    Err(_) => Err(format!("can't find session: {}", dest)),
+                                    Ok((port, key)) => {
+                                        match crate::cross_session::validate_switch_target(port, &key, &pt) {
+                                            Err(e) => Err(e),
+                                            Ok(()) => {
+                                                if pt.pane.is_some() || pt.window.is_some() || pt.window_name.is_some() {
+                                                    let sel = if pt.pane.is_some() { "select-pane" } else { "select-window" };
+                                                    let msg = format!("TARGET {}\n{}\n", raw, sel);
+                                                    let _ = crate::session::send_control_to_port(port, &msg, &key);
+                                                }
+                                                if let Some(cid) = app.latest_client_id {
+                                                    crate::types::send_directive_to_client(cid, &format!("SWITCH {}", dest));
+                                                } else {
+                                                    crate::types::send_directive_to_all_clients(&format!("SWITCH {}", dest));
+                                                }
+                                                Ok(false)
                                             }
                                         }
                                     }
                                 }
-                                if let Some(cid) = app.latest_client_id {
-                                    crate::types::send_directive_to_client(cid, &format!("SWITCH {}", dest));
-                                } else {
-                                    crate::types::send_directive_to_all_clients(&format!("SWITCH {}", dest));
-                                }
-                            }
+                            } else {
                             // Same-session window/pane selection acts on THIS
-                            // server directly. (Cross-session selection was
-                            // forwarded to the destination server above.)
-                            if same_session {
+                            // server directly.
                                 if let Some(pid) = pt.pane {
                                     if pt.pane_is_id {
                                         if crate::tree::find_pane_by_id_global(&app, pid).is_some() {
@@ -4736,8 +4751,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     // Session-only target equal to the current session: no-op.
                                     Ok(false)
                                 }
-                            } else {
-                                Ok(false)
                             }
                         }
                     };
