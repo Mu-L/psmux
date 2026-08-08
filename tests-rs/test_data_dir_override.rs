@@ -13,14 +13,17 @@
 //   - a relative or empty value is rejected (assertion panic)
 //   - with the variable unset, the default home-based root is restored
 //
-// Env is process-global, so every test in this file serializes on
-// ENV_LOCK and restores the previous value via a Drop guard.
+// Env is process-global, so every test in this file serializes on the
+// CRATE-WIDE crate::util::lock_test_env() and restores the previous value
+// via a Drop guard. A file-private mutex is NOT enough: these tests mutate
+// USERPROFILE/HOME/PSMUX_DATA_DIR, which tests_issue474_home_resolution
+// (shared lock) and the inline paths::tests readers (same vars) also touch,
+// so a private lock serialized this file against itself while still racing
+// its siblings — the source of one-off failures of
+// unset_data_dir_falls_back_to_home_root and
+// psmux_dir_is_home_relative_dot_psmux in full parallel runs.
 
 use super::*;
-
-use parking_lot::Mutex;
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// An absolute path for this platform (is_absolute() semantics differ).
 #[cfg(windows)]
@@ -67,7 +70,7 @@ impl Drop for EnvGuard {
 /// root; removing the variable restores the default root.
 #[test]
 fn data_dir_env_reroutes_every_derived_path() {
-    let _lock = ENV_LOCK.lock();
+    let _lock = crate::util::lock_test_env();
     let _clean = EnvGuard::remove("PSMUX_DATA_DIR");
     let default_dir = psmux_dir();
 
@@ -95,7 +98,7 @@ fn data_dir_env_reroutes_every_derived_path() {
 /// Trailing '/' and '\\' are trimmed from the override root.
 #[test]
 fn data_dir_env_trims_trailing_separators() {
-    let _lock = ENV_LOCK.lock();
+    let _lock = crate::util::lock_test_env();
     for raw in [format!("{}/", abs_root()), format!("{}\\", abs_root())] {
         let _g = EnvGuard::set("PSMUX_DATA_DIR", &raw);
         assert_eq!(psmux_dir(), abs_root(), "raw value {raw:?}");
@@ -106,7 +109,7 @@ fn data_dir_env_trims_trailing_separators() {
 /// rejected loudly, never silently resolved relative to the CWD.
 #[test]
 fn relative_or_empty_data_dir_is_rejected() {
-    let _lock = ENV_LOCK.lock();
+    let _lock = crate::util::lock_test_env();
     for bad in ["", ".", "relative/path", "C:relative"] {
         let _g = EnvGuard::set("PSMUX_DATA_DIR", bad);
         let result = std::panic::catch_unwind(psmux_dir_opt);
@@ -121,7 +124,7 @@ fn relative_or_empty_data_dir_is_rejected() {
 /// and the fallback is unaffected by the override code path.
 #[test]
 fn unset_data_dir_falls_back_to_home_root() {
-    let _lock = ENV_LOCK.lock();
+    let _lock = crate::util::lock_test_env();
     let _clean = EnvGuard::remove("PSMUX_DATA_DIR");
     // Pin USERPROFILE so the fallback is deterministic on every platform
     // (home_dir() prefers USERPROFILE over HOME).

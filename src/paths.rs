@@ -202,8 +202,13 @@ pub fn namespace_instance_file(dir: &std::path::Path, ns: Option<&str>) -> std::
 mod tests {
     use super::*;
 
+    // These tests READ the process-global env (USERPROFILE/HOME/
+    // PSMUX_DATA_DIR) that sibling modules mutate, so they must hold the
+    // same crate-wide lock the mutators serialize on or they observe a
+    // half-mutated environment in full parallel runs.
     #[test]
     fn psmux_dir_is_home_relative_dot_psmux() {
+        let _lock = crate::util::lock_test_env();
         // The test environment always has a home, so the data dir resolves to
         // {home}\.psmux and the two accessors agree.
         let dir = psmux_dir();
@@ -213,6 +218,7 @@ mod tests {
 
     #[test]
     fn per_session_helpers_append_name_and_suffix_to_data_dir() {
+        let _lock = crate::util::lock_test_env();
         let dir = psmux_dir();
         assert_eq!(port_file("foo"), format!("{}\\foo.port", dir));
         assert_eq!(key_file("foo"), format!("{}\\foo.key", dir));
@@ -223,6 +229,7 @@ mod tests {
 
     #[test]
     fn psmux_dir_file_appends_fixed_name() {
+        let _lock = crate::util::lock_test_env();
         assert_eq!(
             psmux_dir_file("latency.log"),
             format!("{}\\latency.log", psmux_dir())
