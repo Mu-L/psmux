@@ -164,6 +164,42 @@ fn cli_pane_index_exists(idx_spec: &str) -> Option<bool> {
     if any { Some(false) } else { None }
 }
 
+/// Returns Some(true)/Some(false) for whether pane index `idx_spec` exists in
+/// the window identified by `window_spec` (@id, index, or name), or None when
+/// the server could not be queried. Uses `list-panes -a` so every row carries
+/// its window identity (a bare `list-panes` is scoped to the ACTIVE window,
+/// which is not necessarily the target). Issue #554: needed because focus
+/// commands (select-pane/select-window) use the permanent focus path, which
+/// has no reply channel — the server-side FocusTargetTemp check that covers
+/// targeted commands never runs for them, so a stale numeric pane index in
+/// an explicit window had no error signal at all.
+fn cli_pane_index_exists_in_window(window_spec: &str, idx_spec: &str) -> Option<bool> {
+    let saved_full = std::env::var("PSMUX_TARGET_FULL").ok();
+    std::env::remove_var("PSMUX_TARGET_FULL");
+    let resp = crate::session::send_control_with_response(
+        "list-panes -a -F #{window_id}|#{window_index}|#{window_name}|#{pane_index}\n".to_string(),
+    );
+    if let Some(v) = saved_full { std::env::set_var("PSMUX_TARGET_FULL", v); }
+    let resp = resp.ok()?;
+    let mut any_row = false;
+    for line in resp.lines() {
+        let line = line.trim();
+        if line.is_empty() || line == "OK" { continue; }
+        let mut parts = line.splitn(4, '|');
+        let id = parts.next().unwrap_or("").trim();
+        let widx = parts.next().unwrap_or("").trim();
+        let name = parts.next().unwrap_or("").trim();
+        let pidx = parts.next().unwrap_or("").trim();
+        // Only count lines that look like "@<id>|<index>|<name>|<pane_index>".
+        if !id.starts_with('@') || widx.parse::<usize>().is_err() { continue; }
+        any_row = true;
+        if (id == window_spec || widx == window_spec || name == window_spec) && pidx == idx_spec {
+            return Some(true);
+        }
+    }
+    if any_row { Some(false) } else { None }
+}
+
 /// Issue #545: validate the window/pane component of the global -t target for
 /// commands that require the target to exist. Exits 1 with tmux's diagnostic
 /// ("can't find window: X" / "can't find pane: X") when the target
@@ -209,13 +245,23 @@ fn cli_validate_window_pane_target() {
             std::process::exit(1);
         }
         if let Some(p) = pane_part {
-            if p.starts_with('%') && cli_pane_id_exists(p) == Some(false) {
+            if p.starts_with('%') {
+                if cli_pane_id_exists(p) == Some(false) {
+                    eprintln!("psmux: can't find pane: {}", p);
+                    std::process::exit(1);
+                }
+            } else if !win_part.is_empty()
+                && !special(win_part)
+                && cli_pane_index_exists_in_window(win_part, p) == Some(false)
+            {
+                // Numeric pane index inside an explicit window (issue #554).
+                // Targeted commands get this from the server-side
+                // FocusTargetTemp check, but focus commands (select-pane)
+                // take the permanent focus path with no reply channel, so
+                // the CLI must resolve it for an exit-code signal.
                 eprintln!("psmux: can't find pane: {}", p);
                 std::process::exit(1);
             }
-            // A numeric pane index inside an explicit window is validated
-            // server-side (it is positional within that window, which the
-            // active-window-scoped cli_pane_index_exists cannot check).
         }
     } else if let Some(dot) = full.rfind('.') {
         // "<session>.<index>" form (no window component): the pane index
@@ -477,7 +523,12 @@ fn run_main() -> io::Result<()> {
         | "rename-window" | "renamew" | "kill-pane" | "killp"
         | "clear-history" | "clearhist" | "list-panes" | "lsp"
         | "respawn-pane" | "respawnp" | "pipe-pane" | "pipep"
-        | "resize-pane" | "resizep" | "display-message" | "display")
+        | "resize-pane" | "resizep" | "display-message" | "display"
+        // Issue #554: select-pane/select-window were left off this list, so
+        // any ':'-bearing target (the fully-qualified form scripts use)
+        // skipped validation entirely and exited 0 on a miss. Their older
+        // per-arm validators are deleted; this shared one is a superset.
+        | "select-pane" | "selectp" | "select-window" | "selectw")
     {
         cli_validate_window_pane_target();
     }
@@ -1820,31 +1871,11 @@ fn run_main() -> io::Result<()> {
                     }
                     i += 1;
                 }
-                // tmux parity: error when a pane target does not exist. The global
-                // -t parse stores the target in PSMUX_TARGET_FULL.
-                if let Ok(full) = std::env::var("PSMUX_TARGET_FULL") {
-                    if full.starts_with('%') {
-                        // "%<id>" pane id: globally unique, validate across all panes.
-                        if cli_pane_id_exists(&full) == Some(false) {
-                            eprintln!("psmux: can't find pane: {}", full);
-                            std::process::exit(1);
-                        }
-                    } else if !full.contains(':') {
-                        // "<session>.<index>" form (no window): the pane index refers
-                        // to the active window. Validate only a purely-numeric index
-                        // so session names that merely contain a dot are not blocked.
-                        if let Some(dot) = full.rfind('.') {
-                            let pane_part = &full[dot + 1..];
-                            if !pane_part.is_empty()
-                                && pane_part.chars().all(|c| c.is_ascii_digit())
-                                && cli_pane_index_exists(pane_part) == Some(false)
-                            {
-                                eprintln!("psmux: can't find pane: {}", full);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                }
+                // Target validation happens in the shared
+                // cli_validate_window_pane_target() before dispatch (#554) —
+                // the per-arm copy it replaced skipped every ':'-bearing
+                // target, so the fully-qualified sess:win.pane form was the
+                // only pane-addressing form with no error signal.
                 cmd.push('\n');
                 send_control(cmd)?;
                 return Ok(());
@@ -1868,22 +1899,10 @@ fn run_main() -> io::Result<()> {
                     }
                     i += 1;
                 }
-                // tmux parity: error (nonzero exit) when an explicit window target
-                // does not exist, instead of silently doing nothing. Only validated
-                // when the target contains ':' (an unambiguous window specifier), so
-                // valid `select-window -t <session>` calls are never blocked.
-                // The global -t parse moves the target into PSMUX_TARGET_FULL (and
-                // strips it from cmd_args), so read the window specifier from there.
-                if let Ok(full) = std::env::var("PSMUX_TARGET_FULL") {
-                    if let Some(ci) = full.find(':') {
-                        let win_part = &full[ci + 1..];
-                        let window_spec = win_part.split('.').next().unwrap_or(win_part);
-                        if !window_spec.is_empty() && cli_window_exists(window_spec) == Some(false) {
-                            eprintln!("psmux: can't find window: {}", window_spec);
-                            std::process::exit(1);
-                        }
-                    }
-                }
+                // Target validation happens in the shared
+                // cli_validate_window_pane_target() before dispatch (#554);
+                // it covers the ':' window form this arm used to check plus
+                // the pane forms it never did.
                 cmd.push('\n');
                 send_control(cmd)?;
                 return Ok(());
