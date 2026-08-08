@@ -2222,7 +2222,12 @@ match cmd {
                 a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains(ch)
             })
         };
-        let has_u = combined_has_set('u');
+        // -U is an unset alias (tmux parity, #553). It was only recognized
+        // CLIENT-side, so `set -U @x V` cleared the CLI's empty-value guard,
+        // arrived here, matched neither the case-sensitive "-u" compare nor
+        // the len>2 combined branch, and fell through to the plain SET path:
+        // the option was written where the caller asked for an unset, rc 0.
+        let has_u = combined_has_set('u') || combined_has_set('U');
         let has_a = combined_has_set('a');
         let has_q = combined_has_set('q');
         let has_o = combined_has_set('o');
@@ -3739,7 +3744,9 @@ fn dispatch_control_command(
                 })
             };
             let quiet = combined_has_set2('q');
-            let unset = combined_has_set2('u');
+            // -U is an unset alias (tmux parity, #553) — same fix as the
+            // one-shot handler above.
+            let unset = combined_has_set2('u') || combined_has_set2('U');
             let append = combined_has_set2('a');
             let global = combined_has_set2('g');
             let only_if_unset = combined_has_set2('o');

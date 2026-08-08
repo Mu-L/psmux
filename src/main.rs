@@ -3115,6 +3115,19 @@ fn run_main() -> io::Result<()> {
                         positionals.push(a);
                         j += 1;
                     }
+                    // Issue #553: reject flags psmux does not implement
+                    // instead of silently accepting them and letting the
+                    // write land under different semantics than requested
+                    // (tmux: "unknown flag -Z", rc 1, nothing written). Same
+                    // principle as dd84b97 for refresh-client. -t/-p never
+                    // reach `flags` (skipped with their values above); -U is
+                    // the unset alias, -w a scope flag.
+                    for ch in flags.chars() {
+                        if !"agopqtuUw".contains(ch) {
+                            eprintln!("psmux: set-option: unknown flag -{}", ch);
+                            std::process::exit(1);
+                        }
+                    }
                     let has_unset = flags.contains('u') || flags.contains('U');
                     let has_append = flags.contains('a');
                     // Issue #535: a set-option carrying no value used to be
@@ -3186,6 +3199,26 @@ fn run_main() -> io::Result<()> {
             }
             // show-options / show / show-window-options / showw - Show options
             "show-options" | "show" | "show-window-options" | "showw" => {
+                // Issue #553: reject flags psmux does not implement instead
+                // of silently accepting them (tmux: "unknown flag -Z", rc 1).
+                // Accepted: -A -g -q -s -v -w plus -t <target>. Option names
+                // (@x, status-style) never start with '-'.
+                {
+                    let mut j = 1;
+                    while j < cmd_args.len() {
+                        let a = cmd_args[j].as_str();
+                        if a == "-t" { j += 2; continue; }
+                        if a.starts_with('-') && a.len() > 1 {
+                            for ch in a[1..].chars() {
+                                if !"Agqsvw".contains(ch) {
+                                    eprintln!("psmux: show-options: unknown flag -{}", ch);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        j += 1;
+                    }
+                }
                 let cmd_str: String = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
                 let resp = send_control_with_response(format!("{}\n", cmd_str))?;
                 print!("{}", resp);

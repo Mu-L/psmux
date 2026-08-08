@@ -429,17 +429,17 @@ A psmux extension that creates a pane floating above the tiled layout.
 ### Configuration commands
 
 **set-option** (`set`) and **set-window-option** (`setw`)
-- Boolean: `-g` (global, accepted, psmux has one scope so this is effectively a selector no-op), `-u` (unset), `-a` (append to the current value), `-q` (quiet), `-o` (only set if currently unset), `-w` (window scope, does **not** consume the next argument)
+- Boolean: `-g` (global, accepted, psmux has one scope so this is effectively a selector no-op), `-u` (unset), `-U` (unset alias of `-u`, tmux parity, #553), `-a` (append to the current value), `-q` (quiet), `-o` (only set if currently unset), `-w` (window scope, does **not** consume the next argument)
 - Value: `-t` (target, value consumed), `-p` (pane, value consumed)
 - Flags are also matched inside combined tokens such as `-ga`, `-gu` and `-gq`.
 - A `@name` argument is never treated as a flag.
-- Not accepted: `-F`, `-s`, `-U`
+- Not accepted: `-F`, `-s` — and since #553 any flag outside the accepted set is rejected with `unknown flag -X` at exit 1 instead of being silently dropped while the write lands.
 
 **show-options** (`show`) and **show-window-options** (`showw`)
 - Boolean: `-A` (include inherited), `-s` (server scope), `-w` (window scope), `-v` (value only), `-q` (quiet)
 - Value: `-t` (window selector)
 - Combined tokens are handled the same way as for `set-option`.
-- Not accepted: `-g` as a distinct behavior (it is absorbed), `-H`, `-p`
+- Not accepted: `-g` as a distinct behavior (it is absorbed but tolerated), `-H`, `-p` — since #553 flags outside `-A -g -q -s -v -w` (plus `-t <target>`) are rejected with `unknown flag -X` at exit 1.
 
 **set-hook** and **show-hooks**
 - Boolean: `-u` (unset, also as `-gu` or `-ug`), `-a` (append, also as `-ga` or `-ag`), `-g` (global, accepted and absorbed)

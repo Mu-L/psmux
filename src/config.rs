@@ -899,7 +899,9 @@ fn parse_set_option(app: &mut AppState, line: &str) {
             if p.contains('F') { format_expand = true; }
             if p.contains('o') { only_if_unset = true; }
             if p.contains('a') { append_mode = true; }
-            if p.contains('u') { unset_mode = true; }
+            // -U is an unset alias of -u (tmux parity, #553); the contains
+            // check is case-sensitive so both must be tested.
+            if p.contains('u') || p.contains('U') { unset_mode = true; }
             // -q (quiet): no-op — we don't produce errors for unknown options
             // -w: window option — treat same as global for our single-server model
             i += 1;
