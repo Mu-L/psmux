@@ -741,7 +741,7 @@ fn run_main() -> io::Result<()> {
                                                 }
                                                 // Use -F format if provided, otherwise session-info
                                                 let query = if let Some(ref fmt) = format_str {
-                                                    format!("list-sessions -F \"{}\"\n", fmt.replace('"', "\\\""))
+                                                    format!("list-sessions -F {}\n", crate::util::quote_arg(&fmt))
                                                 } else {
                                                     "session-info\n".to_string()
                                                 };
@@ -1527,22 +1527,22 @@ fn run_main() -> io::Result<()> {
                 if print_info { cmd_line.push_str(" -P"); }
                 if empty_flag { cmd_line.push_str(" -E"); }
                 if let Some(ref fmt) = format_str {
-                    cmd_line.push_str(&format!(" -F \"{}\"", fmt.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" -F {}", crate::util::quote_arg(&fmt)));
                 }
                 if let Some(name) = &name_arg {
-                    cmd_line.push_str(&format!(" -n \"{}\"", name.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" -n {}", crate::util::quote_arg(&name)));
                 }
                 if let Some(t) = &title_arg {
-                    cmd_line.push_str(&format!(" -T \"{}\"", t.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" -T {}", crate::util::quote_arg(&t)));
                 }
                 if let Some(dir) = &start_dir {
-                    cmd_line.push_str(&format!(" -c \"{}\"", dir.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" -c {}", crate::util::quote_arg(&dir)));
                 }
                 for ev in &env_args {
-                    cmd_line.push_str(&format!(" -e \"{}\"", ev.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" -e {}", crate::util::quote_arg(&ev)));
                 }
                 if !cmd_arg.is_empty() {
-                    cmd_line.push_str(&format!(" \"{}\"", cmd_arg.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" {}", crate::util::quote_arg(&cmd_arg)));
                 }
                 cmd_line.push('\n');
                 if print_info {
@@ -1611,13 +1611,13 @@ fn run_main() -> io::Result<()> {
                 if detached { cmd_line.push_str(" -d"); }
                 if print_info { cmd_line.push_str(" -P"); }
                 if let Some(ref fmt) = format_str {
-                    cmd_line.push_str(&format!(" -F \"{}\"", fmt.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" -F {}", crate::util::quote_arg(&fmt)));
                 }
                 if let Some(dir) = &start_dir {
-                    cmd_line.push_str(&format!(" -c \"{}\"", dir.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" -c {}", crate::util::quote_arg(&dir)));
                 }
                 if let Some(t) = &title_arg {
-                    cmd_line.push_str(&format!(" -T \"{}\"", t.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" -T {}", crate::util::quote_arg(&t)));
                 }
                 if let Some(pct) = &size_pct {
                     cmd_line.push_str(&format!(" -p {}", pct));
@@ -1625,10 +1625,10 @@ fn run_main() -> io::Result<()> {
                     cmd_line.push_str(&format!(" -l {}", cells));
                 }
                 for ev in &env_args {
-                    cmd_line.push_str(&format!(" -e \"{}\"", ev.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" -e {}", crate::util::quote_arg(&ev)));
                 }
                 if !cmd_arg.is_empty() {
-                    cmd_line.push_str(&format!(" \"{}\"", cmd_arg.replace("\"", "\\\"")));
+                    cmd_line.push_str(&format!(" {}", crate::util::quote_arg(&cmd_arg)));
                 }
                 cmd_line.push('\n');
                 if print_info {
@@ -1752,17 +1752,15 @@ fn run_main() -> io::Result<()> {
                 if literal { cmd.push_str(" -l"); }
                 if has_x { cmd.push_str(" -X"); }
                 if has_hex { cmd.push_str(" -H"); }
-                // Quote arguments that contain spaces to preserve them
-                for k in keys { 
-                    if k.contains(' ') || k.contains('\t') || k.contains('"') {
-                        // Escape embedded double-quotes and wrap in quotes.
-                        // Do NOT escape backslashes: the server parser treats
-                        // them as literal (Windows path separator).
-                        let escaped = k.replace('"', "\\\"");
-                        cmd.push_str(&format!(" \"{}\"", escaped));
-                    } else {
-                        cmd.push_str(&format!(" {}", k)); 
-                    }
+                // Quote arguments that need it. quote_arg_if_needed escapes
+                // backslashes as well as quotes inside the wrapping quotes,
+                // matching what parse_command_line decodes there (#547) —
+                // the old encoder escaped only `"`, so a quoted key ending
+                // in `\` consumed the closing quote and swallowed the rest.
+                // Unquoted values keep literal backslashes byte-exact
+                // (Windows path separators).
+                for k in keys {
+                    cmd.push_str(&format!(" {}", crate::util::quote_arg_if_needed(&k)));
                 }
                 cmd.push('\n');
                 send_control(cmd)?;
@@ -1798,13 +1796,13 @@ fn run_main() -> io::Result<()> {
                         }
                         "-T" => {
                             if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -T \"{}\"", t));
+                                cmd.push_str(&format!(" -T {}", crate::util::quote_arg(&t)));
                                 i += 1;
                             }
                         }
                         "-P" => {
                             if let Some(s) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -P \"{}\"", s));
+                                cmd.push_str(&format!(" -P {}", crate::util::quote_arg(&s)));
                                 i += 1;
                             }
                         }
@@ -1952,7 +1950,7 @@ fn run_main() -> io::Result<()> {
                                                 }
                                                 // Send list-panes -s (all panes in this session) to each server
                                                 let query = if let Some(ref fmt) = format_str {
-                                                    format!("list-panes -s -F \"{}\"\n", fmt.replace('"', "\\\""))
+                                                    format!("list-panes -s -F {}\n", crate::util::quote_arg(&fmt))
                                                 } else {
                                                     "list-panes -s\n".to_string()
                                                 };
@@ -2000,7 +1998,7 @@ fn run_main() -> io::Result<()> {
                         cmd.push_str(&format!(" -t {}", t));
                     }
                     if let Some(ref f) = format_str {
-                        cmd.push_str(&format!(" -F \"{}\"", f.trim_matches('"').replace("\"", "\\\"")));
+                        cmd.push_str(&format!(" -F {}", crate::util::quote_arg(f.trim_matches('"'))));
                     }
                     cmd.push('\n');
                     let resp = send_control_with_response(cmd)?;
@@ -2070,7 +2068,7 @@ fn run_main() -> io::Result<()> {
                                                 }
                                                 // Send list-windows to each server (without -a to avoid recursion)
                                                 let query = if let Some(ref fmt) = format_str {
-                                                    format!("list-windows -F \"{}\"\n", fmt.replace('"', "\\\""))
+                                                    format!("list-windows -F {}\n", crate::util::quote_arg(&fmt))
                                                 } else if json_mode {
                                                     "list-windows -J\n".to_string()
                                                 } else {
@@ -2116,7 +2114,7 @@ fn run_main() -> io::Result<()> {
                     let mut cmd = "list-windows".to_string();
                     if json_mode { cmd.push_str(" -J"); }
                     if let Some(ref f) = format_str {
-                        cmd.push_str(&format!(" -F \"{}\"", f.trim_matches('"').replace("\"", "\\\"")));
+                        cmd.push_str(&format!(" -F {}", crate::util::quote_arg(f.trim_matches('"'))));
                     }
                     if let Some(ref t) = target_session {
                         cmd.push_str(&format!(" -t {}", t));
@@ -2669,7 +2667,7 @@ fn run_main() -> io::Result<()> {
                 if let Some(d) = duration_ms { cmd.push_str(&format!(" -d {}", d)); }
                 // Quote the message to preserve literal whitespace (tabs etc)
                 // that would otherwise be split by the server's command parser.
-                cmd.push_str(&format!(" \"{}\"", msg.replace('"', "\\\"")));
+                cmd.push_str(&format!(" {}", crate::util::quote_arg(&msg)));
                 cmd.push('\n');
                 if print_to_stdout {
                     let resp = send_control_with_response(cmd)?;
@@ -3165,8 +3163,14 @@ fn run_main() -> io::Result<()> {
                     // rewritten to ASCII spaces. Whether a value survived
                     // depended on whether it happened to contain an ASCII
                     // space (#536).
-                    if s.is_empty() || s.chars().any(char::is_whitespace) {
-                        format!("\"{}\"", s.replace('"', "\\\""))
+                    if s.is_empty() || s.chars().any(char::is_whitespace) || s.contains('"') || s.contains('\'') {
+                        // quote_arg escapes `\` as well as `"` to match what
+                        // parse_command_line decodes inside double quotes;
+                        // escaping only the quote collapsed every `\\` and a
+                        // trailing `\` swallowed the following args (#547).
+                        // Quote-bearing values must be wire-quoted too or the
+                        // re-tokenizer strips the quote chars (`a"b` -> `ab`).
+                        crate::util::quote_arg(s)
                     } else {
                         s.to_string()
                     }
@@ -3778,7 +3782,7 @@ fn run_main() -> io::Result<()> {
             // display-menu - Display a menu
             "display-menu" | "menu" => {
                 let parts: Vec<String> = cmd_args.iter().map(|s| {
-                    if s.contains(' ') || s.contains('"') { format!("\"{}\"" , s.replace('"', "\\\"")) } else { s.to_string() }
+                    crate::util::quote_arg_if_needed(s)
                 }).collect();
                 send_control(format!("{}\n", parts.join(" ")))?;
                 return Ok(());
@@ -3786,14 +3790,14 @@ fn run_main() -> io::Result<()> {
             // display-popup - Display a popup window
             "display-popup" | "popup" => {
                 let parts: Vec<String> = cmd_args.iter().map(|s| {
-                    if s.contains(' ') || s.contains('"') { format!("\"{}\"" , s.replace('"', "\\\"")) } else { s.to_string() }
+                    crate::util::quote_arg_if_needed(s)
                 }).collect();
                 send_control(format!("{}\n", parts.join(" ")))?;
                 return Ok(());
             }
             "new-pane" | "newp" => {
                 let parts: Vec<String> = cmd_args.iter().map(|s| {
-                    if s.contains(' ') || s.contains('"') { format!("\"{}\"" , s.replace('"', "\\\"")) } else { s.to_string() }
+                    crate::util::quote_arg_if_needed(s)
                 }).collect();
                 let line = format!("{}\n", parts.join(" "));
                 // -P prints the new pane id, so read the server's response.
@@ -3883,7 +3887,7 @@ fn run_main() -> io::Result<()> {
             // confirm-before - Ask for confirmation before running a command
             "confirm-before" | "confirm" => {
                 let parts: Vec<String> = cmd_args.iter().map(|s| {
-                    if s.contains(' ') || s.contains('"') { format!("\"{}\"", s.replace('"', "\\\"")) } else { s.to_string() }
+                    crate::util::quote_arg_if_needed(s)
                 }).collect();
                 send_control(format!("{}\n", parts.join(" ")))?;
                 return Ok(());

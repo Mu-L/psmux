@@ -308,6 +308,28 @@ pub fn quote_arg(s: &str) -> String {
     format!("\"{}\"", escaped)
 }
 
+/// Quote an argument for the wire only when the server's quote-aware
+/// re-tokenizer would otherwise corrupt it: empty (collapses into joining
+/// whitespace), whitespace (re-split), or quote characters (stripped as
+/// quoting syntax). Quoting always goes through `quote_arg` so backslashes
+/// are escaped to match what `parse_command_line` decodes inside double
+/// quotes — the old encoders escaped only `"`, so every `\\` collapsed to
+/// `\` and a trailing `\` consumed the closing quote and swallowed the
+/// following flags (issue #547). Values needing no quoting are passed
+/// through untouched on purpose: outside quotes the parser treats
+/// backslashes as literal, so an unquoted value is byte-exact.
+pub fn quote_arg_if_needed(s: &str) -> String {
+    if s.is_empty()
+        || s.chars().any(char::is_whitespace)
+        || s.contains('"')
+        || s.contains('\'')
+    {
+        quote_arg(s)
+    } else {
+        s.to_string()
+    }
+}
+
 /// Parse `VARIABLE=value` for tmux `new-session -e` / internal `server -e`
 /// (split on the first `=` so values may contain `=`).
 pub fn parse_env_assignment(s: &str) -> Result<(String, String), &'static str> {

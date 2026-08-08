@@ -2928,8 +2928,15 @@ pub mod process_info {
         let path = OsString::from_wide(&wchars)
             .to_string_lossy()
             .into_owned();
-        // Remove trailing backslash (tmux convention)
-        Some(path.trim_end_matches('\\').to_string())
+        // Remove trailing backslash (tmux convention) — but keep it for a
+        // drive root: "C:\" trimmed to "C:" is a drive-RELATIVE path on
+        // Windows, not the root (surfaced by #547's drive-root repro).
+        let trimmed = path.trim_end_matches('\\');
+        if trimmed.ends_with(':') {
+            Some(format!("{}\\", trimmed))
+        } else {
+            Some(trimmed.to_string())
+        }
     }
 
     /// Append a line to ~/.psmux/autorename.log (first 100 entries only).
