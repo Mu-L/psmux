@@ -1841,6 +1841,11 @@ pub fn remove_session_registry(base: &str) {
 
 pub fn send_control(line: String) -> io::Result<()> {
     let mut target = env::var("PSMUX_TARGET_SESSION").ok().unwrap_or_else(|| "default".to_string());
+    if env::var("PSMUX_ROUTE_DEBUG").is_ok() {
+        eprintln!("[route] send_control target={:?} full={:?} argv={:?} line={:?}",
+            target, env::var("PSMUX_TARGET_FULL").ok(),
+            env::args().collect::<Vec<_>>(), line.trim());
+    }
     // Never target a warm (standby) session — resolve to a real session instead
     if is_warm_session(&target) {
         // Extract namespace from warm session name (e.g. "foo____warm__" -> Some("foo"))
@@ -1894,6 +1899,11 @@ pub fn send_control(line: String) -> io::Result<()> {
 
 pub fn send_control_with_response(line: String) -> io::Result<String> {
     let mut target = env::var("PSMUX_TARGET_SESSION").ok().unwrap_or_else(|| "default".to_string());
+    if env::var("PSMUX_ROUTE_DEBUG").is_ok() {
+        eprintln!("[route] send_control_with_response target={:?} full={:?} argv={:?} line={:?}",
+            target, env::var("PSMUX_TARGET_FULL").ok(),
+            env::args().collect::<Vec<_>>(), line.trim());
+    }
     // Never target a warm (standby) session — resolve to a real session instead
     if is_warm_session(&target) {
         let ns = target.strip_suffix("____warm__").map(|s| s.to_string());
