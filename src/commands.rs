@@ -1151,14 +1151,19 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         }
         "rename-window" | "renamew" => {
             if let Some(name) = parts.get(1) {
+                // tmux parity (#552): the argument is a format, expanded
+                // against the window being renamed (cmd-rename-window.c uses
+                // format_single_from_target), so `rename-window
+                // '#{s/^XX //:window_name}'` transforms the current name.
+                let name = crate::format::expand_format(name, app);
                 if app.active_idx < app.windows.len() {
                     let win = &mut app.windows[app.active_idx];
-                    win.name = name.to_string();
+                    win.name = name.clone();
                     win.manual_rename = true;
                 }
                 // Forward to server so external queries (display-message, list-windows) see the new name
                 if let Some(port) = app.control_port {
-                    let _ = send_control_to_port(port, &format!("rename-window {}\n", crate::util::quote_arg(name)), &app.session_key);
+                    let _ = send_control_to_port(port, &format!("rename-window {}\n", crate::util::quote_arg(&name)), &app.session_key);
                 }
             }
         }
