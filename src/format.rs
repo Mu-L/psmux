@@ -95,6 +95,16 @@ pub fn expand_format(fmt: &str, app: &AppState) -> String {
     expand_format_for_window(fmt, app, app.active_idx)
 }
 
+/// The REAL (user-visible) active window index. While a temporary -t focus
+/// is applied for command targeting, `active_idx` points at the target
+/// window; the pre-switch index saved in `temp_focus_saved_active` is what
+/// "active" means to the user, so `#{window_active}` and the `*` flag must
+/// compare against it (issue #551 — `display-message -t <win>` reported
+/// every targeted window as active).
+fn real_active_idx(app: &AppState) -> usize {
+    app.temp_focus_saved_active.unwrap_or(app.active_idx)
+}
+
 /// Expand tmux format strings for a specific window index.
 pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> String {
     let mut result = String::with_capacity(fmt.len() * 2);
@@ -192,7 +202,7 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                     i += 2; continue;
                 }
                 b'F' => {
-                    if win_idx == app.active_idx { result.push('*'); }
+                    if win_idx == real_active_idx(app) { result.push('*'); }
                     else if win_idx == app.last_window_idx { result.push('-'); }
                     i += 2; continue;
                 }
@@ -478,7 +488,7 @@ fn expand_expression(expr: &str, app: &AppState, win_idx: usize) -> String {
                 let two_arg = args.len() >= 2;
                 let mut parts = Vec::new();
                 for wi in 0..app.windows.len() {
-                    let fmt = if wi == app.active_idx { current_fmt } else { normal_fmt };
+                    let fmt = if wi == real_active_idx(app) { current_fmt } else { normal_fmt };
                     parts.push(expand_format_for_window(fmt, app, wi));
                 }
                 // Two-argument form joins without separator (user controls layout),
@@ -1241,11 +1251,11 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         // ── Window ──
         "window_index" => app.win_display_index(win_idx).to_string(),
         "window_name" => win.name.clone(),
-        "window_active" => if win_idx == app.active_idx { "1".into() } else { "0".into() },
+        "window_active" => if win_idx == real_active_idx(app) { "1".into() } else { "0".into() },
         "window_panes" => count_panes(&win.root).to_string(),
         "window_flags" | "window_raw_flags" => {
             let mut f = String::new();
-            if win_idx == app.active_idx { f.push('*'); }
+            if win_idx == real_active_idx(app) { f.push('*'); }
             else if win_idx == app.last_window_idx { f.push('-'); }
             if win.zoom_saved.is_some() { f.push('Z'); }
             if win.activity_flag { f.push('#'); }

@@ -1616,7 +1616,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         // Non-detached: new pane keeps focus.
                         // Cancel temp_focus_restore so -t doesn't revert (#112).
+                        // The temporary focus just became permanent.
                         temp_focus_restore = None;
+                        app.temp_focus_saved_active = None;
                     }
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     // Replenish warm pane for the next new-window/split
@@ -1680,6 +1682,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     } else {
                         temp_focus_restore = None;
+                        app.temp_focus_saved_active = None;
                     }
                     let _ = resp.send(pane_info);
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
@@ -1874,6 +1877,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     &app.windows[app.active_idx].active_path,
                                 ).unwrap_or(usize::MAX);
                                 temp_focus_restore = Some((app.active_idx, pane_id));
+                                // Remember the REAL active window so format
+                                // evaluation of #{window_active} and the `*`
+                                // flag is not fooled by the temporary switch
+                                // (issue #551).
+                                app.temp_focus_saved_active = Some(app.active_idx);
                             }
                             if win.is_some() || win_name.is_some() {
                                 if let Some(internal_idx) = win_idx {
@@ -2375,6 +2383,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::RenameWindow(name) => {
                     if let Some(cmds) = app.hooks.get("before-rename-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    // tmux parity (#552): the argument is a format, expanded
+                    // against the target window (cmd-rename-window.c runs it
+                    // through format_single_from_target). The temporary -t
+                    // focus has already made the target the active window
+                    // here, so #{window_name} etc. resolve against it —
+                    // enabling idioms like `rename-window '#{b:pane_current_path}'`.
+                    let name = expand_format(&name, &app);
                     let win = &mut app.windows[app.active_idx]; win.name = name; win.manual_rename = true; meta_dirty = true; hook_event = Some("after-rename-window");
                 }
                 CtrlReq::ListWindows(resp) => { helpers::propagate_osc_titles(&mut app); let json = list_windows_json(&app)?; let _ = resp.send(json); }
@@ -5704,6 +5719,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // If the pane was killed, keep whatever active_path
                         // kill_pane_at_path already set (MRU target).
                     }
+                    // Temporary focus is over; active_idx is real again.
+                    app.temp_focus_saved_active = None;
                 }
             }
             if mutates_state {

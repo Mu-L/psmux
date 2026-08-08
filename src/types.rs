@@ -476,6 +476,14 @@ pub struct ShellEntry {
 pub struct AppState {
     pub windows: Vec<Window>,
     pub active_idx: usize,
+    /// While a temporary -t focus is applied (FocusTargetTemp), holds the
+    /// REAL user-visible active window index saved before the switch.
+    /// Format evaluation uses it for "is this the active window" variables
+    /// (#{window_active}, the `*` flag) so `display-message -t <win>` does
+    /// not report every targeted window as active (issue #551) — the target
+    /// is only *temporarily* focused to serve the request. None when no
+    /// temporary focus is in effect.
+    pub temp_focus_saved_active: Option<usize>,
     pub mode: Mode,
     pub escape_time_ms: u64,
     pub repeat_time_ms: u64,
@@ -1129,6 +1137,7 @@ impl AppState {
         Self {
             windows: Vec::new(),
             active_idx: 0,
+            temp_focus_saved_active: None,
             mode: Mode::Passthrough,
             escape_time_ms: 500,
             repeat_time_ms: 500,
