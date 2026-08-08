@@ -1193,10 +1193,33 @@ where
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map(|e| e == "port").unwrap_or(false) {
+                // PID-anchor verdict FIRST (issue #448 sentinel): the process
+                // table answers liveness instantly and definitively, so a
+                // Some(true) verdict (recorded PID alive with matching
+                // creation time) vetoes every heuristic below, including the
+                // boot-time guard. File metadata must never be a death
+                // certificate for a live server (issue #546): a live server's
+                // registry mtimes are frozen at creation (the 5s self-heal
+                // rewrites only on content change), so a forward wall-clock
+                // step, VM save/restore, or mtime-preserving backup restore
+                // pushes the frozen .port mtime behind the derived boot time
+                // and the old guard-first ordering reaped the registry of a
+                // running session — after which the orphan reaper killed its
+                // server — on any psmux invocation at all, even `psmux -V`.
+                // The genuine reboot case still reaps: after a restart, any
+                // live process holding a recycled PID was created later than
+                // .pid mtime + PID_REUSE_MARGIN_TICKS, which yields
+                // Some(false).
+                let pid_verdict = pid_anchor_verdict(&path);
+                if pid_verdict == Some(true) {
+                    continue; // live server; nothing to clean
+                }
                 // Boot-time guard: a port file last modified before this boot
                 // belongs to a server that died when the machine restarted.
-                // Reap it unconditionally — no network round-trip, and immune
-                // to the old port being reused by another process this boot.
+                // No network round-trip, and immune to the old port being
+                // reused by another process this boot. Applies only when the
+                // PID anchor could not positively confirm liveness
+                // (Some(false) or, for pre-#448 registries, None).
                 if let Some(boot) = boot {
                     if let Some(mtime) = entry.metadata().ok().and_then(|m| m.modified().ok()) {
                         if is_pre_boot(mtime, boot, BOOT_TIME_MARGIN) {
@@ -1210,15 +1233,13 @@ where
                         }
                     }
                 }
-                // PID-anchor fast path (issue #448 sentinel): the process table
-                // answers liveness instantly and definitively, so registry
-                // entries with a `.pid` sibling never pay a network probe.
-                // Dead-port probes are not just slow (they can burn the full
-                // connect timeout per attempt on Windows loopback) - they are
-                // also inconclusive, so stale files were never reaped and the
-                // probe tax repeated on every subsequent CLI invocation.
-                match pid_anchor_verdict(&path) {
-                    Some(true) => continue, // live server; nothing to clean
+                // PID-anchor negative path: registry entries with a `.pid`
+                // sibling never pay a network probe. Dead-port probes are not
+                // just slow (they can burn the full connect timeout per
+                // attempt on Windows loopback) - they are also inconclusive,
+                // so stale files were never reaped and the probe tax repeated
+                // on every subsequent CLI invocation.
+                match pid_verdict {
                     Some(false) => {
                         if crate::debug_log::session_log_enabled() {
                             crate::debug_log::session_log("cleanup", &format!(
@@ -1228,7 +1249,7 @@ where
                         remove_session_registry_files(&path);
                         continue;
                     }
-                    None => {} // no .pid anchor; fall through to the network probe
+                    _ => {} // no .pid anchor; fall through to the network probe
                 }
                 if let Ok(port_str) = std::fs::read_to_string(&path) {
                     if let Ok(port) = port_str.trim().parse::<u16>() {
