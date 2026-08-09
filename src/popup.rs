@@ -126,6 +126,7 @@ pub fn create_popup_pane(
                 color_query_pending.clone(),
                 output_ring.clone(),
                 pane_id,
+                crate::platform::mouse_inject::get_child_pid(&*child),
             );
         }
         Err(e) => {

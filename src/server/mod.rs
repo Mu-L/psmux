@@ -2350,6 +2350,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let hc = crate::types::HostColors::from_spec(&spec);
                     if hc.has_any() || hc.dark.is_some() {
                         app.host_colors = Some(hc);
+                        // Issue #556: pane reader threads answer color queries
+                        // synchronously; publish the update where they can see it.
+                        crate::types::set_shared_host_colors(app.host_colors.clone());
                     }
                 }
                 CtrlReq::FocusPaneCmd(pid) => {

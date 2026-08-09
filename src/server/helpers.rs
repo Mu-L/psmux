@@ -632,12 +632,35 @@ pub(crate) fn answer_color_queries(
     colors: &crate::types::HostColors,
 ) {
     if bits == 0 { return; }
-    // Light/dark scheme query: CSI ?996n → CSI ?997;1n (dark) / ?997;2n (light).
-    if bits & crate::types::COLOR_QUERY_SCHEME != 0 {
-        let n = if colors.is_dark() { 1 } else { 2 };
-        let _ = writer.write_all(format!("\x1b[?997;{}n", n).as_bytes());
+    let (scheme, osc) = build_color_replies(bits, colors);
+    if let Some(scheme) = scheme {
+        let _ = writer.write_all(scheme.as_bytes());
         let _ = writer.flush();
     }
+    if osc.is_empty() { return; }
+    let mut delivered = false;
+    if let Some(pid) = child_pid {
+        delivered = crate::platform::mouse_inject::send_vt_response(pid, &osc);
+    }
+    if !delivered {
+        let _ = writer.write_all(osc.as_bytes());
+        let _ = writer.flush();
+    }
+}
+
+/// Build the reply strings for a color-query bitmask: the CSI scheme reply
+/// (`?997;Nn`, separate because it may be pipe-written) and the concatenated
+/// OSC 10/11/4 replies, in query order.
+pub(crate) fn build_color_replies(
+    bits: u32,
+    colors: &crate::types::HostColors,
+) -> (Option<String>, String) {
+    // Light/dark scheme query: CSI ?996n → CSI ?997;1n (dark) / ?997;2n (light).
+    let scheme = if bits & crate::types::COLOR_QUERY_SCHEME != 0 {
+        Some(format!("\x1b[?997;{}n", if colors.is_dark() { 1 } else { 2 }))
+    } else {
+        None
+    };
     let mut osc = String::new();
     let burst = bits & 1 != 0; // palette index 0 queried → full-burst app
     if (bits & crate::types::COLOR_QUERY_FG != 0 || burst) && colors.fg.is_some() {
@@ -653,14 +676,35 @@ pub(crate) fn answer_color_queries(
             }
         }
     }
-    if osc.is_empty() { return; }
-    let mut delivered = false;
-    if let Some(pid) = child_pid {
-        delivered = crate::platform::mouse_inject::send_vt_response(pid, &osc);
-    }
-    if !delivered {
-        let _ = writer.write_all(osc.as_bytes());
-        let _ = writer.flush();
+    (scheme, osc)
+}
+
+/// Issue #556: best-effort synchronous answer, called from the pane READER
+/// thread the moment a color query is detected in the ConPTY output stream.
+///
+/// The server-loop path adds a coalescing wait (1-8ms) plus a loop tick on
+/// top of ConPTY's forward latency; on hosts whose conhost forwards OSC
+/// 10;?/11;? to us (older builds), that total lands the reply AFTER the
+/// app's startup probe window has closed — yazi then re-parses the reply as
+/// an interactive `shell` action (issue #556).  Answering here, straight off
+/// the read, is the earliest point psmux can physically respond.
+///
+/// Everything (scheme + OSC replies) is injected as one
+/// `WriteConsoleInputW` batch so the replies arrive in query order.  Returns
+/// true when delivered (or nothing needed answering); false means the caller
+/// must fall back to the pending-bits → server-loop pipe path.
+pub(crate) fn answer_color_queries_sync(
+    bits: u32,
+    child_pid: Option<u32>,
+    colors: &crate::types::HostColors,
+) -> bool {
+    if bits == 0 { return true; }
+    let (scheme, osc) = build_color_replies(bits, colors);
+    let combined = format!("{}{}", scheme.as_deref().unwrap_or(""), osc);
+    if combined.is_empty() { return true; }
+    match child_pid {
+        Some(pid) => crate::platform::mouse_inject::send_vt_response(pid, &combined),
+        None => false,
     }
 }
 
@@ -785,3 +829,7 @@ mod tests_issue451_status_styles;
 #[cfg(test)]
 #[path = "../../tests-rs/test_render_path_async_format.rs"]
 mod tests_render_path_async_format;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue556_color_reply_order.rs"]
+mod tests_issue556_color_reply_order;

@@ -441,10 +441,10 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
 
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id);
+    let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id, child_pid);
 
     let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
-    let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
@@ -520,8 +520,8 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
         .try_clone_reader()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id);
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id, child_pid);
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
@@ -574,9 +574,9 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
 
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id);
-
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id, child_pid);
+
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
@@ -769,8 +769,8 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
     let color_query_pending = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let cq_writer = color_query_pending.clone();
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id);
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), app.next_pane_id, child_pid);
     let mut pty_writer = pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
@@ -2071,6 +2071,7 @@ pub fn spawn_reader_thread(
     color_query_pending: Arc<std::sync::atomic::AtomicU32>,
     output_ring: Arc<Mutex<std::collections::VecDeque<u8>>>,
     pane_id: usize,
+    child_pid: Option<u32>,
 ) {
     // ── Issue #246: split the old single reader thread into two threads ──
     //
@@ -2131,6 +2132,7 @@ pub fn spawn_reader_thread(
         }
         let mut local = vec![0u8; 65536];
         let mut zero_reads: u32 = 0;
+        let mut color_scanner = ColorQueryScanner::new();
         loop {
             match reader.read(&mut local) {
                 Ok(n) if n > 0 => {
@@ -2140,6 +2142,28 @@ pub fn spawn_reader_thread(
                     if let Ok(mut buf) = lock.lock() {
                         buf.extend_from_slice(&local[..n]);
                         cv.notify_one();
+                    }
+                    // Issue #556: answer terminal color queries (OSC 4/10/11,
+                    // CSI ?996n, issue #473) HERE, straight off the read,
+                    // rather than signaling the server loop.  The old
+                    // parser-thread detection + server-loop answer added
+                    // 1-8ms of coalescing plus a loop tick, landing the
+                    // reply after a startup probe's read window (closed by
+                    // ConPTY's own DA1 auto-answer) — yazi then re-parsed
+                    // the late reply as an interactive `shell` action.  The
+                    // scan is one `memchr` for ESC when no query is present.
+                    let color_query_bits = color_scanner.scan(&local[..n]);
+                    if color_query_bits != 0 {
+                        let colors = crate::types::shared_host_colors();
+                        if !crate::server::helpers::answer_color_queries_sync(
+                            color_query_bits, child_pid, &colors,
+                        ) {
+                            // Injection unavailable (no child pid, or a
+                            // non-Windows build): keep the #473 server-loop
+                            // pipe path as delivery of record.
+                            color_query_pending.fetch_or(color_query_bits, Ordering::AcqRel);
+                            crate::types::COLOR_QUERY_PENDING.store(true, Ordering::Release);
+                        }
                     }
                     // Append raw output to ring buffer for control mode %output.
                     // This is independent of parser state and must stay live.
@@ -2210,7 +2234,6 @@ pub fn spawn_reader_thread(
     // ── Parser thread: coalesces staged bytes, processes under one lock ──
     thread::spawn(move || {
         let mut cpr_scanner = CprScanner::new();
-        let mut color_scanner = ColorQueryScanner::new();
         loop {
             // Wait for at least one byte (or shutdown).
             {
@@ -2283,7 +2306,6 @@ pub fn spawn_reader_thread(
             }
             let rmcup = scan_rmcup(&bytes);
             let has_cpr_query = cpr_scanner.scan(&bytes);
-            let color_query_bits = color_scanner.scan(&bytes);
 
             // Issue #502 diagnostic: capture the exact pre-parse byte stream
             // when PSMUX_PANE_RAW=1. Off by default, one atomic load when off.
@@ -2307,13 +2329,10 @@ pub fn spawn_reader_thread(
                 cpr_pending.store(true, Ordering::Release);
                 crate::types::CPR_DATA_PENDING.store(true, Ordering::Release);
             }
-            // Issue #473: signal the server loop to answer terminal color
-            // queries (OSC 4/10/11, CSI ?996n) so pane applications can
-            // detect the terminal palette.
-            if color_query_bits != 0 {
-                color_query_pending.fetch_or(color_query_bits, Ordering::AcqRel);
-                crate::types::COLOR_QUERY_PENDING.store(true, Ordering::Release);
-            }
+            // Issue #473 color queries are scanned and answered in the READER
+            // thread above (issue #556): the coalescing wait this thread runs
+            // before parsing is exactly the latency that made replies miss
+            // startup probe windows.
             dv_writer.fetch_add(1, Ordering::Release);
             crate::types::PTY_DATA_READY.store(true, Ordering::Release);
         }

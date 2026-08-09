@@ -1862,6 +1862,30 @@ pub const COLOR_QUERY_FG: u32 = 1 << 16;   // OSC 10;?
 pub const COLOR_QUERY_BG: u32 = 1 << 17;   // OSC 11;?
 pub const COLOR_QUERY_SCHEME: u32 = 1 << 18; // CSI ?996n
 
+/// Issue #556: process-wide snapshot of `AppState::host_colors`, readable from
+/// pane reader threads so color queries can be answered synchronously at
+/// detection instead of waiting for a server-loop tick.  `None` means no
+/// client has reported host colors yet — `shared_host_colors()` then falls
+/// back to the `PSMUX_HOST_COLORS` override / Campbell defaults, the same
+/// resolution the server loop applies to `app.host_colors`.
+pub static HOST_COLORS_SHARED: std::sync::Mutex<Option<HostColors>> = std::sync::Mutex::new(None);
+
+/// Resolve the colors to answer pane color queries with, from any thread.
+pub fn shared_host_colors() -> HostColors {
+    if let Ok(g) = HOST_COLORS_SHARED.lock() {
+        if let Some(hc) = g.as_ref() { return hc.clone(); }
+    }
+    std::env::var("PSMUX_HOST_COLORS").ok()
+        .map(|s| HostColors::from_spec(&s))
+        .filter(|hc| hc.has_any() || hc.dark.is_some())
+        .unwrap_or_else(HostColors::campbell)
+}
+
+/// Publish the latest client-reported host colors for reader threads.
+pub fn set_shared_host_colors(hc: Option<HostColors>) {
+    if let Ok(mut g) = HOST_COLORS_SHARED.lock() { *g = hc; }
+}
+
 /// Issue #473: the host terminal's colors, as reported by an attached client
 /// (which queries its host terminal with OSC 10/11/4 at attach time), or the
 /// `PSMUX_HOST_COLORS` environment override.  Used to answer terminal color
