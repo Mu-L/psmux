@@ -693,7 +693,7 @@ if control_echo || control_noecho {
         let skip_target_focus = matches!(cmd_name, "join-pane" | "joinp" | "move-pane" | "movep"
             | "move-window" | "movew" | "swap-window" | "swapw"
             | "switch-client" | "switchc" | "resize-window" | "resizew"
-            | "kill-window" | "killw");
+            | "kill-window" | "killw" | "detach-client" | "detach");
         // capture-pane -t %N resolves the pane id inside the capture itself;
         // swap-pane resolves its own target and swaps it with the *current*
         // active pane (temp-focusing the target would make active == target
@@ -948,10 +948,14 @@ let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "
 // switch-client resolves the window/pane target itself (#483) and makes the
 // change PERMANENT; letting the generic block issue a temporary focus here
 // would restore the old focus after the batch and silently undo the switch.
+// detach-client's -t is a CLIENT spec (numeric id, %ID, or tty name) that
+// its handler resolves itself — it must never be validated as a pane/window
+// target (a client id shaped like %N would be rejected whenever no pane %N
+// exists, and a nonexistent client is that command's documented safe no-op).
 let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "movep"
     | "move-window" | "movew" | "swap-window" | "swapw"
     | "switch-client" | "switchc" | "resize-window" | "resizew"
-    | "kill-window" | "killw");
+    | "kill-window" | "killw" | "detach-client" | "detach");
 let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_id {
     target_pane
 } else {

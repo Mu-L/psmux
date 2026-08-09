@@ -161,9 +161,12 @@ if ($body.Length -gt 0) { P "capture-pane returned non-empty body (len=$($body.L
 # ============================================================
 Hdr "Layer 4: %output streaming for send-keys (the real iTerm2 display path)"
 $marker = "PSMUX_CC_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
-Send-CC $cc "send-keys -t %0 -l `"echo $marker`""
+# No -t: the session has a single pane and pane ids start at %1, so the
+# historical `-t %0` never resolved — it only "worked" through the silent
+# misroute-to-active-pane that #545 removed (now it errors and no keys land).
+Send-CC $cc "send-keys -l `"echo $marker`""
 [void](Read-Reply $cc 1500)
-Send-CC $cc "send-keys -t %0 Enter"
+Send-CC $cc "send-keys Enter"
 [void](Read-Reply $cc 1500)
 Start-Sleep -Milliseconds 1500
 $stream = Drain-Notifications $cc 2000
@@ -319,9 +322,10 @@ Close-CC $cc2
 Hdr "Layer 12: Output escape encoding (tmux octal)"
 $cc = Open-CC $S2
 $marker = "ESCMRK"
-Send-CC $cc "send-keys -t %0 -l `"echo $marker\\test`""
+# No -t for the same reason as Layer 4: %0 never resolves (ids start at %1).
+Send-CC $cc "send-keys -l `"echo $marker\\test`""
 [void](Read-Reply $cc 1500)
-Send-CC $cc "send-keys -t %0 Enter"
+Send-CC $cc "send-keys Enter"
 [void](Read-Reply $cc 1500)
 Start-Sleep -Milliseconds 1200
 $stream = Drain-Notifications $cc 2000
