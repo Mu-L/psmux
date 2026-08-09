@@ -53,12 +53,30 @@ else {
 }
 
 # TEST 2: respawn-pane WITHOUT a command still respawns the default shell (no regression).
+#
+# NOTE (#545/#554 rewrite): Test 1's `-- cmd /c echo > file` COMPLETES, and with
+# remain-on-exit off (tmux default) its pane closes when the process exits, so
+# $id no longer exists here. The old version of this test kept targeting the
+# gone $id and "passed" only because unresolvable -t targets silently operated
+# on the ACTIVE pane at rc 0 — the exact misroute #545 fixed. tmux errors with
+# "can't find pane" for the gone id, and so does psmux now. Exercise the
+# intended behavior (no-command respawn gives the default shell) on a pane
+# that is still alive: a fresh long-lived `cat` pane.
 Write-Host "`n[Test 2] respawn-pane with no -- command still respawns the default shell" -ForegroundColor Yellow
-& $PSMUX respawn-pane -k -t $id 2>&1 | Out-Null
+$out = & $PSMUX respawn-pane -k -t $id 2>&1
+if ($LASTEXITCODE -ne 0 -and "$out" -match "can't find pane") {
+    Write-Pass "gone pane $id correctly rejected (rc=$LASTEXITCODE, tmux parity)"
+} else {
+    Write-Fail "respawn-pane -t $id (gone pane) rc=$LASTEXITCODE out='$out' (expected can't find pane)"
+}
+
+$id2 = (& $PSMUX split-window -P -F '#{pane_id}' -t $SESSION -- cat 2>&1 | Out-String).Trim()
+Start-Sleep -Seconds 2
+& $PSMUX respawn-pane -k -t $id2 2>&1 | Out-Null
 Start-Sleep -Seconds 3
-& $PSMUX send-keys -t $id "echo SHELL_ALIVE_MARKER" Enter 2>&1 | Out-Null
+& $PSMUX send-keys -t $id2 "echo SHELL_ALIVE_MARKER" Enter 2>&1 | Out-Null
 Start-Sleep -Seconds 1
-$cap2 = & $PSMUX capture-pane -t $id -p 2>&1 | Out-String
+$cap2 = & $PSMUX capture-pane -t $id2 -p 2>&1 | Out-String
 if ($cap2 -match "SHELL_ALIVE_MARKER") { Write-Pass "default-shell respawn still works (no regression)" }
 else { Write-Fail "default-shell respawn broke" }
 
