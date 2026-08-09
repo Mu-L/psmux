@@ -134,8 +134,18 @@ fn write_completes_while_inner_writer_is_blocked() {
     // Nothing has reached the inner writer yet.
     assert!(state.0.lock().is_empty());
 
-    // Let the inner writer drain the queue.
+    // Let the inner writer drain the queue. Lock-then-notify: the drainer
+    // thread checks `open` while HOLDING the state mutex before parking in
+    // cv.wait, so storing the flag and notifying without acquiring that
+    // mutex could fire the wakeup in the window between its check and the
+    // park — a lost wakeup that left the drainer blocked forever and the
+    // wait_until below timing out (one-off failures under full parallel
+    // runs, where preemption widens the window). Acquiring and releasing
+    // the mutex after the store serializes against the check: either the
+    // drainer has not checked yet and will see open=true, or it is already
+    // parked and the notify lands.
     open.store(true, Ordering::SeqCst);
+    drop(state.0.lock());
     state.1.notify_all();
     assert!(
         wait_until("blocked write drains", || *state.0.lock() == b"payload".to_vec(), Duration::from_secs(5)),
@@ -184,7 +194,10 @@ fn burst_writes_survive_backpressure_and_arrive_complete() {
         "backpressured burst must enqueue without blocking"
     );
 
+    // Lock-then-notify — see write_completes_while_inner_writer_is_blocked
+    // for why notifying without the state mutex is a lost wakeup.
     open.store(true, Ordering::SeqCst);
+    drop(state.0.lock());
     state.1.notify_all();
     assert!(
         wait_until("burst arrives intact", || *state.0.lock() == payload, Duration::from_secs(5)),
