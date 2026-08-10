@@ -519,12 +519,25 @@ pub fn print_commands() {
 "#);
 }
 
+/// Strip the tmux exact-match marker from a raw target specification.
+///
+/// tmux target grammar allows a leading '=' meaning "match this session name
+/// exactly, no fuzzy prefix matching". psmux only ever matches exactly, so
+/// the marker carries no information here, but any code that keeps the RAW
+/// -t string (for relative pane forms like :.+) and later compares it as a
+/// session name must see the plain name: `"name" == "=name"` silently
+/// matching nothing is issue #558 (kill-session -t =name burned its 5s
+/// settle deadline and exited 1 while the session survived).
+pub fn strip_exact_match_prefix(target: &str) -> &str {
+    target.strip_prefix('=').unwrap_or(target)
+}
+
 /// Parse a tmux-style target specification
 pub fn parse_target(target: &str) -> ParsedTarget {
     let mut result = ParsedTarget::default();
-    
+
     // Strip leading '=' prefix (tmux exact-match semantics)
-    let target = target.strip_prefix('=').unwrap_or(target);
+    let target = strip_exact_match_prefix(target);
     
     if target.starts_with('%') {
         if let Ok(pid) = target[1..].parse::<usize>() {
@@ -782,3 +795,7 @@ mod tests_issue196_flag_equals;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue497_selectwindow_id.rs"]
 mod tests_issue497_selectwindow_id;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue558_eq_prefix.rs"]
+mod tests_issue558_eq_prefix;

@@ -655,7 +655,8 @@ if control_echo || control_noecho {
             while i < cmd_args.len() {
                 if cmd_args[i] == "-t" {
                     if let Some(v) = cmd_args.get(i+1) {
-                        ctrl_raw_target = Some(v.to_string());
+                        // Issue #558: drop the '=' exact-match marker (see TARGET capture).
+                        ctrl_raw_target = Some(crate::cli::strip_exact_match_prefix(v).to_string());
                         let pt = parse_target(v);
                         if pt.window.is_some() { ctrl_target_win = pt.window; ctrl_target_win_is_id = pt.window_is_id; ctrl_target_win_name = None; }
                         else if pt.window_name.is_some() { ctrl_target_win_name = pt.window_name; ctrl_target_win = None; ctrl_target_win_is_id = false; }
@@ -825,7 +826,10 @@ if control_echo || control_noecho {
 let mut global_raw_target: Option<String> = None;
 if line.trim().starts_with("TARGET ") {
     let target_spec = line.trim().strip_prefix("TARGET ").unwrap_or("");
-    global_raw_target = Some(target_spec.to_string());
+    // Issue #558: keep the spec raw for relative pane forms, but drop the
+    // tmux '=' exact-match marker so name compares in handlers (kill-session)
+    // see the plain session name. parse_target strips it internally anyway.
+    global_raw_target = Some(crate::cli::strip_exact_match_prefix(target_spec).to_string());
     let parsed = parse_target(target_spec);
     global_target_win = parsed.window;
     global_target_win_is_id = parsed.window_is_id;
@@ -914,7 +918,8 @@ let mut i = 0;
 while i < args.len() {
     if args[i] == "-t" {
         if let Some(v) = args.get(i+1) {
-            raw_target = Some(v.to_string());
+            // Issue #558: drop the '=' exact-match marker (see TARGET capture).
+            raw_target = Some(crate::cli::strip_exact_match_prefix(v).to_string());
             // Parse the -t value using parse_target for consistent handling
             let pt = parse_target(v);
             if pt.window.is_some() { target_win = pt.window; target_win_is_id = pt.window_is_id; target_win_name = None; }
