@@ -6,6 +6,10 @@ fn is_window_option(name: &str) -> bool {
         name,
         "automatic-rename"
             | "monitor-activity"
+            // #559: tmux classifies monitor-silence as a window option; without
+            // this entry `show-options -w monitor-silence` returned an empty
+            // value even after a successful `set -w monitor-silence N`.
+            | "monitor-silence"
             | "remain-on-exit"
             | "window-status-format"
             | "window-status-current-format"
@@ -227,6 +231,7 @@ pub(crate) fn render_window_options(app: &AppState) -> String {
     let names = [
         "automatic-rename",
         "monitor-activity",
+        "monitor-silence",
         "remain-on-exit",
         "window-status-format",
         "window-status-current-format",
@@ -625,3 +630,7 @@ mod tests_issue278_toggle_bool_option;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue535_setoption_no_value.rs"]
 mod tests_issue535_setoption_no_value;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue559_monitor_silence_options.rs"]
+mod tests_issue559_monitor_silence_options;

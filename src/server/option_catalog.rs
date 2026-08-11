@@ -55,7 +55,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "visual-bell", scope: "session", option_type: "boolean", default: "off", description: "Show visual indicator on bell" },
     OptionDef { name: "activity-action", scope: "session", option_type: "choice", default: "other", description: "Activity alert action" },
     OptionDef { name: "silence-action", scope: "session", option_type: "choice", default: "other", description: "Silence alert action" },
-    OptionDef { name: "monitor-silence", scope: "session", option_type: "number", default: "0", description: "Seconds of silence before alert (0=off)" },
+    OptionDef { name: "monitor-silence", scope: "window", option_type: "number", default: "0", description: "Seconds of silence before alert (0=off)" },
     OptionDef { name: "destroy-unattached", scope: "session", option_type: "boolean", default: "off", description: "Destroy session when last client detaches" },
     OptionDef { name: "renumber-windows", scope: "session", option_type: "boolean", default: "off", description: "Renumber windows on close" },
     OptionDef { name: "set-titles", scope: "session", option_type: "boolean", default: "off", description: "Set terminal title" },

@@ -1196,6 +1196,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 
     let mut last_registry_check = Instant::now();
 
+    // #559: alert detection (activity/bell/monitor-silence) used to run only
+    // inside DumpState handling and the server-push path, both of which need a
+    // client. A detached session therefore never evaluated monitor-silence and
+    // the silence flag could not fire (tmux fires alerts regardless of
+    // attachment). This timestamp gates a client-independent check to 1 Hz.
+    let mut last_alert_check = Instant::now();
+
     // Throttle reap_children: only check for exited processes every 250ms.
     // With hundreds of windows, calling try_wait() on every process each
     // loop iteration wastes CPU.  Exited processes are still reaped promptly
@@ -1388,6 +1395,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         } else {
             50     // No clients: 50ms (20 Hz) — saves CPU
         };
+        // #559: run alert detection on a 1s cadence independent of clients so
+        // monitor-silence/monitor-activity/bell flags fire in detached
+        // sessions too (scripts read them via list-windows #{window_flags}).
+        if last_alert_check.elapsed() >= Duration::from_secs(1) {
+            last_alert_check = Instant::now();
+            let alert_hooks = helpers::check_window_activity(&mut app);
+            for event in &alert_hooks {
+                crate::commands::fire_hooks(&mut app, event);
+            }
+        }
         if let Some(rx) = app.control_rx.as_ref() {
             if let Ok(req) = rx.recv_timeout(Duration::from_millis(timeout_ms)) {
                 last_client_activity = Instant::now();
@@ -4005,6 +4022,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     output.push_str(&format!("renumber-windows {}\n", if app.renumber_windows { "on" } else { "off" }));
                     output.push_str(&format!("automatic-rename {}\n", if app.automatic_rename { "on" } else { "off" }));
                     output.push_str(&format!("monitor-activity {}\n", if app.monitor_activity { "on" } else { "off" }));
+                    // #559: monitor-silence was queryable one-by-one but absent
+                    // from this full dump, so `show-options -g | grep monitor`
+                    // looked like the option had been silently dropped.
+                    output.push_str(&format!("monitor-silence {}\n", app.monitor_silence));
                     output.push_str(&format!("synchronize-panes {}\n", if app.sync_input { "on" } else { "off" }));
                     output.push_str(&format!("remain-on-exit {}\n", if app.remain_on_exit { "on" } else { "off" }));
                     output.push_str(&format!("destroy-unattached {}\n", if app.destroy_unattached { "on" } else { "off" }));
@@ -4152,14 +4173,36 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::SwapWindow(src, target) => {
+                CtrlReq::SwapWindow(src, target, resp) => {
                     // Both are display indices; map to Vec positions honoring gaps.
                     // The two windows trade Vec positions while `window_indices`
                     // stays put, so they exchange display numbers (tmux swap-window).
+                    // #559: an index that resolves to no window is an error the
+                    // caller must see (tmux: "can't find window: N", exit 1);
+                    // it used to fall through the bounds check as a silent no-op.
                     let spos = match src { Some(d) => app.win_pos(d).unwrap_or(d), None => app.active_idx };
                     let tpos = app.win_pos(target).unwrap_or(target);
-                    if spos != tpos && spos < app.windows.len() && tpos < app.windows.len() {
-                        app.windows.swap(spos, tpos);
+                    let bad: Option<String> = if spos >= app.windows.len() {
+                        Some(format!("can't find window: {}", src.unwrap_or(spos)))
+                    } else if tpos >= app.windows.len() {
+                        Some(format!("can't find window: {}", target))
+                    } else {
+                        None
+                    };
+                    match bad {
+                        Some(msg) => {
+                            // Persistent (TUI) clients have no reply stream for
+                            // this path; surface the error in the status bar
+                            // like kill-window does.
+                            app.status_message = Some((format!("swap-window: {}", msg), Instant::now(), None));
+                            let _ = resp.send(Err(msg));
+                        }
+                        None => {
+                            if spos != tpos {
+                                app.windows.swap(spos, tpos);
+                            }
+                            let _ = resp.send(Ok(()));
+                        }
                     }
                 }
                 CtrlReq::LinkWindow(src_idx_opt, dst_idx_opt) => {

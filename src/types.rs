@@ -1637,8 +1637,11 @@ pub enum CtrlReq {
     /// literal string.
     ExpandFormat(String, mpsc::Sender<String>),
     MoveWindow(Option<usize>),
-    // (source display index, target display index); source None = active window
-    SwapWindow(Option<usize>, usize),
+    // (source display index, target display index, reply); source None =
+    // active window. #559: the reply reports "can't find window: N" when
+    // either side does not resolve, so swap-window can exit 1 instead of
+    // silently no-opping (tmux parity).
+    SwapWindow(Option<usize>, usize, mpsc::Sender<Result<(), String>>),
     /// link-window: (source window index, target insertion index)
     LinkWindow(Option<usize>, Option<usize>),
     UnlinkWindow,

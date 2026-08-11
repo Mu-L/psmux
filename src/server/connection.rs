@@ -2450,17 +2450,54 @@ match cmd {
         let _ = tx.send(CtrlReq::MoveWindow(target));
     }
     "swap-window" | "swapw" => {
-        // Source: `-s <win>` (bare or ':'-prefixed); None = active window.
-        let src = args.windows(2).find(|w| w[0] == "-s")
-            .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
-        // Destination: parsed -t window target, else bare positional.
-        let target = target_win.or_else(|| {
-            args.iter().enumerate()
-                .filter(|(i, a)| !a.starts_with('-') && (*i == 0 || args[*i - 1] != "-s"))
-                .find_map(|(_, a)| a.trim_start_matches(':').parse::<usize>().ok())
+        // Source: `-s <win>`. Accept bare index, ':'-prefixed, and the
+        // qualified `session:index` form (take the part after the last
+        // colon) — #559: `-s sess:99` used to fail the bare parse and fall
+        // back to the ACTIVE window silently.
+        let src_raw = args.windows(2).find(|w| w[0] == "-s").map(|w| w[1].to_string());
+        let src = src_raw.as_deref().and_then(|s| {
+            s.rsplit(':').next().unwrap_or(s).parse::<usize>().ok()
         });
-        if let Some(t) = target {
-            let _ = tx.send(CtrlReq::SwapWindow(src, t));
+        // -s was given but names nothing resolvable: error out instead of
+        // silently swapping the ACTIVE window (the old fallback).
+        let bad_src = src_raw.is_some() && src.is_none();
+        if bad_src {
+            if !persistent {
+                let _ = writeln!(write_stream, "ERROR: can't find window: {}", src_raw.as_deref().unwrap_or(""));
+                let _ = write_stream.flush();
+            }
+        } else {
+            // Destination: parsed -t window target; else the raw -t value
+            // (#559: a bare `-t 0` from a raw TCP client parses as a SESSION
+            // target, leaving target_win None and silently doing nothing —
+            // the CLI only worked because main.rs coerces "N" to ":N");
+            // else a bare positional.
+            let target = target_win
+                .or_else(|| raw_target.as_deref().and_then(|t| {
+                    t.rsplit(':').next().unwrap_or(t).parse::<usize>().ok()
+                }))
+                .or_else(|| {
+                    args.iter().enumerate()
+                        .filter(|(i, a)| !a.starts_with('-') && (*i == 0 || args[*i - 1] != "-s"))
+                        .find_map(|(_, a)| a.trim_start_matches(':').parse::<usize>().ok())
+                });
+            if let Some(t) = target {
+                let (resp_s, resp_r) = mpsc::channel();
+                let _ = tx.send(CtrlReq::SwapWindow(src, t, resp_s));
+                if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+                    if !persistent {
+                        let _ = writeln!(write_stream, "ERROR: {}", e);
+                        let _ = write_stream.flush();
+                    }
+                }
+            } else if let Some(ref rt) = raw_target {
+                // -t was given but names nothing resolvable: report it
+                // instead of silently doing nothing (tmux exits 1).
+                if !persistent {
+                    let _ = writeln!(write_stream, "ERROR: can't find window: {}", rt);
+                    let _ = write_stream.flush();
+                }
+            }
         }
     }
     "link-window" | "linkw" => {

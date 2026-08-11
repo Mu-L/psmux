@@ -394,17 +394,26 @@ pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
         }
 
         // ── Activity detection ──
-        if i == active {
-            // Active window: clear activity/bell/silence flags, update version
+        if i == active && app.attached_clients > 0 {
+            // Active window with a client viewing it: alerts are seen the
+            // moment they happen, so clear the flags (tmux clears alerts when
+            // the window is current in an attached session). #559: a DETACHED
+            // session must NOT take this path — tmux keeps accumulating
+            // alert flags (including monitor-silence) on the current window
+            // of a detached session, and scripts read them via list-windows.
             win.activity_flag = false;
             win.bell_flag = false;
             win.silence_flag = false;
-            win.last_seen_version = window_data_version(win);
-            // Update last_output_time for active window too
+            // #559: the old order assigned last_seen_version BEFORE comparing,
+            // so the comparison below was always false and last_output_time
+            // never advanced for the active window. Switching away from a
+            // just-active window then tripped monitor-silence instantly
+            // because its last_output_time was stale.
             let cur = window_data_version(win);
             if cur != win.last_seen_version {
                 win.last_output_time = std::time::Instant::now();
             }
+            win.last_seen_version = cur;
             continue;
         }
         let cur = window_data_version(win);
@@ -833,3 +842,7 @@ mod tests_render_path_async_format;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue556_color_reply_order.rs"]
 mod tests_issue556_color_reply_order;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue559_monitor_silence.rs"]
+mod tests_issue559_monitor_silence;

@@ -1684,6 +1684,16 @@ fn run_main() -> io::Result<()> {
                 cmd_line.push('\n');
                 if print_info {
                     let resp = send_control_with_response(cmd_line)?;
+                    // #559: an ERROR reply must never masquerade as the new
+                    // pane id. `-P -F '#{pane_id}'` is the documented way for
+                    // scripts to capture the created pane; printing the error
+                    // text to stdout with exit 0 hands the caller a bogus
+                    // "id" it cannot distinguish from success (psmux-resurrect
+                    // silently lost every split this way).
+                    if resp.trim_start().starts_with("ERROR") {
+                        eprint!("{}", resp);
+                        std::process::exit(1);
+                    }
                     print!("{}", resp);
                 } else {
                     let resp = send_control_with_response(cmd_line)?;
@@ -2162,7 +2172,14 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // #559: the server already answers "ERROR: can't find window"
+                // for a bad -t, but the fire-and-forget send discarded it and
+                // exited 0 — a silent no-op (tmux exits 1). Read the reply.
+                let resp = send_control_with_response(cmd)?;
+                if !resp.trim().is_empty() {
+                    eprint!("{}", resp);
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // detach-client - Gracefully detach attached client(s) (issue #275)
@@ -3466,7 +3483,14 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // #559: swap-window with an unresolvable -s/-t silently did
+                // nothing and exited 0. The server now validates both windows
+                // and answers "ERROR: can't find window" — surface it.
+                let resp = send_control_with_response(cmd)?;
+                if !resp.trim().is_empty() {
+                    eprint!("{}", resp);
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // list-clients - List all clients
