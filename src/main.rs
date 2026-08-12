@@ -443,7 +443,13 @@ fn run_main() -> io::Result<()> {
             // the current (source) session for routing. PSMUX_TARGET_FULL
             // still carries the destination for the server handler.
             let is_switch_client = args.iter().any(|a| a == "switch-client" || a == "switchc");
-            if has_explicit_session && !is_switch_client {
+            // detach-client's -t is a CLIENT spec (tty or %id), not a session to
+            // route to. Setting PSMUX_TARGET_SESSION from it made a bare
+            // `detach-client -t /dev/pts/3` route as session '/dev/pts/3' and
+            // fail with "no session" (issue #565). Route it like switch-client:
+            // fall through to -s / $TMUX resolution.
+            let is_detach_client = args.iter().any(|a| a == "detach-client" || a == "detach");
+            if has_explicit_session && !is_switch_client && !is_detach_client {
                 env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
                 explicit_session_target = true;
             }
@@ -497,8 +503,13 @@ fn run_main() -> io::Result<()> {
                     // fall through to push the subcommand name
                 }
             } else {
-                // After subcommand: strip only -t (and its value)
-                if args[i] == "-t" && i + 1 < args.len() {
+                // After subcommand: strip only -t (and its value). Exception:
+                // detach-client's -t is a client spec (tty or %id) that the
+                // handler itself must read, so leave it in place. Stripping it
+                // made the handler see no target and widen to detach-all
+                // (issue #565).
+                let is_detach = result.first().map_or(false, |s| *s == "detach-client" || *s == "detach");
+                if args[i] == "-t" && i + 1 < args.len() && !is_detach {
                     i += 2;
                     continue;
                 }
@@ -3752,7 +3763,14 @@ fn run_main() -> io::Result<()> {
                                 i += 1;
                             }
                         }
-                        s => { cmd.push_str(&format!(" {}", s)); }
+                        // The piped shell command is opaque and must reach the
+                        // server as a single token: the server re-flattens the
+                        // args with join(" ") and hands the result to a shell,
+                        // so a quoted argument containing a space would otherwise
+                        // arrive as several arguments (issue #563). Quoting through
+                        // quote_arg_if_needed makes that join an identity and
+                        // escapes backslashes to match parse_command_line.
+                        s => { cmd.push_str(&format!(" {}", crate::util::quote_arg_if_needed(s))); }
                     }
                     i += 1;
                 }
