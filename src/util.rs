@@ -302,9 +302,20 @@ pub fn base64_decode(encoded: &str) -> Option<String> {
 /// Return color name as a string. Uses static strings for Default and
 /// the 256 indexed colors to avoid heap allocations on every cell.
 /// Quote and escape an argument for safe transmission over the control protocol.
-/// Wraps the value in double quotes and escapes any embedded double quotes or backslashes.
+/// Wraps the value in double quotes and escapes any embedded double quotes or
+/// backslashes. Also escapes the two line-terminator bytes (0x0A/0x0D): the wire
+/// protocol is line-oriented and the server reads one command per `read_line`, so
+/// a raw newline inside an argument would cut the line and the tail would be
+/// executed as a separate command against the caller's session (issue #560, a
+/// send-keys injection). Escaping them to `\n`/`\r` keeps the whole argument on a
+/// single wire line. Backslash is escaped first so the escape bytes introduced
+/// here are not doubled.
 pub fn quote_arg(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
     format!("\"{}\"", escaped)
 }
 
@@ -728,3 +739,7 @@ mod tests_nested_client_color_query;
 #[cfg(test)]
 #[path = "../tests-rs/test_deps_base64_parity.rs"]
 mod tests_deps_base64_parity;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue560_quote_arg_control_bytes.rs"]
+mod tests_issue560_quote_arg_control_bytes;
