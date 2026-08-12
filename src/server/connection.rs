@@ -89,6 +89,11 @@ fn decode_send_command(line: &str) -> Option<(String, Vec<u8>)> {
         args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|fc| fc == c))
     };
     if any_short('X') || any_short('p') || any_short('N') || any_short('R') { return None; }
+    // A bare `--` means end-of-options, and the tokens after it are operands
+    // even if they begin with '-'. This coalescing fast path filters operands
+    // by `starts_with('-')`, which would drop them, so defer to the normal
+    // send-keys handler that understands `--` (issue #562).
+    if args.iter().any(|a| *a == "--") { return None; }
 
     let prev_consumes_operand = |i: usize| -> bool {
         if i == 0 { return false; }
@@ -1375,15 +1380,29 @@ match cmd {
     "toggle-sync" => { let _ = tx.send(CtrlReq::ToggleSync); }
     "set-pane-title" => { let title = args.join(" "); let _ = tx.send(CtrlReq::SetPaneTitle(title)); }
     "send-keys" | "send" => {
+        // End-of-options: a bare `--` terminates flag parsing. Every token after
+        // it is an operand even if it begins with '-', and `--` itself is
+        // consumed. Without this, `send-keys -l -- -foo` dropped `--` as a dash
+        // token and dropped `-foo` because its first byte is '-', so a
+        // dash-leading literal had no deliverable spelling (issue #562).
+        let end_of_opts: Option<usize> = args.iter().position(|a| *a == "--");
+        let past_opts = |i: usize| -> bool { end_of_opts.is_some_and(|eo| i > eo) };
+        let is_marker = |i: usize| -> bool { end_of_opts == Some(i) };
         // tmux short-flag clusters (e.g. iTerm2's `send -lt %1 l`): inspect
         // each `-xyz` arg and check whether any of x/y/z is a known flag.
+        // Tokens at or after the `--` marker are operands, not flags.
         let flag_has = |c: char| -> bool {
-            args.iter().any(|a| a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|fc| fc == c))
+            args.iter().enumerate().any(|(i, a)| {
+                !is_marker(i) && !past_opts(i)
+                    && a.starts_with('-') && !a.starts_with("--")
+                    && a.chars().skip(1).any(|fc| fc == c)
+            })
         };
         // Returns true if the previous arg is a short-flag cluster whose
         // *trailing* character takes an operand (e.g. -t, -lt, -N).
         let prev_consumes_operand = |i: usize| -> bool {
             if i == 0 { return false; }
+            if is_marker(i - 1) || past_opts(i - 1) { return false; }
             if let Some(prev) = args.get(i - 1) {
                 if prev.starts_with('-') && !prev.starts_with("--") && prev.len() >= 2 {
                     if let Some(last) = prev.chars().last() {
@@ -1393,13 +1412,21 @@ match cmd {
             }
             false
         };
+        // A token counts as an operand (a key to deliver) when it is past the
+        // `--` marker, or when it is neither a flag cluster nor a flag's value.
+        // The `--` marker itself is never an operand.
+        let is_operand = |i: usize, a: &str| -> bool {
+            if is_marker(i) { return false; }
+            if past_opts(i) { return true; }
+            !a.starts_with('-') && !prev_consumes_operand(i)
+        };
         let literal = flag_has('l');
         let paste_mode = flag_has('p');
         let has_x = flag_has('X');
         let hex_mode = flag_has('H');
         // Parse -N <count> for repeat (look for any cluster ending in 'N')
         let mut repeat_count: usize = 1;
-        if let Some(n_pos) = args.iter().position(|a| a.starts_with('-') && !a.starts_with("--") && a.ends_with('N')) {
+        if let Some(n_pos) = args.iter().enumerate().position(|(i, a)| !is_marker(i) && !past_opts(i) && a.starts_with('-') && !a.starts_with("--") && a.ends_with('N')) {
             if let Some(count_str) = args.get(n_pos + 1) {
                 repeat_count = count_str.parse::<usize>().unwrap_or(1).max(1);
             }
@@ -1413,7 +1440,7 @@ match cmd {
             // survive verbatim.
             let mut bytes: Vec<u8> = Vec::new();
             for (i, a) in args.iter().enumerate() {
-                if a.starts_with('-') || prev_consumes_operand(i) { continue; }
+                if !is_operand(i, a) { continue; }
                 // A malformed operand is dropped rather than leaked into the
                 // pane as its literal token text.
                 if let Ok(byte) = u8::from_str_radix(a, 16) { bytes.push(byte); }
@@ -1426,7 +1453,7 @@ match cmd {
         } else if has_x {
             // send-keys -X copy-mode-command
             let cmd_parts: Vec<&str> = args.iter().enumerate()
-                .filter(|(i, a)| !a.starts_with('-') && !prev_consumes_operand(*i))
+                .filter(|(i, a)| is_operand(*i, a))
                 .map(|(_, a)| *a).collect();
             for _ in 0..repeat_count {
                 let _ = tx.send(CtrlReq::SendKeysX(cmd_parts.join(" ")));
@@ -1434,7 +1461,7 @@ match cmd {
         } else {
             let keys: Vec<String> = args.iter()
                 .enumerate()
-                .filter(|(i, a)| !a.starts_with('-') && !prev_consumes_operand(*i))
+                .filter(|(i, a)| is_operand(*i, a))
                 .map(|(_, a)| {
                     // Convert real-tmux 0xNN hex codepoint syntax (sent by
                     // iTerm2's gateway: e.g. `send -t %1 0xd` for Enter) into
