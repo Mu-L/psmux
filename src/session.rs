@@ -1943,15 +1943,10 @@ pub fn send_control_with_response(line: String) -> io::Result<String> {
             Err(_) => break,
         }
     }
-    // A timeout with zero bytes received is a FAILED round-trip, not an empty
-    // result set. Returning Ok("") here made `list-windows`/`ls` report zero
-    // windows on a merely-slow server (silent wrong answer). Surface it as a
-    // retryable error so the caller can retry or report honestly.
-    if timed_out && buf.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::TimedOut, "no response from server (timed out)"));
-    }
     let result = String::from_utf8_lossy(&buf).to_string();
-    // Strip the "OK\n" AUTH response prefix if present
+    // Strip the "OK\n" AUTH response prefix if present. This is protocol
+    // framing, not payload — it must come off before the checks below, because
+    // the server writes it before it has even read the command (issue #561).
     let result = if result.starts_with("OK\n") {
         result[3..].to_string()
     } else if result.starts_with("OK\r\n") {
@@ -1959,6 +1954,35 @@ pub fn send_control_with_response(line: String) -> io::Result<String> {
     } else {
         result
     };
+    // A connection-level refusal is not reply data. The server writes these
+    // INSTEAD of running the command (and without the OK ack), but every caller
+    // simply printed the reply, so `list-windows` put "ERROR: Authentication
+    // required" on STDOUT at exit 0 and a machine consumer ingested it as a
+    // window record (issue #561). Classified here, at the single chokepoint,
+    // rather than at the 22 call sites that print the reply.
+    //
+    // Matched as exact whole-payload strings on purpose, NOT as an "ERROR:"
+    // prefix: capture-pane and show-buffer return arbitrary pane content, which
+    // may legitimately begin with the word ERROR, and misreading that as a
+    // refusal would be a worse bug than the one being fixed.
+    let trimmed = result.trim();
+    if trimmed == "ERROR: Authentication required" || trimmed == "ERROR: Invalid session key" {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            trimmed.trim_start_matches("ERROR:").trim().to_string(),
+        ));
+    }
+    // A read timeout means the reply is INCOMPLETE. The half-close above makes a
+    // complete reply end in a definitive server-side EOF (Ok(0)), so landing in
+    // the timeout branch at all means we did not get the whole answer, whatever
+    // is already in `buf`. The old guard also required `buf.is_empty()`, which
+    // the OK ack made permanently false on any authenticated connection, so a
+    // stall returned Ok("") and a truncation returned Ok(partial) at exit 0 —
+    // indistinguishable from an empty result set and from a complete one
+    // (issue #561, cases B and C).
+    if timed_out {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "no response from server (timed out)"));
+    }
     Ok(result)
 }
 
