@@ -159,7 +159,13 @@ Start-Sleep -Seconds 4
 $dRows = @(& $PSMUX list-clients -t $S 2>&1 | Where-Object { $_ -match ': ' + [regex]::Escape($S) + ':' })
 if ((Attached $S) -eq "1" -and $dRows.Count -eq 1) { Write-Pass "attached: exactly 1 row, attached=1" }
 else { Write-Fail "attach state wrong: rows=$($dRows.Count) attached=$(Attached $S)" }
-& $PSMUX detach-client -t $S 2>&1 | Out-Null
+# `-s` is the SESSION selector; `-t` names a CLIENT (a tty or %id), per tmux and
+# psmux since #565. This used to read `-t $S` and worked only because the flag
+# was stripped before it reached the handler, which silently promoted the
+# command to `-a`. Once `-t` was honoured, `-t <session-name>` correctly matched
+# no client and detached nothing. The intent here is "detach this session's
+# client", so `-s` is the right selector.
+& $PSMUX detach-client -s $S 2>&1 | Out-Null
 Start-Sleep -Seconds 3
 $aRows = @(& $PSMUX list-clients -t $S 2>&1 | Where-Object { $_ -match ': ' + [regex]::Escape($S) + ':' })
 $aAtt  = Attached $S

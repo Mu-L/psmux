@@ -2326,6 +2326,29 @@ fn run_main() -> io::Result<()> {
                 if effective_all { server_cmd.push_str(" -a"); }
                 if kill_parent { server_cmd.push_str(" -P"); }
                 if let Some(t) = &t_target {
+                    // `-t` names a CLIENT (a tty like /dev/pts/2, or %id). An
+                    // unknown one must be refused, not silently ignored: tmux
+                    // answers `can't find client: X` with rc 1, and before #565
+                    // stopped stripping this flag the command was promoted to
+                    // `-a`, so it always did SOMETHING. Without this check the
+                    // flag's new correctness would come at the cost of a silent
+                    // no-op, which is worse than either behaviour.
+                    //
+                    // Clients are listed by tty, and tty_name is derived from the
+                    // client id, so `%3` and `/dev/pts/3` name the same client.
+                    let wanted = match t.strip_prefix('%') {
+                        Some(n) if n.chars().all(|c| c.is_ascii_digit()) => format!("/dev/pts/{}", n),
+                        _ => t.clone(),
+                    };
+                    if let Ok(listing) = send_control_with_response("list-clients\n".to_string()) {
+                        let known = listing.lines().any(|l| {
+                            l.split(':').next().map(|tty| tty.trim() == wanted).unwrap_or(false)
+                        });
+                        if !known {
+                            eprintln!("psmux: can't find client: {}", t);
+                            std::process::exit(1);
+                        }
+                    }
                     // Quote the value so tty paths with slashes survive arg parsing.
                     server_cmd.push_str(&format!(" -t {}", crate::util::quote_arg(t)));
                 }
