@@ -4630,6 +4630,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         std::process::exit(0);
                     }
                 }
+                CtrlReq::SetClientLastSession(cid, prev) => {
+                    if let Some(info) = app.client_registry.get_mut(&cid) {
+                        info.last_session = Some(prev);
+                    }
+                }
                 CtrlReq::SwitchClient(target, flag, resp_tx) => {
                     // Resolve the target session name based on the flag
                     let current = app.port_file_base();
@@ -4665,10 +4670,26 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                         'l' => {
-                            // Last session (read from last_session file)
-                            let last_path = crate::paths::psmux_dir_file("last_session");
-                            std::fs::read_to_string(&last_path).ok()
-                                .map(|s| s.trim().to_string())
+                            // Last session, taken from THIS client's own history.
+                            //
+                            // This used to read the data-dir-global
+                            // `last_session` file, which every attach overwrites
+                            // with the session being ENTERED. The `!= current`
+                            // filter then guaranteed that the only value able to
+                            // survive was one written by a DIFFERENT client, so
+                            // `-l` relocated this client into a session it had
+                            // never visited, chosen by whoever attached most
+                            // recently anywhere on the machine (issue #566).
+                            // The file keeps its real job as the routing hint
+                            // consumed by resolve_last_session_name_ns.
+                            //
+                            // No recorded previous session is reported as "no
+                            // last session" rather than borrowed from elsewhere,
+                            // which is what tmux does for a client that has not
+                            // moved.
+                            app.latest_client_id
+                                .and_then(|cid| app.client_registry.get(&cid))
+                                .and_then(|info| info.last_session.clone())
                                 .filter(|s| !s.is_empty() && s != &current && all_sessions.contains(s))
                         }
                         _ => None,

@@ -2133,6 +2133,17 @@ match cmd {
         }
         if !persistent { let _ = write!(write_stream, "ok\n"); }
     }
+    // Records the session this client arrived FROM (issue #566). Sent by the
+    // client right after client-attach, because that is what creates the
+    // registry entry this value is stored on.
+    "client-last-session" => {
+        if let Some(prev) = args.get(0) {
+            if !prev.is_empty() {
+                let _ = tx.send(CtrlReq::SetClientLastSession(client_id, prev.to_string()));
+            }
+        }
+        if !persistent { let _ = write!(write_stream, "ok\n"); }
+    }
     "client-detach" => {
         let _ = tx.send(CtrlReq::ClientDetach(client_id));
         attached_sent = false;

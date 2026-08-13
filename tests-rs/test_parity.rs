@@ -149,6 +149,7 @@ fn client_info_creation() {
         last_activity: std::time::Instant::now(),
         tty_name: "/dev/pts/0".to_string(),
         is_control: false,
+        last_session: None,
     };
     assert_eq!(info.id, 1);
     assert_eq!(info.width, 120);
@@ -167,6 +168,7 @@ fn client_info_control_mode() {
         last_activity: std::time::Instant::now(),
         tty_name: "/dev/pts/3".to_string(),
         is_control: true,
+        last_session: None,
     };
     assert!(info.is_control);
 }
@@ -188,6 +190,7 @@ fn client_registry_add_client() {
         last_activity: std::time::Instant::now(),
         tty_name: "/dev/pts/0".to_string(),
         is_control: false,
+        last_session: None,
     };
     app.client_registry.insert(1, info);
     assert_eq!(app.client_registry.len(), 1);
@@ -206,6 +209,7 @@ fn client_registry_add_multiple_clients() {
             last_activity: std::time::Instant::now(),
             tty_name: format!("/dev/pts/{}", i),
             is_control: false,
+            last_session: None,
         });
     }
     assert_eq!(app.client_registry.len(), 5);
@@ -222,6 +226,7 @@ fn client_registry_remove_client() {
         last_activity: std::time::Instant::now(),
         tty_name: "/dev/pts/0".to_string(),
         is_control: false,
+        last_session: None,
     });
     app.client_registry.insert(2, ClientInfo {
         id: 2,
@@ -231,6 +236,7 @@ fn client_registry_remove_client() {
         last_activity: std::time::Instant::now(),
         tty_name: "/dev/pts/1".to_string(),
         is_control: false,
+        last_session: None,
     });
     assert_eq!(app.client_registry.len(), 2);
     app.client_registry.remove(&1);

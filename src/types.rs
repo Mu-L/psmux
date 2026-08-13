@@ -109,6 +109,19 @@ pub struct ClientInfo {
     pub tty_name: String,
     /// True for CONTROL/CONTROL_NOECHO clients
     pub is_control: bool,
+    /// The session THIS client was in before it switched here, if any.
+    ///
+    /// psmux runs one server per session, so a switch tears the client off one
+    /// server and re-attaches it to another; only the client process spans both
+    /// and knows the pair. It reports the session it left on the attach
+    /// handshake and it is recorded here. Before this existed, `switch-client
+    /// -l` consulted a single data-dir-global `last_session` file that every
+    /// attach overwrote, so the only value that could survive its
+    /// "not the current session" filter was one written by a DIFFERENT client,
+    /// and `-l` relocated this client into a session it had never visited
+    /// (issue #566). `None` means this client has not switched yet, which is
+    /// the honest answer rather than somebody else's history.
+    pub last_session: Option<String>,
 }
 
 pub struct Pane {
@@ -957,6 +970,7 @@ impl AppState {
             last_activity: std::time::Instant::now(),
             tty_name: tty,
             is_control,
+            last_session: None,
         });
         self.attached_clients = self.attached_clients.saturating_add(1);
         // Preserve the existing distinction between an interactive TUI client
@@ -1703,6 +1717,11 @@ pub enum CtrlReq {
     /// `psmux detach-client` from CLI: detach every attached client of this session.
     /// `kill_parent` honors the tmux `-P` flag.
     DetachAllClients(bool),
+    /// Record, on the given client's registry entry, the session it arrived
+    /// FROM (issue #566). Sent by the attach handshake when the client has a
+    /// previous session, so `switch-client -l` and `#{client_last_session}`
+    /// can answer per client instead of from a machine-wide file.
+    SetClientLastSession(u64, String),
     /// switch-client -t <target> / -n / -p / -l: switch the attached client to another session.
     /// The String carries the resolved target session name (or "" for -n/-p/-l to be
     /// resolved server-side), and the second field carries the flag: 't', 'n', 'p', or 'l'.

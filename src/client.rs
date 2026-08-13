@@ -1396,6 +1396,20 @@ fn establish_connection(addr: &str, key: &str) -> io::Result<Connection> {
 
     let _ = writer.write_all(b"PERSISTENT\n");
     let _ = writer.write_all(b"client-attach\n");
+    // Report the session this client came FROM, so the server can answer
+    // `switch-client -l` from this client's own history rather than from a
+    // machine-wide file (issue #566). This MUST follow client-attach: that is
+    // what registers the client, and a value arriving before registration has
+    // no entry to be recorded on and is silently dropped. Sent only when there
+    // is something to say, so a first attach is byte-identical to before.
+    if let Ok(prev) = std::env::var("PSMUX_CLIENT_LAST_SESSION") {
+        if !prev.trim().is_empty() {
+            let _ = writer.write_all(
+                format!("client-last-session {}\n",
+                    crate::util::quote_arg_if_needed(prev.trim())).as_bytes(),
+            );
+        }
+    }
     // Issue #473: report the host terminal's colors (queried once at client
     // startup) so the server can answer pane color queries (OSC 4/10/11,
     // CSI ?996n) with the real palette instead of the Campbell fallback.

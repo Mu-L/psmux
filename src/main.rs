@@ -4474,8 +4474,23 @@ fn run_main() -> io::Result<()> {
         // Check if we should switch to another session
         if let Ok(switch_to) = env::var("PSMUX_SWITCH_TO") {
             env::remove_var("PSMUX_SWITCH_TO");
+            // Remember the session THIS client is leaving, before the variable
+            // that names it is overwritten. This process spans both sides of a
+            // switch (one server per session, so the client re-attaches
+            // elsewhere), which makes it the only place that knows the pair.
+            // It is handed to the next server on the attach handshake so
+            // `switch-client -l` can answer from this client's own history
+            // instead of a machine-wide file that any other client may have
+            // written (issue #566).
+            if let Ok(leaving) = env::var("PSMUX_SESSION_NAME") {
+                if !leaving.is_empty() && leaving != switch_to {
+                    env::set_var("PSMUX_CLIENT_LAST_SESSION", &leaving);
+                }
+            }
             env::set_var("PSMUX_SESSION_NAME", &switch_to);
-            // Update last_session file
+            // Update last_session file. This stays the routing hint it always
+            // was (resolve_last_session_name_ns consumes it); it is no longer
+            // what -l reads.
             let last_path = crate::paths::psmux_dir_file("last_session");
             let _ = std::fs::write(&last_path, &switch_to);
             // Continue loop to attach to new session

@@ -30,6 +30,7 @@ fn client_info(id: u64, control: bool) -> ClientInfo {
         last_activity: std::time::Instant::now(),
         tty_name: format!("/dev/pts/{}", id),
         is_control: control,
+        last_session: None,
     }
 }
 

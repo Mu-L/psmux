@@ -1761,7 +1761,17 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         // ── Client ──
         "client_width" => app.client_area.width.to_string(),
         "client_height" => (app.client_area.height + if app.status_visible { 1 } else { 0 }).to_string(),
-        "client_session" | "client_last_session" => app.session_name.clone(),
+        "client_session" => app.session_name.clone(),
+        // The session this client came from, empty when it has not switched.
+        // This was aliased to client_session, so it echoed the CURRENT session
+        // and could neither predict what `-l` would do nor verify what it did
+        // (issue #566). tmux reports empty for a client with no last session,
+        // which is what an unset value gives here.
+        "client_last_session" => app
+            .latest_client_id
+            .and_then(|cid| app.client_registry.get(&cid))
+            .and_then(|info| info.last_session.clone())
+            .unwrap_or_default(),
         "client_name" | "client_tty" => "client0".into(),
         "client_pid" => std::process::id().to_string(),
         "client_prefix" => if app.client_prefix_active || matches!(app.mode, Mode::Prefix { .. }) { "1".into() } else { "0".into() },

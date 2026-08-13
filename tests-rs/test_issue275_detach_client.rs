@@ -26,6 +26,7 @@ fn add_client(app: &mut AppState, id: u64, tty: &str) {
         last_activity: Instant::now(),
         tty_name: tty.to_string(),
         is_control: false,
+        last_session: None,
     });
     app.attached_clients += 1;
 }
