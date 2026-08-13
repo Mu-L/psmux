@@ -50,6 +50,14 @@ class ConRead
     static extern bool ReadConsoleOutputCharacterW(IntPtr h, [Out] char[] buf,
         uint len, COORD coord, out uint read);
 
+    // Characters alone are not enough. A selection highlight, an active pane
+    // border, a status style: all of those are ATTRIBUTES (colour), and the text
+    // is identical whether or not a row is highlighted. Reading only characters
+    // made a chooser whose selection was moving correctly look frozen.
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ReadConsoleOutputAttribute(IntPtr h, [Out] ushort[] buf,
+        uint len, COORD coord, out uint read);
+
     static int Main(string[] argv)
     {
         if (argv.Length < 1)
@@ -58,7 +66,13 @@ class ConRead
             return 1;
         }
         uint pid = uint.Parse(argv[0]);
-        int maxRows = argv.Length > 1 ? int.Parse(argv[1]) : 0;
+        int maxRows = 0;
+        bool withAttrs = false;
+        for (int a = 1; a < argv.Length; a++)
+        {
+            if (argv[a] == "-a" || argv[a] == "--attrs") withAttrs = true;
+            else int.TryParse(argv[a], out maxRows);
+        }
 
         // Buffer the output: once attached to the target console, writing to our
         // own stdout would land on the TARGET's screen and corrupt the very thing
@@ -98,12 +112,39 @@ class ConRead
         if (maxRows > 0 && maxRows < height) { top = info.srWindow.Bottom - maxRows + 1; height = maxRows; }
 
         var line = new char[width];
+        var attrs = new ushort[width];
         for (int row = 0; row < height; row++)
         {
             uint read;
             COORD at; at.X = 0; at.Y = (short)(top + row);
             if (!ReadConsoleOutputCharacterW(h, line, (uint)width, at, out read)) break;
-            sb.AppendLine(new string(line, 0, (int)read).TrimEnd());
+            string text = new string(line, 0, (int)read).TrimEnd();
+
+            if (withAttrs)
+            {
+                // Run-length encode the row's attributes: "7x40,112x18,7x62".
+                // A highlighted row differs from its neighbours here even when the
+                // text is identical, which is exactly how a moving selection is
+                // detected without guessing at colours.
+                uint aread;
+                if (ReadConsoleOutputAttribute(h, attrs, (uint)width, at, out aread) && aread > 0)
+                {
+                    var rle = new StringBuilder();
+                    ushort cur = attrs[0];
+                    int run = 1;
+                    for (int i = 1; i < (int)aread; i++)
+                    {
+                        if (attrs[i] == cur) { run++; continue; }
+                        if (rle.Length > 0) rle.Append(',');
+                        rle.Append(cur).Append('x').Append(run);
+                        cur = attrs[i]; run = 1;
+                    }
+                    if (rle.Length > 0) rle.Append(',');
+                    rle.Append(cur).Append('x').Append(run);
+                    sb.Append("[attr ").Append(rle).Append("] ");
+                }
+            }
+            sb.AppendLine(text);
         }
 
         FreeConsole();
