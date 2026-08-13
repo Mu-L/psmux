@@ -2602,12 +2602,22 @@ match cmd {
         if has_big_t {
             let table = args.windows(2).find(|w| w[0] == "-T").map(|w| w[1].to_string()).unwrap_or_default();
             let _ = tx.send(CtrlReq::SwitchClientTable(table));
-        } else if args.contains(&"-n") {
-            let _ = tx.send(CtrlReq::SwitchClient(String::new(), 'n'));
-        } else if args.contains(&"-p") {
-            let _ = tx.send(CtrlReq::SwitchClient(String::new(), 'p'));
-        } else if args.contains(&"-l") {
-            let _ = tx.send(CtrlReq::SwitchClient(String::new(), 'l'));
+        } else if args.contains(&"-n") || args.contains(&"-p") || args.contains(&"-l") {
+            // #566: these three were fire-and-forget, so a failed or misdirected
+            // switch was indistinguishable from a successful one at the CLI (rc 0,
+            // no output). Give them the same reply channel the -t arm already has
+            // so the caller can exit non-zero, matching tmux.
+            let flag = if args.contains(&"-n") { 'n' }
+                       else if args.contains(&"-p") { 'p' }
+                       else { 'l' };
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::SwitchClient(String::new(), flag, Some(rtx)));
+            let resp = rrx.recv_timeout(Duration::from_millis(2000))
+                .unwrap_or_else(|_| "OK".to_string());
+            if !persistent {
+                let _ = write!(write_stream, "{}\n", resp);
+                let _ = write_stream.flush();
+            }
         } else {
             // -t <target> was already extracted into raw_target by the global -t
             // parser. Pass the FULL target (session:window.pane / @window / %pane)
@@ -3314,7 +3324,10 @@ match cmd {
 
                 if std::path::Path::new(&port_path).exists() {
                     if !detached {
-                        let _ = tx.send(CtrlReq::SwitchClient(name.clone(), 't'));
+                        // In-process follow-up to a new-session: nobody is waiting
+                        // on a switch result here, the reply for this command has
+                        // already been decided below.
+                        let _ = tx.send(CtrlReq::SwitchClient(name.clone(), 't', None));
                     }
                     if persistent {
                         let _ = tx.send(CtrlReq::StatusMessage(format!("created session '{}'", name)));

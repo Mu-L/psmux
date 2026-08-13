@@ -1706,7 +1706,14 @@ pub enum CtrlReq {
     /// switch-client -t <target> / -n / -p / -l: switch the attached client to another session.
     /// The String carries the resolved target session name (or "" for -n/-p/-l to be
     /// resolved server-side), and the second field carries the flag: 't', 'n', 'p', or 'l'.
-    SwitchClient(String, char),
+    ///
+    /// The optional channel reports "OK" or "ERROR <reason>" so a one-shot CLI
+    /// caller can exit non-zero. Without it, `-l`/`-n`/`-p` were dispatched
+    /// fire-and-forget and their only failure report was a TUI status line that
+    /// a CLI caller never sees, so "switched", "did nothing" and "switched
+    /// somewhere unintended" were all exit 0 with empty output (issue #566).
+    /// `None` is for in-process callers that have no one to answer.
+    SwitchClient(String, char, Option<mpsc::Sender<String>>),
     /// `switch-client -t <target>` where the target is a full
     /// `session:window.pane` / `@window` / `%pane` spec (#483). The server loop
     /// switches the client's session AND selects the addressed window/pane,

@@ -4630,7 +4630,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         std::process::exit(0);
                     }
                 }
-                CtrlReq::SwitchClient(target, flag) => {
+                CtrlReq::SwitchClient(target, flag, resp_tx) => {
                     // Resolve the target session name based on the flag
                     let current = app.port_file_base();
                     let all_sessions = crate::session::list_session_names();
@@ -4673,6 +4673,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         _ => None,
                     };
+                    // #566: every branch now reports its outcome on the optional
+                    // channel as well as on the TUI status line, because a
+                    // one-shot CLI caller never sees a status line and so could
+                    // not tell a completed switch from a silent no-op.
+                    let mut reply = "OK".to_string();
                     match resolved {
                         Some(ref sess) if sess != &current => {
                             // Signal the attached client to switch by sending a directive
@@ -4689,17 +4694,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             state_dirty = true;
                         }
                         None => {
-                            if flag == 't' && !target.is_empty() {
-                                app.status_message = Some((format!("switch-client: session not found: {}", target), std::time::Instant::now(), None));
+                            let msg = if flag == 't' && !target.is_empty() {
+                                format!("switch-client: session not found: {}", target)
                             } else if flag == 'l' {
-                                app.status_message = Some(("switch-client: no last session".to_string(), std::time::Instant::now(), None));
+                                "switch-client: no last session".to_string()
                             } else if all_sessions.len() <= 1 {
-                                app.status_message = Some(("switch-client: only one session available".to_string(), std::time::Instant::now(), None));
+                                "switch-client: only one session available".to_string()
                             } else {
-                                app.status_message = Some(("switch-client: no target session".to_string(), std::time::Instant::now(), None));
-                            }
+                                "switch-client: no target session".to_string()
+                            };
+                            reply = format!("ERROR {}", msg);
+                            app.status_message = Some((msg, std::time::Instant::now(), None));
                             state_dirty = true;
                         }
+                    }
+                    if let Some(rtx) = resp_tx {
+                        let _ = rtx.send(reply);
                     }
                 }
                 CtrlReq::SwitchClientTarget(raw, resp_tx) => {
