@@ -208,16 +208,77 @@ fn cli_pane_index_exists_in_window(window_spec: &str, idx_spec: &str) -> Option<
 /// unreachable server (None from the validators) never blocks the command.
 /// The server-side FocusTargetTemp check independently prevents execution
 /// against the wrong window for anything not validated here.
-fn cli_validate_window_pane_target() {
+/// Return the sessions in this namespace that contain the given `%<id>` pane id.
+///
+/// psmux runs one server per session and each allocates `%N` from its own
+/// counter starting at 1, so `%1` exists in EVERY session simultaneously. tmux
+/// makes these ids unique per server, which is what lets an unqualified `-t %N`
+/// mean one specific pane there; psmux accepts the syntax but cannot honour the
+/// semantics, and routing silently resolved it against whichever session was
+/// most recently used (issue #569). Enumerating the namespace is what lets the
+/// caller refuse an ambiguous target instead of acting on the wrong pane.
+fn cli_sessions_with_pane_id(ns: Option<&str>, pane_id: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for base in crate::session::list_session_names_ns(ns) {
+        let port = match std::fs::read_to_string(crate::paths::port_file(&base))
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+        {
+            Some(p) => p,
+            None => continue,
+        };
+        let key = match std::fs::read_to_string(crate::paths::key_file(&base)) {
+            Ok(k) => k.trim().to_string(),
+            Err(_) => continue,
+        };
+        let addr = format!("127.0.0.1:{}", port);
+        // -s scopes to the whole session rather than the active window, so a
+        // pane in a background window still counts.
+        if let Ok(resp) = crate::session::send_auth_cmd_response(
+            &addr, &key, b"list-panes -s -F #{pane_id}\n",
+        ) {
+            if resp.lines().any(|l| l.trim() == pane_id) {
+                found.push(base);
+            }
+        }
+    }
+    found
+}
+
+fn cli_validate_window_pane_target(ns: Option<&str>) {
     let full = match std::env::var("PSMUX_TARGET_FULL") {
         Ok(f) if !f.is_empty() => f,
         _ => return,
     };
     let special = |s: &str| matches!(s.chars().next(),
         Some('+') | Some('-') | Some('^') | Some('!') | Some('$') | Some('{') | Some('*') | Some('='));
-    // Bare "%<id>" pane target: globally unique, validate across all panes.
+    // Bare "%<id>" pane target. These ids are NOT unique across a namespace (see
+    // cli_sessions_with_pane_id), so an unqualified one has no single correct
+    // answer whenever more than one session holds it. Refuse it loudly rather
+    // than let routing pick a session by recency and act on the wrong pane
+    // (#569). Every currently-correct invocation still resolves to exactly one
+    // session and is unaffected.
     if full.starts_with('%') {
-        if cli_pane_id_exists(&full) == Some(false) {
+        let owners = cli_sessions_with_pane_id(ns, &full);
+        if owners.len() > 1 {
+            // Report the names the caller can actually type: inside a `-L`
+            // namespace the registry base is "<ns>__<session>" but the user
+            // addresses the session by its short name.
+            let names = owners
+                .iter()
+                .map(|b| match ns {
+                    Some(p) => b.strip_prefix(&format!("{}__", p)).unwrap_or(b).to_string(),
+                    None => b.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "psmux: ambiguous pane id {}: present in sessions {}; qualify as session:window.pane",
+                full, names
+            );
+            std::process::exit(1);
+        }
+        if owners.is_empty() && cli_pane_id_exists(&full) == Some(false) {
             eprintln!("psmux: can't find pane: {}", full);
             std::process::exit(1);
         }
@@ -541,7 +602,7 @@ fn run_main() -> io::Result<()> {
         // per-arm validators are deleted; this shared one is a superset.
         | "select-pane" | "selectp" | "select-window" | "selectw")
     {
-        cli_validate_window_pane_target();
+        cli_validate_window_pane_target(l_socket_name.as_deref());
     }
 
     // Handle help and version flags first
