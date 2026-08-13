@@ -4280,7 +4280,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // even after focus moves elsewhere.
                     let win = &app.windows[app.active_idx];
                     let pane_id = get_active_pane_id(&win.root, &win.active_path).unwrap_or(0);
-                    let has_existing = app.pipe_panes.iter().any(|p| p.pane_id == pane_id);
+                    // A recorded pipe whose child has already exited is NOT an
+                    // existing pipe. The reader thread drops the writer when a
+                    // tee write fails, but nothing cleared app.pipe_panes, so a
+                    // sink that exits on its own left the pane marked as piped
+                    // forever and `-o` toggled OFF against a dead process
+                    // instead of re-arming (issue #564). Reap the exited entries
+                    // before the toggle decision reads them.
+                    let mut reaped: Vec<usize> = Vec::new();
+                    app.pipe_panes.retain_mut(|p| match p.process.as_mut() {
+                        Some(child) => {
+                            let alive = matches!(child.try_wait(), Ok(None));
+                            if !alive { reaped.push(p.pane_id); }
+                            alive
+                        }
+                        // No handle to check: keep it, the explicit-close paths
+                        // below still remove it.
+                        None => true,
+                    });
 
                     // Drop any writer this pane's reader thread was teeing to
                     // (issue #440). Dropping the ChildStdin closes the pipe so the
@@ -4297,6 +4314,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                     };
+
+                    // Drop the writers belonging to the sinks reaped above. The
+                    // reader thread already drops a writer when a tee write
+                    // fails, but a sink that exited without the pane emitting
+                    // anything since leaves one registered.
+                    for pid in reaped { unregister_writer(pid); }
+                    let has_existing = app.pipe_panes.iter().any(|p| p.pane_id == pane_id);
 
                     if cmd.is_empty() {
                         // No command: close any existing pipe on this pane
