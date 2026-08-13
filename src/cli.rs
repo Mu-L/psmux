@@ -654,7 +654,17 @@ pub fn parse_target(target: &str) -> ParsedTarget {
                     result.window_name = Some(win_part.to_string());
                 }
             }
-            if let Ok(p) = wp[dot_pos + 1..].parse::<usize>() {
+            // The pane slot accepts a %id as well as an index, exactly as the
+            // "@window.pane" branch above already does. Parsing it with a bare
+            // parse::<usize>() silently failed on the '%', leaving pane = None,
+            // and the command then fell back to the ACTIVE pane. That is not a
+            // no-op: "kill-pane -t sess:.%4" killed the active pane %2 in a
+            // different window and still exited 0.
+            let pane_str = &wp[dot_pos + 1..];
+            if let Some(pid) = pane_str.strip_prefix('%').and_then(|s| s.parse::<usize>().ok()) {
+                result.pane = Some(pid);
+                result.pane_is_id = true;
+            } else if let Ok(p) = pane_str.parse::<usize>() {
                 result.pane = Some(p);
             }
         } else {
@@ -760,6 +770,47 @@ mod tests {
         assert_eq!(pt.window, None);
         assert_eq!(pt.window_name, Some("mywindow".to_string()));
         assert_eq!(pt.pane, Some(1));
+    }
+
+    // A %id is legal in the PANE slot of "session:window.pane". It used to be
+    // parsed with a bare parse::<usize>(), which fails on the '%', so pane came
+    // back None and every caller fell through to the ACTIVE pane. The observable
+    // damage was destructive rather than inert: "kill-pane -t sess:.%4" killed
+    // the active pane %2, in a different window, and exited 0.
+    #[test]
+    fn parse_target_pane_id_in_pane_slot_current_window() {
+        let pt = parse_target("mysession:.%4");
+        assert_eq!(pt.session, Some("mysession".to_string()));
+        assert_eq!(pt.window, None, "no window component means the current window");
+        assert_eq!(pt.pane, Some(4), "%4 must reach the pane slot, not be dropped");
+        assert!(pt.pane_is_id, "%4 is an id, not an index: indexes would resolve to a different pane");
+    }
+
+    #[test]
+    fn parse_target_pane_id_in_pane_slot_with_window_index() {
+        let pt = parse_target("mysession:1.%7");
+        assert_eq!(pt.session, Some("mysession".to_string()));
+        assert_eq!(pt.window, Some(1));
+        assert_eq!(pt.pane, Some(7));
+        assert!(pt.pane_is_id);
+    }
+
+    #[test]
+    fn parse_target_pane_id_in_pane_slot_with_window_name() {
+        let pt = parse_target("mysession:logs.%2");
+        assert_eq!(pt.window_name, Some("logs".to_string()));
+        assert_eq!(pt.pane, Some(2));
+        assert!(pt.pane_is_id);
+    }
+
+    // A numeric pane index in the same slot must stay an INDEX. If this flipped
+    // to pane_is_id the two syntaxes would silently mean the same thing and
+    // "sess:.1" would start resolving to pane %1 instead of the second pane.
+    #[test]
+    fn parse_target_pane_index_is_not_an_id() {
+        let pt = parse_target("mysession:.1");
+        assert_eq!(pt.pane, Some(1));
+        assert!(!pt.pane_is_id, "a bare index must not be treated as a %id");
     }
 
     #[test]

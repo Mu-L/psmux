@@ -245,6 +245,30 @@ fn cli_sessions_with_pane_id(ns: Option<&str>, pane_id: &str) -> Vec<String> {
     found
 }
 
+/// True for a pane component that names a pane by POSITION rather than identity:
+/// `+`/`-` (with an optional repeat count), `!` for the last pane, and the
+/// `{...}` symbolic forms such as `{last}`, `{next}`, `{top-left}`.
+///
+/// These cannot be validated by the CLI, because there is no id or index to look
+/// up: only the server, holding the live layout, can say which pane `+` means.
+/// Treating them as unresolvable is what makes `-t :.+` work at all. The CLI used
+/// to refuse to split them off as a pane component, so `:.+` was read as a WINDOW
+/// literally named ".+", and every relative pane target died in the client with
+/// "can't find window: .+" without a byte reaching the server, which implements
+/// them correctly.
+fn is_relative_pane(p: &str) -> bool {
+    if p == "!" {
+        return true;
+    }
+    if p.starts_with('{') && p.ends_with('}') && p.len() > 2 {
+        return true;
+    }
+    if let Some(count) = p.strip_prefix(['+', '-']) {
+        return count.is_empty() || count.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
 fn cli_validate_window_pane_target(ns: Option<&str>) {
     let full = match std::env::var("PSMUX_TARGET_FULL") {
         Ok(f) if !f.is_empty() => f,
@@ -295,13 +319,18 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
     if let Some(ci) = full.find(':') {
         let rest = &full[ci + 1..];
         if rest.is_empty() { return; }
-        // Split off a pane component only when it is unambiguous (digits or
-        // %id after the last dot) — window names may legitimately contain
-        // dots, and a wrong split would false-error on a real window.
+        // Split off a pane component only when it is unambiguous (digits, %id or
+        // a relative specifier after the last dot) — window names may
+        // legitimately contain dots, and a wrong split would false-error on a
+        // real window.
         let (win_part, pane_part): (&str, Option<&str>) = match rest.rfind('.') {
             Some(d) => {
                 let p = &rest[d + 1..];
-                if !p.is_empty() && (p.starts_with('%') || p.chars().all(|c| c.is_ascii_digit())) {
+                if !p.is_empty()
+                    && (p.starts_with('%')
+                        || p.chars().all(|c| c.is_ascii_digit())
+                        || is_relative_pane(p))
+                {
                     (&rest[..d], Some(p))
                 } else {
                     (rest, None)
@@ -314,7 +343,10 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
             std::process::exit(1);
         }
         if let Some(p) = pane_part {
-            if p.starts_with('%') {
+            if is_relative_pane(p) {
+                // Nothing to look up: a relative pane names a position in the
+                // live layout, which only the server can resolve.
+            } else if p.starts_with('%') {
                 if cli_pane_id_exists(p) == Some(false) {
                     eprintln!("psmux: can't find pane: {}", p);
                     std::process::exit(1);
