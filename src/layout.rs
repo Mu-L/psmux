@@ -667,12 +667,21 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
     }
 
     /// Close the currently-open run: closing `"` for text, then fg/bg/flags/width, then `}`.
-    fn close_run(fg: vt100::Color, bg: vt100::Color, fl: u8, w: u16, out: &mut String) {
+    fn close_run(fg: vt100::Color, bg: vt100::Color, fl: u8, w: u16, link: Option<&str>, out: &mut String) {
         out.push_str("\",\"fg\":\"");
         push_color(fg, out);
         out.push_str("\",\"bg\":\"");
         push_color(bg, out);
-        let _ = std::fmt::Write::write_fmt(out, format_args!("\",\"flags\":{},\"width\":{}}}", fl, w));
+        let _ = std::fmt::Write::write_fmt(out, format_args!("\",\"flags\":{},\"width\":{}", fl, w));
+        // OSC 8 URI (#361).  The client re-emits hyperlinks only for runs that
+        // carry this field, and `CellRunJson::link` skips serialising when it is
+        // None, so omitting it here silently disabled hyperlinks in every pane.
+        if let Some(uri) = link {
+            out.push_str(",\"link\":\"");
+            json_esc(uri, out);
+            out.push('"');
+        }
+        out.push('}');
     }
 
     // ── recursive tree walker ────────────────────────────────────────
@@ -758,7 +767,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 // also holds p.term's mutex while processing ConPTY output).
                 // Without this, WSL echo gets starved because its output sits
                 // in the ConPTY pipe while we build the JSON string.
-                struct Run { text: String, fg: vt100::Color, bg: vt100::Color, flags: u8, width: u16 }
+                struct Run { text: String, fg: vt100::Color, bg: vt100::Color, flags: u8, width: u16, link: Option<String> }
                 struct RowSnap { runs: Vec<Run> }
                 struct CopyCell { text: String, fg: vt100::Color, bg: vt100::Color, bold: bool, italic: bool, underline: bool, inverse: bool, dim: bool, blink: bool, hidden: bool, strikethrough: bool, width: u16 }
                 struct LeafSnap {
@@ -800,6 +809,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         let mut prev_fg: Option<vt100::Color> = None;
                         let mut prev_bg: Option<vt100::Color> = None;
                         let mut prev_fl: u8 = 0;
+                        let mut prev_link: Option<u32> = None;
 
                         while c < p.last_cols {
                             if let Some(cell) = screen.cell(r, c) {
@@ -819,33 +829,45 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 if cell.hidden()    { fl |= FLAG_HIDDEN; }
                                 if cell.strikethrough() { fl |= FLAG_STRIKETHROUGH; }
 
-                                if prev_fg == Some(cfg) && prev_bg == Some(cbg) && prev_fl == fl {
+                                // A hyperlink change must also break the run, so the
+                                // client wraps exactly the linked text in OSC 8 (#361).
+                                let clink = cell.hyperlink_id();
+                                if prev_fg == Some(cfg) && prev_bg == Some(cbg) && prev_fl == fl
+                                    && prev_link == Some(clink)
+                                {
                                     if let Some(last) = runs.last_mut() {
                                         last.text.push_str(t);
                                         last.width += w;
                                     }
                                 } else {
-                                    runs.push(Run { text: t.to_string(), fg: cfg, bg: cbg, flags: fl, width: w });
+                                    let link = if clink != 0 {
+                                        screen.hyperlink_uri(clink).map(|s| s.to_string())
+                                    } else { None };
+                                    runs.push(Run { text: t.to_string(), fg: cfg, bg: cbg, flags: fl, width: w, link });
                                 }
                                 prev_fg = Some(cfg);
                                 prev_bg = Some(cbg);
                                 prev_fl = fl;
+                                prev_link = Some(clink);
                                 c += w.max(1);
                             } else {
                                 let cfg = vt100::Color::Default;
                                 let cbg = vt100::Color::Default;
                                 let fl  = 0u8;
-                                if prev_fg == Some(cfg) && prev_bg == Some(cbg) && prev_fl == fl {
+                                if prev_fg == Some(cfg) && prev_bg == Some(cbg) && prev_fl == fl
+                                    && prev_link == Some(0)
+                                {
                                     if let Some(last) = runs.last_mut() {
                                         last.text.push(' ');
                                         last.width += 1;
                                     }
                                 } else {
-                                    runs.push(Run { text: " ".to_string(), fg: cfg, bg: cbg, flags: fl, width: 1 });
+                                    runs.push(Run { text: " ".to_string(), fg: cfg, bg: cbg, flags: fl, width: 1, link: None });
                                 }
                                 prev_fg = Some(cfg);
                                 prev_bg = Some(cbg);
                                 prev_fl = fl;
+                                prev_link = Some(0);
                                 c += 1;
                             }
                         }
@@ -1015,7 +1037,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         if i > 0 { out.push(','); }
                         out.push_str("{\"text\":\"");
                         json_esc(&run.text, out);
-                        close_run(run.fg, run.bg, run.flags, run.width, out);
+                        close_run(run.fg, run.bg, run.flags, run.width, run.link.as_deref(), out);
                     }
                     out.push_str("]}");
                 }
@@ -1373,3 +1395,7 @@ mod test_layout;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue361_serialize_hyperlink.rs"]
 mod test_issue361_serialize_hyperlink;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue361_fastdump_hyperlink.rs"]
+mod test_issue361_fastdump_hyperlink;
