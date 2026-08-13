@@ -253,14 +253,22 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
     let special = |s: &str| matches!(s.chars().next(),
         Some('+') | Some('-') | Some('^') | Some('!') | Some('$') | Some('{') | Some('*') | Some('='));
     // Bare "%<id>" pane target. These ids are NOT unique across a namespace (see
-    // cli_sessions_with_pane_id), so an unqualified one has no single correct
-    // answer whenever more than one session holds it. Refuse it loudly rather
-    // than let routing pick a session by recency and act on the wrong pane
-    // (#569). Every currently-correct invocation still resolves to exactly one
-    // session and is unaffected.
+    // cli_sessions_with_pane_id), so an unqualified one can be genuinely
+    // unanswerable. But it is only unanswerable when NOTHING decides which
+    // session is meant: if the session this command is already routed to owns
+    // the id, that is the answer, and refusing there would break the ordinary
+    // "grab a %id from this session and use it" idiom (issue #569 first shipped
+    // an unconditional refusal, which broke exactly that and failed
+    // test_named_session_parity).
+    //
+    // So the refusal is scoped to the case the report was actually about: the
+    // routed session does NOT hold the id, several others do, and resolving
+    // would fall back to picking one by recency.
     if full.starts_with('%') {
         let owners = cli_sessions_with_pane_id(ns, &full);
-        if owners.len() > 1 {
+        let routed = std::env::var("PSMUX_TARGET_SESSION").unwrap_or_default();
+        let routed_owns = !routed.is_empty() && owners.iter().any(|o| *o == routed);
+        if owners.len() > 1 && !routed_owns {
             // Report the names the caller can actually type: inside a `-L`
             // namespace the registry base is "<ns>__<session>" but the user
             // addresses the session by its short name.
