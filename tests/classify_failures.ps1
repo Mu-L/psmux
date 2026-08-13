@@ -63,12 +63,19 @@ foreach ($s in $failing) {
     $hist  = foreach ($h in $history) { $c = ExitCodeOf $h.FullName $s; if ($null -eq $c) { '-' } else { $c } }
     $hs = ($hist -join '')
 
-    if ($hs -eq ('-' * $history.Count))            { $verdict = 'no history' }
-    elseif ($hist -notcontains '-' -and
-            ($hist | Select-Object -Unique).Count -eq 1 -and $hist[0] -eq $today) { $verdict = 'PRE-EXISTING' }
-    elseif ($hist -notcontains '-' -and
-            ($hist | Select-Object -Unique).Count -eq 1 -and $hist[0] -eq '0')    { $verdict = '** CHANGED **' }
-    else                                            { $verdict = 'mixed' }
+    # A '-' means that run has no log for this suite (an aborted run, or a suite
+    # added later). That is absence of evidence, not conflicting evidence, so gaps
+    # are DROPPED rather than treated as inconsistency. Counting them as "mixed"
+    # made every single suite read 'mixed' the moment one empty run dir existed,
+    # which hid two genuine regressions in a wall of noise.
+    $known = @($hist | Where-Object { $_ -ne '-' })
+    $uniq  = @($known | Select-Object -Unique)
+
+    if ($known.Count -eq 0)                                         { $verdict = 'no history' }
+    elseif ($uniq.Count -eq 1 -and $uniq[0] -eq $today)             { $verdict = 'PRE-EXISTING' }
+    elseif ($uniq.Count -eq 1 -and $uniq[0] -eq '0')                { $verdict = '** CHANGED **' }
+    elseif ($uniq -notcontains $today -and $uniq -contains '0')     { $verdict = '** CHANGED **' }
+    else                                                            { $verdict = 'mixed' }
 
     $counts[$verdict]++
     $colour = switch ($verdict) {
