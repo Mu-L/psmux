@@ -1,0 +1,127 @@
+# Run the FULL psmux test suite in a dedicated console.
+#
+# WHY A SEPARATE CONSOLE: many suites launch an ATTACHED psmux client and some
+# drive it with real keystrokes (WriteConsoleInput via AttachConsole). Those need
+# a real console of their own, and they will happily kill whatever console they
+# are attached to. Running them inside an agent/tool shell both breaks the tests
+# (no window to find, see test_config_exhaustive_tui) and can take the caller's
+# terminal down with it.
+#
+# WHY THE ENVIRONMENT IS SCRUBBED: 22 suites shell out to claude.exe. Launched
+# from inside a Claude Code session the child inherits CLAUDE_CODE_CHILD_SESSION
+# and is treated as a nested child with its teammate toolset suppressed, which is
+# the harness leaking its identity into the product under test. NO_COLOR is worse:
+# it silently fakes a machine wide colour regression across a dozen suites and
+# defeats bisection, because every side of every A/B inherits it equally.
+#
+# Test discovery is a glob over tests\test_*.ps1, so any NEW test file is picked
+# up automatically with no registration step and nothing is filtered out.
+param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Forward)
+
+$ErrorActionPreference = 'Continue'
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$lockFile = Join-Path $env:TEMP 'psmux-testrun.lock'
+
+# ---------------------------------------------------------------------------
+# Single instance guard.
+#
+# The runner kills ALL psmux processes and wipes ~/.psmux between every test, so
+# two concurrent runs destroy each other's sessions mid test and emit a stream of
+# bogus failures that look exactly like product bugs. That happened once here and
+# cost a full triage cycle, so a second run is refused rather than allowed to
+# corrupt both.
+#
+# The guard is a pid anchor, NOT a command line search. Searching for pwsh
+# processes whose command line mentions run_all_tests matches any shell that
+# merely NAMES the runner, including the monitoring commands used to watch a run
+# in progress, and a false positive here refuses every future run permanently.
+# Anchoring on pid plus process start time is exactly how psmux validates its own
+# .pid files, and it cannot be fooled by a recycled pid.
+# ---------------------------------------------------------------------------
+function Test-RunActive {
+    if (-not (Test-Path $lockFile)) { return $null }
+    $raw = (Get-Content $lockFile -Raw -EA SilentlyContinue)
+    if (-not $raw) { return $null }
+    $parts = $raw.Trim() -split ':'
+    if ($parts.Count -ne 2) { return $null }
+    $pidVal = 0; $ticks = 0L
+    if (-not [int]::TryParse($parts[0], [ref]$pidVal))   { return $null }
+    if (-not [long]::TryParse($parts[1], [ref]$ticks))   { return $null }
+    $p = Get-Process -Id $pidVal -EA SilentlyContinue
+    if (-not $p) { return $null }                        # dead: stale lock
+    if ($p.StartTime.Ticks -ne $ticks) { return $null }  # pid recycled: stale lock
+    return $p
+}
+
+$active = Test-RunActive
+if ($active) {
+    Write-Host ''
+    Write-Host 'REFUSING TO START: a psmux test run is already active.' -ForegroundColor Red
+    Write-Host ("  existing run pid {0}, started {1}" -f $active.Id, $active.StartTime) -ForegroundColor Yellow
+    Write-Host "Two concurrent runs wipe each other's sessions and produce bogus failures." -ForegroundColor Yellow
+    Write-Host 'Stop the existing run first, then relaunch.' -ForegroundColor Yellow
+    exit 99
+}
+
+$me = Get-Process -Id $PID
+"{0}:{1}" -f $PID, $me.StartTime.Ticks | Set-Content $lockFile -Encoding ASCII
+
+try {
+    Get-ChildItem env: |
+        Where-Object { $_.Name -like 'CLAUDE*' -or $_.Name -like 'ANTHROPIC*' -or $_.Name -eq 'NO_COLOR' } |
+        ForEach-Object {
+            Write-Host ('  scrubbed env: ' + $_.Name) -ForegroundColor DarkGray
+            Remove-Item ('env:' + $_.Name) -EA SilentlyContinue
+        }
+
+    $env:PSMUX_TEST_SANDBOX = '1'
+    Set-Location $repoRoot
+
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor Cyan
+    Write-Host '  psmux FULL TEST SUITE (interactive, dedicated window)' -ForegroundColor Cyan
+    Write-Host ('  Started: ' + (Get-Date)) -ForegroundColor Cyan
+    Write-Host ('  psmux:   ' + (Get-Command psmux -EA SilentlyContinue).Source) -ForegroundColor Cyan
+    Write-Host '============================================================' -ForegroundColor Cyan
+    Write-Host ''
+
+    # -IncludeInteractive : run the TUI suites instead of skipping them
+    # -IncludeWSL         : run the tmux parity suites (WSL tmux present)
+    # (no -SkipPerf)      : perf/stress suites run too
+    #
+    # Splat a HASHTABLE, not an array. Array splatting binds every element
+    # POSITIONALLY, so '-IncludeInteractive' was handed to the first positional
+    # parameter ([int]$DefaultTimeoutSec), the runner died on the type conversion,
+    # and the launcher still reported exit code 0. A full run appeared to start
+    # and vanished silently.
+    $params = @{ IncludeInteractive = $true; IncludeWSL = $true }
+
+    # Fold forwarded arguments (-Resume, -Only <regex>, -SkipPerf, ...) into the
+    # same hashtable: a token taking a non-dash token after it is a name/value
+    # pair, anything else is a switch.
+    $fwd = @($Forward | Where-Object { $_ })
+    for ($i = 0; $i -lt $fwd.Count; $i++) {
+        $tok = $fwd[$i]
+        if ($tok -notmatch '^-') {
+            Write-Host "  ignoring stray argument: $tok" -ForegroundColor Yellow
+            continue
+        }
+        $name = $tok.TrimStart('-')
+        if ($i + 1 -lt $fwd.Count -and $fwd[$i + 1] -notmatch '^-') {
+            $params[$name] = $fwd[$i + 1]
+            $i++
+        } else {
+            $params[$name] = $true
+        }
+    }
+
+    & (Join-Path $PSScriptRoot 'run_all_tests.ps1') @params
+    $rc = $LASTEXITCODE
+} finally {
+    # Only clear the lock if it is still ours; a later run must not lose its lock
+    # to this one's cleanup.
+    $cur = (Get-Content $lockFile -Raw -EA SilentlyContinue)
+    if ($cur -and $cur.Trim().StartsWith("$PID`:")) { Remove-Item $lockFile -Force -EA SilentlyContinue }
+}
+
+exit $rc
