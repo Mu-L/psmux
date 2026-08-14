@@ -22,6 +22,12 @@ class Injector
     [DllImport("user32.dll")]
     static extern uint MapVirtualKeyW(uint code, uint mapType);
 
+    // Maps a character to the virtual key plus modifiers that produce it on the
+    // current keyboard layout. Low byte is the VK, high byte is the modifier
+    // mask (1 Shift, 2 Ctrl, 4 Alt); -1 means the character has no key.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern short VkKeyScanW(char ch);
+
     const ushort KEY_EVENT = 1;
     const uint LEFT_CTRL_PRESSED = 0x0008;
     const uint SHIFT_PRESSED = 0x0010;
@@ -300,7 +306,38 @@ class Injector
                 else if (c == '+') { vk = 0xBB; ctrl = SHIFT_PRESSED; }
                 else if (c == '}') { vk = 0xDD; ctrl = SHIFT_PRESSED; }
                 else if (c == '{') { vk = 0xDB; ctrl = SHIFT_PRESSED; }
-                else vk = (ushort)c;
+                else
+                {
+                    // Anything not in the table above: ask Windows for the key
+                    // that produces this character on the CURRENT layout, rather
+                    // than assuming the character code IS the virtual key.
+                    //
+                    // The old fallback was vk = (ushort)c, which is wrong for
+                    // every punctuation character it was reached for. '|' is
+                    // 0x7C, and 0x7C is VK_F13, so typing a pipe pressed F13:
+                    // the character never arrived, and the stray function key was
+                    // free to trigger a binding. That silently turned
+                    // "set-option -g window-status-separator |" into the same
+                    // command with an EMPTY value, and the commands after it
+                    // stopped taking effect.
+                    //
+                    // VkKeyScanW returns the virtual key in the low byte and the
+                    // required modifiers in the high byte (1 = Shift, 2 = Ctrl,
+                    // 4 = Alt), which also makes shifted punctuation correct
+                    // without hand-maintaining a table.
+                    short scan = VkKeyScanW(c);
+                    if (scan == -1)
+                    {
+                        log.Add(string.Format("  SKIP '{0}' (U+{1:X4}): no key on this layout", c, (int)c));
+                        i++;
+                        continue;
+                    }
+                    vk = (ushort)(scan & 0xFF);
+                    int mods = (scan >> 8) & 0xFF;
+                    if ((mods & 1) != 0) ctrl |= SHIFT_PRESSED;
+                    if ((mods & 2) != 0) ctrl |= LEFT_CTRL_PRESSED;
+                    if ((mods & 4) != 0) ctrl |= LEFT_ALT_PRESSED;
+                }
 
                 if (SendKey(handle, vk, c, ctrl, log)) injected++;
                 i++;
