@@ -24,6 +24,46 @@ function Add-Result($name, $pass, $detail="") {
     Write-Host "  $mark $name$(if($detail){' '+$detail}else{''})"
 }
 
+# Wait for a real TUI app to take over the pane, and for the shell to come back
+# afterwards. Fixed sleeps do not work here: opencode is a Bun/Node TUI that takes
+# about ten seconds to draw its first frame on this machine, so a 750ms sleep sent
+# Ctrl+C while the shell was still launching it. The app then started AFTER the
+# interrupt and kept running, leaving the pane with no prompt and failing every
+# check that followed. Given time to start, Ctrl+C exits it cleanly.
+function Wait-AppTookOver($session, $timeoutSec = 25) {
+    # Two conditions, both required:
+    #   1. the shell prompt is gone from the WHOLE pane, not just the last line
+    #   2. the app has actually drawn something
+    #
+    # Condition 2 is what makes this reliable. A TUI clears the screen the moment
+    # it starts, so for the first several seconds the pane is BLANK: the prompt is
+    # already gone but the app is not up yet. Checking only "the last line is not
+    # a prompt" was satisfied by that blank screen and declared the app ready
+    # after about a second, which sent Ctrl+C straight into opencode's startup.
+    # Measured lifecycle: blank at t+3s and t+6s, first frame at t+9s, and once
+    # it is really up Ctrl+C returns the prompt within 3 seconds.
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        $cap = psmux capture-pane -t $session -p 2>&1 | Out-String
+        if ($cap -match 'PS [A-Z]:\\') { continue }
+        $last = ($cap -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 1)
+        if ($last -and $last.Trim().Length -gt 0) { return $true }
+    }
+    return $false
+}
+
+function Wait-ShellBack($session, $timeoutSec = 15) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    $cap = ""
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        $cap = psmux capture-pane -t $session -p 2>&1 | Out-String
+        if ($cap -match 'PS [A-Z]:\\') { break }
+    }
+    return $cap
+}
+
 # Create a fake TUI that enables all terminal modes and exits cleanly
 $fakeTuiClean = @'
 $esc = [char]27
@@ -242,13 +282,20 @@ if ($opencodePath) {
     psmux new-session -d -s tui_oc -x 120 -y 30 2>$null
     Start-Sleep -Milliseconds 750
     
+    # Wait for opencode to actually BE RUNNING before interrupting it, and then
+    # for the shell to actually come back. The old code slept 750ms after
+    # launching and 1s after Ctrl+C.
+    #
+    # opencode is a Bun/Node TUI and takes several seconds to draw its first
+    # frame: measured at roughly 10 seconds on this machine. So Ctrl+C landed
+    # while the shell was still starting it, and opencode then came up AFTER the
+    # interrupt and kept running, which is why the pane had no prompt and the
+    # three checks below failed. Given time to start, Ctrl+C exits it cleanly and
+    # the prompt returns (verified: last pane line "PS C:\cctest>").
     psmux send-keys -t tui_oc "cd c:\cctest && opencode" Enter
-    Start-Sleep -Milliseconds 750
-    
+    Add-Result "opencode: launched and took over the pane" (Wait-AppTookOver 'tui_oc' 25)
     psmux send-keys -t tui_oc C-c
-    Start-Sleep -Seconds 1
-    
-    $capOC = psmux capture-pane -t tui_oc -p 2>&1 | Out-String
+    $capOC = Wait-ShellBack 'tui_oc' 15
     
     $hasOcGarbage = $capOC -match '\[\d{2,};[\d;]+[Mm]'
     Add-Result "opencode Ctrl+C: no garbled mouse sequences" (-not $hasOcGarbage)
@@ -320,18 +367,22 @@ if ($pstopPath -and $opencodePath) {
     psmux new-session -d -s tui_combo -x 120 -y 30 2>$null
     Start-Sleep -Milliseconds 750
     
+    # Same rule as Group 4: wait for each app to actually take over the pane
+    # before interrupting it, and for the shell to come back before moving on.
+    # Interrupting opencode 750ms after launch left it starting up AFTER the
+    # Ctrl+C, so it was still running when the checks below ran.
     psmux send-keys -t tui_combo "pstop.exe" Enter
-    Start-Sleep -Seconds 1
+    Add-Result "Combo: pstop took over the pane" (Wait-AppTookOver 'tui_combo' 20)
     psmux send-keys -t tui_combo C-c
-    Start-Sleep -Seconds 1
-    
+    $null = Wait-ShellBack 'tui_combo' 15
+
     psmux send-keys -t tui_combo "cd c:\cctest && opencode" Enter
-    Start-Sleep -Milliseconds 750
+    Add-Result "Combo: opencode took over the pane" (Wait-AppTookOver 'tui_combo' 25)
     psmux send-keys -t tui_combo C-c
-    Start-Sleep -Seconds 1
-    
+    $null = Wait-ShellBack 'tui_combo' 15
+
     psmux send-keys -t tui_combo "echo combo_test_ok" Enter
-    Start-Sleep -Seconds 1
+    Start-Sleep -Seconds 2
     $capC = psmux capture-pane -t tui_combo -p 2>&1 | Out-String
     Add-Result "Combo test: typing works" ($capC -match 'combo_test_ok')
     
