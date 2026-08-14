@@ -10,7 +10,7 @@ use crate::pane::{create_window, split_active, kill_active_pane};
 use crate::copy_mode::{enter_copy_mode, scroll_copy_up, switch_with_copy_save, paste_latest,
     capture_active_pane, save_latest_buffer};
 use crate::session::{send_control_to_port, list_all_sessions_tree};
-use crate::window_ops::toggle_zoom;
+use crate::window_ops::{toggle_zoom, unzoom_if_zoomed};
 
 /// Parse a popup dimension spec: "80" (absolute) or "95%" (percentage of term_dim).
 pub(crate) fn parse_popup_dim_local(spec: &str, term_dim: u16, default: u16) -> u16 {
@@ -932,7 +932,14 @@ pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
         }
         "split-window" | "splitw" | "split-pane" | "splitp" => {
             let kind = if parts.iter().any(|p| *p == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
+            let zoom_after_split = parts.iter().any(|p| *p == "-Z");
+            if zoom_after_split {
+                unzoom_if_zoomed(app);
+            }
             split_active(app, kind)?;
+            if zoom_after_split {
+                toggle_zoom(app);
+            }
         }
         "kill-pane" | "killp" => { kill_active_pane(app)?; }
         "capture-pane" | "capturep" => { capture_active_pane(app)?; }
@@ -977,6 +984,11 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 // Forward the full command string to preserve -c, -d, -p etc. flags
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else if parts.iter().any(|p| *p == "-Z") {
+                let kind = if parts.iter().any(|p| *p == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
+                unzoom_if_zoomed(app);
+                split_active(app, kind)?;
+                toggle_zoom(app);
             }
         }
         "kill-pane" => {

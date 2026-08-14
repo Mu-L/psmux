@@ -1589,7 +1589,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // other clients' commands.
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
-                CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp, title, env_sets) => {
+                CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp, title, env_sets, zoom_after_split) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     // tmux: split-window without -Z permanently unzooms (#82)
                     unzoom_if_zoomed(&mut app);
@@ -1600,6 +1600,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         win.floating_focus.and_then(|fi| win.floating.get(fi)).map(|fp| (fp.x, fp.y, fp.w, fp.h, fp.border.clone()))
                     };
                     if let Some((sx, sy, sw, sh, sborder)) = float_src {
+                        // Floating panes are overlays, so tiled-window zoom does
+                        // not apply to splits created from a floating pane.
                         let win_w = app.last_window_area.width.max(10);
                         let win_h = app.last_window_area.height.max(10);
                         let nx = (sx + 2).min(win_w.saturating_sub(sw));
@@ -1624,13 +1626,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
                     let prev_path = app.windows[app.active_idx].active_path.clone();
-                    if let Err(e) = split_active_with_env(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets) {
-                        let msg = format!("split-window: {e}");
-                        app.status_message = Some((msg.clone(), std::time::Instant::now(), None));
-                        let _ = resp.send(format!("psmux: {msg}"));
-                    } else {
-                        let _ = resp.send(String::new());
-                    }
+                    let split_succeeded = match split_active_with_env(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets) {
+                        Err(e) => {
+                            let msg = format!("split-window: {e}");
+                            app.status_message = Some((msg.clone(), std::time::Instant::now(), None));
+                            let _ = resp.send(format!("psmux: {msg}"));
+                            false
+                        }
+                        Ok(()) => {
+                            let _ = resp.send(String::new());
+                            true
+                        }
+                    };
                     // Apply size if specified: (value, true) = percentage, (value, false) = cell count
                     if let Some((val, is_pct)) = split_size {
                         let pct = if is_pct {
@@ -1682,6 +1689,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         temp_focus_restore = None;
                         app.temp_focus_saved_active = None;
                     }
+                    if zoom_after_split && split_succeeded {
+                        toggle_zoom(&mut app);
+                    }
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     // Replenish warm pane for the next new-window/split
                     // Warm-pane replenish is deferred OFF the command path — it
@@ -1691,17 +1701,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                     }
                 }
-                CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, split_size, format_str, resp, title, env_sets) => {
+                CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, split_size, format_str, resp, title, env_sets, zoom_after_split) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     unzoom_if_zoomed(&mut app);
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
                     let prev_path = app.windows[app.active_idx].active_path.clone();
-                    if let Err(e) = split_active_with_env(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets) {
-                        app.status_message = Some((format!("split-window: {e}"), std::time::Instant::now(), None));
-                        eprintln!("psmux: split-window error: {e}");
-                    }
+                    let split_succeeded = match split_active_with_env(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets) {
+                        Err(e) => {
+                            app.status_message = Some((format!("split-window: {e}"), std::time::Instant::now(), None));
+                            eprintln!("psmux: split-window error: {e}");
+                            false
+                        }
+                        Ok(()) => true,
+                    };
                     // Apply size if specified: (value, true) = percentage, (value, false) = cell count
                     if let Some((val, is_pct)) = split_size {
                         let pct = if is_pct {
@@ -1745,6 +1759,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         temp_focus_restore = None;
                         app.temp_focus_saved_active = None;
+                    }
+                    if zoom_after_split && split_succeeded {
+                        toggle_zoom(&mut app);
                     }
                     let _ = resp.send(pane_info);
                     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
