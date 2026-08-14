@@ -13,6 +13,11 @@
 // pool self-heals.  These tests exercise (1) with real ConPTY spawns; (2) plus
 // the full prefix+c path is covered by tests/test_issue450_dead_warm_pane.ps1.
 
+// Every test here spawns a REAL warm pane, i.e. a live PTY child, so they all
+// take crate::util::lock_test_env() and run one at a time. The suite runs 2800+
+// tests in parallel and two of these racing on process spawn made
+// create_window_with_live_warm_pane_still_transplants fail intermittently in a
+// full run while passing 3 out of 3 on its own.
 use super::*;
 
 fn test_app() -> AppState {
@@ -52,6 +57,7 @@ fn cleanup(app: &mut AppState) {
 
 #[test]
 fn warm_pane_is_live_reports_running_child() {
+    let _lock = crate::util::lock_test_env();
     let pty = native_pty_system();
     let mut app = test_app();
     let mut wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
@@ -64,6 +70,7 @@ fn warm_pane_is_live_reports_running_child() {
 
 #[test]
 fn warm_pane_is_live_reports_dead_child() {
+    let _lock = crate::util::lock_test_env();
     let pty = native_pty_system();
     let mut app = test_app();
     let mut wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
@@ -79,6 +86,7 @@ fn warm_pane_is_live_reports_dead_child() {
 /// warm pane id, dead child).  After the fix it must cold-spawn a live shell.
 #[test]
 fn create_window_with_dead_warm_pane_delivers_live_shell() {
+    let _lock = crate::util::lock_test_env();
     let pty = native_pty_system();
     let mut app = test_app();
     let mut wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
@@ -109,6 +117,7 @@ fn create_window_with_dead_warm_pane_delivers_live_shell() {
 /// transplanted (same pane id), keeping new-window instant.
 #[test]
 fn create_window_with_live_warm_pane_still_transplants() {
+    let _lock = crate::util::lock_test_env();
     let pty = native_pty_system();
     let mut app = test_app();
     let wp = spawn_warm_pane(&*pty, &mut app).expect("spawn warm pane");
@@ -131,6 +140,7 @@ fn create_window_with_live_warm_pane_still_transplants() {
 /// a split; the split still succeeds via cold spawn.
 #[test]
 fn split_with_dead_warm_pane_delivers_live_shell() {
+    let _lock = crate::util::lock_test_env();
     let pty = native_pty_system();
     let mut app = test_app();
     // First window (cold spawn — no warm pane staged yet).

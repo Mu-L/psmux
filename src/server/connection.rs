@@ -122,6 +122,9 @@ fn decode_send_command(line: &str) -> Option<(String, Vec<u8>)> {
     for (i, a) in args.iter().enumerate() {
         if a.starts_with('-') { continue; }
         if prev_consumes_operand(i) { continue; }
+        // An empty operand contributes no keystroke (tmux semantics), so it must
+        // not reach the key lookup here either.
+        if a.is_empty() { continue; }
         // Hex codepoint?
         let s = *a;
         if literal_byte {
@@ -1417,6 +1420,25 @@ match cmd {
         // The `--` marker itself is never an operand.
         let is_operand = |i: usize, a: &str| -> bool {
             if is_marker(i) { return false; }
+            // An EMPTY argument sends nothing, as in tmux. Writing
+            // `send-keys -t x "X" ""` is an ordinary way to say "type X with no
+            // trailing newline", and the empty argument must produce no
+            // keystroke whatsoever.
+            //
+            // It used to qualify as an operand (an empty string does not start
+            // with '-') and travel on as a key NAMED "", which matched no key
+            // name and fell through to a handler that deleted the rest of the
+            // line. Measured against tmux 3.4 with an identical sequence:
+            //
+            //   type "echo arrow_ABC", then Left Left Left, then `"X" ""`
+            //     tmux   -> arrow_XABC
+            //     psmux  -> arrow_AX     (everything right of the cursor gone)
+            //
+            // It stayed hidden because it is invisible when the cursor is at the
+            // end of the line: only an edit in the MIDDLE of a line shows it.
+            // The check is before past_opts so an empty token after `--` is
+            // dropped too.
+            if a.is_empty() { return false; }
             if past_opts(i) { return true; }
             !a.starts_with('-') && !prev_consumes_operand(i)
         };
@@ -3713,8 +3735,11 @@ fn dispatch_control_command(
             }
             // Convert real-tmux 0xNN hex codepoint syntax (used by iTerm2 for
             // every keystroke: `send -t %1 0xd` etc.) into literal characters.
+            // An empty operand sends nothing, as in tmux. Same rule as the
+            // `is_operand` helper in the send-keys handler above, which carries
+            // the full explanation.
             let keys: Vec<String> = args.iter().enumerate().filter(|(i, a)| {
-                !a.starts_with('-') && !prev_consumes_operand(*i)
+                !a.is_empty() && !a.starts_with('-') && !prev_consumes_operand(*i)
             }).map(|(_, a)| {
                 let s = *a;
                 if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
