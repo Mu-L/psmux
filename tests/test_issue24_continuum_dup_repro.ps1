@@ -18,7 +18,15 @@ $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SESSION = "issue24_repro"
 $psmuxDir = "$env:USERPROFILE\.psmux"
-$PLUGINCONF = "$psmuxDir\plugins\psmux-continuum\plugin.conf"
+# Resolve the plugin the same way psmux does. src/config.rs searches BOTH
+# ~/.psmux/plugins/<name>/ and ~/.psmux/plugins/psmux-plugins/<name>/, because
+# the plugin collection is normally cloned as one repo and each plugin then sits
+# one level deeper. This hardcoded only the flat path, so with a normal install
+# it aborted at "plugin.conf not found" without running a single check.
+$PLUGINROOTS = @("$psmuxDir\plugins\psmux-continuum", "$psmuxDir\plugins\psmux-plugins\psmux-continuum")
+$PLUGINDIR = $PLUGINROOTS | Where-Object { Test-Path (Join-Path $_ "plugin.conf") } | Select-Object -First 1
+if (-not $PLUGINDIR) { $PLUGINDIR = $PLUGINROOTS[0] }
+$PLUGINCONF = Join-Path $PLUGINDIR "plugin.conf"
 $script:Pass = 0; $script:Fail = 0
 function Write-Pass($m){ Write-Host "  [PASS] $m" -ForegroundColor Green; $script:Pass++ }
 function Write-Fail($m){ Write-Host "  [FAIL] $m" -ForegroundColor Red; $script:Fail++ }
