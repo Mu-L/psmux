@@ -1276,11 +1276,18 @@ match cmd {
         }
     }
     "pane-scroll" => {
-        // pane-scroll PANE_ID up|down
+        // pane-scroll PANE_ID up|down [COL ROW]
+        // COL/ROW are the pointer's pane-relative 0-based position.  They are
+        // optional so that a client from an older build still scrolls (#570).
         if args.len() >= 2 {
             if let Ok(pane_id) = args[0].parse::<usize>() {
                 let up = args[1] == "up";
-                let _ = tx.send(CtrlReq::PaneScroll(client_id, pane_id, up));
+                let at = match (args.get(2).and_then(|s| s.parse::<i16>().ok()),
+                                args.get(3).and_then(|s| s.parse::<i16>().ok())) {
+                    (Some(col), Some(row)) => Some((col, row)),
+                    _ => None,
+                };
+                let _ = tx.send(CtrlReq::PaneScroll(client_id, pane_id, up, at));
             }
         }
     }

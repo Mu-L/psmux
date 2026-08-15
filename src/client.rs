@@ -4595,10 +4595,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 rsel_end = None;
                                 rsel_dragged = false;
                                 selection_changed = true;
-                                if let Some(&(pane_id, _)) = client_pane_rects.iter().find(|(_, r)| {
+                                if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                     r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                 }) {
-                                    cmd_batch.push(format!("pane-scroll {} up\n", pane_id));
+                                    let rel_col = me.column as i16 - pane_rect.x as i16;
+                                    let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
+                                    cmd_batch.push(format!("pane-scroll {} up {} {}\n", pane_id, rel_col, rel_row));
                                 } else {
                                     cmd_batch.push(format!("scroll-up {} {}\n", me.column, me.row));
                                 }
@@ -4608,10 +4610,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 rsel_end = None;
                                 rsel_dragged = false;
                                 selection_changed = true;
-                                if let Some(&(pane_id, _)) = client_pane_rects.iter().find(|(_, r)| {
+                                if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                     r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                 }) {
-                                    cmd_batch.push(format!("pane-scroll {} down\n", pane_id));
+                                    let rel_col = me.column as i16 - pane_rect.x as i16;
+                                    let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
+                                    cmd_batch.push(format!("pane-scroll {} down {} {}\n", pane_id, rel_col, rel_row));
                                 } else {
                                     cmd_batch.push(format!("scroll-down {} {}\n", me.column, me.row));
                                 }

@@ -1512,8 +1512,11 @@ pub enum CtrlReq {
     /// Fields: client_id, pane_id, sgr_button, col_0based, row_0based, press
     PaneMouse(u64, usize, u8, i16, i16, bool),
     /// Client-side semantic scroll: targeted by pane ID.
-    /// Fields: client_id, pane_id, up (true=up, false=down)
-    PaneScroll(u64, usize, bool),
+    /// Fields: client_id, pane_id, up (true=up, false=down), pointer position as
+    /// pane-relative 0-based (col, row).  The position is optional because older
+    /// clients send `pane-scroll PANE up|down` with no coordinates; when it is
+    /// absent the server falls back to the pane centre.
+    PaneScroll(u64, usize, bool, Option<(i16, i16)>),
     /// Client-side semantic split resize: set sizes at a tree path.
     /// Fields: client_id, path, new sizes
     SplitSetSizes(u64, Vec<usize>, Vec<u16>),

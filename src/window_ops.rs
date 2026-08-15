@@ -1195,7 +1195,11 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
 }
 
 /// Handle a semantic scroll event targeted at a specific pane.
-pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool) {
+///
+/// `at` is the pointer's pane-relative 0-based (col, row).  It is `None` only
+/// when the request came from a client too old to send it, in which case the
+/// pane centre is used as before.
+pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Option<(i16, i16)>) {
     // Server request dispatch already applies this gate. Keep it here too so
     // alternate/direct callers cannot scroll or enter copy mode with mouse off.
     if !app.mouse_enabled {
@@ -1246,14 +1250,20 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool) {
         let sgr_btn: u8 = if up { 64 } else { 65 };
         let wheel_delta: i16 = if up { 120 } else { -120 };
         let button_state = ((wheel_delta as i32) << 16) as u32;
-        // Use center of pane for coordinates — some TUI frameworks
-        // (Bubble Tea) may ignore events at position (0,0) if it's
-        // outside the scrollable viewport.
+        // Report the wheel at the pointer's real position so the app can scroll
+        // the window actually under the cursor (#570).  A TUI with its own split
+        // layout (a file tree beside an editor, an embedded terminal) routes the
+        // wheel by column/row, so reporting a fixed point made every notch scroll
+        // whichever of its windows happened to cover that point.
+        //
+        // Only when the client did not send a position (older build) fall back to
+        // the pane centre: some TUI frameworks (Bubble Tea) ignore events at (0,0)
+        // when that is outside their scrollable viewport.
         let pane_area = rects.iter()
             .find(|(p, _)| *p == win.active_path)
             .map(|(_, a)| *a);
-        let (col, row) = pane_area.map_or((5, 5), |a| {
-            ((a.width / 2) as i16, (a.height / 2) as i16)
+        let (col, row) = at.unwrap_or_else(|| {
+            pane_area.map_or((5, 5), |a| ((a.width / 2) as i16, (a.height / 2) as i16))
         });
         if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
             inject_mouse_combined(pane, col, row, sgr_btn, true,
@@ -1669,7 +1679,7 @@ mod window_ops_tests {
     fn wheel_up_enters_copy_mode_and_repeated_wheel_scrolls_further() {
         let mut app = make_scrollback_app(true);
 
-        super::handle_pane_scroll(&mut app, 41, true);
+        super::handle_pane_scroll(&mut app, 41, true, None);
         assert!(matches!(app.mode, Mode::CopyMode));
         let first_offset = app.copy_scroll_offset;
         assert!(
@@ -1677,7 +1687,7 @@ mod window_ops_tests {
             "first wheel report must move into history"
         );
 
-        super::handle_pane_scroll(&mut app, 41, true);
+        super::handle_pane_scroll(&mut app, 41, true, None);
         assert!(
             app.copy_scroll_offset > first_offset,
             "repeated wheel reports must continue scrolling"
@@ -1688,7 +1698,7 @@ mod window_ops_tests {
     fn mouse_off_ignores_wheel_without_entering_copy_mode() {
         let mut app = make_scrollback_app(false);
 
-        super::handle_pane_scroll(&mut app, 41, true);
+        super::handle_pane_scroll(&mut app, 41, true, None);
         assert!(matches!(app.mode, Mode::Passthrough));
         assert_eq!(app.copy_scroll_offset, 0);
     }
