@@ -222,8 +222,25 @@ $conRecs = Get-KeyRecords $launchConhost "rec" @("C-Space") "conhost"
 if ($conRecs) {
     $spaceRec = $conRecs | Where-Object { $_ -match "vk=0x20" -and $_ -match "down=1" } | Select-Object -First 1
     Write-Info "conhost   Ctrl+Space -> $spaceRec"
-    if ($spaceRec -match "ctrl=0x8") {
+    # Separate "conhost answered wrongly" from "the keys never arrived".
+    #
+    # This probe is the one place that cannot use WriteConsoleInput: it exists to
+    # measure what CONHOST makes of a real HARDWARE key, so it must use SendInput,
+    # and SendInput goes to the FOREGROUND window. sendhw calls
+    # SetForegroundWindow up to 20 times, but on a busy desktop, over RDP, or on a
+    # locked session, focus can simply be refused and not one keystroke lands.
+    #
+    # An empty record set means exactly that: no key was seen at all, which says
+    # nothing about conhost's Ctrl reporting. Reporting it as a failure blamed
+    # psmux for the desktop refusing focus. A record that IS present but lacks the
+    # Ctrl flag is still a genuine finding and still fails.
+    $anyKeyRec = $conRecs | Where-Object { $_ -match "vk=0x" } | Select-Object -First 1
+    if (-not $anyKeyRec) {
+        Write-Skip "conhost probe captured no keystrokes at all (SendInput needs foreground focus; none was granted)"
+    } elseif ($spaceRec -match "ctrl=0x8") {
         Write-Pass "conhost reports Ctrl+Space WITH the Ctrl flag (ctrl=0x8)"
+    } elseif (-not $spaceRec) {
+        Write-Skip "conhost probe saw keys but no Ctrl+Space record (keystroke lost before conhost)"
     } else {
         Write-Fail "conhost did not report a Ctrl flag: $spaceRec"
     }

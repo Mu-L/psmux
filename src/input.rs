@@ -2083,6 +2083,45 @@ fn for_each_receiving_pane<F: FnMut(&mut Pane)>(app: &mut AppState, mut f: F) {
     }
 }
 
+/// Stamp the INTERACTIVE-route signals for input that arrived from an attached
+/// client rather than from `send-keys`.
+///
+/// The signals are recorded where `forward_key_to_active` runs, but an attached
+/// client does not run it: the client forwards its keystrokes to the server as
+/// `send-text` / `send-key` control commands, and the server writes them to the
+/// pty. So `#{pane_last_special_key}`, `_ms` and `#{pane_last_text_input}` were
+/// empty for every real user of an attached session, in every path that can read
+/// them, including the status bar the user is looking at.
+///
+/// The injected route stays unstamped, as documented: `send-keys` arrives as
+/// CtrlReq::SendKeys (plural), a different message that does not call these.
+pub fn stamp_interactive_text(app: &mut AppState) {
+    let now = Instant::now();
+    for_each_receiving_pane(app, |p| p.last_text_input = Some(now));
+}
+
+/// Same, for a non-text key forwarded by an attached client. `name` is the
+/// canonical bind-key spelling the client already sends (Escape, Enter, Up, F9,
+/// C-c, M-a, ...). A single-character payload is ordinary typing, so it is
+/// recorded as text input to match `is_text_input_key`.
+pub fn stamp_interactive_key(app: &mut AppState, name: &str) {
+    if name.chars().count() == 1 {
+        stamp_interactive_text(app);
+        return;
+    }
+    // Report the CANONICAL bind-key spelling, not the client's wire spelling.
+    // The client sends "esc" and "enter"; the documented value of
+    // #{pane_last_special_key} is the bind-key name, "Escape" and "Enter", which
+    // is what the local route produces via format_key_binding. Round-tripping the
+    // wire name through the product's own key tables keeps the two routes
+    // identical instead of hand-maintaining a second spelling.
+    let canonical = crate::config::parse_key_name(name)
+        .map(|(code, mods)| crate::config::format_key_binding(&(code, mods)))
+        .unwrap_or_else(|| name.to_string());
+    let now = Instant::now();
+    for_each_receiving_pane(app, |p| p.last_special_key = Some((now, canonical.clone())));
+}
+
 pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()> {
     // Record use of the INTERACTIVE input route as read-only route signals:
     // `#{pane_last_text_input}` (printable text) and, for every other key,

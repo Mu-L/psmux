@@ -2299,8 +2299,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(combined_buf.clone());
                     dump_state_seen_full.insert(dump_client_id);
                 }
-                CtrlReq::SendText(s) => { app.status_message = None; send_text_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
-                CtrlReq::SendKey(k) => { app.status_message = None; send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
+                CtrlReq::SendText(s) => { app.status_message = None; crate::input::stamp_interactive_text(&mut app); send_text_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
+                CtrlReq::SendKey(k) => { app.status_message = None; crate::input::stamp_interactive_key(&mut app, &k); send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::ZoomPane => { toggle_zoom(&mut app); state_dirty = true; meta_dirty = true; hook_event = Some("after-resize-pane"); }
                 CtrlReq::PrefixBegin => { app.client_prefix_active = true; state_dirty = true; }
