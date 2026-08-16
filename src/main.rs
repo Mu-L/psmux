@@ -3899,7 +3899,15 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // A direct file sink that could not be opened answers
+                // "ERROR: ..."; exiting 0 on it recorded nothing and looked
+                // identical to success (same shape as #559). Acceptance
+                // answers nothing.
+                let resp = send_control_with_response(cmd)?;
+                if resp.trim_start().starts_with("ERROR") {
+                    eprint!("{}", resp);
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // find-window - Search for a window

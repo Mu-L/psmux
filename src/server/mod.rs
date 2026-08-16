@@ -44,6 +44,33 @@ use crate::control;
 use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override, set_named_buffer_override};
 use crate::help;
 
+/// True when `path` sits on a mapped network drive (`DRIVE_REMOTE`): its
+/// CreateFile can stall like a UNC path when the host is unreachable, so the
+/// direct file sink refuses it and points the user at a shell sink (which
+/// runs as a child process and stalls only itself). `GetDriveTypeW` reads
+/// the local mount table and does not touch the network.
+#[cfg(windows)]
+fn file_sink_drive_is_remote(path: &str) -> bool {
+    // Judge `\\?\Z:\...` like `Z:\...`.
+    let p = path.strip_prefix("\\\\?\\").unwrap_or(path);
+    let bytes = p.as_bytes();
+    if bytes.len() < 2 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
+        return false; // relative or non-drive path: resolved locally
+    }
+    let root: [u16; 4] = [bytes[0] as u16, b':' as u16, b'\\' as u16, 0];
+    // winbase.h GetDriveTypeW return value (windows-sys 0.61 does not
+    // re-export the DRIVE_* constants).
+    const DRIVE_REMOTE: u32 = 4;
+    unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE
+    }
+}
+
+#[cfg(not(windows))]
+fn file_sink_drive_is_remote(_path: &str) -> bool {
+    false
+}
+
 /// Build a JSON fragment with overlay state (popup, menu, confirm, display_panes).
 /// Delegates popup-specific serialization to the popup module.
 fn serialize_overlay_json(app: &AppState) -> String {
@@ -4272,7 +4299,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     let _ = resp.send(output);
                 }
-                CtrlReq::PipePane(cmd, stdin, stdout, toggle) => {
+                CtrlReq::PipePane(cmd, stdin, stdout, toggle, mut reply) => {
                     // The `-t` target (if any) was temp-focused by the connection
                     // layer before this request ran, so the active pane here IS the
                     // requested target pane (issue #440 defect 2). The pipe binds to
@@ -4294,9 +4321,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             if !alive { reaped.push(p.pane_id); }
                             alive
                         }
-                        // No handle to check: keep it, the explicit-close paths
-                        // below still remove it.
-                        None => true,
+                        // No child: a direct file sink. Its liveness IS the
+                        // registered writer — when the reader thread dropped
+                        // it on a failed write, keeping the entry would make
+                        // `-o` toggle OFF a dead sink again (the exact #564
+                        // shape). A pane_id match from another writer kind
+                        // (cross-session tunnel) errs on keeping the entry,
+                        // which is the pre-existing behavior.
+                        None => crate::types::PIPE_WRITERS
+                            .lock()
+                            .map(|w| w.iter().any(|(id, _)| *id == p.pane_id))
+                            .unwrap_or(true),
                     });
 
                     // Drop any writer this pane's reader thread was teeing to
@@ -4321,6 +4356,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // anything since leaves one registered.
                     for pid in reaped { unregister_writer(pid); }
                     let has_existing = app.pipe_panes.iter().any(|p| p.pane_id == pane_id);
+
+                    // Non-empty only when the sink could not be started; sent
+                    // to the reply channel at the end of the arm so the
+                    // one-shot CLI can exit non-zero (see CtrlReq::PipePane).
+                    let mut outcome = String::new();
 
                     if cmd.is_empty() {
                         // No command: close any existing pipe on this pane
@@ -4349,9 +4389,96 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                             app.pipe_panes.remove(idx);
                         }
-                        // Start new pipe
+                        // Direct file sink: the canonical tmux logging idiom
+                        // `cat > file` / `cat >> file` cannot work through the
+                        // Windows sink shell — PowerShell's `cat` is the
+                        // Get-Content alias, never reads stdin, and exits at
+                        // once, so the redirect left a 0-byte file with rc 0.
+                        // Service the idiom in-process instead: the reader
+                        // thread tees the pane's raw ConPTY bytes straight
+                        // into the file (byte-faithful, no shell, no child to
+                        // fail silently). Output direction only; `-I` and
+                        // every other command shape keep the shell sink.
+                        let file_sink = if stdout && !stdin {
+                            crate::util::parse_cat_file_sink(&cmd)
+                        } else {
+                            None
+                        };
+                        if let Some((path, append)) = file_sink {
+                            // The open runs on the server's single event loop,
+                            // so it must never be a call that can stall or hit
+                            // a device. A local CreateFile is microseconds;
+                            // UNC/remote-drive resolution against an
+                            // unreachable host blocks for tens of seconds and
+                            // would freeze every pane, and a DOS device name
+                            // opens the DEVICE (`cat > CON` would tee VT bytes
+                            // into the server's own console). All of those are
+                            // refused loudly; a sink command that reads stdin
+                            // runs as a child process and stalls only itself.
+                            // Known residual: a local directory junction that
+                            // resolves to an unreachable target can still
+                            // stall the open.
+                            if let Some(reason) = crate::util::refuse_file_sink_path(&path) {
+                                outcome = format!("ERROR: pipe-pane: {}: {}", reason, path);
+                            } else if file_sink_drive_is_remote(&path) {
+                                outcome = format!(
+                                    "ERROR: pipe-pane: remote drive not supported for the direct file sink (use a sink command that reads stdin): {}",
+                                    path
+                                );
+                            } else {
+                            let mut opts = std::fs::OpenOptions::new();
+                            opts.create(true).write(true);
+                            if append { opts.append(true); } else { opts.truncate(true); }
+                            match opts.open(&path) {
+                                Ok(file) => {
+                                    if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
+                                        writers.push((pane_id, Box::new(file)));
+                                        crate::types::PIPE_PANE_COUNT
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        app.pipe_panes.push(PipePaneState {
+                                            pane_id,
+                                            process: None,
+                                            stdin,
+                                            stdout,
+                                        });
+                                    } else {
+                                        // Poisoned registry: recording the pane as
+                                        // piped with no writer would be exactly the
+                                        // phantom pipe this change removes.
+                                        outcome =
+                                            "ERROR: pipe-pane: writer registry unavailable".to_string();
+                                    }
+                                }
+                                Err(e) => {
+                                    outcome = format!("ERROR: pipe-pane: can't open {}: {}", path, e);
+                                }
+                            }
+                            }
+                            // The reply channel only reaches the one-shot CLI;
+                            // a pipe-pane issued from a key binding or the
+                            // command prompt discards it, so mirror the
+                            // failure on the status bar (same surface the
+                            // shell-sink spawn failure below uses).
+                            if !outcome.is_empty() {
+                                app.status_message = Some((
+                                    outcome.trim_start_matches("ERROR: ").to_string(),
+                                    std::time::Instant::now(),
+                                    None,
+                                ));
+                            }
+                        } else {
+                        // Start new pipe. Answer "accepted" BEFORE spawning:
+                        // CreateProcess can stall for seconds on a cold
+                        // antivirus scan of the shell image, and holding the
+                        // reply hostage to it turns a successful pipe-pane
+                        // into a client-side timeout error. A spawn failure
+                        // is still not recorded (no phantom pipe) and is
+                        // surfaced on the status bar below.
+                        if let Some(tx) = reply.take() {
+                            let _ = tx.send(String::new());
+                        }
                         let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
-                        let mut process = {
+                        let spawn_result = {
                             let mut c = std::process::Command::new(&shell_prog);
                             for a in &shell_args { c.arg(a); }
                             c.arg(&cmd);
@@ -4359,33 +4486,52 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             c.stdout(if stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() });
                             c.stderr(std::process::Stdio::null());
                             { use crate::platform::HideWindowCommandExt; c.hide_window(); }
-                            c.spawn().ok()
+                            c.spawn()
                         };
-
-                        // Issue #440: hand the child's stdin to this pane's reader
-                        // thread so pane output is actually fed to the pipe command.
-                        // Without this the child blocked on an empty pipe forever and
-                        // the sink stayed 0 bytes. Only the output direction (`-O` /
-                        // default) registers a writer; `-I` (child stdout -> pane
-                        // input) is unchanged.
-                        if stdout {
-                            if let Some(child) = process.as_mut() {
-                                if let Some(stdin_handle) = child.stdin.take() {
-                                    if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
-                                        writers.push((pane_id, Box::new(stdin_handle)));
-                                        crate::types::PIPE_PANE_COUNT
-                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        match spawn_result {
+                            Ok(mut child) => {
+                                // Issue #440: hand the child's stdin to this pane's reader
+                                // thread so pane output is actually fed to the pipe command.
+                                // Without this the child blocked on an empty pipe forever and
+                                // the sink stayed 0 bytes. Only the output direction (`-O` /
+                                // default) registers a writer; `-I` (child stdout -> pane
+                                // input) is unchanged.
+                                if stdout {
+                                    if let Some(stdin_handle) = child.stdin.take() {
+                                        if let Ok(mut writers) = crate::types::PIPE_WRITERS.lock() {
+                                            writers.push((pane_id, Box::new(stdin_handle)));
+                                            crate::types::PIPE_PANE_COUNT
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
                                     }
                                 }
+
+                                app.pipe_panes.push(PipePaneState {
+                                    pane_id,
+                                    process: Some(child),
+                                    stdin,
+                                    stdout,
+                                });
+                            }
+                            Err(e) => {
+                                // A sink that never started must not be recorded:
+                                // the dead entry made a later `-o` toggle OFF a
+                                // nonexistent pipe and hid the failure behind rc 0
+                                // (`spawn().ok()` swallowed the error). The reply
+                                // was already sent, so report where run-shell -b
+                                // reports its spawn failures: the status bar.
+                                app.status_message = Some((
+                                    format!("pipe-pane: can't spawn sink: {}", e),
+                                    std::time::Instant::now(),
+                                    None,
+                                ));
                             }
                         }
+                        }
+                    }
 
-                        app.pipe_panes.push(PipePaneState {
-                            pane_id,
-                            process,
-                            stdin,
-                            stdout,
-                        });
+                    if let Some(reply) = reply {
+                        let _ = reply.send(outcome);
                     }
                 }
                 CtrlReq::SelectLayout(layout) => {

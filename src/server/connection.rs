@@ -2611,7 +2611,25 @@ match cmd {
         } else {
             (stdin_flag, stdout_flag)
         };
-        let _ = tx.send(CtrlReq::PipePane(cmd, stdin, stdout, toggle));
+        // Same reply shape as #559/#566: a direct file sink that cannot be
+        // opened must reach the caller as a non-zero exit, not a silent
+        // rc-0 no-op. The handler answers "" on acceptance; only an
+        // "ERROR: ..." reply is forwarded.
+        let (rtx, rrx) = mpsc::channel::<String>();
+        let _ = tx.send(CtrlReq::PipePane(cmd, stdin, stdout, toggle, Some(rtx)));
+        let resp = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
+        if !persistent {
+            if !resp.is_empty() {
+                let _ = write!(write_stream, "{}\n", resp);
+                let _ = write_stream.flush();
+            }
+            // pipe-pane can sit in the middle of a chained line
+            // (`pipe-pane -o ... \; display-message ...`); breaking with
+            // queued sub-commands would silently drop the rest of the
+            // chain. With no chain pending, the client's half-close ends
+            // the loop on the next read anyway.
+            if pending_chain.is_empty() { break; }
+        }
     }
     "select-layout" | "selectl" => {
         let layout = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"tiled").to_string();

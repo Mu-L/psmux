@@ -1701,7 +1701,14 @@ pub enum CtrlReq {
     PaneForwardStatus(u64, mpsc::Sender<String>),
     /// Kill a forwarded pane's child process. Fields: forward_id.
     PaneForwardKill(u64),
-    PipePane(String, bool, bool, bool),
+    /// pipe-pane. Fields: command, -I (stdin), -O (stdout), -o (toggle),
+    /// optional response channel. The handler answers "" on acceptance and
+    /// "ERROR: ..." when a direct file sink cannot be opened, so the
+    /// one-shot CLI can exit non-zero instead of recording a dead pipe with
+    /// rc 0 (same shape as #559/#566). Shell-sink spawns are answered
+    /// BEFORE spawning (CreateProcess can stall on a cold AV scan); their
+    /// failures are reported on the status bar and never recorded.
+    PipePane(String, bool, bool, bool, Option<mpsc::Sender<String>>),
     SelectLayout(String),
     NextLayout,
     ListClients(mpsc::Sender<String>),

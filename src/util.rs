@@ -341,6 +341,125 @@ pub fn quote_arg_if_needed(s: &str) -> String {
     }
 }
 
+/// Parse the canonical tmux logging idiom `cat > <path>` / `cat >> <path>`
+/// so `pipe-pane` can service it in-process as a direct file sink.
+///
+/// On Windows the piped command runs under PowerShell (`resolve_run_shell`),
+/// where `cat` is the `Get-Content` alias: it never reads stdin, exits at
+/// once, and the redirection leaves a 0-byte file — so the single most
+/// common tmux sink, and the one this repo's own docs show, could not work
+/// through the shell at all. Recognizing the idiom here lets the server
+/// write the pane's raw ConPTY bytes to the file itself: byte-faithful (no
+/// PowerShell line decoding/re-encoding) and with no child process to fail
+/// silently.
+///
+/// Returns `(path, append)` — `append` is true for `>>`. The path may be
+/// single- or double-quoted (one level stripped; inner quote characters
+/// arrive intact through the #547/#563 wire round-trip). Anything that is
+/// not exactly this shape — options on `cat`, an unquoted path containing
+/// whitespace, trailing tokens after a quoted path, shell metacharacters,
+/// anything a shell would expand (`$var`, backticks, `%var%`, leading `~`)
+/// — returns `None` and falls through to the shell sink unchanged: the
+/// file sink must only ever intercept a path the user meant literally.
+pub fn parse_cat_file_sink(cmd: &str) -> Option<(String, bool)> {
+    let trimmed = cmd.trim();
+    // PowerShell aliases are case-insensitive, so `CAT`/`Cat` hit the same
+    // Get-Content trap as `cat` — match the word the same way.
+    if trimmed.len() < 3 || !trimmed[..3].eq_ignore_ascii_case("cat") {
+        return None;
+    }
+    let rest = &trimmed[3..];
+    // `cat` must end at a word boundary: whitespace or the redirection itself.
+    if !rest.is_empty() && !rest.starts_with('>') && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let (append, rest) = if let Some(r) = rest.strip_prefix(">>") {
+        (true, r)
+    } else if let Some(r) = rest.strip_prefix('>') {
+        (false, r)
+    } else {
+        return None;
+    };
+    let path_part = rest.trim();
+    if path_part.is_empty() {
+        return None;
+    }
+    let quoted = |q: char| {
+        path_part.len() >= 2 && path_part.starts_with(q) && path_part.ends_with(q)
+    };
+    let path = if quoted('"') || quoted('\'') {
+        let inner = &path_part[1..path_part.len() - 1];
+        // A quote character inside means this was not one plainly quoted
+        // path (e.g. `"a" "b"`, or nested quoting) — shell territory. `$`
+        // and backticks are what PowerShell would expand inside double
+        // quotes; `#` is what tmux would expand as a format (`#I`, `#{...}`).
+        // Intercepting any of them would silently take the LITERAL text as
+        // a filename, so they go to the shell too.
+        if inner.is_empty() || inner.contains(['"', '\'', '$', '`', '#']) {
+            return None;
+        }
+        inner.to_string()
+    } else {
+        // Unquoted: whitespace, further shell syntax, or anything a shell
+        // would expand means the command is more than a plain literal file
+        // redirect — leave it to the shell.
+        if path_part.chars().any(char::is_whitespace)
+            || path_part.contains(['>', '<', '|', '&', '"', '\'', ';', '$', '`', '%', '(', ')', '^', '#'])
+            || path_part.starts_with('~')
+        {
+            return None;
+        }
+        path_part.to_string()
+    };
+    Some((path, append))
+}
+
+/// Path-shape gate for the direct file sink. The open runs on the server's
+/// single event loop, so every path class whose CreateFile can stall or hit
+/// a device instead of a file must be refused BEFORE opening:
+///
+/// - UNC (`\\server\share`, `//server/share`, `\\?\UNC\...`): CreateFile
+///   against an unreachable host blocks for tens of seconds and would
+///   freeze every pane. `\\?\C:\...` (extended-length local) is allowed.
+/// - DOS reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
+///   `LPT1`-`LPT9`, with or without an extension, in any directory):
+///   CreateFile opens the DEVICE — `cat > CON` would tee raw VT bytes into
+///   the server's own console while looking like a successful log.
+///
+/// Returns `Some(reason)` when the path must be refused. Remote-drive
+/// detection needs a live Win32 call and lives with the caller.
+pub fn refuse_file_sink_path(path: &str) -> Option<String> {
+    if path.starts_with("\\\\.\\") {
+        return Some("device namespace not supported for the direct file sink".to_string());
+    }
+    let is_unc_verbatim = path.to_ascii_lowercase().starts_with("\\\\?\\unc\\");
+    let is_verbatim_local = path.starts_with("\\\\?\\") && !is_unc_verbatim;
+    if !is_verbatim_local
+        && (path.starts_with("\\\\") || path.starts_with("//"))
+    {
+        return Some("UNC path not supported for the direct file sink".to_string());
+    }
+    let basename = path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(path);
+    let stem = basename.split('.').next().unwrap_or(basename);
+    let stem_upper = stem.trim().to_ascii_uppercase();
+    let reserved = matches!(stem_upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem_upper.len() == 4
+            && (stem_upper.starts_with("COM") || stem_upper.starts_with("LPT"))
+            && stem_upper.as_bytes()[3].is_ascii_digit()
+            && stem_upper.as_bytes()[3] != b'0');
+    if reserved {
+        return Some(format!(
+            "reserved device name '{}' not supported for the direct file sink",
+            stem_upper
+        ));
+    }
+    None
+}
+
 /// Parse `VARIABLE=value` for tmux `new-session -e` / internal `server -e`
 /// (split on the first `=` so values may contain `=`).
 pub fn parse_env_assignment(s: &str) -> Result<(String, String), &'static str> {
@@ -743,3 +862,7 @@ mod tests_deps_base64_parity;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue560_quote_arg_control_bytes.rs"]
 mod tests_issue560_quote_arg_control_bytes;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pipe_pane_cat_file_sink.rs"]
+mod tests_pipe_pane_cat_file_sink;
