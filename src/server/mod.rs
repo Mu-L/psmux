@@ -6345,6 +6345,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 mod tests_issue505_rename_session_guard;
 
 #[cfg(test)]
+#[path = "../../tests-rs/test_issue574_rename_loop_guard.rs"]
+mod tests_issue574_rename_loop_guard;
+
+#[cfg(test)]
 #[path = "../../tests-rs/test_server.rs"]
 mod tests;
 
