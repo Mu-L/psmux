@@ -1348,8 +1348,10 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
                     }
                 }
                 if let Some(pid) = p.child_pid {
-                    // Fallback: upstream process-tree heuristic, then shell binary name.
-                    crate::platform::process_info::get_foreground_process_name(pid)
+                    // Fallback: the deepest foreground descendant (what tmux
+                    // reports — `cat` running under a shell, not the shell),
+                    // then the pane's own process, then a generic label.
+                    crate::platform::process_info::get_deepest_foreground_process_name(pid)
                         .or_else(|| crate::platform::process_info::get_process_name(pid))
                         .unwrap_or_else(|| "shell".into())
                 } else if !p.title.is_empty() {

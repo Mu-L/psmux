@@ -3002,6 +3002,63 @@ pub mod process_info {
         None
     }
 
+    /// Name of the pane's DEEPEST foreground descendant, for
+    /// `#{pane_current_command}`.
+    ///
+    /// tmux answers that format with the program in front of the tty, so a
+    /// pane sitting at `pwsh -> bash -> cat` must report `cat`.
+    /// `get_foreground_process_name` cannot: it looks at the immediate child
+    /// and steps one further only for a known wrapper name, so the real
+    /// Windows shell chain (git bash alone is `bash.exe -> bash.exe`) already
+    /// exhausts its budget and the answer freezes at the shell. Control tools
+    /// that key off this format then mis-detect nesting and never see a command
+    /// finish.
+    ///
+    /// Resolution is on demand, off the shared render-path snapshot, and every
+    /// failure (snapshot unavailable, root has no descendants, the leaf's
+    /// executable path unreadable) degrades quietly so the caller can fall back
+    /// to the pane's own process name.
+    pub fn get_deepest_foreground_process_name(pid: u32) -> Option<String> {
+        let entries = process_table(RENDER_PATH_TTL)?;
+        let (leaf_pid, snapshot_name) = deepest_descendant(&entries, pid)?;
+        // The snapshot name is lowercased and carries `.exe`; the live query
+        // gives the real casing. Fall back to the snapshot when the leaf is
+        // gone or unopenable (an elevated process) rather than reporting the
+        // shell.
+        get_process_name(leaf_pid).or_else(|| {
+            Some(snapshot_name.strip_suffix(".exe").unwrap_or(&snapshot_name).to_string())
+        })
+    }
+
+    /// Follow the highest-PID non-system child at each level from `root_pid`
+    /// down to the deepest descendant, returning `(pid, snapshot_name)`.
+    /// `None` when the root has no descendants at all.
+    ///
+    /// Highest PID is this module's established "most recently created"
+    /// heuristic (Windows exposes no console foreground process group, and
+    /// Toolhelp32 carries no creation time). The iteration guard stops a
+    /// pathological loop from PID reuse inside one snapshot.
+    fn deepest_descendant(
+        entries: &[(u32, u32, String)],
+        root_pid: u32,
+    ) -> Option<(u32, String)> {
+        let mut cur = root_pid;
+        let mut leaf: Option<(u32, String)> = None;
+        for _ in 0..64 {
+            let next = entries.iter()
+                .filter(|(pid, ppid, name)| *ppid == cur && *pid != cur && !is_system_exe(name))
+                .max_by_key(|(pid, _, _)| *pid);
+            match next {
+                Some((pid, _, name)) => {
+                    cur = *pid;
+                    leaf = Some((*pid, name.clone()));
+                }
+                None => break,
+            }
+        }
+        leaf
+    }
+
     /// Get the CWD of the foreground process in the pane.
     pub fn get_foreground_cwd(pid: u32) -> Option<String> {
         if let Some(target) = find_foreground_child_pid(pid) {
@@ -3290,24 +3347,9 @@ pub mod process_info {
     fn foreground_leaf_name(root_pid: u32) -> Option<Option<String>> {
         let entries = process_table(std::time::Duration::ZERO)?;
 
-        // Descend to the deepest foreground leaf, skipping system
-        // processes, by following the highest-PID child at each level
-        // (a most-recently-created heuristic).  The iteration guard
-        // prevents pathological loops from PID-reuse cycles in the snapshot.
-        let mut cur = root_pid;
-        let mut leaf_name: Option<String> = None;
-        for _ in 0..64 {
-            let next = entries.iter()
-                .filter(|(pid, ppid, name)| *ppid == cur && *pid != cur && !is_system_exe(name))
-                .max_by_key(|(pid, _, _)| *pid);
-            match next {
-                Some((pid, _, name)) => {
-                    cur = *pid;
-                    leaf_name = Some(name.clone());
-                }
-                None => break,
-            }
-        }
+        // Descend to the deepest foreground leaf, skipping system processes
+        // (see `deepest_descendant`).
+        let leaf_name = deepest_descendant(&entries, root_pid).map(|(_, name)| name);
 
         // The process whose Ctrl+C behavior matters is the deepest
         // foreground leaf.  If the root has no children, classify the root
@@ -3367,6 +3409,7 @@ pub mod process_info {
     pub fn get_process_name(_pid: u32) -> Option<String> { None }
     pub fn get_process_cwd(_pid: u32) -> Option<String> { None }
     pub fn get_foreground_process_name(_pid: u32) -> Option<String> { None }
+    pub fn get_deepest_foreground_process_name(_pid: u32) -> Option<String> { None }
     pub fn get_foreground_cwd(_pid: u32) -> Option<String> { None }
     pub fn has_vt_bridge_descendant(_root_pid: u32) -> bool { false }
     pub fn foreground_is_shell(_root_pid: u32) -> Option<bool> { None }
