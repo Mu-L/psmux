@@ -1758,9 +1758,10 @@ match cmd {
         }
     }
     "set-buffer" => {
-        // Parse -b name, -w (clipboard propagation), and content
+        // Parse -b name, -w (clipboard propagation), -H hex content, and content
         let mut buf_name: Option<String> = None;
         let mut propagate_to_clipboard = false;
+        let mut hex_content: Option<&str> = None;
         let mut i = 0;
         let mut content_parts: Vec<&str> = Vec::new();
         while i < args.len() {
@@ -1772,6 +1773,16 @@ match cmd {
             } else if args[i] == "-w" {
                 propagate_to_clipboard = true;
                 i += 1;
+            } else if args[i] == "-H" {
+                // Byte-exact content, hex encoded. Bare words cannot carry a
+                // buffer: this line has already been split on `;`, tokenized
+                // with quote grouping stripped, and had runs of whitespace
+                // collapsed, so quotes, tabs, control bytes and newlines are
+                // gone before the handler runs. tmux's paste is verbatim, and
+                // for a buffer pasted at a shell prompt the lost quoting is a
+                // DIFFERENT command, not cosmetic damage.
+                hex_content = args.get(i + 1).copied();
+                i += 2;
             } else if args[i].starts_with('-') {
                 i += 1; // skip unknown flags
             } else {
@@ -1779,14 +1790,36 @@ match cmd {
                 break;
             }
         }
-        let content = content_parts.join(" ");
-        if propagate_to_clipboard {
-            crate::clipboard::copy_to_system_clipboard(&content);
-        }
-        if let Some(name) = buf_name {
-            let _ = tx.send(CtrlReq::SetNamedBuffer(name, content));
-        } else {
-            let _ = tx.send(CtrlReq::SetBuffer(content));
+        // A control-mode client is an external boundary, so a bad payload is
+        // refused loudly rather than stored half-decoded. psmux buffers are
+        // Rust `String`s, so non-UTF-8 bytes are rejected here too (the CLI
+        // never sends them: load-buffer reads the file as UTF-8 and errors on
+        // the file itself).
+        let content: Option<String> = match hex_content {
+            Some(hex) => crate::util::hex_decode(hex)
+                .and_then(|bytes| String::from_utf8(bytes).ok()),
+            None => Some(content_parts.join(" ")),
+        };
+        match content {
+            Some(content) => {
+                if propagate_to_clipboard {
+                    crate::clipboard::copy_to_system_clipboard(&content);
+                }
+                if let Some(name) = buf_name {
+                    let _ = tx.send(CtrlReq::SetNamedBuffer(name, content));
+                } else {
+                    let _ = tx.send(CtrlReq::SetBuffer(content));
+                }
+            }
+            None => {
+                let err = "set-buffer: -H requires hex-encoded UTF-8\n";
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("set-buffer".to_string(), format!("ERROR: {}", err.trim_end())));
+                } else {
+                    let _ = write!(write_stream, "ERROR: {}", err);
+                    let _ = write_stream.flush();
+                }
+            }
         }
     }
     "paste-buffer" | "pasteb" => {

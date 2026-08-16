@@ -525,10 +525,70 @@ pub fn collect_server_session_env_args(args: &[String]) -> Result<Vec<(String, S
     Ok(out)
 }
 
+/// Encode bytes as lowercase hex with no separators.
+///
+/// Used to carry a payload that must survive the control wire BYTE-EXACT.
+/// Every command line the server receives is tokenized before a handler sees
+/// it (`;` splits it into sub-commands, quote grouping is stripped, runs of
+/// whitespace collapse), so any operand that is data rather than a word has to
+/// be reduced to `[0-9a-f]` first.  `send -H` already does this for keystrokes;
+/// buffer contents use the same shape.
+pub fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
+/// Decode the output of [`hex_encode`].  `None` for an odd length or any
+/// non-hex character — a malformed payload is reported to the sender, never
+/// silently turned into partial data.
+pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = (bytes[i] as char).to_digit(16)?;
+        let lo = (bytes[i + 1] as char).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+        i += 2;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::parse_command_line;
+
+    /// The whole point of the hex wire: a buffer that the tokenizer would
+    /// otherwise destroy survives encode → tokenize → decode byte for byte.
+    #[test]
+    fn test_hex_buffer_wire_survives_tokenizer() {
+        let content = "printf '%s' 'QUOTED ARG'\tTAB\nline \"two\"; not-a-command\n\x1b[0m";
+        let line = format!("set-buffer -b pb -H {}", hex_encode(content.as_bytes()));
+        // What the server actually receives: the tokenized command line.
+        let toks = parse_command_line(&line);
+        assert_eq!(toks.len(), 5, "hex payload must stay a single token");
+        let decoded = hex_decode(&toks[4]).expect("valid hex");
+        assert_eq!(String::from_utf8(decoded).unwrap(), content);
+    }
+
+    #[test]
+    fn test_hex_encode_is_lowercase_pairs() {
+        assert_eq!(hex_encode(b"\x00\x0f\xff A"), "000fff2041");
+    }
+
+    #[test]
+    fn test_hex_decode_rejects_malformed() {
+        assert_eq!(hex_decode("abc"), None, "odd length");
+        assert_eq!(hex_decode("zz"), None, "non-hex digit");
+        assert_eq!(hex_decode(""), Some(Vec::new()));
+    }
 
     #[test]
     fn test_quote_arg_simple() {

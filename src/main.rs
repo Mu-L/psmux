@@ -2695,7 +2695,10 @@ fn run_main() -> io::Result<()> {
                 }
                 let mut cmd = "set-buffer".to_string();
                 if let Some(b) = buffer_name { cmd.push_str(&format!(" -b {}", b)); }
-                if let Some(d) = data { cmd.push_str(&format!(" {}", d)); }
+                // Same byte-exact wire as load-buffer: `set-buffer "a  'b'"`
+                // reached the server as three bare words and came back out of
+                // paste-buffer as `a b`.
+                if let Some(d) = data { cmd.push_str(&format!(" -H {}", crate::util::hex_encode(d.as_bytes()))); }
                 cmd.push('\n');
                 send_control(cmd)?;
                 return Ok(());
@@ -3803,9 +3806,15 @@ fn run_main() -> io::Result<()> {
                     if let Some(b) = buffer_name {
                         cmd.push_str(&format!(" -b {}", b));
                     }
-                    // Escape the content for transmission
-                    let escaped = content.replace('\n', "\\n").replace('\r', "\\r");
-                    cmd.push_str(&format!(" {}", escaped));
+                    // Byte-exact transport (see `set-buffer -H` in the server).
+                    // The content used to travel as bare words with newlines
+                    // escaped to a literal `\n`, so the server's tokenizer ate
+                    // it: quote grouping was stripped, tabs and runs of spaces
+                    // collapsed to one space, a `;` split the line into two
+                    // commands, and the `\n` two-char escape was never undone.
+                    // `paste-buffer` then faithfully pasted the damaged text —
+                    // `printf '%s' 'ARG'` arrived as `printf %s ARG`.
+                    cmd.push_str(&format!(" -H {}", crate::util::hex_encode(content.as_bytes())));
                     cmd.push('\n');
                     send_control(cmd)?;
                 }
