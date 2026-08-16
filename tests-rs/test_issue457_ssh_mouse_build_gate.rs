@@ -12,22 +12,31 @@
 
 use super::*;
 
+/// Restores `PSMUX_FAKE_WIN_BUILD` on drop so a failing assertion inside the
+/// closure still cleans up. Restoring after the call instead skips the restore
+/// on unwind, leaking a pinned build into every later test in the file.
+struct BuildRestore(Option<String>);
+
+impl Drop for BuildRestore {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(v) => std::env::set_var("PSMUX_FAKE_WIN_BUILD", v),
+            None => std::env::remove_var("PSMUX_FAKE_WIN_BUILD"),
+        }
+    }
+}
+
 /// Set `PSMUX_FAKE_WIN_BUILD` for the duration of the closure, restoring the
 /// previous value afterwards. Uses the shared env lock so it never races other
 /// env-touching tests.
 fn with_fake_build<T>(build: Option<&str>, f: impl FnOnce() -> T) -> T {
     let _lock = crate::util::lock_test_env();
-    let prev = std::env::var("PSMUX_FAKE_WIN_BUILD").ok();
+    let _restore = BuildRestore(std::env::var("PSMUX_FAKE_WIN_BUILD").ok());
     match build {
         Some(v) => std::env::set_var("PSMUX_FAKE_WIN_BUILD", v),
         None => std::env::remove_var("PSMUX_FAKE_WIN_BUILD"),
     }
-    let out = f();
-    match prev {
-        Some(v) => std::env::set_var("PSMUX_FAKE_WIN_BUILD", v),
-        None => std::env::remove_var("PSMUX_FAKE_WIN_BUILD"),
-    }
-    out
+    f()
 }
 
 #[test]

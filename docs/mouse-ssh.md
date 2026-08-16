@@ -11,7 +11,31 @@ server runs Windows 11 build 22523 or newer. On Windows 10 and earlier Windows
 | Any OS → Windows 11 build 22523+ | ✅ | ✅ | Normal `ssh` |
 | macOS/Linux → Windows 10 | ✅ | ✅ | `scripts/psmux-ssh.sh` |
 | Any OS → Windows 10 with a normal SSH PTY | ✅ | ❌ | ConPTY consumes mouse VT bytes |
+| Any OS → Windows Server 2019/2022 | ✅ | ⚠️ | Gated off by default, see below |
 | Local Windows 10/11 | ✅ | ✅ | Run psmux normally |
+
+## Builds below 22523
+
+Below build 22523 psmux does not enable mouse reporting at all. That is
+deliberate: on Windows 10 era console hosts an incoming mouse report could fast
+fail conhost and take the pane process with it, and a dead mouse beats a dead
+session.
+
+The threshold is drawn conservatively. The crash was only ever measured on
+Windows 10 build 19045, while some later console hosts under the threshold,
+Windows Server 2022 (build 20348) among them, handle mouse fine and only need
+psmux to write the enable sequence itself. On such a host set:
+
+```powershell
+$env:PSMUX_FORCE_MOUSE = "1"
+```
+
+before attaching, and the mouse comes back. Set it in your profile to make it
+stick. If a click kills your session, unset it: your console host is one of the
+ones the gate exists for.
+
+This also covers local WezTerm and JetBrains terminals on a sub 22523 build,
+which take the same VT input path as SSH.
 
 ## Windows 10 client wrapper
 

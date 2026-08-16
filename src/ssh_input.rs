@@ -87,9 +87,11 @@ pub fn send_mouse_enable() {
     if !conpty_mouse_supported() {
         ssh_debug_log(&format!(
             "send_mouse_enable: SUPPRESSED — Windows build {} < {} cannot accept \
-             mouse over SSH (issue #457); leaving mouse reporting disabled",
+             mouse over SSH (issue #457); leaving mouse reporting disabled. \
+             Set {}=1 to override if this host's conhost handles mouse (issue #573)",
             windows_build_number().map_or_else(|| "unknown".to_string(), |b| b.to_string()),
             CONPTY_MOUSE_MIN_BUILD,
+            FORCE_MOUSE_ENV,
         ));
         return;
     }
@@ -370,11 +372,41 @@ pub fn windows_build_number() -> Option<u32> {
 /// tears down the ConPTY and kills the pane process (issue #457).
 pub const CONPTY_MOUSE_MIN_BUILD: u32 = 22523;
 
+/// Environment override for the build gate (issue #573).
+///
+/// The gate below is deliberately conservative: it refuses mouse on every build
+/// under [`CONPTY_MOUSE_MIN_BUILD`], while the crash that motivated it was only
+/// ever measured on Win10-era conhost (19041/19045).  Later ConPTY generations
+/// that still do not forward the DECSET, Windows Server 2022 (20348) being the
+/// reported case, relied entirely on the bypass write that the gate removes,
+/// so they lost mouse outright with no way to get it back.
+///
+/// `PSMUX_FORCE_MOUSE=1` re-enables mouse on such a host; `=0` pins it off on a
+/// modern build whose conhost misbehaves.  Unset keeps the build check.
+pub const FORCE_MOUSE_ENV: &str = "PSMUX_FORCE_MOUSE";
+
+/// Parses [`FORCE_MOUSE_ENV`] into an explicit yes/no.  Unset, empty, or
+/// unrecognised values yield `None`, meaning "fall back to the build check"
+/// rather than silently picking a side.
+pub fn forced_mouse_setting() -> Option<bool> {
+    let raw = std::env::var(FORCE_MOUSE_ENV).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "on" | "true" | "yes" => Some(true),
+        "0" | "off" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 /// Returns `true` only when this host's ConPTY can safely accept VT mouse
 /// input over SSH.  When the build is unknown we err on the side of **not**
 /// enabling mouse: a non-functional mouse is acceptable, a crashed session is
 /// not (issue #457).
+///
+/// [`FORCE_MOUSE_ENV`] overrides the build check in both directions (#573).
 pub fn conpty_mouse_supported() -> bool {
+    if let Some(forced) = forced_mouse_setting() {
+        return forced;
+    }
     windows_build_number().map_or(false, |b| b >= CONPTY_MOUSE_MIN_BUILD)
 }
 
@@ -1876,6 +1908,10 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue457_ssh_mouse_build_gate.rs"]
 mod tests_issue457_ssh_mouse_build_gate;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue573_mouse_force_override.rs"]
+mod tests_issue573_mouse_force_override;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_windows10_ssh_mouse.rs"]

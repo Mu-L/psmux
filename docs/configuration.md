@@ -731,6 +731,7 @@ hatch you want for one invocation rather than forever.
 | `PSMUX_NO_PASSTHROUGH` | Set to `1` to disable the experimental ConPTY passthrough flag on Windows build 22621 and newer. Use this if pane creation fails with `ERROR_INVALID_PARAMETER` |
 | `PSMUX_PIPE_VT` | Forces pipe mode VT handling for Cygwin and MSYS style PTYs. `1` forces it on, `0` forces it off. Left unset, psmux detects the pipe itself |
 | `PSMUX_BARE_ENV` | Spawn panes with a bare environment instead of inheriting yours. Useful when a broken inherited variable stops shells from starting |
+| `PSMUX_FORCE_MOUSE` | Overrides the ConPTY mouse safety gate. On Windows builds below 22523 psmux refuses to enable mouse reporting, because on Windows 10 era conhost the first click could fast fail the console host and take the pane down with it. Some later builds under that threshold, Windows Server 2022 (20348) among them, handle mouse perfectly well but still need psmux to write the enable sequence itself. Set to `1` there to get the mouse back. Set to `0` to force it off on a newer build whose console host misbehaves. Accepts `1`, `on`, `true`, `yes` and their negatives. If your session dies the moment you click, unset it |
 
 ### Set inside panes by psmux
 
