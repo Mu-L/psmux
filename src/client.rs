@@ -498,6 +498,14 @@ fn pane_wants_mouse_json(layout: &LayoutJson, pane_id: usize) -> bool {
     }
 }
 
+fn client_selection_owns_drag(
+    mouse_selection: bool,
+    mouse_selection_force: bool,
+    pane_handles_mouse: bool,
+) -> bool {
+    mouse_selection && (mouse_selection_force || !pane_handles_mouse)
+}
+
 /// Check if the active pane is in server-side copy mode.
 /// When true, the client should NOT start its own text selection —
 /// the server handles cursor positioning and selection in copy mode.
@@ -1878,6 +1886,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// in-pane apps (opencode, etc.) can do their own mouse selection.
         #[serde(default = "default_mouse_selection")]
         mouse_selection: bool,
+        /// mouse-selection-force option. When true, client-side drag
+        /// selection overrides an application's mouse tracking.
+        #[serde(default)]
+        mouse_selection_force: bool,
         /// paste-detection option (mirror of server-side AppState field)
         #[serde(default = "default_paste_detection")]
         paste_detection: bool,
@@ -2040,6 +2052,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut rsel_end: Option<(u16, u16)> = None;
     let mut rsel_pane_rect: Option<Rect> = None;    // clip bounds of the originating pane
     let mut rsel_dragged = false;
+    // A click withheld from a mouse-aware pane while psmux determines whether
+    // the gesture is a click or a selection drag: (pane_id, col, row).
+    let mut deferred_left_click: Option<(usize, i16, i16)> = None;
     // Multi-click tracking for word/line selection.
     let mut last_click: Option<(Instant, (u16, u16))> = None;
     let mut click_count: u32 = 0;
@@ -2062,6 +2077,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut client_copy_mode: bool = false;
     let mut client_pwsh_selection: bool = false;
     let mut client_mouse_selection: bool = true;
+    let mut client_mouse_selection_force: bool = false;
     let mut client_zoomed: bool = false;
     let mut client_drag: Option<ClientDragState> = None;
     // Border hover highlight: (position, kind, area) of the border under the cursor.
@@ -4226,6 +4242,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             let rel_row = (me.row as i16 - pane_content_inner(pane_rect, &client_border_status, &client_border_format).y as i16).max(0);
 
                                             if client_copy_mode {
+                                                deferred_left_click = None;
                                                 cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n",
                                                     pane_id, rel_col, rel_row));
                                                 rsel_start = None;
@@ -4234,8 +4251,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                 rsel_block = false;
                                                 selection_changed = true;
                                             } else {
-                                                cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n",
-                                                    pane_id, rel_col, rel_row));
                                                 border_drag = false;
 
                                                 // mouse-selection off: do not start any client-side
@@ -4243,17 +4258,33 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                 // can implement their own mouse selection without
                                                 // psmux drawing on top.  (issue #245)
                                                 //
-                                                // Per-pane: even with mouse-selection on, yield to a
-                                                // pane whose app explicitly enabled a mouse protocol
-                                                // — it handles its own selection, and the press was
-                                                // already forwarded above; with no client selection
-                                                // active, the Drag/Up arms forward mouse-drag /
-                                                // mouse-up so the app sees the full gesture.
+                                                // Per-pane: even with mouse-selection on, normally
+                                                // yield to an app that enabled a mouse protocol. The
+                                                // force option instead withholds the press until
+                                                // release, so clicks can be replayed while drags stay
+                                                // available for psmux selection.
                                                 let pane_handles_mouse =
                                                     serde_json::from_str::<DumpState>(&prev_dump_buf)
                                                         .map(|s| pane_wants_mouse_json(&s.layout, pane_id))
                                                         .unwrap_or(false);
-                                                if !client_mouse_selection || pane_handles_mouse {
+                                                let force_client_selection =
+                                                    client_selection_owns_drag(
+                                                        client_mouse_selection,
+                                                        client_mouse_selection_force,
+                                                        pane_handles_mouse,
+                                                    ) && pane_handles_mouse;
+                                                if force_client_selection {
+                                                    deferred_left_click = Some((pane_id, rel_col, rel_row));
+                                                } else {
+                                                    deferred_left_click = None;
+                                                    cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n",
+                                                        pane_id, rel_col, rel_row));
+                                                }
+                                                if !client_selection_owns_drag(
+                                                    client_mouse_selection,
+                                                    client_mouse_selection_force,
+                                                    pane_handles_mouse,
+                                                ) {
                                                     rsel_start = None;
                                                     rsel_end = None;
                                                     rsel_pane_rect = None;
@@ -4332,6 +4363,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                 } // end client-side selection gate (mouse-selection + per-pane wants_mouse)
                                             }
                                         } else {
+                                            deferred_left_click = None;
                                             cmd_batch.push(format!("mouse-down {} {}\n", me.column, me.row));
                                         }
                                     }
@@ -4475,6 +4507,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             MouseEventKind::Drag(MouseButton::Right) => {}
                             MouseEventKind::Up(MouseButton::Left) => {
                                 if border_drag {
+                                    deferred_left_click = None;
                                     cmd_batch.push(format!("split-resize-done\n"));
                                     border_drag = false;
                                     client_drag = None;
@@ -4533,13 +4566,37 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         rsel_dragged = false;
                                         selection_changed = true;
                                     }
+                                    deferred_left_click = None;
                                 } else {
                                     rsel_start = None;
                                     rsel_end = None;
                                     rsel_pane_rect = None;
                                     rsel_block = false;
                                     selection_changed = true;
-                                    if client_copy_mode {
+                                    if let Some((pane_id, down_col, down_row)) = deferred_left_click.take() {
+                                        let (up_col, up_row) = client_pane_rects.iter()
+                                            .find(|(id, _)| *id == pane_id)
+                                            .map(|(_, pane_rect)| {
+                                                let inner = pane_content_inner(
+                                                    *pane_rect,
+                                                    &client_border_status,
+                                                    &client_border_format,
+                                                );
+                                                (
+                                                    (me.column as i16 - pane_rect.x as i16)
+                                                        .max(0)
+                                                        .min(pane_rect.width.saturating_sub(1) as i16),
+                                                    (me.row as i16 - inner.y as i16)
+                                                        .max(0)
+                                                        .min(inner.height.saturating_sub(1) as i16),
+                                                )
+                                            })
+                                            .unwrap_or((down_col, down_row));
+                                        cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n",
+                                            pane_id, down_col, down_row));
+                                        cmd_batch.push(format!("pane-mouse {} 0 {} {} m\n",
+                                            pane_id, up_col, up_row));
+                                    } else if client_copy_mode {
                                         if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
                                             r.contains(ratatui::layout::Position { x: me.column, y: me.row })
                                         }) {
@@ -4857,6 +4914,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         client_copy_mode = active_pane_in_copy_mode(&root);
         client_pwsh_selection = state.pwsh_mouse_selection;
         client_mouse_selection = state.mouse_selection;
+        client_mouse_selection_force = state.mouse_selection_force;
         #[cfg(windows)]
         { paste_detection_enabled = state.paste_detection; }
         choose_tree_preview_default = state.choose_tree_preview;

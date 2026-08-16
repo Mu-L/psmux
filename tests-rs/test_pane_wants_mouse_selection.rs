@@ -75,3 +75,23 @@ fn pane_wants_mouse_json_matches_only_the_flagged_pane() {
         "unknown pane id must default to false (keep client selection)"
     );
 }
+
+#[test]
+fn mouse_aware_pane_yields_selection_by_default() {
+    assert!(!client_selection_owns_drag(true, false, true));
+}
+
+#[test]
+fn force_option_keeps_psmux_selection_in_mouse_aware_pane() {
+    assert!(client_selection_owns_drag(true, true, true));
+}
+
+#[test]
+fn force_option_does_not_enable_globally_disabled_selection() {
+    assert!(!client_selection_owns_drag(false, true, true));
+}
+
+#[test]
+fn shell_pane_keeps_selection_without_force() {
+    assert!(client_selection_owns_drag(true, false, false));
+}

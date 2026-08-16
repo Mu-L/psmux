@@ -32,6 +32,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "scroll-enter-copy-mode", scope: "session", option_type: "boolean", default: "on", description: "Enter copy mode on mouse scroll up at shell prompt" },
     OptionDef { name: "pwsh-mouse-selection", scope: "session", option_type: "boolean", default: "off", description: "Windows 11 PowerShell-style drag selection (pane-aware, right-click to copy, word/line multi-click)" },
     OptionDef { name: "mouse-selection", scope: "session", option_type: "boolean", default: "on", description: "Enable psmux's client-side drag-selection overlay. Set to off so apps inside a pane (opencode, etc.) can implement their own mouse selection without psmux drawing on top." },
+    OptionDef { name: "mouse-selection-force", scope: "session", option_type: "boolean", default: "off", description: "Keep psmux drag selection active in mouse-aware apps; replay plain clicks while consuming drags" },
     OptionDef { name: "paste-detection", scope: "session", option_type: "boolean", default: "on", description: "Detect Ctrl+V paste from console host and send as bracketed paste (disable to let Ctrl+V reach child apps)" },
     OptionDef { name: "mode-keys", scope: "session", option_type: "choice", default: "emacs", description: "Key bindings in copy mode (vi/emacs)" },
     OptionDef { name: "copy-mode-line-numbers", scope: "window", option_type: "choice", default: "off", description: "Line number mode in copy mode (off/default/absolute/relative/hybrid)" },

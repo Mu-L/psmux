@@ -98,7 +98,7 @@ $bools = @(
     'allow-rename', 'monitor-activity',
     'remain-on-exit', 'destroy-unattached', 'exit-empty',
     'set-titles',
-    'scroll-enter-copy-mode', 'pwsh-mouse-selection',
+    'scroll-enter-copy-mode', 'pwsh-mouse-selection', 'mouse-selection-force',
     'synchronize-panes', 'warm',
     'allow-predictions', 'claude-code-fix-tty', 'claude-code-force-interactive'
 )

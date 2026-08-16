@@ -52,6 +52,42 @@ fn default_mouse_selection_is_on() {
 }
 
 #[test]
+fn default_mouse_selection_force_is_off() {
+    let app = mock_app();
+    assert!(!app.mouse_selection_force);
+}
+
+#[test]
+fn config_and_server_options_support_mouse_selection_force() {
+    let mut app = mock_app_with_window();
+    crate::config::parse_config_content(&mut app, "set -g mouse-selection-force on\n");
+    assert!(app.mouse_selection_force);
+    assert_eq!(
+        crate::server::options::get_option_value(&app, "mouse-selection-force"),
+        "on"
+    );
+
+    crate::server::options::apply_set_option(
+        &mut app,
+        "mouse-selection-force",
+        "off",
+        false,
+    );
+    assert!(!app.mouse_selection_force);
+}
+
+#[test]
+fn option_catalog_registers_mouse_selection_force() {
+    let entry = crate::server::option_catalog::OPTION_CATALOG
+        .iter()
+        .find(|o| o.name == "mouse-selection-force")
+        .expect("mouse-selection-force must be in catalog");
+    assert_eq!(entry.default, "off");
+    assert_eq!(entry.option_type, "boolean");
+    assert_eq!(entry.scope, "session");
+}
+
+#[test]
 fn config_parses_mouse_selection_off() {
     let mut app = mock_app_with_window();
     crate::config::parse_config_content(&mut app, "set -g mouse-selection off\n");

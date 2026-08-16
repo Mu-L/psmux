@@ -543,6 +543,11 @@ pub struct AppState {
     /// forwarded to the application (click-to-focus, scroll, app-level
     /// mouse tracking continue to work).  Default: on.  (issue #245)
     pub mouse_selection: bool,
+    /// mouse-selection-force: when on, psmux keeps client-side drag selection
+    /// even when the pane application enabled mouse tracking. Plain clicks are
+    /// deferred until release and replayed to the application; drags are
+    /// consumed by psmux. Default: off.
+    pub mouse_selection_force: bool,
     /// paste-detection: when on (default), Ctrl+V Press is suppressed and the
     /// Windows paste detection mechanism intercepts clipboard content injected
     /// by the console host.  When off, Ctrl+V is forwarded as send-key C-v so
@@ -1174,6 +1179,7 @@ impl AppState {
             scroll_enter_copy_mode: true,
             pwsh_mouse_selection: false,
             mouse_selection: true,
+            mouse_selection_force: false,
             paste_detection: true,
             choose_tree_preview: false,
             paste_buffers: Vec::new(),

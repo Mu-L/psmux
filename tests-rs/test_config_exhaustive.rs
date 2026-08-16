@@ -259,6 +259,12 @@ fn default_pwsh_mouse_selection() {
 }
 
 #[test]
+fn default_mouse_selection_force() {
+    let app = mock_app();
+    assert!(!app.mouse_selection_force);
+}
+
+#[test]
 fn default_sync_input() {
     let app = mock_app();
     assert!(!app.sync_input);
