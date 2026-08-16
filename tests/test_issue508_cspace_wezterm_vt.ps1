@@ -365,12 +365,23 @@ if ($weztermGui) {
     } else {
         $before = Wins $S
         # Real Ctrl+Space, then real 'c', straight from the hardware input queue.
-        & $sendhwExe "pid:$($wp.Id)" "sleep:1200" "C-Space" "sleep:600" "c" | Out-Null
+        #
+        # sendhw prints NO_FOCUS and exits 3 when SetForegroundWindow loses, which
+        # happens on a locked, unattended, or busy desktop. Piping that to Out-Null
+        # discarded the difference between "the desktop refused focus" and "the
+        # prefix is broken", so an unattended run reported a product failure for a
+        # keystroke that was never delivered. Capture it and skip instead.
+        $sentE = (& $sendhwExe "pid:$($wp.Id)" "sleep:1200" "C-Space" "sleep:600" "c" 2>&1 | Out-String)
+        $focused = -not ($sentE -match "NO_FOCUS")
         Start-Sleep -Seconds 4
         $after = Wins $S
         Write-Info "windows in WezTerm session: $before -> $after"
         if ($after -gt $before) {
             Write-Pass "REAL Ctrl+Space in REAL WezTerm opened a window: the prefix works end to end"
+        } elseif (-not $focused) {
+            # The VT-path fold itself is already proven above over the VT reader,
+            # which needs no foreground.
+            Write-Skip "WezTerm end to end: focus was refused, no keystroke was delivered"
         } else {
             Write-Fail "Ctrl+Space in WezTerm did not trigger the prefix (windows $before -> $after)"
         }
