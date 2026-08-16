@@ -1060,6 +1060,24 @@ fn run_main() -> io::Result<()> {
                         return Ok(());
                     }
                 }
+                // tmux refuses to attach to a session that is not there:
+                // `can't find session: NAME`, exit 1. psmux resolved the name and
+                // then fell straight through to the client, where the non-tty
+                // guard further down printed the version and returned success, so
+                // a scripted `attach -t missing` reported OK for a session that
+                // never existed (#29). Probe before committing to the attach.
+                //
+                // probe_session_alive is conservative in the right direction: a
+                // timeout counts as alive, so a busy server is never mistaken for
+                // a missing one and refused.
+                if !probe_session_alive(&name) {
+                    let shown = l_socket_name
+                        .as_deref()
+                        .and_then(|l| name.strip_prefix(&format!("{}__", l)))
+                        .unwrap_or(&name);
+                    eprintln!("psmux: can't find session: {}", shown);
+                    std::process::exit(1);
+                }
                 env::set_var("PSMUX_SESSION_NAME", name);
                 env::set_var("PSMUX_REMOTE_ATTACH", "1");
             }
@@ -4234,6 +4252,34 @@ fn run_main() -> io::Result<()> {
             }
         }
     
+    // Prevent nesting: similar to tmux checking $TMUX.
+    // PSMUX_ACTIVE is set on the client process itself.
+    // PSMUX_SESSION is set on child panes spawned by the server.
+    // Both indicate we are already inside a psmux PANE; a display-popup child
+    // is not one, and tmux attaches happily from there (#537).
+    // Override with PSMUX_ALLOW_NESTING=1 if nesting is intentional.
+    //
+    // This has to happen HERE, before the block below allocates a session name
+    // and spawns (or claims) a server. It used to sit further down, after the
+    // spawn and after the non-tty version fallback, which made it a refusal in
+    // name only: a nested `psmux` printed "nested with care", declined to
+    // attach, and left a fully spawned orphan session behind it. It was also
+    // unreachable for a non-tty caller, who got the version banner instead of
+    // the refusal. Nesting is a property of the environment, not of the
+    // terminal, and the cheapest correct moment to refuse is before we build
+    // anything.
+    //
+    // Control mode keeps its long-standing exemption: it returned earlier than
+    // the old guard, so it was never subject to this, and an editor driving
+    // `-CC` from inside a pane is a legitimate arrangement.
+    if control_mode == 0
+        && env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1")
+        && crate::util::inside_psmux_pane()
+    {
+        eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
+        return Ok(());
+    }
+
     // Default behavior (bare `psmux` with no command):
     // tmux-compatible: always create a new session with the next available
     // numeric name (0, 1, 2, ...) and attach to it.
@@ -4423,26 +4469,20 @@ fn run_main() -> io::Result<()> {
     // APIs or routing them through ConPTY.
     let pipe_vt = crate::ssh_input::stdin_is_vt_pipe();
 
+    // The nesting guard used to live here. It now runs before the session
+    // spawn further up, so a refused nested invocation leaves nothing behind.
+
     // If stdin is not a terminal (headless/non-interactive environment, e.g.
     // winget validation pipeline), print version and exit cleanly — starting
     // a TUI session would fail without an interactive console. A Cygwin pty
     // IS a terminal (a human sits on the mintty side) even though it is
     // technically a pipe. The same is true of an interactive `ssh -T` channel.
+    //
+    // Only a BARE invocation reaches this. Anything that already knows what it
+    // was asked to do must answer for itself before here, or the version
+    // becomes a success report for work that never happened.
     if !std::io::stdin().is_terminal() && !pipe_vt {
         print_version();
-        return Ok(());
-    }
-
-    // Prevent nesting: similar to tmux checking $TMUX.
-    // PSMUX_ACTIVE is set on the client process itself.
-    // PSMUX_SESSION is set on child panes spawned by the server.
-    // Both indicate we are already inside a psmux PANE; a display-popup child
-    // is not one, and tmux attaches happily from there (#537).
-    // Override with PSMUX_ALLOW_NESTING=1 if nesting is intentional.
-    if env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1")
-        && crate::util::inside_psmux_pane()
-    {
-        eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
         return Ok(());
     }
     env::set_var("PSMUX_ACTIVE", "1");
