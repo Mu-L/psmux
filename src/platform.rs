@@ -1588,6 +1588,7 @@ pub mod mouse_inject {
             ) -> i32;
             fn GetConsoleMode(h: *mut c_void, mode: *mut u32) -> i32;
             fn SetConsoleMode(h: *mut c_void, mode: u32) -> i32;
+            fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
         }
 
         // Always log to file for Ctrl+C events (critical signal path).
@@ -1629,6 +1630,39 @@ pub mod mouse_inject {
             if AttachConsole(child_pid) == 0 {
                 let err = GetLastError();
                 log(&format!("AttachConsole({}) FAILED err={}", child_pid, err));
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return false;
+            }
+
+            // Issue #579: GenerateConsoleCtrlEvent(_, 0) broadcasts to EVERY
+            // process on this console, while the foreground_is_vt_bridge guard
+            // above classified only the deepest leaf of one child chain.  A VT
+            // bridge the leaf walk missed — a backgrounded `wsl.exe &` job, an
+            // interop child below wsl.exe, or a mis-resolved sibling (Windows
+            // PIDs are not monotonic, so the highest-PID-child heuristic can
+            // descend the wrong subtree) — still dies to the broadcast: either
+            // directly (bridge on this console) or through a Cygwin/MSYS shell
+            // on this console whose runtime hard-kills its native descendants
+            // on CTRL_C_EVENT, even background ones parked on hidden consoles.
+            // Now that we are attached, classify the console's REAL membership
+            // and skip the signal when the broadcast would hit a bridge.  The
+            // raw 0x03 the call site writes still reaches the foreground app,
+            // which is all tmux ever delivers.
+            let mut console_pids = vec![0u32; 64];
+            let mut n = GetConsoleProcessList(console_pids.as_mut_ptr(), console_pids.len() as u32);
+            if n as usize > console_pids.len() {
+                console_pids.resize(n as usize, 0);
+                n = GetConsoleProcessList(console_pids.as_mut_ptr(), console_pids.len() as u32);
+            }
+            {
+                let members: Vec<String> = console_pids[..(n as usize).min(console_pids.len())].iter()
+                    .map(|p| crate::platform::process_info::classify_console_member(*p))
+                    .collect();
+                log(&format!("console process list n={} members=[{}]", n, members.join(" | ")));
+            }
+            if n > 0 && crate::platform::process_info::console_broadcast_hits_bridge(&console_pids[..(n as usize).min(console_pids.len())]) {
+                log(&format!("vt bridge on pane console (pid={}): deliver raw 0x03 only, skip CTRL_C_EVENT broadcast", child_pid));
+                FreeConsole();
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
             }
@@ -3321,6 +3355,86 @@ pub mod process_info {
         }))
     }
 
+    /// True when any of the given PIDs names a VT bridge executable
+    /// (wsl.exe, ssh.exe, ...).  Part of the Ctrl+C router's console-scoped
+    /// guard (issue #579); see `console_broadcast_hits_bridge`.
+    pub fn any_vt_bridge(pids: &[u32]) -> bool {
+        let entries = match process_table(std::time::Duration::ZERO) {
+            Some(t) => t,
+            None => return false,
+        };
+        entries.iter().any(|(pid, _, name)| pids.contains(pid) && is_vt_bridge_exe(name))
+    }
+
+    /// Unix-family shells whose Windows builds are Cygwin/MSYS-based (Git
+    /// Bash, MSYS2, Cygwin).  Their runtime reacts to a console CTRL_C_EVENT
+    /// by delivering SIGINT to native child processes, which Cygwin
+    /// implements as a hard kill — the lethal half of issue #491/#579.
+    /// PowerShell/cmd are deliberately excluded: under them the broadcast is
+    /// harmless to bridges and still needed to interrupt cooked console apps
+    /// (ping, #346).
+    fn is_unix_shell_exe(name: &str) -> bool {
+        let stem = name.strip_suffix(".exe").unwrap_or(name);
+        matches!(stem,
+            "bash" | "sh" | "dash" | "zsh" | "fish"
+            | "ksh" | "tcsh" | "csh" | "busybox"
+        )
+    }
+
+    /// Issue #579: decide whether a CTRL_C_EVENT broadcast to the console
+    /// holding `console_pids` is unsafe, i.e. can kill a VT bridge
+    /// (wsl.exe, ssh.exe, ...).
+    ///
+    /// Two lethal shapes, both proven by reproduction:
+    ///   (a) the bridge is itself on the console — the broadcast reaches it
+    ///       directly and its default handler terminates it;
+    ///   (b) a Cygwin/MSYS shell (Git Bash, MSYS2, Cygwin) is on the console.
+    ///       Its runtime reacts to the broadcast by hard-killing the native
+    ///       children its OWN bookkeeping tracks — including a backgrounded
+    ///       `wsl.exe &` job.  This cannot be narrowed with a Windows
+    ///       process-tree walk: the MSYS fork stub that spawned the native
+    ///       child exits, leaving the child's Windows PPID pointing at a dead
+    ///       PID, so no PPID-based descendant scan can see the bridge
+    ///       (measured: the chain is intact seconds earlier and severed by
+    ///       Ctrl+C time), while Cygwin's internal process table still
+    ///       delivers the kill.
+    ///
+    /// A Cygwin shell needs no broadcast anyway: its pty line discipline turns
+    /// the raw 0x03 the call site writes into SIGINT for its foreground
+    /// process group, natives included — the same thing a plain mintty or
+    /// conhost Git Bash session does, and all tmux ever delivers.
+    ///
+    /// Fresh snapshot for the same reason as `foreground_is_shell`: this runs
+    /// on real user input, and a stale table could miss a just-launched
+    /// bridge.
+    pub fn console_broadcast_hits_bridge(console_pids: &[u32]) -> bool {
+        let entries = match process_table(std::time::Duration::ZERO) {
+            Some(t) => t,
+            None => return false,
+        };
+        entries.iter().any(|(pid, _, name)| {
+            console_pids.contains(pid) && (is_vt_bridge_exe(name) || is_unix_shell_exe(name))
+        })
+    }
+
+    /// Diagnostic used by the Ctrl+C router's debug log: classify one console
+    /// member the same way `console_broadcast_hits_bridge` does.
+    pub fn classify_console_member(pid: u32) -> String {
+        let entries = match process_table(std::time::Duration::ZERO) {
+            Some(t) => t,
+            None => return format!("{}: no-table", pid),
+        };
+        match entries.iter().find(|(p, _, _)| *p == pid) {
+            Some((_, ppid, name)) => format!(
+                "{}={} ppid={} bridge={} unix_shell={}",
+                pid, name, ppid,
+                is_vt_bridge_exe(name),
+                is_unix_shell_exe(name),
+            ),
+            None => format!("{}: not-in-table", pid),
+        }
+    }
+
     /// Walk the process tree from `root_pid` and check if any descendant
     /// is a VT bridge process (wsl.exe, ssh.exe, etc.).
     /// This is used for mouse injection: VT bridge processes need VT mouse
@@ -3360,6 +3474,10 @@ pub mod process_info {
     #[cfg(test)]
     #[path = "../../../tests-rs/test_proc_table_cache.rs"]
     mod tests_proc_table_cache;
+
+    #[cfg(test)]
+    #[path = "../../../tests-rs/test_issue579_any_vt_bridge.rs"]
+    mod tests_issue579_any_vt_bridge;
 }
 
 #[cfg(not(windows))]
