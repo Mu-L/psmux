@@ -68,7 +68,12 @@ try {
     # TEST 3: it goes back to the shell when the command ends
     # -----------------------------------------------------------------------
     Write-Host "`n[Test 3] returns to the shell after the command exits" -ForegroundColor Yellow
-    & $PSMUX -L $ns send-keys -t $S "C-c"
+    # send-keys C-c cannot stop a detached ConPTY child (known limitation), so
+    # end the chain by pid: killing the ping lets both cmd wrappers run to
+    # completion and the shell take the tty back.
+    Get-CimInstance Win32_Process -Filter "Name='PING.EXE'" |
+        Where-Object { $_.CommandLine -match '-n 30 127\.0\.0\.1' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
     Start-Sleep -Seconds 3
     $back = Get-CurrentCommand
     if ($back -ieq $idle) { Write-Pass "back to '$back'" }
@@ -90,7 +95,10 @@ try {
         if ($under -ieq "sleep") { Write-Pass "reports 'sleep', not the bash wrapping it" }
         elseif ($under -ieq "bash") { Write-Fail "reported the shell ('bash') while sleep was in front" }
         else { Write-Fail "reported '$under'" }
-        & $PSMUX -L $ns send-keys -t $S "C-c"
+        # Same ConPTY limitation as Test 3: end the bash chain by pid.
+        Get-CimInstance Win32_Process -Filter "Name='sleep.exe'" |
+            Where-Object { $_.CommandLine -match 'sleep 60' } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
         Start-Sleep -Seconds 3
     }
 

@@ -4,6 +4,23 @@ use std::time::Duration;
 use std::net::TcpStream;
 
 use crate::types::{CtrlReq, LayoutKind, WaitForOp, ControlNotification};
+
+/// Clear HANDLE_FLAG_INHERIT on a connection socket (see the comment at the
+/// clone sites in `handle_connection`). No-op off Windows.
+#[cfg(windows)]
+fn clear_inherit(s: &TcpStream) {
+    use std::os::windows::io::AsRawSocket;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetHandleInformation(h: *mut core::ffi::c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    unsafe {
+        SetHandleInformation(s.as_raw_socket() as *mut core::ffi::c_void, HANDLE_FLAG_INHERIT, 0);
+    }
+}
+#[cfg(not(windows))]
+fn clear_inherit(_s: &TcpStream) {}
 use crate::cli::{parse_target, extract_flag_value};
 use crate::util::base64_decode;
 use crate::control;
@@ -302,6 +319,16 @@ let mut write_stream = match stream.try_clone() {
     Ok(s) => s,
     Err(_) => return,
 };
+// Every socket handle on this connection must be non-inheritable: the server
+// spawns children with bInheritHandles=TRUE (pane shells via ConPTY,
+// pipe-pane sinks, run-shell), and a long-lived child that inherits a dup of
+// this socket pins the connection open past our close, so a client waiting
+// for EOF-as-end-of-reply times out ("no response from server (timed out)"
+// on `pipe-pane -o <sink> \; <cmd>`). try_clone creates a NEW socket handle,
+// so the accept-time scrub in run_server does not cover the clones — scrub
+// each one where it is made.
+clear_inherit(&stream);
+clear_inherit(&write_stream);
 
 // Set initial timeout for auth (reduced from 5s - client sends immediately)
 let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
@@ -373,6 +400,7 @@ if line.trim() == "PERSISTENT" {
     // receivers here; the writer thread waits for each response and
     // writes it to TCP in order.
     let mut ws_bg = write_stream.try_clone().unwrap();
+    clear_inherit(&ws_bg);
     // Prevent the writer from blocking indefinitely when the client's TCP
     // receive buffer fills up (e.g. during a slow render). Without a write
     // timeout, a full socket causes write() to block forever, silently
@@ -403,6 +431,7 @@ if line.trim() == "PERSISTENT" {
         Ok(s) => s,
         Err(_) => return,
     };
+    clear_inherit(&ws_shutdown);
     let tx_writer = tx.clone();
     std::thread::spawn(move || {
         // Deregister the frame channel and shut down the TCP connection when

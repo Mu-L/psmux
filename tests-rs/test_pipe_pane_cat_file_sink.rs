@@ -104,6 +104,10 @@ fn refuses_paths_that_can_stall_or_hit_a_device() {
     assert!(refuse_file_sink_path(r"C:\logs\Nul.txt").is_some());
     assert!(refuse_file_sink_path("COM1").is_some());
     assert!(refuse_file_sink_path("lpt9.log").is_some());
+    // DOS-style trailing colon is still the device.
+    assert!(refuse_file_sink_path("nul:").is_some());
+    assert!(refuse_file_sink_path("NUL:").is_some());
+    assert!(refuse_file_sink_path("COM1:").is_some());
     // Near-misses are ordinary filenames.
     assert!(refuse_file_sink_path("CONS.log").is_none());
     assert!(refuse_file_sink_path("COM0").is_none());

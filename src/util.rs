@@ -445,7 +445,9 @@ pub fn refuse_file_sink_path(path: &str) -> Option<String> {
         .next()
         .unwrap_or(path);
     let stem = basename.split('.').next().unwrap_or(basename);
-    let stem_upper = stem.trim().to_ascii_uppercase();
+    // `NUL:` / `COM1:` etc. are still the device — strip the DOS-style
+    // trailing colon before matching.
+    let stem_upper = stem.trim().trim_end_matches(':').to_ascii_uppercase();
     let reserved = matches!(stem_upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || (stem_upper.len() == 4
             && (stem_upper.starts_with("COM") || stem_upper.starts_with("LPT"))

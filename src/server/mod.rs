@@ -977,6 +977,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     thread::spawn(move || {
         for conn in listener.incoming() {
             if let Ok(stream) = conn {
+                // Accepted control sockets must NOT be inheritable: the server
+                // spawns children with bInheritHandles=TRUE (pane shells via
+                // ConPTY, pipe-pane sinks, run-shell), and a long-lived child
+                // that inherits a client's socket pins the connection open, so
+                // the client waiting for close-as-end-of-response times out.
+                // Concretely: `pipe-pane -o "<sink>" \; <cmd>` answered fine
+                // but exited 1 with "no response from server (timed out)"
+                // because the freshly spawned sink held a dup of the socket.
+                #[cfg(windows)]
+                unsafe {
+                    use std::os::windows::io::AsRawSocket;
+                    #[link(name = "kernel32")]
+                    extern "system" {
+                        fn SetHandleInformation(h: *mut core::ffi::c_void, mask: u32, flags: u32) -> i32;
+                    }
+                    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+                    SetHandleInformation(stream.as_raw_socket() as *mut core::ffi::c_void, HANDLE_FLAG_INHERIT, 0);
+                }
                 let tx = tx.clone();
                 let session_key_clone = session_key.clone();
                 let aliases = shared_aliases.clone();
