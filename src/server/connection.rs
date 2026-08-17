@@ -4,6 +4,23 @@ use std::time::Duration;
 use std::net::TcpStream;
 
 use crate::types::{CtrlReq, LayoutKind, WaitForOp, ControlNotification};
+
+/// Clear HANDLE_FLAG_INHERIT on a connection socket (see the comment at the
+/// clone sites in `handle_connection`). No-op off Windows.
+#[cfg(windows)]
+fn clear_inherit(s: &TcpStream) {
+    use std::os::windows::io::AsRawSocket;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetHandleInformation(h: *mut core::ffi::c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    unsafe {
+        SetHandleInformation(s.as_raw_socket() as *mut core::ffi::c_void, HANDLE_FLAG_INHERIT, 0);
+    }
+}
+#[cfg(not(windows))]
+fn clear_inherit(_s: &TcpStream) {}
 use crate::cli::{parse_target, extract_flag_value};
 use crate::util::base64_decode;
 use crate::control;
@@ -302,6 +319,16 @@ let mut write_stream = match stream.try_clone() {
     Ok(s) => s,
     Err(_) => return,
 };
+// Every socket handle on this connection must be non-inheritable: the server
+// spawns children with bInheritHandles=TRUE (pane shells via ConPTY,
+// pipe-pane sinks, run-shell), and a long-lived child that inherits a dup of
+// this socket pins the connection open past our close, so a client waiting
+// for EOF-as-end-of-reply times out ("no response from server (timed out)"
+// on `pipe-pane -o <sink> \; <cmd>`). try_clone creates a NEW socket handle,
+// so the accept-time scrub in run_server does not cover the clones — scrub
+// each one where it is made.
+clear_inherit(&stream);
+clear_inherit(&write_stream);
 
 // Set initial timeout for auth (reduced from 5s - client sends immediately)
 let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
@@ -373,6 +400,7 @@ if line.trim() == "PERSISTENT" {
     // receivers here; the writer thread waits for each response and
     // writes it to TCP in order.
     let mut ws_bg = write_stream.try_clone().unwrap();
+    clear_inherit(&ws_bg);
     // Prevent the writer from blocking indefinitely when the client's TCP
     // receive buffer fills up (e.g. during a slow render). Without a write
     // timeout, a full socket causes write() to block forever, silently
@@ -403,6 +431,7 @@ if line.trim() == "PERSISTENT" {
         Ok(s) => s,
         Err(_) => return,
     };
+    clear_inherit(&ws_shutdown);
     let tx_writer = tx.clone();
     std::thread::spawn(move || {
         // Deregister the frame channel and shut down the TCP connection when
@@ -1758,9 +1787,10 @@ match cmd {
         }
     }
     "set-buffer" => {
-        // Parse -b name, -w (clipboard propagation), and content
+        // Parse -b name, -w (clipboard propagation), -H hex content, and content
         let mut buf_name: Option<String> = None;
         let mut propagate_to_clipboard = false;
+        let mut hex_content: Option<&str> = None;
         let mut i = 0;
         let mut content_parts: Vec<&str> = Vec::new();
         while i < args.len() {
@@ -1772,6 +1802,16 @@ match cmd {
             } else if args[i] == "-w" {
                 propagate_to_clipboard = true;
                 i += 1;
+            } else if args[i] == "-H" {
+                // Byte-exact content, hex encoded. Bare words cannot carry a
+                // buffer: this line has already been split on `;`, tokenized
+                // with quote grouping stripped, and had runs of whitespace
+                // collapsed, so quotes, tabs, control bytes and newlines are
+                // gone before the handler runs. tmux's paste is verbatim, and
+                // for a buffer pasted at a shell prompt the lost quoting is a
+                // DIFFERENT command, not cosmetic damage.
+                hex_content = args.get(i + 1).copied();
+                i += 2;
             } else if args[i].starts_with('-') {
                 i += 1; // skip unknown flags
             } else {
@@ -1779,14 +1819,36 @@ match cmd {
                 break;
             }
         }
-        let content = content_parts.join(" ");
-        if propagate_to_clipboard {
-            crate::clipboard::copy_to_system_clipboard(&content);
-        }
-        if let Some(name) = buf_name {
-            let _ = tx.send(CtrlReq::SetNamedBuffer(name, content));
-        } else {
-            let _ = tx.send(CtrlReq::SetBuffer(content));
+        // A control-mode client is an external boundary, so a bad payload is
+        // refused loudly rather than stored half-decoded. psmux buffers are
+        // Rust `String`s, so non-UTF-8 bytes are rejected here too (the CLI
+        // never sends them: load-buffer reads the file as UTF-8 and errors on
+        // the file itself).
+        let content: Option<String> = match hex_content {
+            Some(hex) => crate::util::hex_decode(hex)
+                .and_then(|bytes| String::from_utf8(bytes).ok()),
+            None => Some(content_parts.join(" ")),
+        };
+        match content {
+            Some(content) => {
+                if propagate_to_clipboard {
+                    crate::clipboard::copy_to_system_clipboard(&content);
+                }
+                if let Some(name) = buf_name {
+                    let _ = tx.send(CtrlReq::SetNamedBuffer(name, content));
+                } else {
+                    let _ = tx.send(CtrlReq::SetBuffer(content));
+                }
+            }
+            None => {
+                let err = "set-buffer: -H requires hex-encoded UTF-8\n";
+                if persistent {
+                    let _ = tx.send(CtrlReq::ShowTextPopup("set-buffer".to_string(), format!("ERROR: {}", err.trim_end())));
+                } else {
+                    let _ = write!(write_stream, "ERROR: {}", err);
+                    let _ = write_stream.flush();
+                }
+            }
         }
     }
     "paste-buffer" | "pasteb" => {
@@ -2611,7 +2673,25 @@ match cmd {
         } else {
             (stdin_flag, stdout_flag)
         };
-        let _ = tx.send(CtrlReq::PipePane(cmd, stdin, stdout, toggle));
+        // Same reply shape as #559/#566: a direct file sink that cannot be
+        // opened must reach the caller as a non-zero exit, not a silent
+        // rc-0 no-op. The handler answers "" on acceptance; only an
+        // "ERROR: ..." reply is forwarded.
+        let (rtx, rrx) = mpsc::channel::<String>();
+        let _ = tx.send(CtrlReq::PipePane(cmd, stdin, stdout, toggle, Some(rtx)));
+        let resp = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
+        if !persistent {
+            if !resp.is_empty() {
+                let _ = write!(write_stream, "{}\n", resp);
+                let _ = write_stream.flush();
+            }
+            // pipe-pane can sit in the middle of a chained line
+            // (`pipe-pane -o ... \; display-message ...`); breaking with
+            // queued sub-commands would silently drop the rest of the
+            // chain. With no chain pending, the client's half-close ends
+            // the loop on the next read anyway.
+            if pending_chain.is_empty() { break; }
+        }
     }
     "select-layout" | "selectl" => {
         let layout = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"tiled").to_string();

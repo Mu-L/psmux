@@ -609,7 +609,8 @@ psmux next-layout
 psmux previous-layout
 psmux select-layout tiled         # Apply a specific layout
 psmux clear-history
-psmux pipe-pane -o "cat > pane.log"
+psmux pipe-pane -o "cat > pane.log"    # Direct file sink (see below)
+psmux pipe-pane                        # Stop piping
 
 # Hooks (event callbacks) - see Hooks section below for full reference
 psmux set-hook -g after-new-window "display-message created"
@@ -790,6 +791,57 @@ bind-key e run-shell -b "my-helper.ps1 -Pane '#{pane_id}' -Path '#{pane_current_
 > swallowing spawn errors, such a bind failed completely silently. If you are
 > targeting an older psmux, pass the values from the caller instead of relying
 > on expansion.
+
+## Piping Pane Output (pipe-pane)
+
+Stream a pane's raw output (ANSI escapes included) to a file or a command,
+like tmux's `pipe-pane` (one deviation: tmux expands format variables such
+as `#I` in the sink command; psmux does not):
+
+```powershell
+# Log the pane to a file (direct file sink - see below)
+psmux pipe-pane -o "cat > pane.log"
+psmux pipe-pane -o "cat >> pane.log"     # append instead of truncate
+psmux pipe-pane -t %2 -o "cat > out.log" # pipe a specific pane
+
+# Stop piping (or use -o again to toggle off)
+psmux pipe-pane
+```
+
+**Direct file sink.** The canonical tmux logging idiom `cat > <path>` /
+`cat >> <path>` (path may be quoted) is serviced by the psmux server itself:
+the pane's raw ConPTY bytes are written straight to the file, byte-for-byte,
+with no shell in between. This exists because arbitrary sink commands run
+under PowerShell, where `cat` is the `Get-Content` alias — it never reads
+stdin, so the idiom cannot work as a shell command on Windows.
+
+Prefer an **absolute path**: a relative path resolves against the psmux
+server's working directory (the session's start directory), not your
+shell's. The path must be a literal **local file** path — anything a shell
+would expand (`$var`, `` `...` ``, `%var%`, `#I`, leading `~`) falls
+through to the shell sink, and UNC paths, mapped network drives, and DOS
+device names (`CON`, `NUL`, ...) are refused loudly: an unreachable host
+would stall the whole server, and a device is not a log file. To log to a
+network location, use a sink command that reads stdin — it runs as a child
+process and stalls only itself.
+
+**Arbitrary command sinks.** Any other command runs under the sink shell
+(`pwsh`/`powershell -NoProfile -Command`, falling back to `cmd /c`) and
+**must actually read its stdin** — that is where the pane bytes arrive. In
+PowerShell, read `$input` or `[Console]::In`:
+
+```powershell
+# PowerShell sink: line-oriented processing of pane output
+psmux pipe-pane -o '$input | Out-File -Encoding utf8 pane.log'
+```
+
+A sink that never reads stdin (like the `cat` alias) exits immediately and
+captures nothing.
+
+**Errors are loud.** If a direct file sink cannot be opened (e.g. the log
+file's directory does not exist), `pipe-pane` prints `ERROR: ...` and exits
+non-zero instead of silently recording a dead pipe. A shell sink that fails
+to spawn is reported on the status bar and is likewise never recorded.
 
 ## Interactive Choosers
 
