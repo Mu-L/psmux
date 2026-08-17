@@ -1619,6 +1619,21 @@ pub mod mouse_inject {
             return false;
         }
 
+        // Issue #579, third guard: a bridge ANYWHERE in the pane's process
+        // tree.  The leaf walk above resolves one chain by a highest-PID
+        // heuristic, and Windows PIDs are not monotonic: prompt tooling
+        // (oh-my-posh, starship) parks transient children under the pane
+        // shell, so the walk can land on a sibling and classify a shell
+        // while wsl.exe is live in the tree.  Native (non-Cygwin) chains
+        // keep their PPID links intact, so the descendant BFS is reliable
+        // exactly where the leaf heuristic is not.  A bridge in the tree
+        // forwards the raw 0x03 into its guest itself; the broadcast is
+        // redundant for it and fatal to it.
+        if crate::platform::process_info::has_vt_bridge_descendant(child_pid) {
+            log(&format!("vt-bridge descendant under pid={}: deliver raw 0x03 only, skip CTRL_C_EVENT", child_pid));
+            return false;
+        }
+
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = reattach && GetConsoleWindow() != 0;
