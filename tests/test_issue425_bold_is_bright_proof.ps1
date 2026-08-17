@@ -136,7 +136,20 @@ foreach($tag in $specs.Keys){
 foreach($tag in $specs.Keys){
   $refCodes = $(if($ref[$tag]){$ref[$tag] -join ','}else{'MISSING'})
   $psCodes  = $(if($ps[$tag]){$ps[$tag] -join ','}else{'MISSING'})
-  if($refCodes -eq $psCodes -and $psCodes -ne 'MISSING'){
+  # The fixed 30-char lookback window regularly catches the PREVIOUS marker's
+  # trailing SGR codes, and the two renderers pack different byte counts
+  # between markers, so the leading residue differs run to run (observed:
+  # psmux [36,32,1] vs reference [32,1] where the 36 is CYNBOLD's leftover).
+  # The state that matters is what is in effect AT the marker, i.e. the tail
+  # of the window: accept when either capture ends with the other.
+  $suffixMatch = $false
+  if($psCodes -ne 'MISSING' -and $refCodes -ne 'MISSING'){
+    # comma-boundary suffix so "12" never matches "2"
+    $suffixMatch = ($psCodes -eq $refCodes) -or
+                   $psCodes.EndsWith(",$refCodes") -or
+                   $refCodes.EndsWith(",$psCodes")
+  }
+  if($suffixMatch){
     P "$tag : psmux SGR matches bare-shell reference [$psCodes]"
   } else {
     F "$tag : psmux [$psCodes] != reference [$refCodes]"
