@@ -2628,8 +2628,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                         {
                                             if c.is_ascii_alphabetic() {
                                                 // Keep Ctrl+C on the legacy interrupt path:
-                                                // raw 0x03 + send_ctrl_c_event below.
+                                                // raw 0x03 + the interrupt router. The router
+                                                // runs BEFORE the byte: when it decides "raw
+                                                // 0x03 only" it may strip PROCESSED_INPUT from
+                                                // the pane console so conhost delivers the byte
+                                                // as input instead of converting it into a
+                                                // console-wide CTRL_C_EVENT that aborts a
+                                                // booting WSL launch (#579).
                                                 if ctrl == 0x03 {
+                                                    if let Some(win) = app.windows.get_mut(app.active_idx) {
+                                                        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                                                            if p.child_pid.is_none() {
+                                                                p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
+                                                            }
+                                                            if let Some(pid) = p.child_pid {
+                                                                crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                                                            }
+                                                        }
+                                                    }
                                                     send_text_to_active(&mut app, &String::from(ctrl as char))?;
                                                 } else {
                                                     let vk = crate::platform::mouse_inject::char_to_vk(c);
@@ -2649,24 +2665,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                         }
                                         #[cfg(not(windows))]
                                         send_text_to_active(&mut app, &String::from(ctrl as char))?;
-                                        // On Windows, writing 0x03 to the PTY pipe doesn't
-                                        // generate CTRL_C_EVENT when ENABLE_PROCESSED_INPUT
-                                        // is disabled (e.g. after a TUI app).  Fire the real
-                                        // signal via the platform helper so detached/headless
-                                        // send-keys C-c reliably interrupts processes.
-                                        #[cfg(windows)]
-                                        if ctrl == 0x03 {
-                                            if let Some(win) = app.windows.get_mut(app.active_idx) {
-                                                if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-                                                    if p.child_pid.is_none() {
-                                                        p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
-                                                    }
-                                                    if let Some(pid) = p.child_pid {
-                                                        crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
-                                                    }
-                                                }
-                                            }
-                                        }
                                     }
                                 }
                                 s if s.starts_with("M-") => {

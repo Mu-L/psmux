@@ -116,6 +116,39 @@ if ($hasWsl) {
     Write-Host "[Arm 2] SKIP: no working WSL distro" -ForegroundColor Yellow
 }
 
+# --- Arm 2b: the reported kill - Ctrl+C during the WSL boot window. While the
+# WSL VM boots, the live wsl.exe processes can be parented by wslservice and
+# unattached to the pane console (attribution-blind for every walk), the pane
+# shell sits in cooked mode waiting on the launch, and pre-fix either psmux's
+# broadcast or conhost's PROCESSED_INPUT conversion of the delivered 0x03 made
+# the shell abort the launch: WSL session dead, prompt back. The router now
+# skips the broadcast AND strips PROCESSED_INPUT (only when no plain native
+# app is on the console), so the boot must survive. Uses wsl --shutdown to
+# widen the window, so it is gated on the destructive-tests flag. ---
+if ($hasWsl -and ($env:PSMUX_ALLOW_DESTRUCTIVE_TESTS -or $env:CI)) {
+    Write-Host "[Arm 2b] pwsh pane, Ctrl+C during WSL boot window" -ForegroundColor Yellow
+    wsl.exe --shutdown 2>$null
+    Start-Sleep -Seconds 2
+    $p2b = New-Pane "t579a2b" @()
+    Start-Sleep -Seconds 2
+    & $PSMUX send-keys -t "t579a2b" "wsl.exe" Enter
+    Start-Sleep -Milliseconds 900
+    $atInject = @(Get-Process wsl -EA SilentlyContinue).Count
+    & $INJ $p2b.Id "^c"
+    Start-Sleep -Seconds 8
+    $later = @(Get-Process wsl -EA SilentlyContinue).Count
+    if ($atInject -eq 0) {
+        Write-Host "  [SKIP] wsl had not spawned at inject time; window missed" -ForegroundColor Yellow
+    } elseif ($later -ge $atInject) {
+        Write-Pass "WSL boot survived a mid-boot Ctrl+C ($atInject -> $later)"
+    } else {
+        Write-Fail "mid-boot Ctrl+C killed the WSL launch ($atInject -> $later)"
+    }
+    Close-Pane "t579a2b" $p2b
+} elseif ($hasWsl) {
+    Write-Host "[Arm 2b] SKIP: needs PSMUX_ALLOW_DESTRUCTIVE_TESTS (uses wsl --shutdown)" -ForegroundColor Yellow
+}
+
 # --- Arm 3: pwsh pane + cooked app; the pre-existing interrupt path must be
 # untouched (no unix shell on the pane console -> guard does not engage). ---
 Write-Host "[Arm 3] pwsh pane, ping -t, Ctrl+C interrupts (path unchanged)" -ForegroundColor Yellow

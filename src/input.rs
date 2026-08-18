@@ -2247,13 +2247,23 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
                     fn inject_ctrl_all(node: &mut Node, ch: char, raw: u8, is_ctrl_c: bool) {
                         match node {
                             Node::Leaf(p) if !p.dead => {
+                                // Ctrl+C: consult the interrupt router BEFORE writing the
+                                // byte — when it decides "raw 0x03 only" it may strip
+                                // PROCESSED_INPUT from the pane console so conhost hands
+                                // the byte over as input instead of converting it into a
+                                // console-wide CTRL_C_EVENT (which aborts a booting WSL
+                                // launch, issue #579). Writing first loses that race.
+                                #[cfg(windows)]
+                                if is_ctrl_c {
+                                    if let Some(pid) = p.child_pid {
+                                        crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                                    }
+                                }
                                 let _ = p.writer.write_all(&[raw]);
                                 let _ = p.writer.flush();
                                 #[cfg(windows)]
-                                if let Some(pid) = p.child_pid {
-                                    if is_ctrl_c {
-                                        crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
-                                    } else {
+                                if !is_ctrl_c {
+                                    if let Some(pid) = p.child_pid {
                                         crate::platform::mouse_inject::send_modified_key_event(pid, ch, true, false, false);
                                     }
                                 }
@@ -2271,13 +2281,19 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
                     let win = &mut app.windows[app.active_idx];
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                         if !active.dead {
+                            // Same ordering as the sync arm above: router (and its
+                            // possible PROCESSED_INPUT strip) before the byte (#579).
+                            #[cfg(windows)]
+                            if is_ctrl_c {
+                                if let Some(pid) = active.child_pid {
+                                    crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
+                                }
+                            }
                             let _ = active.writer.write_all(&[ctrl_char]);
                             let _ = active.writer.flush();
                             #[cfg(windows)]
-                            if let Some(pid) = active.child_pid {
-                                if is_ctrl_c {
-                                    crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
-                                } else {
+                            if !is_ctrl_c {
+                                if let Some(pid) = active.child_pid {
                                     crate::platform::mouse_inject::send_modified_key_event(pid, inject_char, true, false, false);
                                 }
                             }
@@ -3695,16 +3711,21 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 // arrived as <C-w><C-w>, turning neovim's window command into a
                 // no-op and making `<C-w>s` behave like a bare `s`; PSReadLine's
                 // Ctrl+W likewise deleted two words instead of one).
-                let _ = p.writer.write_all(&[ctrl_char]);
-                let _ = p.writer.flush();
-                // Ctrl+C is the sole exception: a CTRL_C_EVENT must be raised so
-                // the child's console handler runs (SIGINT parity, issue #338).
+                // Ctrl+C is the sole exception: the interrupt router runs so the
+                // child's console handler can be signalled (SIGINT parity, #338)
+                // — BEFORE the byte, because when the router decides "raw 0x03
+                // only" it may strip PROCESSED_INPUT from the pane console so
+                // conhost delivers the byte as input instead of converting it
+                // into a console-wide CTRL_C_EVENT that aborts a booting WSL
+                // launch (#579). Writing first loses that race.
                 #[cfg(windows)]
                 if c.eq_ignore_ascii_case(&'c') {
                     if let Some(pid) = p.child_pid {
                         crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
                     }
                 }
+                let _ = p.writer.write_all(&[ctrl_char]);
+                let _ = p.writer.flush();
             }
             s if (s.starts_with("M-") || s.starts_with("m-")) && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('a');

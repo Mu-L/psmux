@@ -1614,8 +1614,76 @@ pub mod mouse_inject {
         // delivering SIGINT to its native foreground child, which the Cygwin
         // runtime implements as a hard kill of wsl.exe.  Deliver only the raw
         // 0x03 the call site writes and skip the signal.
+        // When a bridge guard below decides "raw 0x03 only", the byte must
+        // actually ARRIVE as input.  If the pane console is in cooked mode at
+        // that moment (the shell restored PROCESSED_INPUT while waiting on an
+        // external command — measured 0x01F7 during the WSL boot window),
+        // conhost itself converts the delivered ^C into a console-wide
+        // CTRL_C_EVENT and the shell aborts the launch it is waiting on: the
+        // WSL session dies with no psmux broadcast involved (reproduced with
+        // every broadcast suppressed).  Stripping ENABLE_PROCESSED_INPUT
+        // before the call site writes the byte makes conhost hand it over as
+        // an input record instead; the bridge's relay reads it once attached.
+        // No restore: the shell re-arms its own mode at the next prompt, and
+        // the bridge sets its own mode when it takes the console.
+        fn strip_processed_input(child_pid: u32, log: &dyn Fn(&str)) {
+            const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetConsoleMode(h: *mut c_void, mode: *mut u32) -> i32;
+                fn SetConsoleMode(h: *mut c_void, mode: u32) -> i32;
+                fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+            }
+            let _console_guard = portable_pty::console_state_lock();
+            unsafe {
+                let had_console = GetConsoleWindow() != 0;
+                FreeConsole();
+                if AttachConsole(child_pid) == 0 {
+                    if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                    return;
+                }
+                // A plain native app on the console (ping under Git Bash) is
+                // the legitimate recipient of conhost's Ctrl+C conversion —
+                // stripping the flag then silences its interrupt (measured).
+                let mut pids = [0u32; 64];
+                let n = GetConsoleProcessList(pids.as_mut_ptr(), 64) as usize;
+                if n > 0 && crate::platform::process_info::console_has_plain_native_app(&pids[..n.min(64)]) {
+                    log("plain native app on pane console: keep PROCESSED_INPUT so its interrupt still fires");
+                    FreeConsole();
+                    if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                    return;
+                }
+                let conin: [u16; 7] = [
+                    'C' as u16, 'O' as u16, 'N' as u16,
+                    'I' as u16, 'N' as u16, '$' as u16, 0,
+                ];
+                let handle = CreateFileW(
+                    conin.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null(),
+                );
+                if handle != INVALID_HANDLE && handle != 0 {
+                    let mut mode: u32 = 0;
+                    if GetConsoleMode(handle as *mut c_void, &mut mode) != 0
+                        && mode & ENABLE_PROCESSED_INPUT != 0
+                    {
+                        SetConsoleMode(handle as *mut c_void, mode & !ENABLE_PROCESSED_INPUT);
+                        log(&format!("stripped PROCESSED_INPUT (was 0x{:04X}) so the raw 0x03 arrives as input", mode));
+                    }
+                    CloseHandle(handle);
+                }
+                FreeConsole();
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+            }
+        }
+
         if crate::platform::process_info::foreground_is_vt_bridge(child_pid) {
             log(&format!("vt-bridge foreground under pid={}: deliver raw 0x03 only, skip CTRL_C_EVENT", child_pid));
+            strip_processed_input(child_pid, &log);
             return false;
         }
 
@@ -1631,6 +1699,31 @@ pub mod mouse_inject {
         // redundant for it and fatal to it.
         if crate::platform::process_info::has_vt_bridge_descendant(child_pid) {
             log(&format!("vt-bridge descendant under pid={}: deliver raw 0x03 only, skip CTRL_C_EVENT", child_pid));
+            strip_processed_input(child_pid, &log);
+            return false;
+        }
+
+        // Issue #579, boot-window guard (the reproduced kill): while the WSL
+        // VM boots (~1-2s cold), the live wsl.exe processes are parented by
+        // wslservice — NOT children of the pane shell — and not yet attached
+        // to the pane console, so the leaf walk, the descendant BFS, and the
+        // console-membership check below are ALL structurally blind to them.
+        // The pane shell meanwhile has no visible children, so the foreground
+        // resolution falls back to "bare shell prompt" and the broadcast
+        // fires — and the shell reacts to CTRL_C_EVENT by aborting the launch
+        // it is waiting on: the WSL session dies and the prompt returns
+        // (measured: at-inject two live wsl.exe, console = {server, shell}
+        // only, fg_is_shell=true, after = zero).  When the resolution came
+        // from that childless fallback — exactly the attribution-blind state
+        // — treat any bridge alive anywhere on the system as potentially
+        // ours and skip the broadcast.  Cost when it misfires: a legacy
+        // cooked prompt loses the explicit line-cancel signal while some
+        // unrelated WSL runs elsewhere; the raw 0x03 still reaches the pane.
+        if crate::platform::process_info::foreground_fell_back_to_root(child_pid)
+            && crate::platform::process_info::any_vt_bridge_running()
+        {
+            log(&format!("childless foreground fallback with a live system bridge (pid={}): deliver raw 0x03 only, skip CTRL_C_EVENT", child_pid));
+            strip_processed_input(child_pid, &log);
             return false;
         }
 
@@ -1677,6 +1770,38 @@ pub mod mouse_inject {
             }
             if n > 0 && crate::platform::process_info::console_broadcast_hits_bridge(&console_pids[..(n as usize).min(console_pids.len())]) {
                 log(&format!("vt bridge on pane console (pid={}): deliver raw 0x03 only, skip CTRL_C_EVENT broadcast", child_pid));
+                // Same cooked-mode hazard as the earlier skip paths: make sure
+                // the raw 0x03 arrives as input, not as a conhost-side signal
+                // — UNLESS a plain native app (ping under Git Bash) is on the
+                // console, in which case conhost's conversion IS its interrupt
+                // and must stay armed (measured regression).
+                if crate::platform::process_info::console_has_plain_native_app(&console_pids[..(n as usize).min(console_pids.len())]) {
+                    log("plain native app on pane console: keep PROCESSED_INPUT so its interrupt still fires");
+                } else {
+                    let conin: [u16; 7] = [
+                        'C' as u16, 'O' as u16, 'N' as u16,
+                        'I' as u16, 'N' as u16, '$' as u16, 0,
+                    ];
+                    let h = CreateFileW(
+                        conin.as_ptr(),
+                        GENERIC_READ | GENERIC_WRITE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        std::ptr::null(),
+                        OPEN_EXISTING,
+                        0,
+                        std::ptr::null(),
+                    );
+                    if h != INVALID_HANDLE && h != 0 {
+                        let mut mode: u32 = 0;
+                        if GetConsoleMode(h as *mut c_void, &mut mode) != 0
+                            && mode & ENABLE_PROCESSED_INPUT != 0
+                        {
+                            SetConsoleMode(h as *mut c_void, mode & !ENABLE_PROCESSED_INPUT);
+                            log(&format!("stripped PROCESSED_INPUT (was 0x{:04X}) so the raw 0x03 arrives as input", mode));
+                        }
+                        CloseHandle(h);
+                    }
+                }
                 FreeConsole();
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
@@ -3410,6 +3535,59 @@ pub mod process_info {
                 .find(|(pid, _, _)| *pid == root_pid)
                 .map(|(_, _, name)| name.clone())
         }))
+    }
+
+    /// True when the pane root has no visible non-system children in the
+    /// process table, i.e. `foreground_leaf_name` would fall back to
+    /// classifying the root itself.  Used by the Ctrl+C router's boot-window
+    /// guard (issue #579): this childless state is exactly when the walk
+    /// cannot attribute a service-parented bridge (a booting wsl.exe) to the
+    /// pane, so a "bare shell prompt" classification is untrustworthy.
+    pub fn foreground_fell_back_to_root(root_pid: u32) -> bool {
+        let entries = match process_table(std::time::Duration::ZERO) {
+            Some(t) => t,
+            None => return false,
+        };
+        !entries.iter().any(|(pid, ppid, name)| {
+            *ppid == root_pid && *pid != root_pid && !is_system_exe(name)
+        })
+    }
+
+    /// True when any VT bridge executable (wsl.exe, ssh.exe, wslhost.exe,
+    /// ...) is alive anywhere on the system.  Deliberately unscoped: during
+    /// the WSL boot window the bridge is parented by wslservice and attached
+    /// to no console, so no pane-scoped attribution can see it (issue #579).
+    pub fn any_vt_bridge_running() -> bool {
+        let entries = match process_table(std::time::Duration::ZERO) {
+            Some(t) => t,
+            None => return false,
+        };
+        entries.iter().any(|(_, _, name)| is_vt_bridge_exe(name))
+    }
+
+    /// True when the console holding `console_pids` contains a plain native
+    /// application — a member that is not psmux itself, not console
+    /// infrastructure, not a shell, and not a VT bridge (e.g. a foreground
+    /// `ping.exe` under Git Bash).  Such a member is the legitimate recipient
+    /// of conhost's PROCESSED_INPUT Ctrl+C conversion, so the router must
+    /// NOT strip the flag then: stripping it silenced the ping interrupt
+    /// (measured, issue #579 regression during the boot-window fix).  With
+    /// only infrastructure/shells/bridges on the console, the conversion's
+    /// sole victim is a shell waiting on a bridge launch, and stripping is
+    /// what keeps a booting WSL alive.
+    pub fn console_has_plain_native_app(console_pids: &[u32]) -> bool {
+        let entries = match process_table(std::time::Duration::ZERO) {
+            Some(t) => t,
+            None => return false,
+        };
+        entries.iter().any(|(pid, _, name)| {
+            console_pids.contains(pid) && {
+                let stem = name.strip_suffix(".exe").unwrap_or(name.as_str());
+                !matches!(stem, "psmux" | "tmux" | "pmux" | "conhost" | "openconsole")
+                    && !is_shell_exe(name)
+                    && !is_vt_bridge_exe(name)
+            }
+        })
     }
 
     /// True when any of the given PIDs names a VT bridge executable
