@@ -3553,16 +3553,28 @@ pub mod process_info {
         })
     }
 
-    /// True when any VT bridge executable (wsl.exe, ssh.exe, wslhost.exe,
-    /// ...) is alive anywhere on the system.  Deliberately unscoped: during
-    /// the WSL boot window the bridge is parented by wslservice and attached
-    /// to no console, so no pane-scoped attribution can see it (issue #579).
+    /// True when a VT bridge CLIENT executable (wsl.exe, ssh.exe,
+    /// wslhost.exe, ...) is alive anywhere on the system.  Deliberately
+    /// unscoped: during the WSL boot window the bridge is parented by
+    /// wslservice and attached to no console, so no pane-scoped attribution
+    /// can see it (issue #579).
+    ///
+    /// MUST exclude `wslservice.exe`: it is a Windows service that stays
+    /// resident forever once WSL has run, and `is_vt_bridge_exe`'s `wsl*`
+    /// prefix matches it.  Counting it made this check permanently true on
+    /// any WSL-installed machine, which made the childless-fallback guard
+    /// fire on every bare-prompt Ctrl+C and (with the PROCESSED_INPUT strip)
+    /// broke cancelling an in-process cmdlet like `Start-Sleep`
+    /// (measured: test_issue231's inter-test C-c stopped working).
     pub fn any_vt_bridge_running() -> bool {
         let entries = match process_table(std::time::Duration::ZERO) {
             Some(t) => t,
             None => return false,
         };
-        entries.iter().any(|(_, _, name)| is_vt_bridge_exe(name))
+        entries.iter().any(|(_, _, name)| {
+            let stem = name.strip_suffix(".exe").unwrap_or(name.as_str());
+            stem != "wslservice" && is_vt_bridge_exe(name)
+        })
     }
 
     /// True when the console holding `console_pids` contains a plain native

@@ -46,6 +46,21 @@ fn unix_shell_classification() {
 }
 
 #[test]
+fn system_bridge_check_excludes_the_resident_service() {
+    // wslservice.exe is a Windows service resident forever once WSL has run.
+    // If any_vt_bridge_running counted it, the childless-fallback Ctrl+C
+    // guard would fire on EVERY bare-prompt press on a WSL-installed machine
+    // and (with the PROCESSED_INPUT strip) break cancelling in-process
+    // cmdlets like Start-Sleep.  The prefix classifier still counts it as a
+    // bridge for pane-scoped checks; only the system-wide check excludes it.
+    assert!(is_vt_bridge_exe("wslservice.exe"));
+    // On the machine running this suite wslservice is typically resident
+    // while no wsl.exe client is: the system-wide check must not be true
+    // SOLELY because of it.  (Cannot assert a fixed value here since a real
+    // wsl.exe/ssh.exe may legitimately be running during the suite.)
+}
+
+#[test]
 fn vt_bridge_name_classification() {
     assert!(is_vt_bridge_exe("wsl.exe"));
     assert!(is_vt_bridge_exe("wsl"));
