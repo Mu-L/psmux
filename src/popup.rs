@@ -179,6 +179,7 @@ pub fn create_popup_pane(
         color_query_pending,
         copy_state: None,
         pane_style: None,
+        pane_options: Default::default(),
         squelch_until: None,
         output_ring,
         // Popup shells are overlays, never tiled panes; never auto-heal them.
@@ -247,6 +248,7 @@ pub fn create_empty_pane(rows: u16, cols: u16, pane_id: usize) -> Option<Pane> {
         color_query_pending: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         copy_state: None,
         pane_style: None,
+        pane_options: Default::default(),
         squelch_until: None,
         output_ring: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         // Empty (`-E`) panes have a NullChild that never "exits"; not healable.

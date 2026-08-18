@@ -289,6 +289,7 @@ pub fn create_proxy_pane(
         color_query_pending: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         copy_state: None,
         pane_style: None,
+        pane_options: Default::default(),
         squelch_until: None,
         output_ring: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         // Proxy panes mirror a remote pane's ConPTY; respawning a local shell

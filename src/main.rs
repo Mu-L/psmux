@@ -3298,7 +3298,12 @@ fn run_main() -> io::Result<()> {
                     let mut j = 1;
                     while j < cmd_args.len() {
                         let a = cmd_args[j].as_str();
-                        if a == "-t" || a == "-p" { j += 2; continue; }
+                        // Only -t consumes a value. `-p` is a bare pane-scope
+                        // flag (tmux parity, #580); treating it as a target
+                        // flag ate the option name, so `set -p -t %3
+                        // remain-on-exit failed` misparsed as an empty-value
+                        // set of 'failed'.
+                        if a == "-t" { j += 2; continue; }
                         if a.starts_with('-') && a.len() > 1 {
                             flags.push_str(&a[1..]);
                             j += 1;
@@ -3380,6 +3385,25 @@ fn run_main() -> io::Result<()> {
                         s.to_string()
                     }
                 }).collect::<Vec<String>>().join(" ");
+                // Pane scope (#580): the server validates the option and the
+                // target pane and answers "ERROR: ..." on refusal. A silent
+                // fire-and-forget here would recreate the exit-0 silent no-op
+                // this flag's support exists to end, so read the reply.
+                let pane_scope = cmd_args.iter().skip(1).any(|a| {
+                    let a = a.as_str();
+                    a == "-p"
+                        || (a.starts_with('-') && a.len() > 2 && a != "-t"
+                            && a.chars().skip(1).all(|c| c.is_ascii_alphabetic())
+                            && a.contains('p'))
+                });
+                if pane_scope {
+                    let resp = send_control_with_response(format!("{}\n", cmd_str))?;
+                    if resp.trim_start().starts_with("ERROR") {
+                        eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
+                        std::process::exit(1);
+                    }
+                    return Ok(());
+                }
                 match send_control(format!("{}\n", cmd_str)) {
                     Ok(()) => {},
                     Err(e) if e.to_string().contains("no session") => {
@@ -3402,7 +3426,8 @@ fn run_main() -> io::Result<()> {
                         if a == "-t" { j += 2; continue; }
                         if a.starts_with('-') && a.len() > 1 {
                             for ch in a[1..].chars() {
-                                if !"Agqsvw".contains(ch) {
+                                // 'p' = pane scope (#580), forwarded as-is.
+                                if !"Agpqsvw".contains(ch) {
                                     eprintln!("psmux: show-options: unknown flag -{}", ch);
                                     std::process::exit(1);
                                 }
@@ -3413,6 +3438,13 @@ fn run_main() -> io::Result<()> {
                 }
                 let cmd_str: String = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
                 let resp = send_control_with_response(format!("{}\n", cmd_str))?;
+                // A refusal (e.g. show-options -p on a nonexistent pane, #580)
+                // must not masquerade as an option listing at exit 0 (#559
+                // family).
+                if resp.trim_start().starts_with("ERROR") {
+                    eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
+                    std::process::exit(1);
+                }
                 print!("{}", resp);
                 return Ok(());
             }

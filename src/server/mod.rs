@@ -3830,6 +3830,63 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = fp.child.kill();
                     }
                 }
+                CtrlReq::SetPaneOption(raw, option, value, resp) => {
+                    // Resolve "" -> active pane, "%N"/"N" -> global pane id.
+                    let pane = if raw.is_empty() {
+                        let win = &mut app.windows[app.active_idx];
+                        crate::tree::active_pane_mut(&mut win.root, &win.active_path)
+                    } else {
+                        match raw.trim().trim_start_matches('%').parse::<usize>() {
+                            Ok(id) => crate::tree::find_pane_mut_by_id_global(&mut app, id),
+                            Err(_) => None,
+                        }
+                    };
+                    let reply = match pane {
+                        None => format!("ERROR: can't find pane: {}", raw),
+                        Some(p) => match option.as_str() {
+                            "remain-on-exit" => {
+                                if value.is_empty() {
+                                    p.pane_options.remove("remain-on-exit");
+                                    String::new()
+                                } else if matches!(value.as_str(), "on" | "off" | "failed") {
+                                    p.pane_options.insert("remain-on-exit".to_string(), value.clone());
+                                    String::new()
+                                } else {
+                                    format!("ERROR: set-option -p remain-on-exit: bad value '{}' (want on, off or failed)", value)
+                                }
+                            }
+                            // Loud refusal, never a silent stored no-op: the
+                            // Claude Code teammate backend checked nothing but
+                            // exit codes and a swallowed pane option looked
+                            // exactly like success (#580).
+                            other => format!("ERROR: pane-scoped option '{}' is not supported (supported: remain-on-exit)", other),
+                        },
+                    };
+                    let _ = resp.send(reply);
+                }
+                CtrlReq::ShowPaneOptions(raw, resp) => {
+                    let pane = if raw.is_empty() {
+                        let win = &mut app.windows[app.active_idx];
+                        crate::tree::active_pane_mut(&mut win.root, &win.active_path)
+                    } else {
+                        match raw.trim().trim_start_matches('%').parse::<usize>() {
+                            Ok(id) => crate::tree::find_pane_mut_by_id_global(&mut app, id),
+                            Err(_) => None,
+                        }
+                    };
+                    let reply = match pane {
+                        None => format!("ERROR: can't find pane: {}", raw),
+                        Some(p) => {
+                            let mut keys: Vec<&String> = p.pane_options.keys().collect();
+                            keys.sort();
+                            keys.iter()
+                                .map(|k| format!("{} {}", k, p.pane_options[*k]))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                    };
+                    let _ = resp.send(reply);
+                }
                 CtrlReq::RespawnPane(workdir, kill, command, empty) => {
                     respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), kill, command.as_deref(), empty)?;
                     hook_event = Some("after-respawn-pane");

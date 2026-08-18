@@ -434,8 +434,20 @@ pub fn prune_exited(n: Node, remain_on_exit: bool, kill_descendants: bool) -> (O
         Node::Leaf(mut p) => {
             if p.dead { return (Some(Node::Leaf(p)), 0); }
             match p.child.try_wait() {
-                Ok(Some(_)) => {
-                    if remain_on_exit {
+                Ok(Some(status)) => {
+                    // Pane-scoped remain-on-exit overrides the session global
+                    // (issue #580; tmux pane-option semantics): `on` keeps the
+                    // dead pane, `off` closes it, `failed` keeps it only when
+                    // the process exited nonzero — which is exactly what a
+                    // teammate supervisor wants: crashed panes stay visible
+                    // with their error, clean exits close.
+                    let keep = match p.pane_options.get("remain-on-exit").map(|s| s.as_str()) {
+                        Some("on") => true,
+                        Some("off") => false,
+                        Some("failed") => !status.success(),
+                        _ => remain_on_exit,
+                    };
+                    if keep {
                         p.dead = true;
                         (Some(Node::Leaf(p)), 1)
                     } else {
@@ -741,6 +753,27 @@ pub fn find_pane_by_id_global(app: &AppState, pane_id: usize) -> Option<(usize, 
         if let Some(pos) = get_pane_position_in_window(&w.root, pane_id) {
             return Some((wi, pos));
         }
+    }
+    None
+}
+
+/// Mutable access to a pane by its global pane ID across every window
+/// (issue #580: pane-scoped options must resolve `%N` regardless of the
+/// active window, like every other bare-%id target).
+pub fn find_pane_mut_by_id_global(app: &mut AppState, pane_id: usize) -> Option<&mut Pane> {
+    fn walk(node: &mut Node, pane_id: usize) -> Option<&mut Pane> {
+        match node {
+            Node::Leaf(p) => if p.id == pane_id { Some(p) } else { None },
+            Node::Split { children, .. } => {
+                for c in children {
+                    if let Some(p) = walk(c, pane_id) { return Some(p); }
+                }
+                None
+            }
+        }
+    }
+    for w in app.windows.iter_mut() {
+        if let Some(p) = walk(&mut w.root, pane_id) { return Some(p); }
     }
     None
 }

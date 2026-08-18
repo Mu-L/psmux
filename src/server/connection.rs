@@ -2370,16 +2370,44 @@ match cmd {
         let has_q = combined_has_set('q');
         let has_o = combined_has_set('o');
         let global = combined_has_set('g');
-        // Skip -t TARGET / -p PANE values (TARGET is not a positional option/value).
-        // Note: -w is a scope flag (window), not a target flag — it does NOT
-        // consume the next argument.
+        // tmux parity (#580): `-p` is a bare PANE-SCOPE flag like `-w`; it
+        // never consumes the next argument. Treating it as a target flag ate
+        // the option name, so `set -p -t %3 remain-on-exit failed` misparsed
+        // as an empty-value set of 'failed'. Only -t takes a value here.
+        let pane_scope = combined_has_set('p');
         let t_targets: std::collections::HashSet<&str> = args.windows(2)
-            .filter(|w| w[0] == "-t" || w[0] == "-p")
+            .filter(|w| w[0] == "-t")
             .map(|w| w[1]).collect();
         let non_flag_args: Vec<&str> = args.iter()
             .filter(|a| (!a.starts_with('-') || a.starts_with('@')) && !t_targets.contains(*a))
             .copied().collect();
-        if has_u {
+        if pane_scope {
+            let raw_target = extract_flag_value(&args, "-t")
+                .map(|s| s.trim_matches('"').to_string())
+                .unwrap_or_default();
+            let reply = if has_u {
+                match non_flag_args.first() {
+                    Some(option) => {
+                        let (rtx, rrx) = mpsc::channel::<String>();
+                        let _ = tx.send(CtrlReq::SetPaneOption(raw_target, option.to_string(), String::new(), rtx));
+                        rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default()
+                    }
+                    None => "ERROR: set-option -pu: option name required".to_string(),
+                }
+            } else if non_flag_args.len() >= 2 {
+                let option = non_flag_args[0].to_string();
+                let value = non_flag_args[1..].join(" ").trim_matches('"').to_string();
+                let (rtx, rrx) = mpsc::channel::<String>();
+                let _ = tx.send(CtrlReq::SetPaneOption(raw_target, option, value, rtx));
+                rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default()
+            } else {
+                "ERROR: set-option -p: option and value required".to_string()
+            };
+            if !reply.is_empty() {
+                let _ = write!(write_stream, "{}\n", reply);
+                let _ = write_stream.flush();
+            }
+        } else if has_u {
             if let Some(option) = non_flag_args.first() {
                 if *option == "window-size" && !global {
                     let _ = tx.send(CtrlReq::SetWindowSize(None));
@@ -2430,6 +2458,23 @@ match cmd {
         let window_scope = matches!(cmd, "show-window-options" | "showw") || has_w;
         let has_v = combined_has('v');
         let has_q = combined_has('q');
+        // Pane scope (issue #580): list the target pane's `set-option -p`
+        // options. `-p` is a bare flag; only -t carries a value.
+        if combined_has('p') {
+            let raw_target = extract_flag_value(&args, "-t")
+                .map(|s| s.trim_matches('"').to_string())
+                .unwrap_or_default();
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ShowPaneOptions(raw_target, rtx));
+            if let Ok(reply) = rrx.recv_timeout(Duration::from_millis(2000)) {
+                if !reply.is_empty() {
+                    let _ = write!(write_stream, "{}\n", reply);
+                    let _ = write_stream.flush();
+                }
+            }
+            if !persistent { break; }
+            continue;
+        }
         let opt_name: Option<&str> = args.iter()
             .filter(|a| !a.starts_with('-'))
             .copied()
@@ -3959,14 +4004,33 @@ fn dispatch_control_command(
             let append = combined_has_set2('a');
             let global = combined_has_set2('g');
             let only_if_unset = combined_has_set2('o');
-            // Skip values that follow target flags. `-w` selects window scope
-            // and does not consume the next argument.
+            // `-p` is a bare pane-scope flag (#580), like `-w`: it never
+            // consumes the next argument. Only -t carries a value here.
+            let pane_scope2 = combined_has_set2('p');
             let t_vals2: std::collections::HashSet<&str> = args.windows(2)
-                .filter(|w| w[0] == "-t" || w[0] == "-p")
+                .filter(|w| w[0] == "-t")
                 .map(|w| w[1]).collect();
             let positional: Vec<&str> = args.iter()
                 .filter(|a| (!a.starts_with('-') || a.starts_with('@')) && !t_vals2.contains(*a))
                 .copied().collect();
+            if pane_scope2 {
+                let raw = extract_flag_value(&args, "-t")
+                    .map(|s| s.trim_matches('"').to_string())
+                    .unwrap_or_default();
+                let (rtx, rrx) = mpsc::channel::<String>();
+                if unset && !positional.is_empty() {
+                    let _ = tx.send(CtrlReq::SetPaneOption(raw, positional[0].to_string(), String::new(), rtx));
+                } else if positional.len() >= 2 {
+                    let value = positional[1..].join(" ").trim_matches('"').to_string();
+                    let _ = tx.send(CtrlReq::SetPaneOption(raw, positional[0].to_string(), value, rtx));
+                } else {
+                    let _ = resp_tx.send("ERROR: set-option -p: option and value required".to_string());
+                    return true;
+                }
+                let reply = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
+                let _ = resp_tx.send(reply);
+                return true;
+            }
             if unset && !positional.is_empty() {
                 if positional[0] == "window-size" && !global {
                     let _ = tx.send(CtrlReq::SetWindowSize(None));
@@ -4007,6 +4071,16 @@ fn dispatch_control_command(
                     a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains(ch)
                 })
             };
+            // Pane scope (#580): list a pane's `set-option -p` options.
+            if combined_has2('p') {
+                let raw = extract_flag_value(&args, "-t")
+                    .map(|s| s.trim_matches('"').to_string())
+                    .unwrap_or_default();
+                let _ = tx.send(CtrlReq::ShowPaneOptions(raw, rtx));
+                let reply = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
+                let _ = resp_tx.send(reply);
+                return true;
+            }
             let value_only = combined_has2('v');
             let window_scope2 = matches!(cmd, "show-window-options" | "showw" | "show-window-option") || combined_has2('w');
             let opt_name = args.iter().filter(|a| !a.starts_with('-')).next().map(|s| s.to_string());

@@ -213,6 +213,12 @@ pub struct Pane {
     /// Stored for API compatibility; ConPTY rendering doesn't support
     /// per-pane fg/bg tinting so this is not rendered yet.
     pub pane_style: Option<String>,
+    /// Pane-scoped options set via `set-option -p` (issue #580, the Claude
+    /// Code teammate backend's scope).  Currently wired: `remain-on-exit`
+    /// (`on`/`off`/`failed`, consulted by `prune_exited` and overriding the
+    /// session-global).  Unwired pane options are rejected loudly at set
+    /// time rather than stored as silent no-ops.
+    pub pane_options: std::collections::HashMap<String, String>,
     /// When set, the layout serialiser renders this pane as blank until
     /// the deadline passes.  Used to hide injected cd+cls commands during
     /// warm session claiming so the user never sees a flash.
@@ -1627,6 +1633,13 @@ pub enum CtrlReq {
         horizontal: bool,
     },
     RespawnPane(Option<String>, bool, Option<String>, bool),  // optional workdir (-c), kill flag (-k), command (-- shell-command), empty (-E)
+    /// set-option -p (issue #580): pane-scoped option. Fields: raw -t pane
+    /// target ("" = active pane), option name, value ("" = unset via -u/-U),
+    /// reply ("" on success, "ERROR: ..." otherwise). Unwired pane options
+    /// are rejected loudly instead of stored as silent no-ops.
+    SetPaneOption(String, String, String, mpsc::Sender<String>),
+    /// show-options -p (issue #580): list a pane's scoped options.
+    ShowPaneOptions(String, mpsc::Sender<String>),
     BindKey(String, String, String, bool),  // table, key, command, repeat
     UnbindKey(String, Option<String>),  // key, optional table (None = prefix)
     UnbindAll,
