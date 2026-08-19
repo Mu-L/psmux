@@ -320,11 +320,37 @@ if (-not $makensis) {
                     } else {
                         Write-Fail "Registry key still present after uninstall"
                     }
+
+                    # ── Test 16: user PATH entry removed by the uninstaller ─
+                    # Same async caveat as Tests 14/15. Verified live 2026-08-20:
+                    # the release uninstaller removes its entry correctly; this
+                    # assertion keeps it that way.
+                    Write-Test "User PATH entry removed after uninstall"
+                    $pathGone = $false
+                    for ($w = 0; $w -lt 10; $w++) {
+                        $up = [Environment]::GetEnvironmentVariable("Path", "User")
+                        if (($up -split ';') -notcontains $testDir) { $pathGone = $true; break }
+                        Start-Sleep -Seconds 1
+                    }
+                    if ($pathGone) {
+                        Write-Pass "User PATH entry removed"
+                    } else {
+                        Write-Fail "User PATH still contains the install dir after uninstall"
+                    }
                 }
             } finally {
                 # Cleanup temp dir if it still exists
                 if (Test-Path $testDir) {
                     Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "rd", "/s", "/q", $testDir -Wait -NoNewWindow -ErrorAction SilentlyContinue
+                }
+                # Scrub the user PATH entry the installer added, plus any stale
+                # entries older aborted runs left behind. A run that died before
+                # its uninstaller finished leaked a psmux-installer-test-* PATH
+                # entry that dangled forever (found live on the dev machine).
+                $up = [Environment]::GetEnvironmentVariable("Path", "User")
+                if ($up -match 'psmux-installer-test-') {
+                    $cleanPath = ($up -split ';' | Where-Object { $_ -notmatch 'psmux-installer-test-' }) -join ';'
+                    [Environment]::SetEnvironmentVariable("Path", $cleanPath, "User")
                 }
             }
         } else {
