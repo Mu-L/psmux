@@ -416,6 +416,42 @@ fn probe_session_alive(session_name: &str) -> bool {
     }
 }
 
+fn build_send_paste_control(cmd_args: &[&str]) -> io::Result<String> {
+    let mut payload: Option<&str> = None;
+    let mut i = 1;
+    while i < cmd_args.len() {
+        match cmd_args[i] {
+            "-t" => {
+                i += 1;
+                if i >= cmd_args.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "send-paste -t requires a target",
+                    ));
+                }
+            }
+            value if payload.is_none() => payload = Some(value),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "send-paste requires exactly one UTF-8 base64 payload",
+                ));
+            }
+        }
+        i += 1;
+    }
+
+    let payload = payload
+        .filter(|value| crate::util::base64_decode(value).is_some())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "send-paste requires exactly one UTF-8 base64 payload",
+            )
+        })?;
+    Ok(format!("send-paste {}\n", payload))
+}
+
 fn main() {
     if let Err(e) = run_main() {
         // Print a user-friendly error message instead of Rust's Debug format
@@ -1957,20 +1993,13 @@ fn run_main() -> io::Result<()> {
                 send_control(cmd)?;
                 return Ok(());
             }
-            // send-paste - Paste base64-encoded text to a pane
+            // Base64 is the protocol boundary: unlike send-keys -l, it cannot
+            // inject a second newline-delimited control command. It also avoids
+            // nesting the payload inside PowerShell -EncodedCommand, which
+            // crossed cmd.exe's 8191-character limit around 2 KiB of text.
             "send-paste" => {
-                let mut payload = String::new();
-                let mut i = 1;
-                while i < cmd_args.len() {
-                    match cmd_args[i].as_str() {
-                        "-t" => { i += 1; } // consume target (handled globally)
-                        _ => { payload = cmd_args[i].to_string(); }
-                    }
-                    i += 1;
-                }
-                if !payload.is_empty() {
-                    send_control(format!("send-paste {}\n", payload))?;
-                }
+                let normalized: Vec<&str> = cmd_args.iter().map(|arg| arg.as_str()).collect();
+                send_control(build_send_paste_control(&normalized)?)?;
                 return Ok(());
             }
             // select-pane - Select the active pane
@@ -5171,5 +5200,36 @@ mod readiness_tests {
         // The key read can race the server's .key write; an auth failure is
         // a non-empty reply but is NOT a ready window list.
         assert!(!detached_list_windows_ready("ERROR: Invalid session key\n"));
+    }
+}
+
+#[cfg(test)]
+mod sbai_7120_tests {
+    use super::build_send_paste_control;
+
+    #[test]
+    fn send_paste_cli_forwards_one_base64_frame() {
+        let args = vec!["send-paste", "IGxpbmUgb25lXG5saW5lIHR3byA="];
+
+        assert_eq!(
+            build_send_paste_control(&args).unwrap(),
+            "send-paste IGxpbmUgb25lXG5saW5lIHR3byA=\n",
+        );
+    }
+
+    #[test]
+    fn send_paste_cli_rejects_missing_or_non_base64_payload() {
+        assert!(build_send_paste_control(&["send-paste"]).is_err());
+        assert!(build_send_paste_control(&["send-paste", "not base64"]).is_err());
+        assert!(build_send_paste_control(&["send-paste", "YQ==", "Yg=="]).is_err());
+        assert!(build_send_paste_control(&["send-paste", "-t"]).is_err());
+    }
+
+    #[test]
+    fn send_paste_cli_preserves_optional_target_syntax() {
+        assert_eq!(
+            build_send_paste_control(&["send-paste", "-t", "dev:0.1", "YQ=="]).unwrap(),
+            "send-paste YQ==\n",
+        );
     }
 }
