@@ -277,9 +277,12 @@ fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
     // x/y = POSITION (from -X/-Y); w/h = SIZE (from -x/-y). tmux ordering.
     let (mut x, mut y, mut w, mut h): (Option<u16>, Option<u16>, Option<u16>, Option<u16>) = (None, None, None, None);
     let mut skip = std::collections::HashSet::new();
+    // `--` ends option parsing; everything after it is the command argv.
+    let mut raw_from: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i] {
+            "--" => { skip.insert(i); raw_from = Some(i + 1); }
             "-d" => { skip.insert(i); detached = true; }
             "-P" => { skip.insert(i); print = true; }
             "-E" => { skip.insert(i); empty = true; }
@@ -292,13 +295,27 @@ fn parse_new_pane_args(args: &[&str]) -> ParsedNewPane {
             "-Y" => { if let Some(v) = args.get(i+1) { y = v.parse().ok(); skip.insert(i); skip.insert(i+1); i += 1; } }
             _ => {}
         }
+        if raw_from.is_some() { break; }
         i += 1;
     }
-    let command = args.iter().enumerate()
-        .filter(|(idx, _)| !skip.contains(idx))
-        .map(|(_, a)| *a)
-        .collect::<Vec<&str>>()
-        .join(" ");
+    // tmux parity (#582): a multi-token argv after `--` is exec'd directly
+    // (tmux execvp), so keep the marker plus token boundaries for
+    // build_command's argv decoder. A single token keeps tmux's string
+    // semantics (shell route).
+    let command = if let Some(start) = raw_from {
+        let tail = &args[start.min(args.len())..];
+        if tail.len() > 1 {
+            format!("-- {}", requote_command_tail(tail))
+        } else {
+            tail.join(" ")
+        }
+    } else {
+        args.iter().enumerate()
+            .filter(|(idx, _)| !skip.contains(idx))
+            .map(|(_, a)| *a)
+            .collect::<Vec<&str>>()
+            .join(" ")
+    };
     ParsedNewPane { command, x, y, w, h, border, title, start_dir, detached, print, empty }
 }
 
@@ -1088,9 +1105,24 @@ match cmd {
             .filter(|w| w[0] == "-e")
             .filter_map(|w| w[1].trim_matches('"').split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
             .collect();
-        let cmd_str: Option<String> = args.iter()
-            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-e" && w[1] == **a)) && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
-            .map(|s| s.trim_matches('"').to_string());
+        // tmux parity (#582): `-- prog args...` is an explicit argv. A
+        // multi-token argv keeps the `--` marker plus token boundaries so
+        // build_command execs it directly (tmux execvp); a single token
+        // keeps string semantics. Without `--`, the historical single-token
+        // extraction applies (the CLI sends the string form as one quoted
+        // arg).
+        let cmd_str: Option<String> = if let Some(pos) = args.iter().position(|a| *a == "--") {
+            let tail = &args[pos + 1..];
+            if tail.len() > 1 {
+                Some(format!("-- {}", requote_command_tail(tail)))
+            } else {
+                tail.first().map(|s| s.trim_matches('"').to_string()).filter(|s| !s.is_empty())
+            }
+        } else {
+            args.iter()
+                .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-e" && w[1] == **a)) && !args.iter().any(|f| f.starts_with("-F") && f.len() > 2 && &f[2..] == **a))
+                .map(|s| s.trim_matches('"').to_string())
+        };
         if print_info {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::NewWindowPrint(cmd_str, name, detached, start_dir, format_str, rtx, title, empty, env_sets));
@@ -1128,9 +1160,19 @@ match cmd {
             .filter(|w| w[0] == "-e")
             .filter_map(|w| w[1].trim_matches('"').split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
             .collect();
-        let cmd_str: Option<String> = args.iter()
-            .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-e" && w[1] == **a)))
-            .map(|s| s.trim_matches('"').to_string());
+        // tmux parity (#582): same `--` argv handling as new-window above.
+        let cmd_str: Option<String> = if let Some(pos) = args.iter().position(|a| *a == "--") {
+            let tail = &args[pos + 1..];
+            if tail.len() > 1 {
+                Some(format!("-- {}", requote_command_tail(tail)))
+            } else {
+                tail.first().map(|s| s.trim_matches('"').to_string()).filter(|s| !s.is_empty())
+            }
+        } else {
+            args.iter()
+                .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-c" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-p" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-l" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-T" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-F" && w[1] == **a)) && args.windows(2).all(|w| !(w[0] == "-e" && w[1] == **a)))
+                .map(|s| s.trim_matches('"').to_string())
+        };
         if print_info {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::SplitWindowPrint(kind, cmd_str, detached, start_dir, split_size, format_str, rtx, title, env_sets));
@@ -2113,8 +2155,18 @@ match cmd {
         // delivers the teammate launch via `respawn-pane -k -t %N -- "<cmd>"`.
         // Without this the pane is respawned with the default shell and the
         // teammate never boots (mailbox stays unread, task never runs).
+        // tmux parity (#582): a multi-token argv after `--` keeps the marker
+        // and token boundaries so build_command execs it directly; the
+        // single-quoted-string teammate form keeps shell semantics.
         let command = args.iter().position(|a| *a == "--")
-            .map(|i| args[i + 1..].join(" "))
+            .map(|i| {
+                let tail = &args[i + 1..];
+                if tail.len() > 1 {
+                    format!("-- {}", requote_command_tail(tail))
+                } else {
+                    tail.join(" ")
+                }
+            })
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command, empty));

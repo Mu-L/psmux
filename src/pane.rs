@@ -1548,6 +1548,98 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
         }
         other => other,
     };
+    // tmux parity (#582): an explicit `-- prog args...` argv with more than
+    // one token is exec'd DIRECTLY (tmux spawn.c execvp), never routed
+    // through a shell wrapper. The CLI and server encode the argv form by
+    // keeping the `--` marker at the head of the command string with each
+    // token requoted; a single token after `--` keeps tmux's string
+    // semantics (shell route), which also preserves the #580 teammate
+    // respawn idiom `-- "<one quoted command>"`.
+    #[cfg(windows)]
+    let (command_owned, raw_argv): (Option<String>, Option<Vec<String>>) = match command {
+        Some(c) => {
+            let t = c.trim_start();
+            match t.strip_prefix("--") {
+                Some(rest) if rest.is_empty() => (None, None),
+                Some(rest) if rest.starts_with(char::is_whitespace) => {
+                    let toks = split_spawn_tokens(rest);
+                    match toks.len() {
+                        0 => (None, None),
+                        1 => (Some(toks.into_iter().next().unwrap()), None),
+                        _ => {
+                            // Unix launch idioms (`env VAR=v prog`, `/bin/bash
+                            // -c '...'`) need the string path's Windows
+                            // translation (#399); direct-exec'ing `env` would
+                            // fail outright. Shell metacharacters mean the
+                            // argv was really a flattened shell string (the
+                            // respawn wire path loses quotes), so those keep
+                            // shell semantics too.
+                            let tail = rest.trim();
+                            let needs_shell = tail.chars().any(|c| matches!(c,
+                                '&' | '|' | '<' | '>' | ';' | '`' | '$' | '(' | ')' | '%' | '\n' | '\r'))
+                                || detect_bash_c_wrapper(tail).is_some()
+                                || detect_env_prefix_command(tail).is_some();
+                            if needs_shell {
+                                (Some(tail.to_string()), None)
+                            } else {
+                                (None, Some(toks))
+                            }
+                        }
+                    }
+                }
+                // e.g. "--foo": not the argv marker, an ordinary string.
+                _ => (Some(c.to_string()), None),
+            }
+        }
+        None => (None, None),
+    };
+    #[cfg(windows)]
+    let command: Option<&str> = command_owned.as_deref();
+    // A single token decoded from the `--` form can itself be the cat
+    // blocker idiom; the substitution above ran before decoding, so route
+    // it back through (depth is bounded: the plain "cat" string never
+    // reaches this decoder again).
+    #[cfg(windows)]
+    if let Some(c) = command {
+        if matches!(c.trim(), "cat" | "cat -") {
+            return build_command(Some(c.trim()), env_shim, allow_predictions);
+        }
+    }
+    #[cfg(windows)]
+    if let Some(tokens) = raw_argv {
+        // `-- cat -` spells the tmux blocker idiom too (#580).
+        if tokens.len() == 2 && tokens[0] == "cat" && tokens[1] == "-" {
+            return build_command(Some("cat"), env_shim, allow_predictions);
+        }
+        // CreateProcess resolves bare names (cmd.exe, ping) via its own
+        // search path and auto-wraps .bat/.cmd; normalize unix-style
+        // forward slashes like the direct-spawn path does.
+        let prog = tokens[0].replace('/', "\\");
+        let mut builder = CommandBuilder::new(&prog);
+        if let Some(ref dir) = cwd { builder.cwd(dir); }
+        apply_bare_env_if_set(&mut builder);
+        builder.env("TERM", "xterm-256color");
+        builder.env("COLORTERM", "truecolor");
+        builder.env("PSMUX_SESSION", "1");
+        let prog_args: Vec<String> = tokens[1..].to_vec();
+        builder.args(&prog_args);
+        // #495 follow-up, same as the direct-spawn path: an interactive
+        // PowerShell needs psrl_init or #{pane_current_path} freezes.
+        if is_powershell_program(&prog) && powershell_args_interactive(&prog_args) {
+            let has_noprofile = prog_args.iter()
+                .any(|a| a.eq_ignore_ascii_case("-NoProfile"));
+            let psrl_init = if has_noprofile {
+                build_psrl_init_noprofile(env_shim)
+            } else {
+                build_psrl_init(env_shim, allow_predictions)
+            };
+            if !has_noprofile {
+                builder.args(["-NoProfile"]);
+            }
+            builder.args(["-NoLogo", "-NoExit", "-Command", &psrl_init]);
+        }
+        return builder;
+    }
     if let Some(cmd) = command {
         // On Windows, detect `/bin/bash -c '...'` wrappers used by tools like
         // Overstory and omc for env var setup before launching agents.

@@ -1662,11 +1662,12 @@ fn run_main() -> io::Result<()> {
                 let mut empty_flag = false;
                 let mut env_args: Vec<String> = Vec::new();
                 let mut nw_positional: Vec<String> = Vec::new();
+                let mut nw_saw_ddash = false;
                 {
                     let mut i = 1;
                     while i < cmd_args.len() {
                         let a = cmd_args[i].as_str();
-                        if a == "--" { nw_positional.extend(cmd_args[i+1..].iter().map(|s| s.to_string())); break; }
+                        if a == "--" { nw_saw_ddash = true; nw_positional.extend(cmd_args[i+1..].iter().map(|s| s.to_string())); break; }
                         match a {
                             "-n" => { i += 1; if i < cmd_args.len() { name_arg = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             "-F" => { i += 1; if i < cmd_args.len() { format_str = Some(cmd_args[i].trim_matches('"').to_string()); } }
@@ -1722,7 +1723,16 @@ fn run_main() -> io::Result<()> {
                 for ev in &env_args {
                     cmd_line.push_str(&format!(" -e {}", crate::util::quote_arg(&ev)));
                 }
-                if !cmd_arg.is_empty() {
+                // tmux parity (#582): a multi-token `-- prog args...` argv is
+                // exec'd directly by the server, so forward the tokens
+                // individually behind the `--` marker instead of collapsing
+                // them into one shell string.
+                if nw_saw_ddash && nw_positional.len() > 1 {
+                    cmd_line.push_str(" --");
+                    for tok in &nw_positional {
+                        cmd_line.push_str(&format!(" {}", crate::util::quote_arg(tok)));
+                    }
+                } else if !cmd_arg.is_empty() {
                     cmd_line.push_str(&format!(" {}", crate::util::quote_arg(&cmd_arg)));
                 }
                 cmd_line.push('\n');
@@ -1751,11 +1761,12 @@ fn run_main() -> io::Result<()> {
                 let mut title_arg: Option<String> = None;
                 let mut env_args: Vec<String> = Vec::new();
                 let mut sw_positional: Vec<String> = Vec::new();
+                let mut sw_saw_ddash = false;
                 {
                     let mut i = 1;
                     while i < cmd_args.len() {
                         let a = cmd_args[i].as_str();
-                        if a == "--" { sw_positional.extend(cmd_args[i+1..].iter().map(|s| s.to_string())); break; }
+                        if a == "--" { sw_saw_ddash = true; sw_positional.extend(cmd_args[i+1..].iter().map(|s| s.to_string())); break; }
                         match a {
                             "-F" => { i += 1; if i < cmd_args.len() { format_str = Some(cmd_args[i].trim_matches('"').to_string()); } }
                             s if s.starts_with("-F") && s.len() > 2 => { format_str = Some(s[2..].trim_matches('"').to_string()); }
@@ -1808,7 +1819,15 @@ fn run_main() -> io::Result<()> {
                 for ev in &env_args {
                     cmd_line.push_str(&format!(" -e {}", crate::util::quote_arg(&ev)));
                 }
-                if !cmd_arg.is_empty() {
+                // tmux parity (#582): a multi-token `-- prog args...` argv is
+                // exec'd directly by the server; forward tokens individually
+                // behind the `--` marker.
+                if sw_saw_ddash && sw_positional.len() > 1 {
+                    cmd_line.push_str(" --");
+                    for tok in &sw_positional {
+                        cmd_line.push_str(&format!(" {}", crate::util::quote_arg(tok)));
+                    }
+                } else if !cmd_arg.is_empty() {
                     cmd_line.push_str(&format!(" {}", crate::util::quote_arg(&cmd_arg)));
                 }
                 cmd_line.push('\n');
