@@ -119,6 +119,37 @@ if ($alive -and $cap -notmatch 'Path\[0\]|Get-Content') {
 }
 & $PSMUX kill-session -t "${SESSION}cat" 2>&1 | Out-Null
 
+# --- Arm 7 (B4): new-session with `-- cat` (the exact Claude Code teammate
+# form). The `--` args take the direct-exec path (build_raw_command), which
+# handed the literal `cat` to CreateProcessW and failed the whole
+# new-session at exit 1 before the blocker substitution was routed here.
+Write-Host "[Arm 7] new-session -- cat (direct-exec path)" -ForegroundColor Yellow
+& $PSMUX new-session -d -s "${SESSION}cat2" -- cat 2>&1 | Out-Null
+$ec = $LASTEXITCODE
+Start-Sleep -Seconds 3
+& $PSMUX has-session -t "${SESSION}cat2" 2>$null
+$alive = ($LASTEXITCODE -eq 0)
+$dead = (& $PSMUX display-message -t "${SESSION}cat2" -p '#{pane_dead}' 2>&1 | Out-String).Trim()
+$cap = & $PSMUX capture-pane -t "${SESSION}cat2" -p 2>&1 | Out-String
+if ($ec -eq 0 -and $alive -and $dead -eq "0" -and $cap -notmatch 'Path\[0\]|Get-Content') {
+    Write-Pass "new-session -- cat up with a live silent blocker (exit 0)"
+} else {
+    Write-Fail "new-session -- cat: exit=$ec alive=$alive dead=$dead content=[$($cap.Trim())]"
+}
+& $PSMUX kill-session -t "${SESSION}cat2" 2>&1 | Out-Null
+
+# `cat -` spells the same blocker idiom.
+& $PSMUX new-session -d -s "${SESSION}cat3" -- cat - 2>&1 | Out-Null
+$ec = $LASTEXITCODE
+Start-Sleep -Seconds 3
+& $PSMUX has-session -t "${SESSION}cat3" 2>$null
+if ($ec -eq 0 -and $LASTEXITCODE -eq 0) {
+    Write-Pass "new-session -- cat - accepted (exit 0, session up)"
+} else {
+    Write-Fail "new-session -- cat - failed (exit=$ec)"
+}
+& $PSMUX kill-session -t "${SESSION}cat3" 2>&1 | Out-Null
+
 & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null
 
 Write-Host "`n=== Results ===" -ForegroundColor Cyan

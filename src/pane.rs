@@ -1865,6 +1865,19 @@ pub fn build_raw_command(raw_args: &[String]) -> CommandBuilder {
     if raw_args.is_empty() {
         return build_command(None, true, false);
     }
+    // tmux blocker idiom (issue #580): `new-session -- cat` is how Claude
+    // Code's teammate backend creates its root placeholder session. The
+    // shell-wrapped paths substitute a stdin-draining blocker in
+    // build_command, but this direct-exec path handed the literal `cat` to
+    // CreateProcessW, which fails the whole new-session. Route the idiom
+    // through build_command so it gets the same blocker.
+    #[cfg(windows)]
+    {
+        let joined = raw_args.join(" ");
+        if matches!(joined.trim(), "cat" | "cat -") {
+            return build_command(Some("cat"), true, false);
+        }
+    }
     let program = &raw_args[0];
     let mut builder = CommandBuilder::new(program);
     // Set CWD explicitly — portable_pty on Windows defaults to USERPROFILE
