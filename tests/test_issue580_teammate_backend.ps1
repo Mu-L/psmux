@@ -58,6 +58,12 @@ Start-Sleep -Seconds 3
 $cap = & $PSMUX capture-pane -t "${SESSION}:1" -p 2>&1 | Out-String
 if ($cap -match 'RESPAWN580') { Write-Pass "respawn-pane replaced the placeholder" }
 else { Write-Fail "respawned command output not found" }
+# A respawned pane must re-register its child pid: respawn_active_pane used
+# to null child_pid, blanking #{pane_pid} and sending
+# #{pane_current_command} to the foreground-window fallback forever.
+$rpid = (& $PSMUX display-message -t $paneId -p '#{pane_pid}' 2>&1 | Out-String).Trim()
+if ($rpid -match '^\d+$') { Write-Pass "respawned pane reports a fresh pane_pid ($rpid)" }
+else { Write-Fail "respawned pane lost its pane_pid (got [$rpid])" }
 
 # --- Arm 3 (B1): pane-scope option round trip ---
 Write-Host "[Arm 3] set-option -p / show-options -p round trip" -ForegroundColor Yellow
