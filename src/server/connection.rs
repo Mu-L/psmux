@@ -953,6 +953,9 @@ let mut pane_is_id = global_pane_is_id;
 let mut raw_target: Option<String> = global_raw_target.clone();
 let mut i = 0;
 while i < args.len() {
+    // `--` ends option parsing: a `-t` after it is command/value data, not a
+    // target flag (#583).
+    if args[i] == "--" { break; }
     if args[i] == "-t" {
         if let Some(v) = args.get(i+1) {
             // Issue #558: drop the '=' exact-match marker (see TARGET capture).
@@ -961,7 +964,7 @@ while i < args.len() {
             let pt = parse_target(v);
             if pt.window.is_some() { target_win = pt.window; target_win_is_id = pt.window_is_id; target_win_name = None; }
             else if pt.window_name.is_some() { target_win_name = pt.window_name; target_win = None; target_win_is_id = false; }
-            if pt.pane.is_some() { 
+            if pt.pane.is_some() {
                 target_pane = pt.pane;
                 pane_is_id = pt.pane_is_id;
             }
@@ -974,10 +977,21 @@ while i < args.len() {
 let args: Vec<&str> = {
     let mut filtered = Vec::new();
     let mut i = 0;
+    let mut end_of_opts = false;
     while i < args.len() {
-        if args[i] == "-t" {
-            i += 2; // skip -t and its value
-            continue;
+        if !end_of_opts {
+            if args[i] == "--" {
+                // Keep the `--` itself (arms that understand it use it as the
+                // end-of-options marker) but stop eating -t pairs after it.
+                end_of_opts = true;
+                filtered.push(args[i]);
+                i += 1;
+                continue;
+            }
+            if args[i] == "-t" {
+                i += 2; // skip -t and its value
+                continue;
+            }
         }
         filtered.push(args[i]);
         i += 1;
@@ -2353,34 +2367,50 @@ match cmd {
         if !persistent { break; }
     }
     "set-option" | "set" | "set-window-option" | "setw" => {
-        // Support combined flag tokens like -ga, -gu, -gq (tmux compat)
-        let combined_has_set = |ch: char| -> bool {
-            args.iter().any(|a| {
-                if *a == format!("-{}", ch) { return true; }
-                a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains(ch)
-            })
-        };
+        // Flags parse only BEFORE the first positional, and `--` ends option
+        // parsing entirely (#583, the set-option sibling of the #562
+        // send-keys fix). tmux (getopt) stops scanning at the option name,
+        // so a dash-leading VALUE is data, never a flag: `set @k -u` must
+        // store the literal "-u", not route the command to the unset path
+        // (that was a silent rc-0 key deletion). Combined tokens like -ga,
+        // -gu, -gq still work in the flag region. -t and its value never
+        // reach this match (stripped by the generic -t filter above).
+        //
         // -U is an unset alias (tmux parity, #553). It was only recognized
         // CLIENT-side, so `set -U @x V` cleared the CLI's empty-value guard,
-        // arrived here, matched neither the case-sensitive "-u" compare nor
-        // the len>2 combined branch, and fell through to the plain SET path:
+        // arrived here unrecognized, and fell through to the plain SET path:
         // the option was written where the caller asked for an unset, rc 0.
-        let has_u = combined_has_set('u') || combined_has_set('U');
-        let has_a = combined_has_set('a');
-        let has_q = combined_has_set('q');
-        let has_o = combined_has_set('o');
-        let global = combined_has_set('g');
+        let mut flag_chars = String::new();
+        let mut non_flag_args: Vec<&str> = Vec::new();
+        {
+            let mut i = 0;
+            while i < args.len() {
+                let a = args[i];
+                if non_flag_args.is_empty() {
+                    if a == "--" {
+                        non_flag_args.extend(args[i + 1..].iter().copied());
+                        break;
+                    }
+                    if a.starts_with('-') && a.len() > 1
+                        && a.chars().skip(1).all(|c| c.is_ascii_alphabetic())
+                    {
+                        flag_chars.push_str(&a[1..]);
+                        i += 1;
+                        continue;
+                    }
+                }
+                non_flag_args.push(a);
+                i += 1;
+            }
+        }
+        let has_u = flag_chars.contains('u') || flag_chars.contains('U');
+        let has_a = flag_chars.contains('a');
+        let has_q = flag_chars.contains('q');
+        let has_o = flag_chars.contains('o');
+        let global = flag_chars.contains('g');
         // tmux parity (#580): `-p` is a bare PANE-SCOPE flag like `-w`; it
-        // never consumes the next argument. Treating it as a target flag ate
-        // the option name, so `set -p -t %3 remain-on-exit failed` misparsed
-        // as an empty-value set of 'failed'. Only -t takes a value here.
-        let pane_scope = combined_has_set('p');
-        let t_targets: std::collections::HashSet<&str> = args.windows(2)
-            .filter(|w| w[0] == "-t")
-            .map(|w| w[1]).collect();
-        let non_flag_args: Vec<&str> = args.iter()
-            .filter(|a| (!a.starts_with('-') || a.starts_with('@')) && !t_targets.contains(*a))
-            .copied().collect();
+        // never consumes the next argument.
+        let pane_scope = flag_chars.contains('p');
         if pane_scope {
             let raw_target = extract_flag_value(&args, "-t")
                 .map(|s| s.trim_matches('"').to_string())
@@ -2863,9 +2893,36 @@ match cmd {
         if !persistent { break; }
     }
     "set-hook" => {
-        let has_unset = args.iter().any(|a| *a == "-u" || *a == "-gu" || *a == "-ug");
-        let has_append = args.iter().any(|a| *a == "-a" || *a == "-ga" || *a == "-ag");
-        let non_flag: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+        // Same positional discipline as set-option (#583): flags parse only
+        // BEFORE the hook name, `--` ends option parsing. `set-hook
+        // after-new-window -u` used to route to the unset path and silently
+        // delete the hook at rc 0; a dash-leading token after the hook name
+        // is part of the hook command.
+        let mut flag_chars = String::new();
+        let mut non_flag: Vec<&str> = Vec::new();
+        {
+            let mut i = 0;
+            while i < args.len() {
+                let a = args[i];
+                if non_flag.is_empty() {
+                    if a == "--" {
+                        non_flag.extend(args[i + 1..].iter().copied());
+                        break;
+                    }
+                    if a.starts_with('-') && a.len() > 1
+                        && a.chars().skip(1).all(|c| c.is_ascii_alphabetic())
+                    {
+                        flag_chars.push_str(&a[1..]);
+                        i += 1;
+                        continue;
+                    }
+                }
+                non_flag.push(a);
+                i += 1;
+            }
+        }
+        let has_unset = flag_chars.contains('u');
+        let has_append = flag_chars.contains('a');
         if has_unset {
             // set-hook -gu <hook-name>  →  remove the hook
             if let Some(name) = non_flag.first() {

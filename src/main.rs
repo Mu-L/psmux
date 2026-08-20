@@ -3275,7 +3275,7 @@ fn run_main() -> io::Result<()> {
             "set-option" | "set" | "set-window-option" | "setw" => {
                 // Validate that known integer-valued options receive a numeric value,
                 // erroring (nonzero exit) like tmux instead of silently accepting junk.
-                {
+                let cli_pane_scope = {
                     // NOTE: "lock-after-time" is intentionally excluded. Unlike the
                     // options below, psmux has no real numeric business logic for it
                     // anywhere server-side -- config.rs stores it as an opaque
@@ -3298,16 +3298,29 @@ fn run_main() -> io::Result<()> {
                     let mut j = 1;
                     while j < cmd_args.len() {
                         let a = cmd_args[j].as_str();
-                        // Only -t consumes a value. `-p` is a bare pane-scope
-                        // flag (tmux parity, #580); treating it as a target
-                        // flag ate the option name, so `set -p -t %3
-                        // remain-on-exit failed` misparsed as an empty-value
-                        // set of 'failed'.
-                        if a == "-t" { j += 2; continue; }
-                        if a.starts_with('-') && a.len() > 1 {
-                            flags.push_str(&a[1..]);
-                            j += 1;
-                            continue;
+                        // Flags parse only BEFORE the first positional, and
+                        // `--` ends option parsing entirely (#583, the
+                        // set-option sibling of the #562 send-keys fix). tmux
+                        // (getopt) stops scanning at the option name, so a
+                        // dash-leading VALUE is data, never a flag: `set @k
+                        // -u` stores the literal "-u" instead of consuming it
+                        // as the unset flag and deleting the key at rc 0.
+                        if positionals.is_empty() {
+                            if a == "--" {
+                                positionals.extend(cmd_args[j + 1..].iter().map(|s| s.as_str()));
+                                break;
+                            }
+                            // Only -t consumes a value. `-p` is a bare pane-scope
+                            // flag (tmux parity, #580); treating it as a target
+                            // flag ate the option name, so `set -p -t %3
+                            // remain-on-exit failed` misparsed as an empty-value
+                            // set of 'failed'.
+                            if a == "-t" { j += 2; continue; }
+                            if a.starts_with('-') && a.len() > 1 {
+                                flags.push_str(&a[1..]);
+                                j += 1;
+                                continue;
+                            }
                         }
                         positionals.push(a);
                         j += 1;
@@ -3356,7 +3369,8 @@ fn run_main() -> io::Result<()> {
                             std::process::exit(1);
                         }
                     }
-                }
+                    flags.contains('p')
+                };
                 let cmd_str: String = cmd_args.iter().map(|s| {
                     let s = s.as_str();
                     // An explicitly empty argument must be re-quoted, or it
@@ -3389,13 +3403,9 @@ fn run_main() -> io::Result<()> {
                 // target pane and answers "ERROR: ..." on refusal. A silent
                 // fire-and-forget here would recreate the exit-0 silent no-op
                 // this flag's support exists to end, so read the reply.
-                let pane_scope = cmd_args.iter().skip(1).any(|a| {
-                    let a = a.as_str();
-                    a == "-p"
-                        || (a.starts_with('-') && a.len() > 2 && a != "-t"
-                            && a.chars().skip(1).all(|c| c.is_ascii_alphabetic())
-                            && a.contains('p'))
-                });
+                // Detected in the flag region above; a "-p" in the VALUE
+                // position is data, not a scope flag (#583).
+                let pane_scope = cli_pane_scope;
                 if pane_scope {
                     let resp = send_control_with_response(format!("{}\n", cmd_str))?;
                     if resp.trim_start().starts_with("ERROR") {
@@ -3423,6 +3433,10 @@ fn run_main() -> io::Result<()> {
                     let mut j = 1;
                     while j < cmd_args.len() {
                         let a = cmd_args[j].as_str();
+                        // `--` ends option parsing: whatever follows is the
+                        // option name, dashes and all (#583; tmux accepts
+                        // `show -qv -t S -- @k` at rc 0).
+                        if a == "--" { break; }
                         if a == "-t" { j += 2; continue; }
                         if a.starts_with('-') && a.len() > 1 {
                             for ch in a[1..].chars() {
