@@ -2525,7 +2525,10 @@ match cmd {
             // the only place an exit code exists; nothing to apply here.
         }
     }
-    "show-options" | "show" | "show-window-options" | "showw" => {
+    // Singular aliases: tmux's unambiguous-prefix resolution makes
+    // `show-option` / `show-window-option` valid spellings there (#586).
+    "show-options" | "show" | "show-window-options" | "showw"
+    | "show-option" | "show-window-option" => {
         // Support combined flag tokens like -gv, -wv, -Av (tmux compat)
         let combined_has = |ch: char| -> bool {
             args.iter().any(|a| {
@@ -2537,7 +2540,7 @@ match cmd {
         let has_a = combined_has('A');
         let _has_s = combined_has('s');
         let has_w = combined_has('w');
-        let window_scope = matches!(cmd, "show-window-options" | "showw") || has_w;
+        let window_scope = matches!(cmd, "show-window-options" | "showw" | "show-window-option") || has_w;
         let has_v = combined_has('v');
         let has_q = combined_has('q');
         // Pane scope (issue #580): list the target pane's `set-option -p`

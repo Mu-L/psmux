@@ -558,7 +558,8 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
         "send-keys" | "send" => Some(Action::Command(cmd.to_string())),
         "send-prefix" => Some(Action::Command(cmd.to_string())),
         "set-option" | "set" | "setw" | "set-window-option" => Some(Action::Command(cmd.to_string())),
-        "show-options" | "show" | "show-window-options" | "showw" => Some(Action::Command(cmd.to_string())),
+        "show-options" | "show" | "show-window-options" | "showw"
+        | "show-option" | "show-window-option" => Some(Action::Command(cmd.to_string())),
         "source-file" | "source" => Some(Action::Command(cmd.to_string())),
         "select-layout" | "selectl" => Some(Action::Command(cmd.to_string())),
         "next-layout" | "nextl" => Some(Action::Command("next-layout".to_string())),
@@ -1750,7 +1751,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if output.is_empty() { output.push_str("(no bindings)\n"); }
             show_output_popup(app, "list-keys", output);
         }
-        "show-options" | "show" | "show-window-options" | "showw" => {
+        "show-options" | "show" | "show-window-options" | "showw"
+        | "show-option" | "show-window-option" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {

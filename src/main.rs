@@ -3443,7 +3443,13 @@ fn run_main() -> io::Result<()> {
                 return Ok(());
             }
             // show-options / show / show-window-options / showw - Show options
-            "show-options" | "show" | "show-window-options" | "showw" => {
+            // `show-option` / `show-window-option`: tmux resolves unambiguous
+            // command-name prefixes, so the singular spellings work there and
+            // tools type them (LazyVim probes `show-option -qvg ...`, #586).
+            // The control-mode dispatcher already accepted them; the CLI and
+            // TCP paths did not.
+            "show-options" | "show" | "show-window-options" | "showw"
+            | "show-option" | "show-window-option" => {
                 // Issue #553: reject flags psmux does not implement instead
                 // of silently accepting them (tmux: "unknown flag -Z", rc 1).
                 // Accepted: -A -g -q -s -v -w plus -t <target>. Option names
