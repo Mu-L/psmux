@@ -2815,7 +2815,7 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             // semantics.  pane_wants_mouse() must not be used for the wheel
             // (see pane_in_alt_screen for the rationale).
             let child_in_alt = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::pane_in_alt_screen(p));
+                .map_or(false, |p| crate::window_ops::pane_wheel_forward(p));
             if child_in_alt {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
@@ -2856,7 +2856,7 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             // Wheel gate: alternate_screen ONLY — known-good pre-3.3.5
             // semantics (see pane_in_alt_screen for the rationale).
             let child_in_alt = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::pane_in_alt_screen(p));
+                .map_or(false, |p| crate::window_ops::pane_wheel_forward(p));
             if child_in_alt {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {

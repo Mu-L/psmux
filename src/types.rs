@@ -186,6 +186,18 @@ pub struct Pane {
     /// pagers (`more.com`) that don't consume arrow keys. Refreshed every
     /// 2 seconds, same TTL as the other mouse-inject detectors above.
     pub scroll_fg_cache: Option<(Instant, bool, Option<String>)>,
+    /// Wheel-forward attribution for the pane's mouse protocol (#548
+    /// follow-up): `(mode, app_owned)` for the currently active DECSET
+    /// 1000/1002/1003 tracking, `None` while no protocol is on.
+    /// `app_owned` is sampled ONCE per protocol transition, at enablement
+    /// time, from `foreground_is_shell`: PSReadLine enables tracking
+    /// spuriously while the shell owns the prompt (`app_owned = false`,
+    /// wheel enters copy mode like tmux over a plain pane), while a real
+    /// main-screen mouse consumer (Copilot CLI, the #570 echo child)
+    /// enables it after taking the foreground (`app_owned = true`, wheel
+    /// is forwarded — tmux `mouse_any_flag` parity).  Updated by
+    /// `window_ops::update_mouse_proto_owner` on the server data tick.
+    pub mouse_proto_owner: Option<(vt100::MouseProtocolMode, bool)>,
     /// Last cursor shape requested by the child process via DECSCUSR (`\x1b[N q`).
     /// 0 = no override (use PSMUX_CURSOR_STYLE default), 1-6 = DECSCUSR values.
     pub cursor_shape: std::sync::Arc<std::sync::atomic::AtomicU8>,

@@ -1286,6 +1286,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         let data_ready = crate::types::PTY_DATA_READY.swap(false, std::sync::atomic::Ordering::AcqRel);
         if data_ready {
             state_dirty = true;
+            // #548 follow-up: attribute any newly-enabled mouse protocol to
+            // the process that was foreground when it appeared (shell =
+            // PSReadLine's spurious tracking, non-shell = a genuine mouse
+            // consumer).  Runs on the data tick because a DECSET transition
+            // can only happen when pane output was just parsed; the process
+            // walk in update_mouse_proto_owner only fires on transitions.
+            for win in &mut app.windows {
+                crate::tree::for_each_pane_mut(&mut win.root, &mut |pane| {
+                    crate::window_ops::update_mouse_proto_owner(pane);
+                });
+                for fp in win.floating.iter_mut() {
+                    crate::window_ops::update_mouse_proto_owner(&mut fp.pane);
+                }
+            }
             // Drain output ring buffers and send %output notifications to control clients
             if !app.control_clients.is_empty() {
                 // Collect output from all panes first, then dispatch to clients

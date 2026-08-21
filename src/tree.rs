@@ -682,6 +682,16 @@ pub fn for_each_pane(node: &Node, f: &mut dyn FnMut(&Pane)) {
     }
 }
 
+/// Visit every pane in a tree node (DFS order), calling `f` on each, mutably.
+pub fn for_each_pane_mut(node: &mut Node, f: &mut dyn FnMut(&mut Pane)) {
+    match node {
+        Node::Leaf(p) => f(p),
+        Node::Split { children, .. } => {
+            for c in children { for_each_pane_mut(c, f); }
+        }
+    }
+}
+
 /// Collect all pane IDs from a tree node (DFS order).
 pub fn collect_pane_ids(node: &Node) -> Vec<usize> {
     let mut ids = Vec::new();

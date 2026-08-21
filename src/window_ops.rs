@@ -268,6 +268,52 @@ pub(crate) fn pane_in_alt_screen(pane: &Pane) -> bool {
     false
 }
 
+/// Attribute the pane's mouse protocol to whoever was foreground when it was
+/// enabled (#548 follow-up).  Called from the server data tick, so the
+/// process-table walk happens at ENABLEMENT time — sampling lazily at wheel
+/// time would misattribute PSReadLine's lingering spurious tracking to
+/// whatever app happens to be foreground when the user first scrolls.
+///
+/// Rules:
+///   - protocol off               -> owner cleared
+///   - protocol newly on/changed  -> `app_owned = (foreground_is_shell ==
+///     Some(false))`.  A confirmed non-shell foreground at enablement means
+///     the app itself asked for the mouse (Copilot CLI, the #570 echo
+///     child); the shell (or an inconclusive probe) means PSReadLine-style
+///     spurious tracking and the wheel stays on copy-mode semantics.
+///   - protocol unchanged         -> owner kept (one walk per transition)
+pub(crate) fn update_mouse_proto_owner(pane: &mut Pane) {
+    let mode = match pane.term.lock() {
+        Ok(parser) => parser.screen().mouse_protocol_mode(),
+        Err(_) => return,
+    };
+    if mode == vt100::MouseProtocolMode::None {
+        pane.mouse_proto_owner = None;
+        return;
+    }
+    let changed = match pane.mouse_proto_owner {
+        Some((last, _)) => last != mode,
+        None => true,
+    };
+    if changed {
+        let app_owned = pane
+            .child_pid
+            .and_then(crate::platform::process_info::foreground_is_shell)
+            == Some(false);
+        pane.mouse_proto_owner = Some((mode, app_owned));
+    }
+}
+
+/// The wheel-forwarding decision (#548 + #570): forward when the pane is on
+/// the alternate screen (nvim, htop, less — tmux `alternate_on`) OR when a
+/// mouse protocol is active AND was enabled by the application itself (tmux
+/// `mouse_any_flag`, minus PSReadLine's spurious enablement which
+/// `update_mouse_proto_owner` attributes to the shell).  Everything else
+/// gets copy-mode scrollback, exactly like tmux over a plain pane.
+pub(crate) fn pane_wheel_forward(pane: &Pane) -> bool {
+    pane_in_alt_screen(pane) || matches!(pane.mouse_proto_owner, Some((_, true)))
+}
+
 /// Gate for mouse CLICK/button forwarding.  Like `pane_wants_mouse` but WITHOUT
 /// the tier-3 `is_fullscreen_tui` screen-content heuristic.
 ///
@@ -1048,7 +1094,7 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
         }
 
         let alt = active_pane(&win.root, &win.active_path)
-            .map_or(false, |p| pane_in_alt_screen(p));
+            .map_or(false, |p| pane_wheel_forward(p));
         let sgr_btn: u8 = if up { 64 } else { 65 };
         let wheel_delta: i16 = if up { 120 } else { -120 };
         let bs = ((wheel_delta as i32) << 16) as u32;
@@ -1229,7 +1275,7 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
     // into pi's focused input box via PSReadLine's spurious mouse tracking;
     // see pane_in_alt_screen for the full rationale.
     let alt = active_pane(&win.root, &win.active_path)
-        .map_or(false, |p| pane_in_alt_screen(p));
+        .map_or(false, |p| pane_wheel_forward(p));
 
     if alt {
         // Forward scroll to TUI app
