@@ -219,7 +219,7 @@ fn issue278_bind_m_set_mouse_simulated() {
 fn all_boolean_options_recognized() {
     let booleans = [
         "mouse", "scroll-enter-copy-mode", "pwsh-mouse-selection",
-        "mouse-selection", "paste-detection", "choose-tree-preview",
+        "mouse-selection", "mouse-selection-force", "paste-detection", "choose-tree-preview",
         "focus-events", "renumber-windows", "automatic-rename",
         "allow-rename", "allow-set-title", "monitor-activity",
         "visual-activity", "synchronize-panes", "remain-on-exit",

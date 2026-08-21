@@ -317,7 +317,7 @@ $bools = @(
     'allow-rename', 'monitor-activity', 'visual-activity',
     'remain-on-exit', 'destroy-unattached', 'exit-empty',
     'aggressive-resize', 'set-titles', 'visual-bell',
-    'scroll-enter-copy-mode', 'pwsh-mouse-selection',
+    'scroll-enter-copy-mode', 'pwsh-mouse-selection', 'mouse-selection-force',
     'synchronize-panes', 'env-shim', 'warm',
     'allow-predictions', 'claude-code-fix-tty', 'claude-code-force-interactive'
 )
@@ -854,6 +854,7 @@ Test-TuiOption "set-option -g allow-predictions on" "allow-predictions" '\bon\b'
 Test-TuiOption "set-option -g warm on" "warm" '\bon\b' "TUI psmux: warm"
 Test-TuiOption "set-option -g env-shim on" "env-shim" '\bon\b' "TUI psmux: env-shim"
 Test-TuiOption "set-option -g pwsh-mouse-selection on" "pwsh-mouse-selection" '\bon\b' "TUI psmux: pwsh-mouse-selection"
+Test-TuiOption "set-option -g mouse-selection-force on" "mouse-selection-force" '\bon\b' "TUI psmux: mouse-selection-force"
 Test-TuiOption "set-option -g scroll-enter-copy-mode on" "scroll-enter-copy-mode" '\bon\b' "TUI psmux: scroll-enter-copy-mode"
 
 # =============================================================================

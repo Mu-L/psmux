@@ -66,6 +66,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "scroll-enter-copy-mode" => if app.scroll_enter_copy_mode { "on".into() } else { "off".into() },
         "pwsh-mouse-selection" => if app.pwsh_mouse_selection { "on".into() } else { "off".into() },
         "mouse-selection" => if app.mouse_selection { "on".into() } else { "off".into() },
+        "mouse-selection-force" => if app.mouse_selection_force { "on".into() } else { "off".into() },
         "paste-detection" => if app.paste_detection { "on".into() } else { "off".into() },
         "choose-tree-preview" => if app.choose_tree_preview { "on".into() } else { "off".into() },
         "status" => {
@@ -264,6 +265,7 @@ pub(crate) fn is_boolean_option(name: &str) -> bool {
             | "scroll-enter-copy-mode"
             | "pwsh-mouse-selection"
             | "mouse-selection"
+            | "mouse-selection-force"
             | "paste-detection"
             | "choose-tree-preview"
             | "focus-events"
@@ -349,6 +351,7 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
         "scroll-enter-copy-mode" => { app.scroll_enter_copy_mode = matches!(value, "on" | "true" | "1" | "yes"); }
         "pwsh-mouse-selection" => { app.pwsh_mouse_selection = matches!(value, "on" | "true" | "1" | "yes"); }
         "mouse-selection" => { app.mouse_selection = matches!(value, "on" | "true" | "1" | "yes"); }
+        "mouse-selection-force" => { app.mouse_selection_force = matches!(value, "on" | "true" | "1" | "yes"); }
         "paste-detection" => { app.paste_detection = matches!(value, "on" | "true" | "1" | "yes"); }
         "choose-tree-preview" => { app.choose_tree_preview = matches!(value, "on" | "true" | "1" | "yes"); }
         "prefix" => {
