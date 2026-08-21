@@ -45,6 +45,22 @@ $startTime = Get-Date
 # suite we spawn.
 Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
 
+# Suppress Windows hard-error popups for this process and EVERYTHING it
+# spawns (the error mode is inherited through CreateProcess). The runner and
+# the suites kill whole process trees constantly, and a console child caught
+# mid-initialization while its console/job is being torn down dies with
+# STATUS_DLL_INIT_FAILED (0xc0000142). Without this, each such death posts a
+# MODAL "pwsh.exe - Application Error" dialog to the desktop; Windows queues
+# them, so they keep resurfacing one OK-click at a time for hours after a
+# sweep. Measured 2026-08-21: every 0xc0000142 popup in a 7-day window fell
+# inside a full-sweep run (bursts of 10-12 around the codex-suite tree
+# kills), zero outside them.
+#   SEM_FAILCRITICALERRORS (0x1) | SEM_NOGPFAULTERRORBOX (0x2) |
+#   SEM_NOOPENFILEERRORBOX (0x8000)
+Add-Type -Name ErrMode -Namespace PsmuxRunner -MemberDefinition `
+    '[DllImport("kernel32.dll")] public static extern uint SetErrorMode(uint uMode);'
+[void][PsmuxRunner.ErrMode]::SetErrorMode(0x1 -bor 0x2 -bor 0x8000)
+
 # ── Logging setup ──────────────────────────────────────────────
 # All logs go to $env:TEMP\psmux-test-logs\ (never inside the repo).
 # Each run gets a timestamped folder with:
