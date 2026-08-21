@@ -1760,6 +1760,7 @@ fn run_main() -> io::Result<()> {
                 let mut size_cells: Option<String> = None;
                 let mut title_arg: Option<String> = None;
                 let mut env_args: Vec<String> = Vec::new();
+                let mut zoom_after_split = false;
                 let mut sw_positional: Vec<String> = Vec::new();
                 let mut sw_saw_ddash = false;
                 {
@@ -1781,7 +1782,8 @@ fn run_main() -> io::Result<()> {
                             "-v" => { flag = "-v"; }
                             "-d" => { detached = true; }
                             "-P" => { print_info = true; }
-                            "-b" | "-f" | "-I" | "-Z" => { /* ignored for compatibility */ }
+                            "-Z" => { zoom_after_split = true; }
+                            "-b" | "-f" | "-I" => { /* ignored for compatibility */ }
                             _ if a.starts_with('-') => { /* unknown flag, skip */ }
                             _ => { sw_positional.extend(cmd_args[i..].iter().map(|s| s.to_string())); break; }
                         }
@@ -1802,6 +1804,7 @@ fn run_main() -> io::Result<()> {
                 let mut cmd_line = format!("split-window {}", flag);
                 if detached { cmd_line.push_str(" -d"); }
                 if print_info { cmd_line.push_str(" -P"); }
+                if zoom_after_split { cmd_line.push_str(" -Z"); }
                 if let Some(ref fmt) = format_str {
                     cmd_line.push_str(&format!(" -F {}", crate::util::quote_arg(&fmt)));
                 }

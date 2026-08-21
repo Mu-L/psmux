@@ -911,8 +911,10 @@ fn split_window_flag_P_print() {
 #[test]
 fn split_window_flag_Z_zoom() {
     let mut app = mock_app_with_window();
+    assert!(app.windows[0].zoom_saved.is_none());
     execute_command_string(&mut app, "split-window -Z").unwrap();
-    // -Z should zoom the new pane after split
+    assert!(app.windows[0].zoom_saved.is_some(), "-Z should zoom the active pane after splitting");
+    assert_eq!(app.windows[0].active_path, vec![1], "-Z should leave the new pane active");
 }
 
 #[test]
