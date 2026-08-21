@@ -97,6 +97,62 @@ pub fn normalize_attached_global_args(args: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Split tmux-style ATTACHED `-t` target arguments AFTER the subcommand:
+/// `kill-session -tname` -> `kill-session -t name` (discussion #571,
+/// command-level slice).
+///
+/// tmux's command parser (arguments.c args_parse_flag_argument: the
+/// `if (*string != '\0')` branch) treats characters left attached after a
+/// value-taking flag letter as that flag's argument, for EVERY command.
+/// psmux's exact-match command parsers ignored such tokens, and the global
+/// routing fallback then picked the most recent session — reproduced:
+/// `kill-session -tvictimA` killed victimB.  `-t` is value-taking in every
+/// tmux and psmux command, so it is the one letter that can be rewritten
+/// generically without a per-command flag table (`-L`, `-T`, `-s`, ... are
+/// boolean in some commands and value-taking in others).
+///
+/// Rules:
+///   - Only tokens after the first non-flag token (the subcommand) are
+///     candidates; the global region is `normalize_attached_global_args`'s
+///     job and is left alone here.
+///   - Rewriting stops at a literal `--`: everything after it is payload
+///     (send-keys literals, direct-exec argv), exactly like tmux.
+///   - Only `-t<value>` is split.  A bare `-t` (detached form) and every
+///     other flag pass through unchanged.
+///   - tmux parses a token like `-tfoo` as a target in every command, so
+///     this rewrite is parity even where the token was meant as text; the
+///     tmux-blessed way to pass literal `-t...` text is after `--`.
+pub fn normalize_attached_target_flag(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut seen_subcommand = false;
+    let mut seen_dashdash = false;
+    for (idx, arg) in args.into_iter().enumerate() {
+        if idx == 0 {
+            out.push(arg); // binary name
+            continue;
+        }
+        if arg == "--" {
+            seen_dashdash = true;
+            out.push(arg);
+            continue;
+        }
+        if !seen_subcommand {
+            if !arg.starts_with('-') || arg == "-" {
+                seen_subcommand = true;
+            }
+            out.push(arg);
+            continue;
+        }
+        if !seen_dashdash && arg.len() > 2 && arg.starts_with("-t") && !arg.starts_with("--") {
+            out.push("-t".to_string());
+            out.push(arg[2..].to_string());
+            continue;
+        }
+        out.push(arg);
+    }
+    out
+}
+
 /// Same as [`normalize_flag_equals`] but operates on `Vec<&str>`, returning
 /// owned strings (needed where the caller already has borrowed slices).
 pub fn normalize_flag_equals_borrowed(args: &[&str]) -> Vec<String> {

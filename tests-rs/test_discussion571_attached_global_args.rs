@@ -95,3 +95,60 @@ fn composes_with_flag_equals_normalization() {
     ));
     assert_eq!(chained, vec!["psmux", "-L", "foo", "ls"]);
 }
+
+// --- command-level attached -t slice ---
+
+use crate::cli::normalize_attached_target_flag;
+
+fn normt(args: &[&str]) -> Vec<String> {
+    normalize_attached_target_flag(args.iter().map(|s| s.to_string()).collect())
+}
+
+#[test]
+fn command_level_attached_t_is_split() {
+    assert_eq!(
+        normt(&["psmux", "kill-session", "-tvictimA"]),
+        vec!["psmux", "kill-session", "-t", "victimA"]
+    );
+    assert_eq!(
+        normt(&["psmux", "display-message", "-tdev", "-p", "#S"]),
+        vec!["psmux", "display-message", "-t", "dev", "-p", "#S"]
+    );
+}
+
+#[test]
+fn detached_t_and_other_flags_pass_through() {
+    assert_eq!(
+        normt(&["psmux", "kill-session", "-t", "a"]),
+        vec!["psmux", "kill-session", "-t", "a"]
+    );
+    // -T is boolean in some commands: never rewritten by this pass
+    assert_eq!(
+        normt(&["psmux", "split-window", "-Ttitle"]),
+        vec!["psmux", "split-window", "-Ttitle"]
+    );
+}
+
+#[test]
+fn dashdash_protects_literals() {
+    assert_eq!(
+        normt(&["psmux", "send-keys", "-t", "a", "--", "-tliteral"]),
+        vec!["psmux", "send-keys", "-t", "a", "--", "-tliteral"]
+    );
+    assert_eq!(
+        normt(&["psmux", "new-session", "--", "cat", "-tfoo"]),
+        vec!["psmux", "new-session", "--", "cat", "-tfoo"]
+    );
+}
+
+#[test]
+fn global_region_is_left_to_the_global_pass() {
+    // chained as in main.rs: globals split by attached_global first, then
+    // the target pass leaves the already-detached pair alone
+    let chained = normalize_attached_target_flag(
+        crate::cli::normalize_attached_global_args(
+            ["psmux", "-Lns", "kill-session", "-tx"].iter().map(|s| s.to_string()).collect(),
+        ),
+    );
+    assert_eq!(chained, vec!["psmux", "-L", "ns", "kill-session", "-t", "x"]);
+}

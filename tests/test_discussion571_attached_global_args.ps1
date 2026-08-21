@@ -71,6 +71,43 @@ $wn = (& $PSMUX -L $NS display-message -t d571a -p '#{window_name}' 2>&1 | Out-S
 if ($wn -eq "d571win") { Write-Pass "rename through attached -L applied ($wn)" }
 else { Write-Fail "expected d571win, got '$wn'" }
 
+# Test 7: command-level attached -t kills the RIGHT session
+# (before the fix: the flag was ignored and fallback routing killed the
+# MOST RECENT session, so kill-session -tvictimA killed victimB)
+Write-Host "[Test 7] kill-session -t<name> (attached) targets the named session" -ForegroundColor Yellow
+& $PSMUX new-session -d -s d571vA 2>&1 | Out-Null
+Start-Sleep -Seconds 2
+& $PSMUX new-session -d -s d571vB 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+& $PSMUX kill-session "-td571vA" 2>&1 | Out-Null
+Start-Sleep -Seconds 1
+& $PSMUX has-session -t d571vA 2>$null
+$aAlive = ($LASTEXITCODE -eq 0)
+& $PSMUX has-session -t d571vB 2>$null
+$bAlive = ($LASTEXITCODE -eq 0)
+if (-not $aAlive -and $bAlive) { Write-Pass "attached -t killed d571vA, d571vB survived" }
+else { Write-Fail "wrong target: vA alive=$aAlive vB alive=$bAlive (fallback-routing kill = old bug)" }
+& $PSMUX kill-session -t d571vB 2>&1 | Out-Null
+
+# Test 8: command-level attached -t routes display-message and does not leak
+Write-Host "[Test 8] display-message -t<name> (attached) routes cleanly" -ForegroundColor Yellow
+& $PSMUX new-session -d -s d571r 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+$out = (& $PSMUX display-message "-td571r" -p '#{session_name}' 2>&1 | Out-String).Trim()
+if ($out -eq "d571r") { Write-Pass "routed and no token leak ($out)" }
+else { Write-Fail "expected clean 'd571r', got '$out'" }
+
+# Test 9: literals after -- are untouched
+Write-Host "[Test 9] send-keys literal '-tfoo' after -- stays literal" -ForegroundColor Yellow
+& $PSMUX send-keys -t d571r "echo " 2>&1 | Out-Null
+& $PSMUX send-keys -t d571r -l -- "-tfoo" 2>&1 | Out-Null
+& $PSMUX send-keys -t d571r Enter 2>&1 | Out-Null
+Start-Sleep -Seconds 1
+$cap = (& $PSMUX capture-pane -t d571r -p 2>&1 | Out-String)
+if ($cap -match "-tfoo") { Write-Pass "literal -tfoo reached the pane" }
+else { Write-Fail "literal -tfoo did not appear in pane capture" }
+& $PSMUX kill-session -t d571r 2>&1 | Out-Null
+
 Cleanup
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
 Write-Host "  Passed: $($script:TestsPassed)" -ForegroundColor Green
