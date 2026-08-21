@@ -248,27 +248,22 @@ pub(crate) fn pane_wants_mouse(pane: &Pane) -> bool {
     is_fullscreen_tui(pane)
 }
 
-/// Stricter than `pane_wants_mouse`, used ONLY for the scroll-wheel decision.
+/// Wheel-forwarding gate: is the pane's child on the alternate screen?
 ///
-/// The wheel must auto-enter copy mode for an ordinary shell pane (tmux parity,
-/// issue #360).  `pane_wants_mouse`'s tier-3 `is_fullscreen_tui` content
-/// heuristic returns true for a normal shell that has filled the screen with
-/// the prompt sitting at the bottom, which wrongly forwarded the wheel to the
-/// shell (it ignores SGR wheel) instead of entering copy mode.  For scroll we
-/// only forward when the child RELIABLY wants the mouse: it enabled a mouse
-/// protocol (e.g. nvim `set mouse=a`) or is on the alternate screen.  TUI apps
-/// that genuinely consume the wheel satisfy one of these even on older ConPTY
-/// (the mouse protocol DECSETs are not stripped); apps that satisfy neither do
-/// not interpret the wheel anyway, so copy-mode scrollback is the right thing.
-pub(crate) fn pane_wants_scroll_forward(pane: &Pane) -> bool {
+/// The wheel is the ONE mouse event that must use this check alone — the
+/// known-good pre-3.3.5 semantics.  Neither of the broader signals is safe
+/// for it:
+///   - mouse_protocol_mode: PSReadLine spuriously enables mouse tracking on
+///     ConPTY, so any pane whose shell is pwsh reports a mouse protocol even
+///     when the foreground app (pi, …) never asked for the wheel.
+///   - is_fullscreen_tui: false-positives on a filled shell (#360) and on
+///     inline TUIs like pi whose input box then eats the wheel as prompt
+///     history instead of psmux entering copy mode.
+/// Apps that genuinely consume the wheel (nvim, htop, less, opencode) run on
+/// the alternate screen, which modern ConPTY reports reliably.
+pub(crate) fn pane_in_alt_screen(pane: &Pane) -> bool {
     if let Ok(parser) = pane.term.lock() {
-        let screen = parser.screen();
-        if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
-            return true;
-        }
-        if screen.alternate_screen() {
-            return true;
-        }
+        return parser.screen().alternate_screen();
     }
     false
 }
@@ -292,11 +287,13 @@ pub(crate) fn pane_wants_scroll_forward(pane: &Pane) -> bool {
 /// This deliberately does NOT use the tier-3 `is_fullscreen_tui` content
 /// heuristic (a plain shell that merely filled the screen trips it) nor the
 /// console `ENABLE_MOUSE_INPUT` flag (which is SET by default on every console,
-/// so it never distinguishes a mouse app from a plain shell).  It matches the
-/// gate `pane_wants_scroll_forward` already uses for the wheel, and tmux, which
-/// forwards mouse events only to apps that requested a mouse mode.  A plain
-/// shell — inside a container or not — requests none, so clicks are no longer
-/// leaked into it.
+/// so it never distinguishes a mouse app from a plain shell).  It matches
+/// tmux, which forwards mouse events only to apps that requested a mouse
+/// mode.  A plain shell — inside a container or not — requests none, so
+/// clicks are no longer leaked into it.  (The wheel uses the even stricter
+/// `pane_in_alt_screen`: mouse_protocol_mode is not trustworthy there because
+/// PSReadLine enables it spuriously, and a wheel misroute is user-visible —
+/// it cycles prompt history in inline TUIs like pi.)
 pub(crate) fn pane_wants_click(pane: &Pane) -> bool {
     if let Ok(parser) = pane.term.lock() {
         let screen = parser.screen();
@@ -1029,15 +1026,7 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
     // Determine target pane, switch focus, and check if child is a TUI app
     // that should receive scroll events.
     //
-    // Detection strategy (same as pane_wants_mouse, fixes #285):
-    //   1. alternate_screen() — authoritative on newer Windows 11+ ConPTY
-    //   2. is_fullscreen_tui() heuristic — fallback for older Windows 10
-    //      builds where ConPTY strips DECSET 1049h.
-    //
-    // Note: is_fullscreen_tui() may false-positive after `ls`/`dir` fills
-    // the screen (preventing scroll-to-copy-mode briefly), but this is far
-    // less harmful than completely breaking scroll in TUI apps like Neovim
-    // on older Windows.
+    // Wheel gate: alternate_screen ONLY (see pane_in_alt_screen).
     let (child_in_alt_screen, target_area_opt, sgr_btn, button_state) = {
         let win = &mut app.windows[app.active_idx];
         let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
@@ -1059,7 +1048,7 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
         }
 
         let alt = active_pane(&win.root, &win.active_path)
-            .map_or(false, |p| pane_wants_mouse(p));
+            .map_or(false, |p| pane_in_alt_screen(p));
         let sgr_btn: u8 = if up { 64 } else { 65 };
         let wheel_delta: i16 = if up { 120 } else { -120 };
         let bs = ((wheel_delta as i32) << 16) as u32;
@@ -1235,13 +1224,12 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
         }
     }
 
-    // Use the stricter scroll-forward check (mouse protocol or alternate
-    // screen only).  The permissive pane_wants_mouse() heuristic misclassifies
-    // a normal shell that has filled the screen (prompt at the bottom) as a TUI
-    // app, so the wheel was forwarded to the shell instead of entering copy
-    // mode (#360).
+    // Wheel gate: alternate_screen ONLY — the known-good pre-3.3.5 semantics.
+    // Gating on mouse_protocol_mode (what #360's check kept) routed the wheel
+    // into pi's focused input box via PSReadLine's spurious mouse tracking;
+    // see pane_in_alt_screen for the full rationale.
     let alt = active_pane(&win.root, &win.active_path)
-        .map_or(false, |p| pane_wants_scroll_forward(p));
+        .map_or(false, |p| pane_in_alt_screen(p));
 
     if alt {
         // Forward scroll to TUI app
@@ -1272,25 +1260,29 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
         return;
     }
 
-    // Not mouse-aware and not on psmux's tracked alternate screen.  Before
-    // falling back to shell semantics (copy-mode entry / no-op), check
-    // whether the pane's foreground is a genuine non-shell program (e.g.
-    // legacy pagers like Windows' `more.com`, which never issues DECSET
-    // 1049/1000 at all — `pane_wants_scroll_forward` can never see it as
-    // "alt" — but is still a real foreground app, not the shell prompt).
+    // Not mouse-aware and not on psmux's tracked alternate screen.  tmux
+    // parity: a main-screen program without mouse tracking gets copy-mode
+    // scrollback.  Alternate-scroll (DECSET 1007, wheel → arrow keys) only
+    // ever applies to ALTERNATE-screen panes in tmux/xterm; the forward
+    // branch above already covers those via wheel injection.
     //
-    // tmux's answer for a foreground program with no mouse tracking is
-    // alternate-scroll: translate each wheel notch into arrow-key presses
-    // so the program's own built-in paging moves (DECSET 1007 semantics).
-    // That is the general case below. `more.com` is a special case within
-    // it: it's a DOS-heritage getch()-style reader that parses no ANSI
-    // escape sequences at all, so arrow keys are a silent no-op for it —
-    // proven by direct keystroke testing (Enter advances one line, Space
-    // one page, arrows do nothing). It's also forward-only by design (MS
-    // docs: no backward paging), so only wheel-down gets the Enter-advance
-    // treatment; wheel-up falls through to copy-mode entry, which already
-    // works because psmux's own scrollback buffer captured everything
-    // `more` printed regardless of what `more` itself can rewind to.
+    // Do NOT blanket-translate the wheel into arrow keys for every non-shell
+    // foreground.  Interactive inline TUIs (pi, Claude Code, …) run on the
+    // main screen without mouse tracking, and their focused input box reads
+    // Up/Down as prompt-history navigation: the general alternate-scroll
+    // branch this replaced sent 3×arrows per wheel notch, so the wheel over
+    // pi cycled prompt history instead of scrolling the transcript
+    // (regression 3.3.4→3.3.5+).
+    //
+    // The one legacy pager that genuinely needs help stays as an exact
+    // allowlist. `more.com` is a DOS-heritage getch()-style reader that
+    // parses no ANSI escape sequences at all, so arrow keys are a silent
+    // no-op for it — proven by direct keystroke testing (Enter advances one
+    // line, Space one page, arrows do nothing). It's also forward-only by
+    // design (MS docs: no backward paging), so only wheel-down gets the
+    // Enter-advance treatment; wheel-up falls through to copy-mode entry,
+    // which already works because psmux's own scrollback buffer captured
+    // everything `more` printed regardless of what `more` can rewind to.
     //
     // `non_shell_fg` is gated on a *confirmed* `Some(false)` from the
     // process-identity check in platform::process_info::foreground_is_shell
@@ -1323,18 +1315,10 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
             }
             let _ = pane.writer.flush();
         }
-    } else if non_shell_fg && !is_legacy_pager {
-        // General alternate-scroll: arrow keys (tmux DECSET-1007 parity).
-        if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
-            let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
-            for _ in 0..3 {
-                crate::input::write_key_seq(pane, seq);
-            }
-            let _ = pane.writer.flush();
-        }
     } else if up && app.scroll_enter_copy_mode {
-        // Shell prompt (or `more.com` wheel-up, or a probe failure) —
-        // enter copy mode and scroll psmux's own buffer.
+        // Everything else (shell prompt, inline TUI like pi, `more.com`
+        // wheel-up, or a probe failure) — enter copy mode and scroll
+        // psmux's own buffer, exactly like tmux.
         enter_copy_mode(app);
         scroll_copy_up(app, 3);
     } else if !app.scroll_enter_copy_mode {

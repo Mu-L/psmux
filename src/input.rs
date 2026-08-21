@@ -2811,14 +2811,11 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 win.active_path = path.clone();
                 active_area = Some(*area);
             }
-            // Forward scroll to child if pane wants mouse events (real TUI app
-            // like nvim/htop).  If not (shell prompt), auto-enter copy mode.
-            //
-            // Uses pane_wants_mouse() which includes heuristic fallback for
-            // older Windows 10 builds where ConPTY strips DECSET 1049h.
-            // (fixes #285)
+            // Wheel gate: alternate_screen ONLY — known-good pre-3.3.5
+            // semantics.  pane_wants_mouse() must not be used for the wheel
+            // (see pane_in_alt_screen for the rationale).
             let child_in_alt = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p));
+                .map_or(false, |p| crate::window_ops::pane_in_alt_screen(p));
             if child_in_alt {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
@@ -2856,10 +2853,10 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 win.active_path = path.clone();
                 active_area = Some(*area);
             }
-            // Forward scroll-down to child only if pane wants mouse events.
-            // Uses pane_wants_mouse() with heuristic fallback. (fixes #285)
+            // Wheel gate: alternate_screen ONLY — known-good pre-3.3.5
+            // semantics (see pane_in_alt_screen for the rationale).
             let child_in_alt = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p));
+                .map_or(false, |p| crate::window_ops::pane_in_alt_screen(p));
             if child_in_alt {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
