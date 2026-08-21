@@ -50,10 +50,15 @@ function Reset-All {
     Start-Sleep -Milliseconds 300
 }
 
-# Every invocation here captures output, so stdin is a pipe. That is the whole
-# point: it is the condition under which the bug was reachable.
+# The non-tty condition is the whole point: it is what made the bug reachable.
+# Capturing output only pipes STDOUT; stdin stays whatever the harness gave us
+# (a real console under run_all_tests' -NoNewWindow launch, the null device in
+# some agent shells). So pipe empty input explicitly: that makes stdin a pipe
+# in every harness, and it is what kept this suite hanging for 240s under the
+# full runner: with a console stdin, the bare-psmux arms started a REAL TUI on
+# the runner's console instead of taking the non-tty fallback.
 function Invoke-Attach($form, $target) {
-    $out = & $PSMUX $form -t $target 2>&1 | Out-String
+    $out = '' | & $PSMUX $form -t $target 2>&1 | Out-String
     return [pscustomobject]@{ Exit = $LASTEXITCODE; Out = $out.Trim() }
 }
 
@@ -136,7 +141,7 @@ $env:PSMUX_NO_WARM = "1"
 Remove-Item Env:\PSMUX_ALLOW_NESTING -EA SilentlyContinue
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-$out3 = & $PSMUX 2>&1 | Out-String
+$out3 = '' | & $PSMUX 2>&1 | Out-String
 $exit3 = $LASTEXITCODE
 $sw.Stop()
 $portsAfter = (Get-ChildItem "$psmuxDir" -Filter "*.port" -EA SilentlyContinue).Count
@@ -166,7 +171,7 @@ Remove-Item Env:\PSMUX_ACTIVE -EA SilentlyContinue
 Write-Host "`n[Test 4] The headless version fallback still works for a bare invocation" -ForegroundColor Yellow
 Reset-All
 Remove-Item Env:\PSMUX_ACTIVE -EA SilentlyContinue
-$out4 = & $PSMUX 2>&1 | Out-String
+$out4 = '' | & $PSMUX 2>&1 | Out-String
 $exit4 = $LASTEXITCODE
 Write-Info "bare psmux (not nested) -> exit=$exit4 out=[$($out4.Trim())]"
 if ($exit4 -eq 0 -and $out4 -match "tmux \d+\.\d+") {
