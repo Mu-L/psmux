@@ -463,7 +463,11 @@ fn main() {
 }
 
 fn run_main() -> io::Result<()> {
-    let args: Vec<String> = crate::cli::normalize_flag_equals(env::args().collect());
+    // `-L=foo` first (flag_equals), then `-Lfoo` (attached): running attached
+    // first would mis-split `-L=foo` into `-L` + `=foo`.
+    let args: Vec<String> = crate::cli::normalize_attached_global_args(
+        crate::cli::normalize_flag_equals(env::args().collect()),
+    );
     
     // Set console code page to UTF-8 early so ALL output paths (CLI commands
     // like capture-pane, list-sessions, display-message, etc.) correctly

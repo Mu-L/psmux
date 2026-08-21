@@ -34,6 +34,69 @@ pub fn normalize_flag_equals(args: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Split tmux-style ATTACHED short-option arguments in the GLOBAL (pre
+/// subcommand) region of the command line: `-Lsockname` -> `-L sockname`
+/// (discussion #571).
+///
+/// tmux parses its program options with getopt(3) (tmux.c: spec string
+/// `2c:CDdf:hlL:NqS:T:uUvV`), and its bundled compat getopt treats
+/// characters left attached after a value-taking option letter as that
+/// option's argument (`optarg = place` in the "no white space" branch of
+/// compat/getopt_long.c), so `-L sockname` and `-Lsockname` are
+/// equivalent.  Tools that drive tmux emit the
+/// attached form (libtmux builds `-L{name}`), and psmux's exact-match
+/// scanners treated the whole token as an unknown flag and SILENTLY
+/// dropped it — a `-Lfoo new-session` landed in the DEFAULT namespace.
+///
+/// Rules:
+///   - Only the region BEFORE the subcommand is rewritten; the first token
+///     not starting with `-` ends the scan, so command flags such as
+///     `select-pane -L` (no value) are never touched.
+///   - Only the value-taking global option letters psmux's own scanners
+///     consume are split: L, f, S, and psmux's global `-t`.  Letters psmux
+///     does not handle globally (tmux's `-c`/`-T`) pass through unchanged —
+///     splitting those would leave a stray value token that the scanner
+///     mistakes for the subcommand.  `-C`/`-CC` and boolean flags pass
+///     through unchanged.
+///   - A detached form (`-L name`) passes through unchanged: the letter is
+///     followed by nothing, so there is no attached value to split.
+pub fn normalize_attached_global_args(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut in_globals = true;
+    let mut skip_value = false;
+    for (idx, arg) in args.into_iter().enumerate() {
+        // args[0] is the binary name, not the subcommand.
+        if idx > 0 && in_globals {
+            if skip_value {
+                // Previous token was a detached value-taking flag: this token
+                // is its value, not the subcommand.
+                skip_value = false;
+                out.push(arg);
+                continue;
+            }
+            if !arg.starts_with('-') || arg == "-" {
+                in_globals = false; // subcommand (or bare -): stop rewriting
+                out.push(arg);
+                continue;
+            }
+            let bytes = arg.as_bytes();
+            if bytes.len() >= 3
+                && !arg.starts_with("--")
+                && matches!(bytes[1], b'L' | b'f' | b'S' | b't')
+            {
+                out.push(format!("-{}", bytes[1] as char));
+                out.push(arg[2..].to_string());
+                continue;
+            }
+            if bytes.len() == 2 && matches!(bytes[1], b'L' | b'f' | b'S' | b't') {
+                skip_value = true; // detached form: the NEXT token is the value
+            }
+        }
+        out.push(arg);
+    }
+    out
+}
+
 /// Same as [`normalize_flag_equals`] but operates on `Vec<&str>`, returning
 /// owned strings (needed where the caller already has borrowed slices).
 pub fn normalize_flag_equals_borrowed(args: &[&str]) -> Vec<String> {
@@ -850,3 +913,7 @@ mod tests_issue497_selectwindow_id;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue558_eq_prefix.rs"]
 mod tests_issue558_eq_prefix;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_discussion571_attached_global_args.rs"]
+mod tests_discussion571_attached_global_args;
