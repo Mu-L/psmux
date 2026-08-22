@@ -689,28 +689,6 @@ pub fn toggle_zoom(app: &mut AppState) {
     resize_all_panes(app);
 }
 
-/// Compute tab positions on the server side to match the client's status bar layout.
-/// The client renders: "[session_name] idx: window_name idx: window_name ..."
-/// NOTE: No longer called — tab clicks are now handled client-side with exact
-/// rendered positions.  Kept for reference / potential embedded-mode use.
-#[allow(dead_code)]
-pub fn update_tab_positions(app: &mut AppState) {
-    let mut tab_pos: Vec<(usize, u16, u16)> = Vec::new();
-    let mut cursor_x: u16 = 0;
-    // Session label: "[session_name] "
-    let session_label_len = app.session_name.len() as u16 + 3; // '[' + name + ']' + ' '
-    cursor_x += session_label_len;
-    // Window tabs: "idx: window_name " for each window
-    for (i, w) in app.windows.iter().enumerate() {
-        let display_idx = app.win_display_index(i);
-        let label = format!("{}: {} ", display_idx, w.name);
-        let start_x = cursor_x;
-        cursor_x += label.len() as u16;
-        tab_pos.push((i, start_x, cursor_x));
-    }
-    app.tab_positions = tab_pos;
-}
-
 pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
     let (x, y) = map_client_coords(app, x, y);
     // Status bar tab clicks are handled client-side via select-window.

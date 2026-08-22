@@ -2464,21 +2464,10 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
         return Ok(());
     }
 
-    // --- Tab click: check if click is on the status bar row ---
-    let status_row = window_area.y + window_area.height; // status bar is 1 row below window area
-    if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) && me.row == status_row {
-        for &(win_idx, x_start, x_end) in app.tab_positions.iter() {
-            if me.column >= x_start && me.column < x_end {
-                if win_idx < app.windows.len() {
-                    switch_with_copy_save(app, |app| {
-                        app.last_window_idx = app.active_idx;
-                        app.active_idx = win_idx;
-                    });
-                }
-                return Ok(());
-            }
-        }
-        // Click was on status bar but not on a tab — ignore
+    // Status bar tab clicks are handled client-side.
+    if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
+        && me.row == window_area.y + window_area.height
+    {
         return Ok(());
     }
 
