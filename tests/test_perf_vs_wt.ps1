@@ -474,7 +474,12 @@ for ($i = 0; $i -lt 10; $i++) { & $PSMUX new-window -t $SESSION 2>$null }
 $sw.Stop()
 $perWindow = [math]::Round($sw.ElapsedMilliseconds / 10, 1)
 Write-Perf "10 windows created in $($sw.ElapsedMilliseconds)ms (${perWindow}ms/window)"
-if ($perWindow -lt 50) { Write-Pass "Window creation: ${perWindow}ms/window < 50ms" } else { Write-Fail "too slow: ${perWindow}ms" }
+# Threshold history: originally 50ms/window. The 2026-08-21 sweep measured
+# 55-58ms on the then-current build AND 59.6ms on pre-change 5d938aa, and the
+# 2026-08-22 sweep measured 61.5ms: the drift is the MACHINE, not the product
+# (A/B on old builds proves it). 75ms keeps headroom to catch a genuine
+# regression (a 2x jump still fails) without flagging environment drift.
+if ($perWindow -lt 75) { Write-Pass "Window creation: ${perWindow}ms/window < 75ms" } else { Write-Fail "too slow: ${perWindow}ms" }
 
 Write-Test "8.2 Rapid window switching (50 cycles)"
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
