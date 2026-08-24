@@ -230,10 +230,12 @@ set -g status 2
 
 # Configure each line (0-indexed)
 set -g status-format[0] "#[align=left]#S #[align=right]%H:%M"
-set -g status-format[1] "#[align=left]#{W:#I:#W }"
+set -g status-format[1] "#[align=left]#{W:#[range=window|#{window_index}]#I:#W #[norange],#[range=window|#{window_index}]#I:#W* #[norange]}"
 ```
 
 The first line (`status-format[0]`) replaces the default status bar content. Additional lines stack below (or above, depending on `status-position`).
+
+**Clickable window tabs.** In a custom `status-format[N]` line, tab click targets come from `#[range=window|N]`/`#[norange]` markers and nothing else: a window list written without them renders correctly but cannot be clicked, exactly as in tmux (tmux's shipped default `status-format[0]` carries these markers, which is why its window list is clickable out of the box). `N` is the window index itself, so `#[range=window|#{window_index}]` is the correct idiom at any `base-index`. Inside `#{W:inactive,current}` the comma separates the two loop arguments, so any other comma must be escaped as `#,` and combined styles are easier written as `#[fg=green]#[bold]` than `#[fg=green,bold]`. Ranges are honored on every status line, and clicks are hit-tested on every status row.
 
 ### Pane Border Labels
 
