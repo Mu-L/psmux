@@ -285,6 +285,112 @@ fn handle_key_plain_arrows_still_move_the_cursor() {
     assert_eq!(row(&app), r0, "plain Down must still move the cursor back down");
 }
 
+// ══════════════ vi only scroll keys: C-e / C-y / J / K ══════════════
+// tmux copy-mode-vi binds C-e and J to scroll-down and C-y and K to scroll-up
+// (key-bindings.c:645, :653, :680, :681). tmux copy-mode binds C-e to
+// end-of-line and leaves C-y, J and K unbound, so mode-keys emacs must keep the
+// old end-of-line meaning for C-e and do nothing for the other three.
+
+fn col(app: &AppState) -> u16 {
+    app.copy_pos.expect("copy_pos must be tracked in copy mode").1
+}
+
+#[test]
+fn live_ctrl_y_scrolls_up_and_ctrl_e_scrolls_back_down_in_vi_mode() {
+    let mut app = copy_app("vi");
+    let (r0, c0) = (row(&app), col(&app));
+    crate::input::send_key_to_active(&mut app, "C-y").unwrap();
+    assert_eq!(offset(&app), 1, "vi C-y must scroll the viewport up one line");
+    assert_eq!(row(&app), r0, "vi C-y must not move the copy cursor");
+    assert_eq!(col(&app), c0, "vi C-y must not move the copy cursor to the line end");
+    crate::input::send_key_to_active(&mut app, "C-e").unwrap();
+    assert_eq!(offset(&app), 0, "vi C-e must scroll the viewport back down one line");
+    assert_eq!(col(&app), c0, "vi C-e must NOT jump to the end of the line");
+}
+
+#[test]
+fn live_ctrl_e_still_means_end_of_line_in_emacs_mode() {
+    let mut app = copy_app("emacs");
+    let (r0, o0) = (row(&app), offset(&app));
+    crate::input::send_key_to_active(&mut app, "C-e").unwrap();
+    assert!(col(&app) > 0, "emacs C-e must jump to the end of the line");
+    assert_eq!(offset(&app), o0, "emacs C-e must not scroll");
+    assert_eq!(row(&app), r0, "emacs C-e must stay on the same row");
+}
+
+#[test]
+fn live_ctrl_y_does_nothing_in_emacs_mode() {
+    // tmux leaves C-y unbound in the copy-mode table.
+    let mut app = copy_app("emacs");
+    let (r0, c0, o0) = (row(&app), col(&app), offset(&app));
+    crate::input::send_key_to_active(&mut app, "C-y").unwrap();
+    assert_eq!((row(&app), col(&app), offset(&app)), (r0, c0, o0), "emacs C-y must be inert");
+}
+
+#[test]
+fn live_shift_k_scrolls_up_and_shift_j_scrolls_back_down_in_vi_mode() {
+    // Printable keys reach the server as send-text on Windows, so this is the
+    // path a real Shift+K press takes.
+    let mut app = copy_app("vi");
+    let (r0, c0) = (row(&app), col(&app));
+    crate::input::send_text_to_active(&mut app, "K").unwrap();
+    assert_eq!(offset(&app), 1, "vi K must scroll the viewport up one line");
+    assert_eq!((row(&app), col(&app)), (r0, c0), "vi K must not move the copy cursor");
+    crate::input::send_text_to_active(&mut app, "J").unwrap();
+    assert_eq!(offset(&app), 0, "vi J must scroll the viewport back down one line");
+    assert_eq!((row(&app), col(&app)), (r0, c0), "vi J must not move the copy cursor");
+}
+
+#[test]
+fn live_shift_j_and_k_do_nothing_in_emacs_mode() {
+    let mut app = copy_app("emacs");
+    let (r0, c0, o0) = (row(&app), col(&app), offset(&app));
+    crate::input::send_text_to_active(&mut app, "K").unwrap();
+    crate::input::send_text_to_active(&mut app, "J").unwrap();
+    assert_eq!((row(&app), col(&app), offset(&app)), (r0, c0, o0), "emacs J and K must be inert");
+}
+
+#[test]
+fn live_shift_k_honours_a_numeric_count() {
+    let mut app = copy_app("vi");
+    crate::input::send_text_to_active(&mut app, "3").unwrap();
+    assert_eq!(app.copy_count, Some(3), "the digit must accumulate a count");
+    crate::input::send_text_to_active(&mut app, "K").unwrap();
+    assert_eq!(offset(&app), 3, "3K must scroll three lines, not one");
+}
+
+#[test]
+fn handle_key_ctrl_e_and_ctrl_y_match_the_live_path() {
+    let mut app = copy_app("vi");
+    let (r0, c0) = (row(&app), col(&app));
+    crate::input::handle_key(&mut app, ctrl(KeyCode::Char('y'))).unwrap();
+    assert_eq!(offset(&app), 1, "handle_key vi C-y must scroll up one line");
+    assert_eq!((row(&app), col(&app)), (r0, c0), "handle_key vi C-y must not move the cursor");
+    crate::input::handle_key(&mut app, ctrl(KeyCode::Char('e'))).unwrap();
+    assert_eq!(offset(&app), 0, "handle_key vi C-e must scroll back down one line");
+    assert_eq!(col(&app), c0, "handle_key vi C-e must not jump to the end of the line");
+
+    let mut emacs = copy_app("emacs");
+    crate::input::handle_key(&mut emacs, ctrl(KeyCode::Char('e'))).unwrap();
+    assert!(col(&emacs) > 0, "handle_key emacs C-e must still be end-of-line");
+    assert_eq!(offset(&emacs), 0, "handle_key emacs C-e must not scroll");
+}
+
+#[test]
+fn handle_key_shift_j_and_k_scroll_in_vi_mode_only() {
+    let mut app = copy_app("vi");
+    let r0 = row(&app);
+    crate::input::handle_key(&mut app, KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)).unwrap();
+    assert_eq!(offset(&app), 1, "handle_key vi K must scroll up one line");
+    assert_eq!(row(&app), r0, "handle_key vi K must not move the cursor");
+    crate::input::handle_key(&mut app, KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT)).unwrap();
+    assert_eq!(offset(&app), 0, "handle_key vi J must scroll back down one line");
+
+    let mut emacs = copy_app("emacs");
+    crate::input::handle_key(&mut emacs, KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)).unwrap();
+    assert_eq!(offset(&emacs), 0, "handle_key emacs K must be inert");
+}
+
 #[test]
 fn handle_key_ctrl_up_honours_a_numeric_count() {
     // psmux accumulates a vi-style repeat count; `3 C-Up` scrolls three lines.

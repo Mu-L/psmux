@@ -132,6 +132,68 @@ foreach ($mode in @("vi", "emacs")) {
         Write-Fail "$mode : C-Down expected offset $($b.scroll_offset - 1) / row $($b.copy_cursor_row), got offset $($a.scroll_offset) / row $($a.copy_cursor_row)"
     }
 
+    # ── vi only scroll keys: C-y / C-e and K / J ──
+    # tmux copy-mode-vi binds C-y and K to scroll-up and C-e and J to scroll-down
+    # (key-bindings.c:645, :653, :680, :681). tmux copy-mode binds C-e to
+    # end-of-line and leaves C-y, J and K unbound.
+    if ($mode -eq "vi") {
+        $b = $a
+        & $PSMUX -L $SOCK send-keys -t $S "C-y" 2>&1 | Out-Null; Start-Sleep -Milliseconds 250
+        $a = Get-Leaf $S
+        if ($a.scroll_offset -eq ($b.scroll_offset + 1) -and $a.copy_cursor_col -eq $b.copy_cursor_col) {
+            Write-Pass "vi : C-y scrolled $($b.scroll_offset) -> $($a.scroll_offset), cursor col stayed $($a.copy_cursor_col)"
+        } else {
+            Write-Fail "vi : C-y expected offset $($b.scroll_offset + 1) / col $($b.copy_cursor_col), got offset $($a.scroll_offset) / col $($a.copy_cursor_col)"
+        }
+
+        $b = $a
+        & $PSMUX -L $SOCK send-keys -t $S "C-e" 2>&1 | Out-Null; Start-Sleep -Milliseconds 250
+        $a = Get-Leaf $S
+        if ($a.scroll_offset -eq ($b.scroll_offset - 1) -and $a.copy_cursor_col -eq $b.copy_cursor_col) {
+            Write-Pass "vi : C-e scrolled $($b.scroll_offset) -> $($a.scroll_offset) and did NOT jump to the line end (col stayed $($a.copy_cursor_col))"
+        } else {
+            Write-Fail "vi : C-e expected offset $($b.scroll_offset - 1) / col $($b.copy_cursor_col), got offset $($a.scroll_offset) / col $($a.copy_cursor_col)"
+        }
+
+        $b = $a
+        & $PSMUX -L $SOCK send-keys -t $S "K" 2>&1 | Out-Null; Start-Sleep -Milliseconds 250
+        $a = Get-Leaf $S
+        if ($a.scroll_offset -eq ($b.scroll_offset + 1) -and $a.copy_cursor_row -eq $b.copy_cursor_row) {
+            Write-Pass "vi : K scrolled $($b.scroll_offset) -> $($a.scroll_offset), cursor row stayed $($a.copy_cursor_row)"
+        } else {
+            Write-Fail "vi : K expected offset $($b.scroll_offset + 1) / row $($b.copy_cursor_row), got offset $($a.scroll_offset) / row $($a.copy_cursor_row)"
+        }
+
+        $b = $a
+        & $PSMUX -L $SOCK send-keys -t $S "J" 2>&1 | Out-Null; Start-Sleep -Milliseconds 250
+        $a = Get-Leaf $S
+        if ($a.scroll_offset -eq ($b.scroll_offset - 1) -and $a.copy_cursor_row -eq $b.copy_cursor_row) {
+            Write-Pass "vi : J scrolled $($b.scroll_offset) -> $($a.scroll_offset), cursor row stayed $($a.copy_cursor_row)"
+        } else {
+            Write-Fail "vi : J expected offset $($b.scroll_offset - 1) / row $($b.copy_cursor_row), got offset $($a.scroll_offset) / row $($a.copy_cursor_row)"
+        }
+    } else {
+        # emacs: C-e is still end-of-line, C-y / J / K are inert.
+        & $PSMUX -L $SOCK send-keys -t $S "0" 2>&1 | Out-Null; Start-Sleep -Milliseconds 250
+        $b = Get-Leaf $S
+        & $PSMUX -L $SOCK send-keys -t $S "C-e" 2>&1 | Out-Null; Start-Sleep -Milliseconds 250
+        $a = Get-Leaf $S
+        if ($a.copy_cursor_col -gt $b.copy_cursor_col -and $a.scroll_offset -eq $b.scroll_offset) {
+            Write-Pass "emacs : C-e is still end-of-line, col $($b.copy_cursor_col) -> $($a.copy_cursor_col), no scroll"
+        } else {
+            Write-Fail "emacs : C-e expected col > $($b.copy_cursor_col) with offset $($b.scroll_offset), got col $($a.copy_cursor_col) / offset $($a.scroll_offset)"
+        }
+
+        $b = $a
+        foreach ($k in @("C-y", "K", "J")) { & $PSMUX -L $SOCK send-keys -t $S $k 2>&1 | Out-Null; Start-Sleep -Milliseconds 250 }
+        $a = Get-Leaf $S
+        if ($a.scroll_offset -eq $b.scroll_offset -and $a.copy_cursor_row -eq $b.copy_cursor_row -and $a.copy_cursor_col -eq $b.copy_cursor_col) {
+            Write-Pass "emacs : C-y, K and J are inert, exactly as tmux copy-mode leaves them"
+        } else {
+            Write-Fail "emacs : C-y/K/J moved something, offset $($b.scroll_offset)->$($a.scroll_offset) row $($b.copy_cursor_row)->$($a.copy_cursor_row) col $($b.copy_cursor_col)->$($a.copy_cursor_col)"
+        }
+    }
+
     & $PSMUX -L $SOCK kill-session -t $S 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
 }
@@ -182,6 +244,9 @@ set PSMUX_NO_WARM=1
     } else {
         $clientPid = $cli.ProcessId
         Write-Host "      attached client pid=$clientPid"
+        # mode-keys defaults to emacs (same as tmux), so the vi only keys below
+        # need it set explicitly. Never rely on the default here.
+        & $PSMUX -L $SOCK set-option -t $S -g mode-keys vi 2>&1 | Out-Null
         Fill-Pane $S
 
         # prefix (C-b) then '[' enters copy mode, exactly as a user does it.
@@ -239,6 +304,46 @@ set PSMUX_NO_WARM=1
                 Write-Fail "TUI Ctrl+Down expected offset $($b.scroll_offset - 1) / row $($b.copy_cursor_row), got offset $($a.scroll_offset) / row $($a.copy_cursor_row)"
             }
 
+            # vi only scroll keys through real keystrokes. mode-keys defaults to
+            # vi, and this client was never switched, so the vi table applies.
+            # ^y then ^e, then Shift+K then Shift+J (the injector sends an
+            # uppercase letter as the shifted key, which is what a real Shift+K is).
+            $b = $a
+            & $injector $clientPid "^y" | Out-Null; Start-Sleep -Milliseconds 500
+            $a = Get-Leaf $S
+            if ($a.scroll_offset -eq ($b.scroll_offset + 1) -and $a.copy_cursor_col -eq $b.copy_cursor_col) {
+                Write-Pass "TUI Ctrl+Y scrolled $($b.scroll_offset) -> $($a.scroll_offset), cursor col stayed $($a.copy_cursor_col)"
+            } else {
+                Write-Fail "TUI Ctrl+Y expected offset $($b.scroll_offset + 1) / col $($b.copy_cursor_col), got offset $($a.scroll_offset) / col $($a.copy_cursor_col)"
+            }
+
+            $b = $a
+            & $injector $clientPid "^e" | Out-Null; Start-Sleep -Milliseconds 500
+            $a = Get-Leaf $S
+            if ($a.scroll_offset -eq ($b.scroll_offset - 1) -and $a.copy_cursor_col -eq $b.copy_cursor_col) {
+                Write-Pass "TUI Ctrl+E scrolled $($b.scroll_offset) -> $($a.scroll_offset) and did NOT jump to the line end (col stayed $($a.copy_cursor_col))"
+            } else {
+                Write-Fail "TUI Ctrl+E expected offset $($b.scroll_offset - 1) / col $($b.copy_cursor_col), got offset $($a.scroll_offset) / col $($a.copy_cursor_col)"
+            }
+
+            $b = $a
+            & $injector $clientPid "K" | Out-Null; Start-Sleep -Milliseconds 500
+            $a = Get-Leaf $S
+            if ($a.scroll_offset -eq ($b.scroll_offset + 1) -and $a.copy_cursor_row -eq $b.copy_cursor_row) {
+                Write-Pass "TUI Shift+K scrolled $($b.scroll_offset) -> $($a.scroll_offset), cursor row stayed $($a.copy_cursor_row)"
+            } else {
+                Write-Fail "TUI Shift+K expected offset $($b.scroll_offset + 1) / row $($b.copy_cursor_row), got offset $($a.scroll_offset) / row $($a.copy_cursor_row)"
+            }
+
+            $b = $a
+            & $injector $clientPid "J" | Out-Null; Start-Sleep -Milliseconds 500
+            $a = Get-Leaf $S
+            if ($a.scroll_offset -eq ($b.scroll_offset - 1) -and $a.copy_cursor_row -eq $b.copy_cursor_row) {
+                Write-Pass "TUI Shift+J scrolled $($b.scroll_offset) -> $($a.scroll_offset), cursor row stayed $($a.copy_cursor_row)"
+            } else {
+                Write-Fail "TUI Shift+J expected offset $($b.scroll_offset - 1) / row $($b.copy_cursor_row), got offset $($a.scroll_offset) / row $($a.copy_cursor_row)"
+            }
+
             # Repeat the whole quartet to rule out a one shot fluke.
             $flaky = $false
             for ($round = 1; $round -le 3; $round++) {
@@ -252,10 +357,45 @@ set PSMUX_NO_WARM=1
                 & $injector $clientPid "{RAW:28:00:0008}" | Out-Null; Start-Sleep -Milliseconds 400
                 $a3 = Get-Leaf $S
                 if ($a3.scroll_offset -ne $a1.scroll_offset) { $flaky = $true }
+                & $injector $clientPid "K" | Out-Null; Start-Sleep -Milliseconds 400
+                $a4 = Get-Leaf $S
+                if ($a4.scroll_offset -ne ($a3.scroll_offset + 1)) { $flaky = $true }
+                & $injector $clientPid "^y" | Out-Null; Start-Sleep -Milliseconds 400
+                $a5 = Get-Leaf $S
+                if ($a5.scroll_offset -ne ($a4.scroll_offset + 1)) { $flaky = $true }
+                & $injector $clientPid "J" | Out-Null; Start-Sleep -Milliseconds 400
+                & $injector $clientPid "^e" | Out-Null; Start-Sleep -Milliseconds 400
+                $a6 = Get-Leaf $S
+                if ($a6.scroll_offset -ne $a3.scroll_offset) { $flaky = $true }
                 & $injector $clientPid "^n" | Out-Null; Start-Sleep -Milliseconds 400
             }
             if ($flaky) { Write-Fail "repeat rounds disagreed with the first pass" }
-            else { Write-Pass "3 repeat rounds of Ctrl+P / Ctrl+Up / Ctrl+Down all behaved identically" }
+            else { Write-Pass "3 repeat rounds of Ctrl+P / Ctrl+Up / Ctrl+Down / K / Ctrl+Y / J / Ctrl+E all behaved identically" }
+
+            # Same client, mode-keys flipped to emacs: C-e goes back to being
+            # end-of-line and C-y / K / J go inert, matching tmux copy-mode.
+            & $PSMUX -L $SOCK set-option -t $S -g mode-keys emacs 2>&1 | Out-Null
+            Start-Sleep -Milliseconds 400
+            & $injector $clientPid "0" | Out-Null; Start-Sleep -Milliseconds 400
+            $b = Get-Leaf $S
+            & $injector $clientPid "^e" | Out-Null; Start-Sleep -Milliseconds 500
+            $a = Get-Leaf $S
+            if ($a.copy_cursor_col -gt $b.copy_cursor_col -and $a.scroll_offset -eq $b.scroll_offset) {
+                Write-Pass "TUI emacs Ctrl+E is end-of-line again, col $($b.copy_cursor_col) -> $($a.copy_cursor_col), no scroll"
+            } else {
+                Write-Fail "TUI emacs Ctrl+E expected col > $($b.copy_cursor_col) / offset $($b.scroll_offset), got col $($a.copy_cursor_col) / offset $($a.scroll_offset)"
+            }
+
+            $b = $a
+            & $injector $clientPid "^y" | Out-Null; Start-Sleep -Milliseconds 400
+            & $injector $clientPid "K" | Out-Null; Start-Sleep -Milliseconds 400
+            & $injector $clientPid "J" | Out-Null; Start-Sleep -Milliseconds 400
+            $a = Get-Leaf $S
+            if ($a.scroll_offset -eq $b.scroll_offset -and $a.copy_cursor_row -eq $b.copy_cursor_row) {
+                Write-Pass "TUI emacs Ctrl+Y, K and J are inert, exactly as tmux copy-mode leaves them"
+            } else {
+                Write-Fail "TUI emacs Ctrl+Y/K/J moved something, offset $($b.scroll_offset)->$($a.scroll_offset) row $($b.copy_cursor_row)->$($a.copy_cursor_row)"
+            }
         }
 
         & $PSMUX -L $SOCK kill-session -t $S 2>&1 | Out-Null
