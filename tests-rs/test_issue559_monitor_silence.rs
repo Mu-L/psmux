@@ -34,15 +34,35 @@ fn make_window(name: &str, id: usize) -> crate::types::Window {
     }
 }
 
+/// An `Instant` roughly `secs` in the past.
+///
+/// `Instant` cannot be moved back beyond the clock's origin, so on a machine
+/// that booted recently `checked_sub` returns `None` for a large interval and
+/// the old `.expect(...)` here panicked: the 3600s case failed on any host with
+/// under an hour of uptime (a fresh CI runner, or a workstation just rebooted).
+/// Every caller only needs "longer ago than the threshold under test", never
+/// the exact interval, so halve the request until the clock can represent it.
+fn instant_secs_ago(secs: u64) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    let mut back = secs;
+    loop {
+        if let Some(past) = now.checked_sub(std::time::Duration::from_secs(back)) {
+            return past;
+        }
+        if back == 0 {
+            return now;
+        }
+        back /= 2;
+    }
+}
+
 /// App with `n` windows whose last output was `silent_for` seconds ago and
 /// whose version counters are settled (so the "new output" reset path does
 /// not swallow the silence check).
 fn app_silent_for(n: usize, silent_for: u64) -> AppState {
     let mut app = AppState::new("silence559".to_string());
     app.window_base_index = 0;
-    let past = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(silent_for))
-        .expect("machine uptime must exceed the test's silence interval");
+    let past = instant_secs_ago(silent_for);
     for i in 0..n {
         let mut w = make_window(&format!("w{}", i), i);
         w.last_output_time = past;
