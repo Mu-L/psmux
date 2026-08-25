@@ -197,3 +197,143 @@ fn contents_formatted_replays_each_style_code() {
         assert!(text.contains(want), "expected {want} in {text:?}");
     }
 }
+
+// ─── reset paths, every spelling (regression guard for the #589 review) ─────
+//
+// These were written after a review run of tests/test_issue589_undercurl.ps1
+// came back 24/28 on a machine with NO_COLOR=1 exported.  PowerShell 7 then
+// sets `$PSStyle.OutputRendering = PlainText` and strips the SGR sequences it
+// recognises out of Write-Host output, but its matcher does not recognise the
+// COLON subparameter forms.  The pane therefore received `4:3m` and `58:5:9m`
+// with every `ESC[0m` and `ESC[24m` around them deleted, so the style really
+// did run on until the end of the screen.  Real tmux 3.4 renders that same
+// byte stream identically (verified in WSL: `capture-pane -e` prints
+// `ESC[58;5;9mAFTER_ALL ESC[0m`), so the behaviour is correct and it was the
+// environment that changed.  The tests below pin every reset spelling so a
+// future regression in one of them cannot hide behind that explanation.
+
+#[test]
+fn bare_csi_m_clears_style_and_colour() {
+    // `ESC[m` with no parameters at all, which is what ConPTY emits.
+    let bytes = b"\x1b[4:3m\x1b[58:5:9mA\x1b[mB";
+    assert_eq!(style_at(bytes, 1), vt100::UnderlineStyle::None);
+    assert_eq!(ulcolor_at(bytes, 1), vt100::Color::Default);
+}
+
+#[test]
+fn sgr_0_in_the_middle_of_a_longer_list_clears_style_and_colour() {
+    // `ESC[0;1;4m` is exactly what psmux's own capture-pane -e writes, so it
+    // has to behave as reset-then-bold-then-underline.
+    let bytes = b"\x1b[4:3m\x1b[58:5:9mA\x1b[0;1;4mB";
+    let mut parser = vt100::Parser::new(5, 80, 0);
+    parser.process(bytes);
+    let b = parser.screen().cell(0, 1).unwrap();
+    assert_eq!(b.underline_style(), vt100::UnderlineStyle::Single);
+    assert_eq!(b.underline_color(), vt100::Color::Default);
+    assert!(b.bold());
+}
+
+#[test]
+fn sgr_0_at_the_end_of_a_list_clears_style_and_colour() {
+    let bytes = b"\x1b[4:3m\x1b[58:5:9mA\x1b[1;0mB";
+    let mut parser = vt100::Parser::new(5, 80, 0);
+    parser.process(bytes);
+    let b = parser.screen().cell(0, 1).unwrap();
+    assert_eq!(b.underline_style(), vt100::UnderlineStyle::None);
+    assert_eq!(b.underline_color(), vt100::Color::Default);
+    assert!(!b.bold());
+}
+
+#[test]
+fn sgr_4_semicolon_1_is_not_the_subparameter_form_in_any_order() {
+    // Two parameters in one CSI, both orders, plus the same pair delivered as
+    // two separate CSIs.  None of them may become an extended style.
+    for seq in [
+        &b"\x1b[4;1mX"[..],
+        &b"\x1b[1;4mX"[..],
+        &b"\x1b[1m\x1b[4mX"[..],
+        &b"\x1b[4m\x1b[1mX"[..],
+    ] {
+        let mut parser = vt100::Parser::new(5, 80, 0);
+        parser.process(seq);
+        let cell = parser.screen().cell(0, 0).unwrap();
+        assert_eq!(
+            cell.underline_style(),
+            vt100::UnderlineStyle::Single,
+            "wrong style for {seq:?}"
+        );
+        assert!(cell.bold(), "lost bold for {seq:?}");
+    }
+}
+
+#[test]
+fn a_leading_reset_wipes_attributes_set_before_it() {
+    // ConPTY's frame preamble is `ESC[2J ESC[m ESC[H`.  Anything set before it
+    // must be gone, which is what a stripped `ESC[4;1m` looks like from the
+    // outside.  tmux 3.4 does the same (verified: `ESC[1m ESC[4m ESC[m STD_UL`
+    // captures as plain `STD_UL`).
+    let bytes = b"\x1b[1m\x1b[4m\x1b[2J\x1b[m\x1b[HSTD_UL";
+    let mut parser = vt100::Parser::new(5, 80, 0);
+    parser.process(bytes);
+    let cell = parser.screen().cell(0, 0).unwrap();
+    assert_eq!(cell.underline_style(), vt100::UnderlineStyle::None);
+    assert!(!cell.bold());
+}
+
+#[test]
+fn underline_colour_outlives_sgr_24_exactly_like_tmux() {
+    // SGR 24 clears the underline, NOT the underline colour (tmux input.c
+    // `case 24` touches only GRID_ATTR_ALL_UNDERSCORE; only `case 59` and a
+    // full reset touch gc->us).  A cell can therefore legitimately carry an
+    // underline colour with no underline, which is what the NO_COLOR run
+    // above produced for AFTER_ALL.
+    let bytes = b"\x1b[4:3m\x1b[58:5:9mA\x1b[24mB";
+    let mut parser = vt100::Parser::new(5, 80, 0);
+    parser.process(bytes);
+    let b = parser.screen().cell(0, 1).unwrap();
+    assert_eq!(b.underline_style(), vt100::UnderlineStyle::None);
+    assert!(!b.underline());
+    assert_eq!(b.underline_color(), vt100::Color::Idx(9));
+}
+
+#[test]
+fn the_no_color_stripped_conhost_stream_renders_like_tmux() {
+    // The exact pre-parse bytes psmux received from ConPTY on the machine that
+    // reported 24/28, captured with PSMUX_PANE_RAW=1.  Every `ESC[0m` the
+    // payload wrote had been deleted by PowerShell before ConPTY ever saw it.
+    let bytes = b"COLOR_CURLY\x1b[58:5:9m\r\n\
+IDX_CURLY\r\n\
+BLEED_ONBLEED_OFF\r\n\
+COLON0_ON\x1b[24mCOLON0_OFF\r\n\
+AFTER_ALL\r\n";
+    let mut parser = vt100::Parser::new(8, 100, 0);
+    parser.process(b"\x1b[4:3m");
+    parser.process(bytes);
+    let screen = parser.screen();
+    // IDX_CURLY keeps the curl and the colour: nothing reset them.
+    let idx = screen.cell(1, 0).unwrap();
+    assert_eq!(idx.underline_style(), vt100::UnderlineStyle::Curly);
+    assert_eq!(idx.underline_color(), vt100::Color::Idx(9));
+    // AFTER_ALL keeps the colour but not the underline, because the only
+    // reset in the stream is the `ESC[24m` on the COLON0 line.  tmux 3.4
+    // prints `ESC[58;5;9mAFTER_ALL ESC[0m` for the same bytes.
+    let after = screen.cell(4, 0).unwrap();
+    assert_eq!(after.underline_style(), vt100::UnderlineStyle::None);
+    assert_eq!(after.underline_color(), vt100::Color::Idx(9));
+}
+
+#[test]
+fn the_unstripped_stream_leaves_nothing_behind() {
+    // The same lines with the resets intact, which is what the pane receives
+    // once NO_COLOR is out of the way.  Nothing may survive onto AFTER_ALL.
+    let bytes = b"\x1b[4:3m\x1b[58:5:9mIDX_CURLY\x1b[m\r\n\
+\x1b[4:3mBLEED_ON\x1b[24mBLEED_OFF\r\n\
+\x1b[4:3mCOLON0_ON\x1b[4:0mCOLON0_OFF\r\n\
+AFTER_ALL\r\n";
+    let mut parser = vt100::Parser::new(8, 100, 0);
+    parser.process(bytes);
+    let after = parser.screen().cell(3, 0).unwrap();
+    assert_eq!(after.underline_style(), vt100::UnderlineStyle::None);
+    assert_eq!(after.underline_color(), vt100::Color::Default);
+    assert!(!after.underline());
+}

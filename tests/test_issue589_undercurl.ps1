@@ -17,6 +17,17 @@
 # re-encodes them as `4:2`..`4:5` plus `58;2;r;g;b` (grid.c
 # grid_string_cells_code), which is exactly what is asserted below.
 #
+# NOTE on NO_COLOR: with NO_COLOR set in the environment, PowerShell 7 switches
+# $PSStyle.OutputRendering to PlainText and strips the SGR sequences it
+# recognises out of Write-Host output. Its matcher does NOT recognise the colon
+# subparameter forms, so the pane would receive `4:3m` and `58:5:9m` with every
+# surrounding `ESC[0m` and `ESC[24m` deleted, and the style would legitimately
+# run on to the end of the screen. That is a stripped payload, not a psmux
+# fault (real tmux 3.4 renders the same bytes the same way), so this script
+# clears NO_COLOR for the session it creates AND the payload forces
+# OutputRendering back to Ansi. Test 0 below fails loudly if anything strips
+# them anyway, instead of letting it look like a psmux regression.
+#
 # NOTE on SGR 58: the Windows SYSTEM conhost that backs every psmux pane does
 # NOT understand the SEMICOLON form `58;2;r;g;b`. It skips the 58 and then
 # reads 2/255/0/0 as ordinary SGR parameters, so the trailing 0 resets every
@@ -27,6 +38,9 @@
 # crates/vt100-psmux/tests/issue589_undercurl.rs.
 
 $ErrorActionPreference = "Continue"
+# Both of these are inherited by the server and by every pane it spawns.
+Remove-Item Env:\NO_COLOR -EA SilentlyContinue
+$env:PSMUX_NO_WARM = "1"
 $PSMUX = (Get-Command psmux -EA Stop).Source
 $SOCK = "i589"
 $SESSION = "t589"
@@ -45,6 +59,14 @@ $emptyConf = "$env:TEMP\psmux_589_empty.conf"
 # Write-Host lines with the SGR 4 subparameter forms.
 $payload = "$env:TEMP\psmux_589_payload.ps1"
 @'
+# Never let the host strip what this script is deliberately writing.
+Remove-Item Env:\NO_COLOR -EA SilentlyContinue
+if ($PSStyle) { $PSStyle.OutputRendering = 'Ansi' }
+# Let ConPTY flush its own frame preamble (ESC[2J ESC[m ESC[H, the title OSC,
+# ESC[?25h) before the first styled write, so the preamble's reset can never
+# land after the first line's attributes.
+Start-Sleep -Milliseconds 400
+Write-Host "WARMUP_LINE"
 $e = [char]27
 Write-Host "$e[4;1mSTD_UL$e[0m"
 Write-Host "$e[4:1mEXT_SINGLE$e[0m"
@@ -84,11 +106,26 @@ function Get-LineFor($capture, $label) {
 
 Write-Host "`n=== Issue #589 Tests: styled underscores and underline colour ===" -ForegroundColor Cyan
 
-# === TEST 1: capture-pane -e re-encodes every style, tmux style ===
-Write-Host "`n[Test 1] capture-pane -e carries 4:2 / 4:3 / 4:4 / 4:5" -ForegroundColor Yellow
+# === TEST 0: the payload's own escapes reached the pane ===
+# Guard, not a psmux assertion. If the host stripped the semicolon SGRs on the
+# way out, every later result is meaningless, so say so plainly here rather
+# than letting it read as a psmux failure.
+Write-Host "`n[Test 0] precondition: the payload's SGR sequences were not stripped" -ForegroundColor Yellow
 Cleanup
 Start-PayloadSession $SESSION
 $cap = Get-StyledCapture $SESSION
+$stdLine = Get-LineFor $cap "STD_UL"
+$extLine = Get-LineFor $cap "EXT_SINGLE"
+if ($stdLine -notmatch '4' -and $extLine -match '4') {
+    Write-Fail ("the shell stripped the semicolon SGR forms from the payload " +
+        "(NO_COLOR set, or `$PSStyle.OutputRendering is PlainText). " +
+        "STD_UL=$($stdLine -replace "`e", '<ESC>'). Nothing below is a psmux result.")
+} else {
+    Write-Pass "payload escapes reached the pane intact"
+}
+
+# === TEST 1: capture-pane -e re-encodes every style, tmux style ===
+Write-Host "`n[Test 1] capture-pane -e carries 4:2 / 4:3 / 4:4 / 4:5" -ForegroundColor Yellow
 
 foreach ($case in @(
     @{ Label = "DOUBLE_UL"; Want = "4:2" },
@@ -149,8 +186,14 @@ else { Write-Fail "curl bled past SGR 4:0: $vis" }
 
 $line = Get-LineFor $cap "AFTER_ALL"
 $vis = $line -replace "`e", '<ESC>'
-if ($line -notmatch '4:' -and $line -notmatch '58[;:]') { Write-Pass "AFTER_ALL is clean: $vis" }
-else { Write-Fail "style or colour bled onto AFTER_ALL: $vis" }
+# Only the underline STYLE is asserted across lines. ConPTY models underlines,
+# so it re-emits the reset faithfully; it does NOT model the SGR 58 colour and
+# forwards it blind, so where that colour lands relative to a reset is a
+# property of the shell and of ConPTY, not of psmux. The cross-line colour
+# reset is pinned deterministically in
+# crates/vt100-psmux/tests/issue589_undercurl.rs instead.
+if ($line -notmatch '4:') { Write-Pass "AFTER_ALL carries no underline style: $vis" }
+else { Write-Fail "underline style bled onto AFTER_ALL: $vis" }
 
 # === TEST 5: the run JSON the client renders from carries ul / ulc ===
 Write-Host "`n[Test 5] dump-state run JSON carries ul and ulc" -ForegroundColor Yellow
@@ -172,8 +215,9 @@ $run = [regex]::Match($dump, '\{"text":"IDX_CURLY[^}]*\}').Value
 if ($run -match '"ul":3' -and $run -match '"ulc":"idx:9"') { Write-Pass "IDX_CURLY: $run" }
 else { Write-Fail "IDX_CURLY run missing ul/ulc: $run" }
 $run = [regex]::Match($dump, '\{"text":"AFTER_ALL[^}]*\}').Value
-if ($run -and $run -notmatch '"ul"' -and $run -notmatch '"ulc"') { Write-Pass "AFTER_ALL run has no ul/ulc" }
-else { Write-Fail "AFTER_ALL run carries a style: $run" }
+# See the note above: "ulc" is deliberately not asserted here.
+if ($run -and $run -notmatch '"ul":') { Write-Pass "AFTER_ALL run has no underline style" }
+else { Write-Fail "AFTER_ALL run carries an underline style: $run" }
 
 # === TEST 6: FLAG_UNDERLINE stays set so older clients still underline ===
 Write-Host "`n[Test 6] flags keeps bit 8 for every styled run" -ForegroundColor Yellow
