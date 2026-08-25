@@ -368,8 +368,13 @@ The keys below are the built in copy mode map. Anything you bind with
 | `j` / `Down` | Move cursor down |
 | `k` / `Up` | Move cursor up |
 | `l` / `Right` | Move cursor right |
+| `Ctrl+p` / `Ctrl+n` | Move cursor up / down (same as `k` / `j`, emacs style, works in vi mode too) |
 | `Ctrl+a` | Start of line (emacs style, works in vi mode too) |
 | `Ctrl+e` | End of line (emacs style, works in vi mode too) |
+
+Cursor motions keep the viewport still until the cursor reaches the top or the bottom row of the
+pane. Only then does the view follow, one line at a time. To move the view itself while the cursor
+stays put, use the scrolling keys below.
 
 ### Word Motions
 
@@ -394,7 +399,7 @@ The keys below are the built in copy mode map. Anything you bind with
 | `Ctrl+u` / `Ctrl+d` | Half page up / down |
 | `Ctrl+b` / `PageUp` | Full page up |
 | `Ctrl+f` / `PageDown` | Full page down |
-| `Ctrl+p` / `Ctrl+n` | Scroll up / down one line |
+| `Ctrl+Up` / `Ctrl+Down` | Scroll up / down one line (cursor stays where it is) |
 | `g` | Top of scrollback |
 | `G` | Bottom (live output) |
 | `z` | Centre the cursor line in the pane (scroll-middle) |
@@ -516,9 +521,13 @@ mode uses for scrolling:
 | `Ctrl+f` | Page down | Move cursor right |
 | `Ctrl+v` | Force rectangle selection | Page down |
 
-These keys behave the same under both settings: `Ctrl+n` / `Ctrl+p` scroll one line, `Ctrl+a` /
-`Ctrl+e` go to line start / end, `Alt+f` / `Alt+b` move by word, `Alt+v` pages up, `Alt+w` copies
-and exits, `Ctrl+s` / `Ctrl+r` search forward / backward.
+These keys behave the same under both settings: `Ctrl+p` / `Ctrl+n` move the cursor up / down,
+`Ctrl+Up` / `Ctrl+Down` scroll one line, `Ctrl+a` / `Ctrl+e` go to line start / end, `Alt+f` /
+`Alt+b` move by word, `Alt+v` pages up, `Alt+w` copies and exits, `Ctrl+s` / `Ctrl+r` search
+forward / backward.
+
+`Ctrl+p` / `Ctrl+n` are cursor motions, not scrolling, which is what tmux binds them to in its
+`copy-mode` table. psmux keeps them available in vi mode as well, where tmux leaves them unbound.
 
 When in copy mode:
 - The pane border turns **yellow**
