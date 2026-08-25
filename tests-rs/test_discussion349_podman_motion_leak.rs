@@ -6,18 +6,17 @@
 //   The attached client forwards every bare mouse move as
 //   "pane-mouse <id> 35 <col> <row> M".  The server handlers
 //   (handle_pane_mouse / remote_mouse_motion) gated ALL buttons, including
-//   bare motion 35, on the permissive pane_wants_mouse().  Its tier-3
-//   is_fullscreen_tui() heuristic false-positives on a filled screen whose
+//   bare motion 35, on a permissive screen-content heuristic. It
+//   false-positives on a filled screen whose
 //   foreground is a NON-shell (podman.exe is neither a shell nor wsl/ssh, so
 //   the #381 shell gate does not apply).  psmux then wrote SGR any-motion
 //   bytes (ESC[<35;x;yM) into podman's pty on every mouse move; the container
 //   shell never enabled mouse tracking, so the tty echoed them as garbage.
 //
-// FIX (parity with the local input path, fixed the same way in #296):
+// CONTRACT:
 //   Bare motion (button 35) is gated on pane_wants_hover(), which requires the
 //   child to have EXPLICITLY enabled motion tracking (DECSET 1002/1003).
-//   Clicks/drags/wheel keep pane_wants_mouse() so TUI mouse support on ConPTY
-//   builds that strip the DECSETs keeps working (#285).
+//   Clicks and drags use pane_wants_click(); wheel uses pane_wheel_forward().
 //
 // Registered from src/window_ops.rs so it can call the pub(crate) helpers.
 
@@ -96,28 +95,18 @@ fn make_pane(term: Arc<Mutex<vt100::Parser>>, rows: u16, cols: u16) -> crate::ty
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// PART 1 — ROOT CAUSE: the trap state exists.  A filled container screen
-// (non-shell foreground, no mouse protocol enabled) makes the permissive
-// gate fire while the strict hover gate correctly stays closed.  Before the
-// fix, motion was routed through the permissive gate → leak.
+// PART 1: A filled container screen without an explicit mouse protocol must
+// not receive hover events.
 // ─────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn discussion349_filled_container_screen_trips_permissive_gate_but_not_hover_gate() {
+fn discussion349_filled_container_screen_does_not_get_hover() {
     let term = filled_parser(10, 60);
     let pane = make_pane(term, 10, 60);
 
-    // child_pid is None here → the #381 foreground_is_shell gate cannot help,
-    // exactly like podman.exe (a non-shell, non-wsl/ssh foreground) at runtime.
-    let permissive = pane_wants_mouse(&pane);
     let hover = pane_wants_hover(&pane);
-    eprintln!("[filled container] pane_wants_mouse={permissive} pane_wants_hover={hover}");
-
-    assert!(permissive,
-        "trap not reproduced: the fullscreen heuristic should false-positive on a filled screen \
-         (this is the deliberate #285 tradeoff for clicks)");
     assert!(!hover,
-        "FIX CONTRACT: bare motion must NOT be forwarded — the child never enabled \
+        "bare motion must not be forwarded: the child never enabled \
          DECSET 1002/1003, so pane_wants_hover must be false");
 }
 
@@ -156,28 +145,11 @@ fn discussion349_alt_screen_without_mouse_protocol_gets_no_hover() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// PART 4 — CLICK gate (discussion #349 follow-up, comment 17754744).
+// PART 4: CLICK gate (discussion #349 follow-up, comment 17754744).
 //
-// The original motion fix left clicks on the permissive pane_wants_mouse(),
-// whose tier-3 content heuristic still fires on a filled container screen —
-// so left/right clicks leaked "0;x;yM0;x;ym" into the podman tty. Clicks now
-// use pane_wants_click(), which drops the content heuristic while keeping the
-// reliable signals (mouse protocol enabled, or the alternate screen).
-//
-// NOTE: pane_wants_mouse() itself is UNCHANGED (still tier1/2/3) — it is the
-// wheel/scroll gate. Only the click gate switched to pane_wants_click().
+// Clicks use pane_wants_click(), whose reliable signals are an enabled mouse
+// protocol or the alternate screen.
 // ─────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn discussion349_permissive_gate_still_trips_on_filled_screen() {
-    // The trap state is unchanged; pane_wants_mouse (the WHEEL gate) still
-    // false-positives here. This documents WHY clicks needed a separate gate.
-    let term = filled_parser(10, 60);
-    let pane = make_pane(term, 10, 60);
-    assert!(pane_wants_mouse(&pane),
-        "pane_wants_mouse (wheel gate) still trips on a filled screen — that is why \
-         clicks moved to the stricter pane_wants_click");
-}
 
 #[test]
 fn discussion349_clicks_not_forwarded_on_filled_container_screen() {

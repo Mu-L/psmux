@@ -186,3 +186,56 @@ fn the_table_is_plausibly_populated() {
         "the test process itself should appear in its own process table"
     );
 }
+
+#[test]
+fn foreground_is_shell_classifies_live_processes() {
+    use std::process::{Command, Stdio};
+
+    let _g = lock();
+    let classify = |pid, expected| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut verdict = None;
+        loop {
+            let present = process_table(Duration::ZERO)
+                .is_some_and(|table| table.iter().any(|(entry_pid, _, _)| *entry_pid == pid));
+            if present {
+                verdict = foreground_is_shell(pid);
+                if verdict == Some(expected) {
+                    break verdict;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break verdict;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+
+    let mut shell = Command::new("cmd.exe")
+        .args(["/D", "/Q", "/K"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn cmd");
+    let shell_verdict = classify(shell.id(), true);
+    let _ = shell.kill();
+    let _ = shell.wait();
+    assert_eq!(shell_verdict, Some(true), "cmd must classify as a shell");
+
+    let mut ping = Command::new("ping.exe")
+        .args(["-n", "60", "127.0.0.1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn ping");
+    let ping_verdict = classify(ping.id(), false);
+    let _ = ping.kill();
+    let _ = ping.wait();
+    assert_eq!(
+        ping_verdict,
+        Some(false),
+        "ping must classify as a non-shell"
+    );
+}
