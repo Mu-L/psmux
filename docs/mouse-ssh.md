@@ -16,7 +16,9 @@ server runs Windows 11 build 22523 or newer. On Windows 10 and earlier Windows
 
 ## Builds below 22523
 
-Below build 22523 psmux does not enable mouse reporting at all. That is
+Below build 22523 psmux does not enable mouse reporting on the VT input path at
+all (SSH, JediTerm, WezTerm; a local Windows Terminal session is covered
+separately below). That is
 deliberate: on Windows 10 era console hosts an incoming mouse report could fast
 fail conhost and take the pane process with it, and a dead mouse beats a dead
 session.
@@ -36,6 +38,38 @@ ones the gate exists for.
 
 This also covers local WezTerm and JetBrains terminals on a sub 22523 build,
 which take the same VT input path as SSH.
+
+### The gate does not apply to a local Windows Terminal session
+
+The gate covers the VT input path: SSH, JediTerm and WezTerm, where an incoming
+SGR report is fed to conhost as VT bytes on the ConPTY input pipe. That is the
+path the crash was measured on.
+
+A local Windows Terminal session never uses that path, and it does not register
+mouse by writing escape sequences either. Under ConPTY a client's own mouse
+DECSET bytes never reach the terminal at all: conhost absorbs
+`ESC [ ? 1000 h`, `1002h`, `1003h` and `1006h` written to stdout, by a raw
+`WriteFile` on the console handle exactly as much as by `WriteConsoleW`. What
+conhost does relay is the Win32 console flag: setting `ENABLE_MOUSE_INPUT` on
+the client's input handle makes it emit `ESC [ ? 1003 ; 1006 h` to the terminal,
+and clearing the flag emits `ESC [ ? 1003 ; 1006 l`. That console flag is the
+only mouse registration channel a local client has, and psmux sets it at startup
+on every build.
+
+Windows Terminal sometimes drops a long lived local client's registration on its
+own, so the client re-asserts the flag every 30 seconds and on every resize.
+That re-assert runs on every build, including builds below 22523: it is a
+console mode call, it feeds nothing to the VT input parser, and it only restores
+a registration the same session already had. Before psmux 3.3.9 it sat behind
+the build gate, so on Windows 10 a dropped registration was permanent. The
+terminal, having been told `ESC [ ? 1003 ; 1006 l`, then fell back to
+alternate scroll and turned every wheel notch into Up and Down arrow keys, which
+psmux forwarded into the pane. Applications that read the wheel themselves, such
+as Claude Code, reported that the scroll wheel was sending arrow keys
+(issue #597).
+
+`PSMUX_FORCE_MOUSE=0` still pins mouse off completely, on any build, including
+this re-assert.
 
 ## Windows 10 client wrapper
 

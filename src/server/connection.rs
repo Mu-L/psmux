@@ -744,7 +744,13 @@ if control_echo || control_noecho {
         let filtered_args = without_outer_target(cmd_name, &cmd_args);
 
         // Apply target focus
-        let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp");
+        // tmux parity (#592): select-pane -T/-P is title/style-only (see the
+        // one-shot path below) — route it through the validated temp focus
+        // instead of permanently moving the user's active window/pane.
+        let ctrl_sp_attr_only = matches!(cmd_name, "select-pane" | "selectp")
+            && cmd_args.windows(2).any(|w| w[0] == "-T" || w[0] == "-P")
+            && !cmd_args.iter().any(|a| matches!(*a, "-U" | "-D" | "-L" | "-R" | "-l" | "-m" | "-M" | "-e" | "-d"));
+        let is_focus_cmd = matches!(cmd_name, "select-window" | "selectw" | "select-pane" | "selectp") && !ctrl_sp_attr_only;
         // Same skip list as the one-shot path below. The two lists had
         // diverged (issue #545 sub-note): join-pane/move-pane/move-window/
         // swap-window/switch-client resolve their own targets (or name a
@@ -996,8 +1002,17 @@ while i < target_scan_end {
 }
 // Remove this command's target while retaining targets in deferred commands.
 let args = without_outer_target(cmd, &args);
+// tmux parity (#592): `select-pane -T`/`-P` is a title/style-only
+// operation — tmux's cmd-select-pane.c sets the title and returns
+// before any activation. Classify it as a NON-focus command so it takes
+// the validated temp-focus path below: the attribute lands on the -t
+// target and the user's active window/pane are restored afterwards.
+// Movement flags (-U/-D/-L/-R/-l/-m/-M/-e/-d) keep the focus path.
+let sp_attr_only = matches!(cmd, "select-pane" | "selectp")
+    && args.windows(2).any(|w| w[0] == "-T" || w[0] == "-P")
+    && !args.iter().any(|a| matches!(*a, "-U" | "-D" | "-L" | "-R" | "-l" | "-m" | "-M" | "-e" | "-d"));
 // Commands that should permanently change focus when used with -t
-let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp");
+let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp") && !sp_attr_only;
 // Commands that handle -t internally and should NOT get FocusWindowTemp.
 // switch-client resolves the window/pane target itself (#483) and makes the
 // change PERMANENT; letting the generic block issue a temporary focus here
@@ -1613,17 +1628,16 @@ match cmd {
             else if args.iter().any(|a| *a == "-e") { "enable-input" }
             else if args.iter().any(|a| *a == "-d") { "disable-input" }
             else { "" };
-        // Check for -T title
+        // Check for -T title and -P style (per-pane style, e.g.
+        // "bg=default,fg=blue" — Claude Code uses -P for agent pane
+        // coloring; stored even if rendering doesn't support it yet).
+        // Sent as ONE SetPaneAttrs request (#592): under the temporary
+        // -t focus the restore fires after the first non-temp request,
+        // so two separate sends would mis-target the second attribute.
         let title = args.windows(2).find(|w| w[0] == "-T").map(|w| w[1].to_string());
-        if let Some(t) = title {
-            let _ = tx.send(CtrlReq::SetPaneTitle(t));
-        }
-        // Handle -P style (per-pane style, e.g. "bg=default,fg=blue")
-        // Claude Code uses this for agent pane coloring. Store silently
-        // even if rendering doesn't support it yet.
         let pane_style = args.windows(2).find(|w| w[0] == "-P").map(|w| w[1].to_string());
-        if let Some(style) = pane_style {
-            let _ = tx.send(CtrlReq::SetPaneStyle(style));
+        if title.is_some() || pane_style.is_some() {
+            let _ = tx.send(CtrlReq::SetPaneAttrs { title, style: pane_style });
         }
         if !dir.is_empty() {
             let keep_zoom = args.iter().any(|a| *a == "-Z");
@@ -4064,9 +4078,13 @@ fn dispatch_control_command(
             true
         }
         "select-pane" | "selectp" => {
-            // Handle -T title setting
-            if let Some(t) = args.windows(2).find(|w| w[0] == "-T").map(|w| w[1].trim_matches('"').to_string()) {
-                let _ = tx.send(CtrlReq::SetPaneTitle(t));
+            // Handle -T title / -P style. One SetPaneAttrs request (#592):
+            // under a temporary -t focus the restore fires after the first
+            // non-temp request, so separate sends would mis-target.
+            let title = args.windows(2).find(|w| w[0] == "-T").map(|w| w[1].trim_matches('"').to_string());
+            let style = args.windows(2).find(|w| w[0] == "-P").map(|w| w[1].trim_matches('"').to_string());
+            if title.is_some() || style.is_some() {
+                let _ = tx.send(CtrlReq::SetPaneAttrs { title, style });
             }
             let _ = resp_tx.send(String::new());
             true

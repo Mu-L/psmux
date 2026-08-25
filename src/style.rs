@@ -103,6 +103,8 @@ pub fn parse_tmux_style(style_str: &str) -> Style {
         let p = part.trim();
         if p.starts_with("fg=") { style = style.fg(map_color(&p[3..])); }
         else if p.starts_with("bg=") { style = style.bg(map_color(&p[3..])); }
+        // tmux style.c:236 accepts `us=` for the underscore colour.
+        else if p.starts_with("us=") { style = style.underline_color(map_color(&p[3..])); }
         else { apply_modifier(p, &mut style); }
     }
     style
@@ -143,14 +145,32 @@ fn apply_modifier(token: &str, style: &mut Style) {
         "hidden" => { *style = style.add_modifier(Modifier::HIDDEN); }
         "strikethrough" => { *style = style.add_modifier(Modifier::CROSSED_OUT); }
         "overline" => { /* ratatui doesn't support overline natively */ }
-        "double-underscore" | "curly-underscore" | "dotted-underscore" | "dashed-underscore" => {
-            *style = style.add_modifier(Modifier::UNDERLINED);
+        // tmux's styled underscores (attributes.c: double-underscore,
+        // curly-underscore, dotted-underscore, dashed-underscore).  The
+        // extended style rides in the smuggled high modifier bits that
+        // `PsmuxBackend::draw` turns into `CSI 4:N m` (issue #589).
+        "double-underscore" => {
+            *style = crate::rendering::with_underline(*style, 2, None);
+        }
+        "curly-underscore" => {
+            *style = crate::rendering::with_underline(*style, 3, None);
+        }
+        "dotted-underscore" => {
+            *style = crate::rendering::with_underline(*style, 4, None);
+        }
+        "dashed-underscore" => {
+            *style = crate::rendering::with_underline(*style, 5, None);
         }
         "default" | "none" => { *style = Style::default(); }
         "nobold" => { *style = style.remove_modifier(Modifier::BOLD); }
         "nodim" => { *style = style.remove_modifier(Modifier::DIM); }
         "noitalics" | "noitalic" => { *style = style.remove_modifier(Modifier::ITALIC); }
-        "nounderline" | "nounderscore" => { *style = style.remove_modifier(Modifier::UNDERLINED); }
+        "nounderline" | "nounderscore" => {
+            *style = style.remove_modifier(Modifier::UNDERLINED);
+            *style = style.remove_modifier(
+                Modifier::from_bits_retain(crate::rendering::UL_STYLE_MASK),
+            );
+        }
         "noblink" => { *style = style.remove_modifier(Modifier::SLOW_BLINK); }
         "noreverse" => { *style = style.remove_modifier(Modifier::REVERSED); }
         "nohidden" => { *style = style.remove_modifier(Modifier::HIDDEN); }
@@ -191,6 +211,8 @@ pub fn parse_inline_styles(text: &str, base_style: Style) -> Vec<Span<'static>> 
                     let p = part.trim();
                     if p.starts_with("fg=") { cur_style = cur_style.fg(map_color(&p[3..])); }
                     else if p.starts_with("bg=") { cur_style = cur_style.bg(map_color(&p[3..])); }
+                    // tmux style.c:236 accepts `us=` for the underscore colour.
+                    else if p.starts_with("us=") { cur_style = cur_style.underline_color(map_color(&p[3..])); }
                     else if p == "default" || p == "none" { cur_style = base_style; }
                     else if p == "push-default" { style_stack.push(cur_style); }
                     else if p == "pop-default" {

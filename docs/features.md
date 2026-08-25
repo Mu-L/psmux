@@ -42,6 +42,7 @@
 - **20+ customizable style options** : status bar, pane borders, messages, copy-mode highlights, popups, menus, window backgrounds. See [configuration.md](configuration.md) for the full table
 - **Full color spectrum** : 16 named colors, 256 indexed (`colour0` to `colour255`), 24-bit true color (`#RRGGBB`)
 - **Text attributes** : bold, dim, italic, underline, blink, reverse, strikethrough, and more
+- **Styled underscores** : double, curly (undercurl), dotted and dashed underlines from `ESC[4:2m` through `ESC[4:5m`, plus the SGR 58 underline colour, are parsed and passed on to the outer terminal
 - **Status bar** : fully customizable left/right content with format variables
 - **Window tab styling** : separate styles for active, inactive, activity, bell, and last-used tabs
 - **Pane border line styles** : `set -g pane-border-lines double` picks the glyph set (`single`, `double`, `heavy`, `simple`, `number`, `spaces`, `none`), and a post-pass upgrades straight runs to proper junction glyphs where borders meet. See [configuration.md](configuration.md)

@@ -1117,6 +1117,8 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
     let mut prev_dim = false;
     let mut prev_italic = false;
     let mut prev_underline = false;
+    let mut prev_ul_style = vt100::UnderlineStyle::None;
+    let mut prev_ulcolor: Option<vt100::Color> = None;
     let mut prev_blink = false;
     let mut prev_inverse = false;
     let mut prev_hidden = false;
@@ -1139,6 +1141,8 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                 let dim = cell.dim();
                 let italic = cell.italic();
                 let underline = cell.underline();
+                let ul_style = cell.underline_style();
+                let ulcolor = cell.underline_color();
                 let blink = cell.blink();
                 let inverse = cell.inverse();
                 let hidden = cell.hidden();
@@ -1147,7 +1151,10 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                 let style_changed = Some(fg) != prev_fg || Some(bg) != prev_bg
                     || bold != prev_bold || dim != prev_dim
                     || italic != prev_italic
-                    || underline != prev_underline || blink != prev_blink
+                    || underline != prev_underline
+                    || ul_style != prev_ul_style
+                    || Some(ulcolor) != prev_ulcolor
+                    || blink != prev_blink
                     || inverse != prev_inverse || hidden != prev_hidden
                     || strikethrough != prev_strikethrough;
 
@@ -1157,7 +1164,16 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                     if bold { params.push("1".to_string()); }
                     if dim { params.push("2".to_string()); }
                     if italic { params.push("3".to_string()); }
-                    if underline { params.push("4".to_string()); }
+                    // tmux re-encodes styled underscores with the SGR 4
+                    // subparameter form (grid.c grid_string_cells_code maps
+                    // GRID_ATTR_UNDERSCORE_2..5 to codes 42..45 and prints
+                    // them as "4:2".."4:5"), so a capture replays byte for
+                    // byte in any terminal that understands undercurl.
+                    match ul_style {
+                        vt100::UnderlineStyle::None => {}
+                        vt100::UnderlineStyle::Single => params.push("4".to_string()),
+                        other => params.push(format!("4:{}", other.sgr_subparam())),
+                    }
                     if blink { params.push("5".to_string()); }
                     if inverse { params.push("7".to_string()); }
                     if hidden { params.push("8".to_string()); }
@@ -1180,12 +1196,19 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                         }
                         vt100::Color::Rgb(r, g, b) => { params.push(format!("48;2;{};{};{}", r, g, b)); }
                     }
+                    match ulcolor {
+                        vt100::Color::Default => {}
+                        vt100::Color::Idx(n) => { params.push(format!("58;5;{}", n)); }
+                        vt100::Color::Rgb(r, g, b) => { params.push(format!("58;2;{};{};{}", r, g, b)); }
+                    }
                     prev_fg = Some(fg);
                     prev_bg = Some(bg);
                     prev_bold = bold;
                     prev_dim = dim;
                     prev_italic = italic;
                     prev_underline = underline;
+                    prev_ul_style = ul_style;
+                    prev_ulcolor = Some(ulcolor);
                     prev_blink = blink;
                     prev_inverse = inverse;
                     prev_hidden = hidden;
@@ -1227,6 +1250,8 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
             prev_dim = false;
             prev_italic = false;
             prev_underline = false;
+            prev_ul_style = vt100::UnderlineStyle::None;
+            prev_ulcolor = Some(vt100::Color::Default);
             prev_blink = false;
             prev_inverse = false;
             prev_hidden = false;

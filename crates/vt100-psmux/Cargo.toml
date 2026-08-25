@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.70"
 name = "vt100-psmux"
-version = "0.16.10"
+version = "0.16.11"
 authors = ["Jesse Luehrs <doy@tozt.net>"]
 build = false
 include = [
@@ -68,6 +68,10 @@ path = "tests/issue502_decsc_altscreen.rs"
 [[test]]
 name = "osc7_windows_path"
 path = "tests/osc7_windows_path.rs"
+
+[[test]]
+name = "issue589_undercurl"
+path = "tests/issue589_undercurl.rs"
 
 [dependencies.itoa]
 version = "1.0.15"

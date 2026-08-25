@@ -2522,6 +2522,23 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         p.pane_style = Some(style);
                     }
                 }
+                CtrlReq::SetPaneAttrs { title, style } => {
+                    // select-pane -T/-P (#592): runs under a temporary -t
+                    // focus, so "active pane" here is the target. Both
+                    // attributes apply in this single request; the temp
+                    // focus restores right after it.
+                    let win = &mut app.windows[app.active_idx];
+                    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                        if let Some(t) = title {
+                            p.title_locked = !t.is_empty();
+                            p.title = t;
+                        }
+                        if let Some(s) = style {
+                            p.pane_style = Some(s);
+                        }
+                    }
+                    meta_dirty = true;
+                }
                 CtrlReq::SendBytes(bytes) => {
                     send_bytes_to_active(&mut app, &bytes)?;
                 }

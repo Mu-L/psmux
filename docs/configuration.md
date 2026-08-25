@@ -230,10 +230,12 @@ set -g status 2
 
 # Configure each line (0-indexed)
 set -g status-format[0] "#[align=left]#S #[align=right]%H:%M"
-set -g status-format[1] "#[align=left]#{W:#I:#W }"
+set -g status-format[1] "#[align=left]#{W:#[range=window|#{window_index}]#I:#W #[norange],#[range=window|#{window_index}]#I:#W* #[norange]}"
 ```
 
 The first line (`status-format[0]`) replaces the default status bar content. Additional lines stack below (or above, depending on `status-position`).
+
+**Clickable window tabs.** In a custom `status-format[N]` line, tab click targets come from `#[range=window|N]`/`#[norange]` markers and nothing else: a window list written without them renders correctly but cannot be clicked, exactly as in tmux (tmux's shipped default `status-format[0]` carries these markers, which is why its window list is clickable out of the box). `N` is the window index itself, so `#[range=window|#{window_index}]` is the correct idiom at any `base-index`. Inside `#{W:inactive,current}` the comma separates the two loop arguments, so any other comma must be escaped as `#,` and combined styles are easier written as `#[fg=green]#[bold]` than `#[fg=green,bold]`. Ranges are honored on every status line, and clicks are hit-tested on every status row.
 
 ### Pane Border Labels
 
@@ -604,9 +606,17 @@ set -g status-left "#[fg=green,bold]#S#[default] "
 
 **Colours.** `default` and `terminal` (both mean the terminal's own default), `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, the bright variants (`brightblack` through `brightwhite`, also spelled `bright-black`), `colour0` to `colour255` (the American spelling `color0` works too), `#RRGGBB`, `idx:N`, and `rgb:R,G,B`.
 
-**Attributes.** `bold`, `dim`, `italics` (also `italic`), `underscore` (also `underline`), `blink`, `reverse`, `hidden`, `strikethrough`.
+**Attributes.** `bold`, `dim`, `italics` (also `italic`), `underscore` (also `underline`), `double-underscore`, `curly-underscore`, `dotted-underscore`, `dashed-underscore`, `blink`, `reverse`, `hidden`, `strikethrough`.
 
-**Negations.** Each attribute has a matching keyword that removes it again: `nobold`, `nodim`, `noitalics`, `nounderscore` (also `nounderline`), `noblink`, `noreverse`, `nohidden`, `nostrikethrough`. These matter inside a format string, where a later `#[...]` block builds on the style already in effect rather than starting from nothing:
+**Underscore colour.** `us=colour` sets the colour of the underline on its own, separate from `fg=`:
+
+```tmux
+set -g message-style "curly-underscore,us=red"
+```
+
+The styled underscores and `us=` need a terminal that understands the SGR 4 subparameter forms (`4:2` through `4:5`) and SGR 58. Windows Terminal, WezTerm and kitty all do; a terminal that does not falls back to a plain underline.
+
+**Negations.** Each attribute has a matching keyword that removes it again: `nobold`, `nodim`, `noitalics`, `nounderscore` (also `nounderline`, and it clears the styled underscores too), `noblink`, `noreverse`, `nohidden`, `nostrikethrough`. These matter inside a format string, where a later `#[...]` block builds on the style already in effect rather than starting from nothing:
 
 ```tmux
 # Bold for the session name, then drop bold only, keeping the colour

@@ -12,6 +12,17 @@ use crate::tree::get_split_mut;
 /// overlay rendering.  Extracts cells from [0..rows) x [0..cols), merges
 /// adjacent cells with identical styling into runs, and returns the result
 /// as a `Vec<RowRunsJson>`.
+/// Extracts the extended underline style and the SGR 58 underline colour from
+/// a parsed cell, in the shape the run JSON carries them (#589).
+fn cell_underline(cell: &vt100::Cell) -> (u8, Option<String>) {
+    let ul = cell.underline_style().sgr_subparam();
+    let ulc = match cell.underline_color() {
+        vt100::Color::Default => None,
+        c => Some(crate::util::color_to_name(c).into_owned()),
+    };
+    (ul, ulc)
+}
+
 pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Vec<RowRunsJson> {
     const FLAG_DIM: u8 = 1;
     const FLAG_BOLD: u8 = 2;
@@ -48,12 +59,14 @@ pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Ve
                 if cell.blink() { fl |= FLAG_BLINK; }
                 if cell.hidden() { fl |= FLAG_HIDDEN; }
                 if cell.strikethrough() { fl |= FLAG_STRIKETHROUGH; }
+                let (cell_ul, cell_ulc) = cell_underline(cell);
 
                 // A hyperlink change must also break the run so the client can
                 // wrap exactly the linked text in OSC 8 (#361).
                 let merged = if let Some(last) = runs.last_mut() {
                     if prev_fg_raw == Some(cell_fg) && prev_bg_raw == Some(cell_bg)
                         && prev_flags == fl && prev_link == Some(cell_link)
+                        && last.ul == cell_ul && last.ulc == cell_ulc
                     {
                         last.text.push_str(t);
                         last.width = last.width.saturating_add(w);
@@ -66,7 +79,7 @@ pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Ve
                     let link = if cell_link != 0 {
                         screen.hyperlink_uri(cell_link).map(|s| s.to_string())
                     } else { None };
-                    runs.push(CellRunJson { text: t.to_string(), fg: fg.into_owned(), bg: bg.into_owned(), flags: fl, width: w, link });
+                    runs.push(CellRunJson { text: t.to_string(), fg: fg.into_owned(), bg: bg.into_owned(), flags: fl, width: w, link, ul: cell_ul, ulc: cell_ulc });
                 }
 
                 (w, cell_fg, cell_bg, fl, cell_link)
@@ -81,7 +94,7 @@ pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Ve
                     } else { false }
                 } else { false };
                 if !merged {
-                    runs.push(CellRunJson { text: " ".to_string(), fg: "default".to_string(), bg: "default".to_string(), flags: 0, width: 1, link: None });
+                    runs.push(CellRunJson { text: " ".to_string(), fg: "default".to_string(), bg: "default".to_string(), flags: 0, width: 1, link: None, ul: 0, ulc: None });
                 }
                 (1u16, vt100::Color::Default, vt100::Color::Default, 0u8, 0u32)
             };
@@ -125,6 +138,23 @@ pub struct CellRunJson {
     /// normal output. The client re-emits OSC 8 around runs that carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// Extended underline style for this run as the SGR 4 subparameter:
+    /// 0 none, 1 single, 2 double, 3 curly, 4 dotted, 5 dashed (#589).
+    /// `flags & FLAG_UNDERLINE` still says "underlined at all", so an older
+    /// client that does not know this field keeps drawing a plain underline.
+    /// Omitted from the JSON when 0 or 1, which is every ordinary run.
+    #[serde(default, skip_serializing_if = "crate::layout::ul_is_plain")]
+    pub ul: u8,
+    /// SGR 58 underline colour name for this run, if one was set (#589).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ulc: Option<String>,
+}
+
+/// Runs with no underline or a plain single underline need no `ul` field on
+/// the wire, which keeps the per-frame payload identical for normal output.
+#[must_use]
+pub fn ul_is_plain(ul: &u8) -> bool {
+    *ul <= 1
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -412,6 +442,7 @@ fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) ->
                             if cell.blink() { fl |= FLAG_BLINK; }
                             if cell.hidden() { fl |= FLAG_HIDDEN; }
                             if cell.strikethrough() { fl |= FLAG_STRIKETHROUGH; }
+                            let (cell_ul, cell_ulc) = cell_underline(cell);
 
                             // Run merging — push &str directly, no String allocation.
                             // Break on hyperlink change so OSC 8 wraps exactly the
@@ -419,6 +450,7 @@ fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) ->
                             let merged = if let Some(last) = runs.last_mut() {
                                 if prev_fg_raw == Some(cell_fg) && prev_bg_raw == Some(cell_bg)
                                     && prev_flags == fl && prev_link == Some(cell_link)
+                                    && last.ul == cell_ul && last.ulc == cell_ulc
                                 {
                                     last.text.push_str(t);
                                     last.width = last.width.saturating_add(w);
@@ -431,7 +463,7 @@ fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) ->
                                 let link = if cell_link != 0 {
                                     screen.hyperlink_uri(cell_link).map(|s| s.to_string())
                                 } else { None };
-                                runs.push(CellRunJson { text: t.to_string(), fg: fg.into_owned(), bg: bg.into_owned(), flags: fl, width: w, link });
+                                runs.push(CellRunJson { text: t.to_string(), fg: fg.into_owned(), bg: bg.into_owned(), flags: fl, width: w, link, ul: cell_ul, ulc: cell_ulc.clone() });
                             }
 
                             if need_full_content {
@@ -466,7 +498,7 @@ fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) ->
                                 } else { false }
                             } else { false };
                             if !merged {
-                                runs.push(CellRunJson { text: " ".to_string(), fg: "default".to_string(), bg: "default".to_string(), flags: 0, width: 1, link: None });
+                                runs.push(CellRunJson { text: " ".to_string(), fg: "default".to_string(), bg: "default".to_string(), flags: 0, width: 1, link: None, ul: 0, ulc: None });
                             }
                             if need_full_content {
                                 row.push(CellJson {
@@ -667,12 +699,24 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
     }
 
     /// Close the currently-open run: closing `"` for text, then fg/bg/flags/width, then `}`.
-    fn close_run(fg: vt100::Color, bg: vt100::Color, fl: u8, w: u16, link: Option<&str>, out: &mut String) {
+    #[allow(clippy::too_many_arguments)]
+    fn close_run(fg: vt100::Color, bg: vt100::Color, fl: u8, w: u16, link: Option<&str>, ul: u8, ulc: vt100::Color, out: &mut String) {
         out.push_str("\",\"fg\":\"");
         push_color(fg, out);
         out.push_str("\",\"bg\":\"");
         push_color(bg, out);
         let _ = std::fmt::Write::write_fmt(out, format_args!("\",\"flags\":{},\"width\":{}", fl, w));
+        // Extended underline style and SGR 58 colour (#589).  Both are omitted
+        // for ordinary runs so the per-frame payload is unchanged, and
+        // `flags & FLAG_UNDERLINE` still carries "underlined at all".
+        if ul > 1 {
+            let _ = std::fmt::Write::write_fmt(out, format_args!(",\"ul\":{}", ul));
+        }
+        if ulc != vt100::Color::Default {
+            out.push_str(",\"ulc\":\"");
+            push_color(ulc, out);
+            out.push('"');
+        }
         // OSC 8 URI (#361).  The client re-emits hyperlinks only for runs that
         // carry this field, and `CellRunJson::link` skips serialising when it is
         // None, so omitting it here silently disabled hyperlinks in every pane.
@@ -767,7 +811,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 // also holds p.term's mutex while processing ConPTY output).
                 // Without this, WSL echo gets starved because its output sits
                 // in the ConPTY pipe while we build the JSON string.
-                struct Run { text: String, fg: vt100::Color, bg: vt100::Color, flags: u8, width: u16, link: Option<String> }
+                struct Run { text: String, fg: vt100::Color, bg: vt100::Color, flags: u8, width: u16, link: Option<String>, ul: u8, ulc: vt100::Color }
                 struct RowSnap { runs: Vec<Run> }
                 struct CopyCell { text: String, fg: vt100::Color, bg: vt100::Color, bold: bool, italic: bool, underline: bool, inverse: bool, dim: bool, blink: bool, hidden: bool, strikethrough: bool, width: u16 }
                 struct LeafSnap {
@@ -810,6 +854,8 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         let mut prev_bg: Option<vt100::Color> = None;
                         let mut prev_fl: u8 = 0;
                         let mut prev_link: Option<u32> = None;
+                        let mut prev_ul: u8 = 0;
+                        let mut prev_ulc = vt100::Color::Default;
 
                         while c < p.last_cols {
                             if let Some(cell) = screen.cell(r, c) {
@@ -832,8 +878,11 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 // A hyperlink change must also break the run, so the
                                 // client wraps exactly the linked text in OSC 8 (#361).
                                 let clink = cell.hyperlink_id();
+                                let cul = cell.underline_style().sgr_subparam();
+                                let culc = cell.underline_color();
                                 if prev_fg == Some(cfg) && prev_bg == Some(cbg) && prev_fl == fl
                                     && prev_link == Some(clink)
+                                    && prev_ul == cul && prev_ulc == culc
                                 {
                                     if let Some(last) = runs.last_mut() {
                                         last.text.push_str(t);
@@ -843,12 +892,14 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                     let link = if clink != 0 {
                                         screen.hyperlink_uri(clink).map(|s| s.to_string())
                                     } else { None };
-                                    runs.push(Run { text: t.to_string(), fg: cfg, bg: cbg, flags: fl, width: w, link });
+                                    runs.push(Run { text: t.to_string(), fg: cfg, bg: cbg, flags: fl, width: w, link, ul: cul, ulc: culc });
                                 }
                                 prev_fg = Some(cfg);
                                 prev_bg = Some(cbg);
                                 prev_fl = fl;
                                 prev_link = Some(clink);
+                                prev_ul = cul;
+                                prev_ulc = culc;
                                 c += w.max(1);
                             } else {
                                 let cfg = vt100::Color::Default;
@@ -856,18 +907,21 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 let fl  = 0u8;
                                 if prev_fg == Some(cfg) && prev_bg == Some(cbg) && prev_fl == fl
                                     && prev_link == Some(0)
+                                    && prev_ul == 0 && prev_ulc == vt100::Color::Default
                                 {
                                     if let Some(last) = runs.last_mut() {
                                         last.text.push(' ');
                                         last.width += 1;
                                     }
                                 } else {
-                                    runs.push(Run { text: " ".to_string(), fg: cfg, bg: cbg, flags: fl, width: 1, link: None });
+                                    runs.push(Run { text: " ".to_string(), fg: cfg, bg: cbg, flags: fl, width: 1, link: None, ul: 0, ulc: vt100::Color::Default });
                                 }
                                 prev_fg = Some(cfg);
                                 prev_bg = Some(cbg);
                                 prev_fl = fl;
                                 prev_link = Some(0);
+                                prev_ul = 0;
+                                prev_ulc = vt100::Color::Default;
                                 c += 1;
                             }
                         }
@@ -1037,7 +1091,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         if i > 0 { out.push(','); }
                         out.push_str("{\"text\":\"");
                         json_esc(&run.text, out);
-                        close_run(run.fg, run.bg, run.flags, run.width, run.link.as_deref(), out);
+                        close_run(run.fg, run.bg, run.flags, run.width, run.link.as_deref(), run.ul, run.ulc, out);
                     }
                     out.push_str("]}");
                 }
