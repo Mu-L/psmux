@@ -87,6 +87,12 @@ Start-Sleep -Milliseconds 400
 $hooks = Get-Hooks
 if ($hooks -match 'after-new-window.*select-window\s+-t\s+0') { Write-Pass "hook stored verbatim: $(($hooks -split "`n" | Where-Object { $_ -match 'after-new-window' } | Select-Object -First 1).Trim())" }
 else { Write-Fail "hook lost its -t 0: '$($hooks.Trim())'" }
+# The hook now really fires with its target (it is the whole point of the
+# fix), which would drag the active window back to 0 after every new-window
+# below. Unset it so the next checks can capture the window they created.
+& $PSMUX -t $SESSION set-hook -gu after-new-window 2>&1 | Out-Null
+Start-Sleep -Milliseconds 300
+if ((Get-Hooks) -notmatch 'after-new-window') { Write-Pass "set-hook -gu removed the hook again" } else { Write-Fail "set-hook -gu left the hook in place: '$((Get-Hooks).Trim())'" }
 
 Write-Host "`n[A4] new-window -t SESSION -- child -t worker passes -t worker to the child" -ForegroundColor Yellow
 & $PSMUX new-window -t $SESSION -- cmd /k echo CHILDARGS -t worker 2>&1 | Out-Null
