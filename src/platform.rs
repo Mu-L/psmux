@@ -4745,9 +4745,9 @@ fn write_underline_color<W: std::io::Write>(
 ) -> std::io::Result<()> {
     use ratatui::style::Color as R;
     match color {
-        R::Reset => w.write_all(b"[59m"),
+        R::Reset => w.write_all(b"\x1b[59m"),
         R::Rgb(r, g, b) => {
-            write!(w, "[58:2::{r}:{g}:{b}m")
+            write!(w, "\x1b[58:2::{r}:{g}:{b}m")
         }
         other => {
             let idx = match other {
@@ -4770,7 +4770,7 @@ fn write_underline_color<W: std::io::Write>(
                 R::Indexed(i) => i,
                 _ => return Ok(()),
             };
-            write!(w, "[58:5:{idx}m")
+            write!(w, "\x1b[58:5:{idx}m")
         }
     }
 }
