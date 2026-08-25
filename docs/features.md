@@ -29,7 +29,7 @@
 - **Click** status-bar tabs to switch windows
 - **Scroll wheel** in any pane, scrolls that pane's output (configurable via `scroll-enter-copy-mode`)
 - **Drag-select** text to copy to clipboard
-- **Drag auto-scroll** : dragging a selection past the top of a pane continues it into scrollback via copy mode, and holding the pointer at/past the pane's first or last row keeps scrolling (tmux parity) — so output taller than the window can be selected in one gesture. With `scroll-enter-copy-mode off`, a selection made over a direct-scrolled view also continues past the bottom edge, back toward the live output
+- **Drag auto-scroll** : dragging a selection past the top of a pane continues it into scrollback via copy mode, and holding the pointer on the pane's first or last row keeps scrolling one line every 50ms, like tmux; psmux additionally keeps scrolling, faster, when the pointer moves past the edge. Output taller than the window can be selected in one gesture. With `scroll-enter-copy-mode off`, a selection made over a direct-scrolled view also continues past the bottom edge, back toward the live output
 - **Right-click** to paste or copy selection
 - **tmux-like release copy selection** : pane-clipped drag copy on left-button release with word/line multi-click (`pwsh-mouse-selection on`)
 - **Disable client-side selection** : let in-pane TUI apps (opencode, lazygit, etc.) handle their own mouse selection (`mouse-selection off`)
