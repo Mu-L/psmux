@@ -1107,7 +1107,13 @@ pub fn render_layout_json(
                         if run.flags & 1 != 0 { style = style.add_modifier(Modifier::DIM); }
                         if run.flags & 2 != 0 { style = style.add_modifier(Modifier::BOLD); }
                         if run.flags & 4 != 0 { style = style.add_modifier(Modifier::ITALIC); }
-                        if run.flags & 8 != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+                        if run.flags & 8 != 0 {
+                            style = crate::rendering::with_underline(
+                                style,
+                                if run.ul == 0 { 1 } else { run.ul },
+                                run.ulc.as_deref().map(map_color),
+                            );
+                        }
                         if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
                         if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
                         let text: &str = if run.flags & 64 != 0 {

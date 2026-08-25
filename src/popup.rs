@@ -609,9 +609,14 @@ pub fn render_popup_overlay(
                             if cell.italic() {
                                 style = style.add_modifier(Modifier::ITALIC);
                             }
-                            if cell.underline() {
-                                style = style.add_modifier(Modifier::UNDERLINED);
-                            }
+                            style = crate::rendering::with_underline(
+                                style,
+                                cell.underline_style().sgr_subparam(),
+                                match cell.underline_color() {
+                                    vt100::Color::Default => None,
+                                    c => Some(crate::rendering::vt_to_color(c)),
+                                },
+                            );
                             if cell.inverse() {
                                 style = style.add_modifier(Modifier::REVERSED);
                             }

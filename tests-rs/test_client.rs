@@ -323,6 +323,8 @@ fn make_run(text: &str, width: u16) -> crate::layout::CellRunJson {
         flags: 0,
         width,
         link: None,
+        ul: 0,
+        ulc: None,
     }
 }
 
