@@ -4660,7 +4660,7 @@ where
     use crossterm::queue;
     use crossterm::style::{
         Attribute as CtAttribute, Color as CtColor, Print, SetAttribute,
-        SetBackgroundColor, SetForegroundColor, SetUnderlineColor,
+        SetBackgroundColor, SetForegroundColor,
     };
     use ratatui::style::Modifier;
 
@@ -4712,10 +4712,7 @@ where
             bg = cell.bg;
         }
         if cell.underline_color != underline_color {
-            queue!(
-                *w,
-                SetUnderlineColor(to_crossterm_color(cell.underline_color))
-            )?;
+            write_underline_color(w, cell.underline_color)?;
             underline_color = cell.underline_color;
         }
 
@@ -4726,9 +4723,56 @@ where
         *w,
         SetForegroundColor(CtColor::Reset),
         SetBackgroundColor(CtColor::Reset),
-        SetUnderlineColor(CtColor::Reset),
-        SetAttribute(CtAttribute::Reset),
-    )
+    )?;
+    write_underline_color(w, ratatui::style::Color::Reset)?;
+    queue!(*w, SetAttribute(CtAttribute::Reset))
+}
+
+/// Writes the SGR 58 underline colour in the COLON subparameter form, and SGR
+/// 59 to clear it.
+///
+/// crossterm's `SetUnderlineColor` emits the semicolon form (`58;5;9`), which
+/// the Windows system conhost does not understand: it skips the 58, then reads
+/// the remaining arguments as ordinary SGR parameters, so `58;5;9` arrives at
+/// the outer terminal as blink plus strikethrough and `58;2;255;0;0` ends in a
+/// `0` that resets every attribute.  The colon form is passed through
+/// untouched by conhost, is what tmux's own `Setulc`/`Setulc1` capabilities
+/// use (tmux `tty-features.c:157`), and is what Windows Terminal, `WezTerm`
+/// and `kitty` accept.  Issue #589.
+fn write_underline_color<W: std::io::Write>(
+    w: &mut W,
+    color: ratatui::style::Color,
+) -> std::io::Result<()> {
+    use ratatui::style::Color as R;
+    match color {
+        R::Reset => w.write_all(b"[59m"),
+        R::Rgb(r, g, b) => {
+            write!(w, "[58:2::{r}:{g}:{b}m")
+        }
+        other => {
+            let idx = match other {
+                R::Black => 0,
+                R::Red => 1,
+                R::Green => 2,
+                R::Yellow => 3,
+                R::Blue => 4,
+                R::Magenta => 5,
+                R::Cyan => 6,
+                R::Gray => 7,
+                R::DarkGray => 8,
+                R::LightRed => 9,
+                R::LightGreen => 10,
+                R::LightYellow => 11,
+                R::LightBlue => 12,
+                R::LightMagenta => 13,
+                R::LightCyan => 14,
+                R::White => 15,
+                R::Indexed(i) => i,
+                _ => return Ok(()),
+            };
+            write!(w, "[58:5:{idx}m")
+        }
+    }
 }
 
 /// TUI backend for the psmux client: [`ratatui::backend::CrosstermBackend`]

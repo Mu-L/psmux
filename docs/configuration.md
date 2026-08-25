@@ -606,9 +606,17 @@ set -g status-left "#[fg=green,bold]#S#[default] "
 
 **Colours.** `default` and `terminal` (both mean the terminal's own default), `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, the bright variants (`brightblack` through `brightwhite`, also spelled `bright-black`), `colour0` to `colour255` (the American spelling `color0` works too), `#RRGGBB`, `idx:N`, and `rgb:R,G,B`.
 
-**Attributes.** `bold`, `dim`, `italics` (also `italic`), `underscore` (also `underline`), `blink`, `reverse`, `hidden`, `strikethrough`.
+**Attributes.** `bold`, `dim`, `italics` (also `italic`), `underscore` (also `underline`), `double-underscore`, `curly-underscore`, `dotted-underscore`, `dashed-underscore`, `blink`, `reverse`, `hidden`, `strikethrough`.
 
-**Negations.** Each attribute has a matching keyword that removes it again: `nobold`, `nodim`, `noitalics`, `nounderscore` (also `nounderline`), `noblink`, `noreverse`, `nohidden`, `nostrikethrough`. These matter inside a format string, where a later `#[...]` block builds on the style already in effect rather than starting from nothing:
+**Underscore colour.** `us=colour` sets the colour of the underline on its own, separate from `fg=`:
+
+```tmux
+set -g message-style "curly-underscore,us=red"
+```
+
+The styled underscores and `us=` need a terminal that understands the SGR 4 subparameter forms (`4:2` through `4:5`) and SGR 58. Windows Terminal, WezTerm and kitty all do; a terminal that does not falls back to a plain underline.
+
+**Negations.** Each attribute has a matching keyword that removes it again: `nobold`, `nodim`, `noitalics`, `nounderscore` (also `nounderline`, and it clears the styled underscores too), `noblink`, `noreverse`, `nohidden`, `nostrikethrough`. These matter inside a format string, where a later `#[...]` block builds on the style already in effect rather than starting from nothing:
 
 ```tmux
 # Bold for the session name, then drop bold only, keeping the colour

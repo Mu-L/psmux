@@ -16,6 +16,20 @@ use std::sync::{Arc, Mutex};
 use crate::layout::serialize_screen_rows;
 use crate::types::{Pane, AppState, Mode};
 
+/// Appends the extended underline style and SGR 58 colour of one run to the
+/// hand-written popup JSON, in the same shape `dump_layout_json_fast` uses
+/// (#589).  Both fields are omitted for ordinary runs.
+fn push_run_underline(run: &crate::layout::CellRunJson, out: &mut String) {
+    if run.ul > 1 {
+        let _ = std::fmt::Write::write_fmt(out, format_args!(",\"ul\":{}", run.ul));
+    }
+    if let Some(ulc) = &run.ulc {
+        out.push_str(",\"ulc\":\"");
+        out.push_str(ulc);
+        out.push('"');
+    }
+}
+
 /// Diagnostic-only popup logging, gated by PSMUX_POPUP_DEBUG=1 (no-op otherwise).
 /// Writes to %TEMP%\psmux_popup_debug.log (never inside the repo).
 fn popup_debug(msg: &str) {
@@ -323,8 +337,10 @@ pub fn serialize_popup_overlay(app: &AppState) -> String {
                             out.push_str(&run.bg);
                             let _ = std::fmt::Write::write_fmt(
                                 &mut out,
-                                format_args!("\",\"flags\":{},\"width\":{}}}", run.flags, run.width),
+                                format_args!("\",\"flags\":{},\"width\":{}", run.flags, run.width),
                             );
+                            push_run_underline(run, &mut out);
+                            out.push('}');
                         }
                         out.push_str("]}");
                     }
@@ -502,8 +518,10 @@ pub fn serialize_floats_json(app: &AppState) -> String {
                     out.push_str(&run.bg);
                     let _ = std::fmt::Write::write_fmt(
                         &mut out,
-                        format_args!("\",\"flags\":{},\"width\":{}}}", run.flags, run.width),
+                        format_args!("\",\"flags\":{},\"width\":{}", run.flags, run.width),
                     );
+                    push_run_underline(run, &mut out);
+                    out.push('}');
                 }
                 out.push_str("]}");
             }

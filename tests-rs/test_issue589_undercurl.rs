@@ -75,7 +75,10 @@ fn draw_emits_the_underline_colour() {
     let style = with_underline(Style::default(), 3, Some(RColor::Rgb(255, 0, 0)));
     let out = render_cells(&[("X", style)]);
     assert!(out.contains("\x1b[4:3m"), "{out:?}");
-    assert!(out.contains("58;2;255;0;0"), "{out:?}");
+    // Colon form on purpose: the Windows system conhost mis-parses the
+    // semicolon form crossterm would emit (see write_underline_color).
+    assert!(out.contains("\x1b[58:2::255:0:0m"), "{out:?}");
+    assert!(!out.contains("58;2"), "semicolon form must not be used: {out:?}");
 }
 
 #[test]
@@ -86,7 +89,7 @@ fn draw_does_not_bleed_the_style_into_plain_cells() {
     // Between A and B the underline must be switched off and the underline
     // colour reset, otherwise B is drawn with a red curl.
     assert!(after_a.contains("\x1b[24m"), "no SGR 24 before B: {out:?}");
-    assert!(after_a.contains("58;5;") || after_a.contains("\x1b[59m"),
+    assert!(after_a.contains("\x1b[59m"),
         "underline colour not reset before B: {out:?}");
 }
 
@@ -169,4 +172,12 @@ fn nounderscore_clears_the_extended_style_too() {
     let s = crate::style::parse_tmux_style("curly-underscore,nounderscore");
     assert!(!s.add_modifier.contains(Modifier::UNDERLINED));
     assert_eq!(ul_style_of(s.add_modifier), 0);
+}
+
+#[test]
+fn indexed_underline_colour_uses_the_colon_form() {
+    let style = with_underline(Style::default(), 3, Some(RColor::Indexed(9)));
+    let out = render_cells(&[("X", style)]);
+    assert!(out.contains("\x1b[58:5:9m"), "{out:?}");
+    assert!(!out.contains("58;5;9"), "semicolon form must not be used: {out:?}");
 }

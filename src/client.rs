@@ -899,7 +899,13 @@ pub(crate) fn render_float_overlays(f: &mut Frame, content_chunk: Rect, floats: 
                 if run.flags & 1  != 0 { style = style.add_modifier(Modifier::DIM); }
                 if run.flags & 2  != 0 { style = style.add_modifier(Modifier::BOLD); }
                 if run.flags & 4  != 0 { style = style.add_modifier(Modifier::ITALIC); }
-                if run.flags & 8  != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+                if run.flags & 8  != 0 {
+                    style = crate::rendering::with_underline(
+                        style,
+                        if run.ul == 0 { 1 } else { run.ul },
+                        run.ulc.as_deref().map(map_color),
+                    );
+                }
                 if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
                 if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
                 if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
@@ -6205,7 +6211,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             if run.flags & 1  != 0 { style = style.add_modifier(Modifier::DIM); }
                             if run.flags & 2  != 0 { style = style.add_modifier(Modifier::BOLD); }
                             if run.flags & 4  != 0 { style = style.add_modifier(Modifier::ITALIC); }
-                            if run.flags & 8  != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+                            if run.flags & 8  != 0 {
+                    style = crate::rendering::with_underline(
+                        style,
+                        if run.ul == 0 { 1 } else { run.ul },
+                        run.ulc.as_deref().map(map_color),
+                    );
+                }
                             if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
                             if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
                             if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
