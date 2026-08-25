@@ -708,6 +708,7 @@ pub fn render_dump_tree(
         total_panes,
         crate::border_lines::border_chars(crate::border_lines::DEFAULT),
         None,
+        crate::client::WindowContentStyles::default(),
     );
     let border_mask = crate::client::border_mask_from_layout(layout, area, f.buffer_mut().area, false);
     crate::rendering::fix_border_intersections(f.buffer_mut(), crate::border_lines::border_chars(crate::border_lines::DEFAULT), &border_mask);

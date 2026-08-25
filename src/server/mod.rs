@@ -459,6 +459,9 @@ fn drain_plugin_req(
         CtrlReq::SetOptionUnset(option) => {
             if option.starts_with('@') {
                 app.user_options.remove(&option);
+            } else if matches!(option.as_str(), "window-style" | "window-active-style") {
+                app.user_options.remove(&option);
+                app.user_set_options.remove(&option);
             }
         }
         CtrlReq::SetOptionToggle(option) => {
@@ -2263,8 +2266,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.scroll_enter_copy_mode,
                         app.bold_is_bright,
                     ));
-                    // #451: append status-bar style options dropped in the
-                    // app.rs->client.rs modularization.
                     helpers::append_extra_style_json(&mut combined_buf, &app);
                     // Issue #7 batch D: dump-state's JSON never identified which
                     // session it belonged to (no consumer could tell two
@@ -4202,6 +4203,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "pane-border-style" => { app.pane_border_style = String::new(); }
                             "pane-active-border-style" => { app.pane_active_border_style = "fg=green".to_string(); }
                             "pane-border-hover-style" => { app.pane_border_hover_style = "fg=yellow".to_string(); }
+                            "window-style" | "window-active-style" => {
+                                app.user_options.remove(&option);
+                                app.user_set_options.remove(&option);
+                                state_dirty = true;
+                            }
                             "window-status-format" => { app.window_status_format = "#I:#W#{?window_flags,#{window_flags}, }".to_string(); }
                             "window-status-current-format" => { app.window_status_current_format = "#I:#W#{?window_flags,#{window_flags}, }".to_string(); }
                             "window-status-separator" => { app.window_status_separator = " ".to_string(); }
@@ -6372,8 +6378,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 app.scroll_enter_copy_mode,
                 app.bold_is_bright,
             ));
-            // #451: append status-bar style options dropped in the
-            // app.rs->client.rs modularization.
             helpers::append_extra_style_json(&mut combined_buf, &app);
             // Inject overlay state (popup, menu, confirm, display_panes)
             {

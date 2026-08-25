@@ -1,12 +1,7 @@
-// Issue #451: status-bar style options broke in the app.rs -> client.rs
-// modularization. The server render-state JSON only ever shipped
-// ws_style/wsc_style, so status-left-style, status-right-style and
-// window-status-{activity,bell,last}-style never reached the client renderer
-// and had no effect. These tests guard the exact server-side mechanism:
-//   1. append_extra_style_json() must emit all five style fields (expanded).
+// Live-client style options must share one server-side render-state contract:
+//   1. append_extra_style_json() emits status and pane-content style fields.
 //   2. list_windows_json_with_tabs() must carry per-window bell/last/activity
 //      flags so the client can pick the right style.
-// If either regresses (a field dropped again), these fail deterministically.
 
 use super::*;
 
@@ -65,6 +60,37 @@ fn append_extra_style_json_emits_all_five_dropped_styles() {
     let parsed: serde_json::Value = serde_json::from_str(&buf).expect("valid JSON");
     assert_eq!(parsed["wsa_style"], "reverse");
     assert_eq!(parsed["status_left_style"], "fg=colour201");
+}
+
+#[test]
+fn append_extra_style_json_emits_global_window_content_styles() {
+    let mut app = mk_app();
+    app.user_options.insert(
+        "window-style".to_string(),
+        "fg=colour245,bg=colour236".to_string(),
+    );
+    app.user_options.insert(
+        "window-active-style".to_string(),
+        "fg=colour250,bg=black".to_string(),
+    );
+
+    let mut buf = String::from("{\"layout\":{}}");
+    append_extra_style_json(&mut buf, &app);
+
+    let parsed: serde_json::Value = serde_json::from_str(&buf).expect("valid JSON");
+    assert_eq!(parsed["window_style"], "fg=colour245,bg=colour236");
+    assert_eq!(parsed["window_active_style"], "fg=colour250,bg=black");
+}
+
+#[test]
+fn append_extra_style_json_emits_empty_global_window_content_styles_when_unset() {
+    let app = mk_app();
+    let mut buf = String::from("{\"layout\":{}}");
+    append_extra_style_json(&mut buf, &app);
+
+    let parsed: serde_json::Value = serde_json::from_str(&buf).expect("valid JSON");
+    assert_eq!(parsed["window_style"], "");
+    assert_eq!(parsed["window_active_style"], "");
 }
 
 // Guard the injection contract: never touch a buffer that is not a closed object.
