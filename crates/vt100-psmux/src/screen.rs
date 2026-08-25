@@ -1006,6 +1006,18 @@ impl Screen {
         self.attrs.underline()
     }
 
+    /// Returns the extended underline style of the current drawing attributes.
+    #[must_use]
+    pub fn underline_style(&self) -> crate::attrs::UnderlineStyle {
+        self.attrs.underline_style()
+    }
+
+    /// Returns the underline colour of the current drawing attributes.
+    #[must_use]
+    pub fn ulcolor(&self) -> crate::Color {
+        self.attrs.ulcolor()
+    }
+
     /// Returns whether newly drawn text should be rendered with the inverse
     /// text attribute.
     #[must_use]
@@ -1751,6 +1763,23 @@ impl Screen {
                 [2] => self.attrs.set_dim(),
                 [3] => self.attrs.set_italic(true),
                 [4] => self.attrs.set_underline(true),
+                // SGR 4 with a subparameter: `4:0` .. `4:5` select the
+                // extended underline styles (tmux input.c
+                // input_csi_dispatch_sgr_colon, cases 0..5).  Windows ConPTY
+                // forwards these verbatim, so dropping them here is what made
+                // undercurl invisible inside a pane.
+                [4, n] => self
+                    .attrs
+                    .set_underline_style(
+                        crate::attrs::UnderlineStyle::from_sgr_subparam(*n),
+                    ),
+                // Legacy double underline.  ConPTY rewrites `4:2` to `21`, so
+                // this arm is the one that actually fires for double
+                // underlines coming out of a pane on Windows (tmux input.c
+                // case 21).
+                [21] => self
+                    .attrs
+                    .set_underline_style(crate::attrs::UnderlineStyle::Double),
                 [5] | [6] => self.attrs.set_blink(true),
                 [7] => self.attrs.set_inverse(true),
                 [8] => self.attrs.set_hidden(true),
@@ -1766,6 +1795,10 @@ impl Screen {
                     self.attrs.fgcolor = crate::Color::Idx(to_u8!(*n) - 30);
                 }
                 [38, 2, r, g, b] => {
+                    self.attrs.fgcolor =
+                        crate::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
+                }
+                [38, 2, _cs, r, g, b] => {
                     self.attrs.fgcolor =
                         crate::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
                 }
@@ -1798,6 +1831,10 @@ impl Screen {
                     self.attrs.bgcolor =
                         crate::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
                 }
+                [48, 2, _cs, r, g, b] => {
+                    self.attrs.bgcolor =
+                        crate::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
+                }
                 [48, 5, i] => {
                     self.attrs.bgcolor = crate::Color::Idx(to_u8!(*i));
                 }
@@ -1819,6 +1856,49 @@ impl Screen {
                 },
                 [49] => {
                     self.attrs.bgcolor = crate::Color::Default;
+                }
+                // SGR 58: underline colour.  Both the semicolon form
+                // (`58;2;r;g;b`) and the colon forms (`58:2::r:g:b`,
+                // `58:5:n`) are accepted, exactly as tmux does in
+                // input_csi_dispatch_sgr_colon / _sgr (p[0] == 58).
+                [58, 2, r, g, b] => {
+                    self.attrs.set_ulcolor(crate::Color::Rgb(
+                        to_u8!(*r),
+                        to_u8!(*g),
+                        to_u8!(*b),
+                    ));
+                }
+                // `58:2::r:g:b` carries an empty colour-space id, which vte
+                // reports as a leading zero subparameter.
+                [58, 2, _cs, r, g, b] => {
+                    self.attrs.set_ulcolor(crate::Color::Rgb(
+                        to_u8!(*r),
+                        to_u8!(*g),
+                        to_u8!(*b),
+                    ));
+                }
+                [58, 5, i] => {
+                    self.attrs.set_ulcolor(crate::Color::Idx(to_u8!(*i)));
+                }
+                [58] => match next_param!() {
+                    [2] => {
+                        let r = next_param_u8!();
+                        let g = next_param_u8!();
+                        let b = next_param_u8!();
+                        self.attrs
+                            .set_ulcolor(crate::Color::Rgb(r, g, b));
+                    }
+                    [5] => {
+                        self.attrs
+                            .set_ulcolor(crate::Color::Idx(next_param_u8!()));
+                    }
+                    _ => {
+                        unhandled(self);
+                        return;
+                    }
+                },
+                [59] => {
+                    self.attrs.set_ulcolor(crate::Color::Default);
                 }
                 [n] if (90..=97).contains(n) => {
                     self.attrs.fgcolor = crate::Color::Idx(to_u8!(*n) - 82);

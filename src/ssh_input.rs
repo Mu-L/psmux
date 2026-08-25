@@ -235,12 +235,19 @@ pub fn send_mouse_keepalive() {
         send_mouse_enable();
         return;
     }
-    // Same safety gate as send_mouse_enable (issue #457): builds whose
-    // conhost VT input parser fast-fails on SGR mouse reports must not have
-    // mouse reporting poked at all.  No-op there == pre-keepalive behavior.
-    if !conpty_mouse_supported() {
+    // `PSMUX_FORCE_MOUSE=0` is an explicit "no mouse on this host" opt-out and
+    // still silences the whole keep-alive.
+    if !keepalive_reasserts_mouse_input() {
         return;
     }
+    // Issue #457's build gate covers the DECSET BYTE WRITES only.  On old
+    // conhost builds the bypass write below could reach the terminal, and the
+    // SGR report the terminal then sent back through the ConPTY input pipe
+    // fast-failed that build's VT input parser.  Re-asserting the Win32
+    // `ENABLE_MOUSE_INPUT` flag carries none of that risk and must NOT be
+    // gated: it is the only part of this function that actually restores the
+    // registration (issue #597, see `keepalive_reasserts_mouse_input`).
+    let write_decset_registration = conpty_mouse_supported();
     // Belt-and-suspenders pair mirroring send_mouse_enable: raw WriteFile on
     // the console output handle plus a buffered stdout write.  Both are
     // idempotent for the terminal, so re-sending every refresh is harmless.
@@ -261,7 +268,7 @@ pub fn send_mouse_keepalive() {
         const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
         const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
         let h = GetStdHandle(STD_OUTPUT_HANDLE);
-        if !h.is_null() && h != (-1isize) as *mut std::ffi::c_void {
+        if write_decset_registration && !h.is_null() && h != (-1isize) as *mut std::ffi::c_void {
             let mut written: u32 = 0;
             let _ = WriteFile(
                 h,
@@ -273,6 +280,12 @@ pub fn send_mouse_keepalive() {
         }
         // Re-assert ENABLE_MOUSE_INPUT if a console reset cleared it.  VTI
         // (0x0200) is intentionally left alone — see the doc comment.
+        //
+        // This is the load-bearing line of the whole function: under ConPTY a
+        // client's own mouse DECSET bytes never reach the terminal (conhost
+        // absorbs them), so the terminal's mouse registration is driven purely
+        // by this console flag, which conhost mirrors outward as
+        // `\x1b[?1003;1006h` / `\x1b[?1003;1006l`.
         let hin = GetStdHandle(STD_INPUT_HANDLE);
         if !hin.is_null() && hin != (-1isize) as *mut std::ffi::c_void {
             let mut mode: u32 = 0;
@@ -281,10 +294,12 @@ pub fn send_mouse_keepalive() {
             }
         }
     }
-    use std::io::Write;
-    let mut out = io::stdout().lock();
-    let _ = out.write_all(MOUSE_ENABLE);
-    let _ = out.flush();
+    if write_decset_registration {
+        use std::io::Write;
+        let mut out = io::stdout().lock();
+        let _ = out.write_all(MOUSE_ENABLE);
+        let _ = out.flush();
+    }
 }
 
 #[cfg(not(windows))]
@@ -408,6 +423,36 @@ pub fn conpty_mouse_supported() -> bool {
         return forced;
     }
     windows_build_number().map_or(false, |b| b >= CONPTY_MOUSE_MIN_BUILD)
+}
+
+/// Whether the local-console keep-alive may re-assert `ENABLE_MOUSE_INPUT`
+/// on this host (issue #597).
+///
+/// Under ConPTY a client's own mouse DECSET bytes never reach the terminal:
+/// conhost absorbs `\x1b[?1000h`/`1002h`/`1003h`/`1006h` written to stdout
+/// (by `WriteFile` on the raw handle just as much as by `WriteConsoleW`) and
+/// mirrors mouse state outward on its own, from the Win32 `ENABLE_MOUSE_INPUT`
+/// flag, as `\x1b[?1003;1006h` / `\x1b[?1003;1006l`.  That console flag is
+/// therefore the ONLY registration channel a local client has, and crossterm
+/// already sets it at startup on every Windows build (`EnableMouseCapture`
+/// answers `is_ansi_code_supported() == false`, so it always takes the
+/// `SetConsoleMode` path).
+///
+/// Windows Terminal drops a long-lived local client's registration on its own
+/// (see the keep-alive doc comment).  Gating the restore behind
+/// [`conpty_mouse_supported`] therefore protected nothing — the session had
+/// been running with mouse reporting on since startup anyway — while making
+/// that loss PERMANENT on every build below [`CONPTY_MOUSE_MIN_BUILD`].  Once
+/// the terminal is told `\x1b[?1003;1006l` it falls back to alternate-scroll
+/// and turns the wheel into Up/Down arrow keys, which psmux then forwards into
+/// the pane; that is the "scroll wheel is sending arrow keys" report.
+///
+/// The issue #457 hazard is unrelated to this flag: it is about SGR reports
+/// arriving as VT bytes on the ConPTY INPUT pipe, which only the VT input path
+/// (`send_mouse_enable`) feeds.  `PSMUX_FORCE_MOUSE=0` still turns the whole
+/// keep-alive off for anyone who needs mouse pinned dead.
+pub fn keepalive_reasserts_mouse_input() -> bool {
+    forced_mouse_setting() != Some(false)
 }
 
 /// Unified input source — abstracts over crossterm (local) and SSH VT (remote).
@@ -1912,6 +1957,10 @@ mod tests_issue457_ssh_mouse_build_gate;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue573_mouse_force_override.rs"]
 mod tests_issue573_mouse_force_override;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue597_mouse_keepalive_reassert.rs"]
+mod tests_issue597_mouse_keepalive_reassert;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_windows10_ssh_mouse.rs"]

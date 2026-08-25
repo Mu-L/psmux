@@ -4540,6 +4540,241 @@ pub fn pipe_term_size() -> Option<(u16, u16)> {
     }
 }
 
+/// Maps a ratatui colour onto the crossterm colour crossterm 0.29 writes.
+fn to_crossterm_color(c: ratatui::style::Color) -> crossterm::style::Color {
+    use crossterm::style::Color as C;
+    use ratatui::style::Color as R;
+    match c {
+        R::Reset => C::Reset,
+        R::Black => C::Black,
+        R::Red => C::DarkRed,
+        R::Green => C::DarkGreen,
+        R::Yellow => C::DarkYellow,
+        R::Blue => C::DarkBlue,
+        R::Magenta => C::DarkMagenta,
+        R::Cyan => C::DarkCyan,
+        R::Gray => C::Grey,
+        R::DarkGray => C::DarkGrey,
+        R::LightRed => C::Red,
+        R::LightGreen => C::Green,
+        R::LightYellow => C::Yellow,
+        R::LightBlue => C::Blue,
+        R::LightMagenta => C::Magenta,
+        R::LightCyan => C::Cyan,
+        R::White => C::White,
+        R::Indexed(i) => C::AnsiValue(i),
+        R::Rgb(r, g, b) => C::Rgb { r, g, b },
+    }
+}
+
+/// A copy of ratatui-crossterm's private `ModifierDiff::queue`, needed because
+/// [`PsmuxBackend::draw`] runs its own cell loop to add the extended
+/// underline styles ratatui cannot express (issue #589).
+fn queue_modifier_diff<W: std::io::Write>(
+    w: &mut W,
+    from: ratatui::style::Modifier,
+    to: ratatui::style::Modifier,
+) -> std::io::Result<()> {
+    use crossterm::queue;
+    use crossterm::style::{Attribute as A, SetAttribute};
+    use ratatui::style::Modifier as M;
+
+    let removed = from - to;
+    if removed.contains(M::REVERSED) {
+        queue!(w, SetAttribute(A::NoReverse))?;
+    }
+    let reset_intensity =
+        removed.contains(M::BOLD) || removed.contains(M::DIM);
+    if reset_intensity {
+        queue!(w, SetAttribute(A::NormalIntensity))?;
+        if to.contains(M::DIM) {
+            queue!(w, SetAttribute(A::Dim))?;
+        }
+        if to.contains(M::BOLD) {
+            queue!(w, SetAttribute(A::Bold))?;
+        }
+    }
+    if removed.contains(M::ITALIC) {
+        queue!(w, SetAttribute(A::NoItalic))?;
+    }
+    if removed.contains(M::UNDERLINED) {
+        queue!(w, SetAttribute(A::NoUnderline))?;
+    }
+    if removed.contains(M::CROSSED_OUT) {
+        queue!(w, SetAttribute(A::NotCrossedOut))?;
+    }
+    if removed.contains(M::HIDDEN) {
+        queue!(w, SetAttribute(A::NoHidden))?;
+    }
+    if removed.contains(M::SLOW_BLINK) || removed.contains(M::RAPID_BLINK) {
+        queue!(w, SetAttribute(A::NoBlink))?;
+    }
+
+    let added = to - from;
+    if added.contains(M::REVERSED) {
+        queue!(w, SetAttribute(A::Reverse))?;
+    }
+    if added.contains(M::BOLD) && !reset_intensity {
+        queue!(w, SetAttribute(A::Bold))?;
+    }
+    if added.contains(M::ITALIC) {
+        queue!(w, SetAttribute(A::Italic))?;
+    }
+    if added.contains(M::UNDERLINED) {
+        queue!(w, SetAttribute(A::Underlined))?;
+    }
+    if added.contains(M::DIM) && !reset_intensity {
+        queue!(w, SetAttribute(A::Dim))?;
+    }
+    if added.contains(M::CROSSED_OUT) {
+        queue!(w, SetAttribute(A::CrossedOut))?;
+    }
+    if added.contains(M::HIDDEN) {
+        queue!(w, SetAttribute(A::Hidden))?;
+    }
+    if added.contains(M::SLOW_BLINK) {
+        queue!(w, SetAttribute(A::SlowBlink))?;
+    }
+    if added.contains(M::RAPID_BLINK) {
+        queue!(w, SetAttribute(A::RapidBlink))?;
+    }
+    Ok(())
+}
+
+/// Same cell loop as `CrosstermBackend::draw`, with one addition: psmux
+/// smuggles the extended underline style (SGR `4:0` .. `4:5`) through three
+/// unused high bits of ratatui's `Modifier` (see `rendering::UL_STYLE_SHIFT`),
+/// because ratatui has no modifier for double, curly, dotted or dashed
+/// underscores.  Those bits are masked off here and turned into the matching
+/// crossterm attribute, which emits `CSI 4:N m`, the same bytes tmux writes
+/// through `Smulx` (tmux `tty.c` `tty_attributes`).  Issue #589.
+///
+/// Kept as a free function over any `Write` so it can be driven from a test
+/// with a plain byte buffer; `PsmuxWriter` is a real console handle.
+pub fn draw_cells<'a, W, I>(w: &mut W, content: I) -> std::io::Result<()>
+where
+    W: std::io::Write,
+    I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+{
+    use crossterm::cursor::MoveTo;
+    use crossterm::queue;
+    use crossterm::style::{
+        Attribute as CtAttribute, Color as CtColor, Print, SetAttribute,
+        SetBackgroundColor, SetForegroundColor,
+    };
+    use ratatui::style::Modifier;
+
+    let mut fg = ratatui::style::Color::Reset;
+    let mut bg = ratatui::style::Color::Reset;
+    let mut underline_color = ratatui::style::Color::Reset;
+    let mut modifier = Modifier::empty();
+    let mut ul_style: u8 = 0;
+    let mut last_pos: Option<(u16, u16)> = None;
+    for (x, y, cell) in content {
+        if !matches!(last_pos, Some((px, py)) if x == px + 1 && y == py) {
+            queue!(*w, MoveTo(x, y))?;
+        }
+        last_pos = Some((x, y));
+
+        let cell_modifier = crate::rendering::strip_ul_style(cell.modifier);
+        if cell_modifier != modifier {
+            queue_modifier_diff(&mut *w, modifier, cell_modifier)?;
+            modifier = cell_modifier;
+        }
+
+        // The extended style is emitted after the modifier diff on
+        // purpose: the diff may have written a plain `4`, and `4:3` must
+        // come last to win.  A style of 0 means "no underline" and is
+        // already covered by the diff's `24`.
+        let cell_ul = if cell_modifier.contains(Modifier::UNDERLINED) {
+            crate::rendering::ul_style_of(cell.modifier).max(1)
+        } else {
+            0
+        };
+        if cell_ul != ul_style {
+            match cell_ul {
+                1 => queue!(*w, SetAttribute(CtAttribute::Underlined))?,
+                2 => queue!(*w, SetAttribute(CtAttribute::DoubleUnderlined))?,
+                3 => queue!(*w, SetAttribute(CtAttribute::Undercurled))?,
+                4 => queue!(*w, SetAttribute(CtAttribute::Underdotted))?,
+                5 => queue!(*w, SetAttribute(CtAttribute::Underdashed))?,
+                _ => {}
+            }
+            ul_style = cell_ul;
+        }
+
+        if cell.fg != fg {
+            queue!(*w, SetForegroundColor(to_crossterm_color(cell.fg)))?;
+            fg = cell.fg;
+        }
+        if cell.bg != bg {
+            queue!(*w, SetBackgroundColor(to_crossterm_color(cell.bg)))?;
+            bg = cell.bg;
+        }
+        if cell.underline_color != underline_color {
+            write_underline_color(w, cell.underline_color)?;
+            underline_color = cell.underline_color;
+        }
+
+        queue!(*w, Print(cell.symbol()))?;
+    }
+
+    queue!(
+        *w,
+        SetForegroundColor(CtColor::Reset),
+        SetBackgroundColor(CtColor::Reset),
+    )?;
+    write_underline_color(w, ratatui::style::Color::Reset)?;
+    queue!(*w, SetAttribute(CtAttribute::Reset))
+}
+
+/// Writes the SGR 58 underline colour in the COLON subparameter form, and SGR
+/// 59 to clear it.
+///
+/// crossterm's `SetUnderlineColor` emits the semicolon form (`58;5;9`), which
+/// the Windows system conhost does not understand: it skips the 58, then reads
+/// the remaining arguments as ordinary SGR parameters, so `58;5;9` arrives at
+/// the outer terminal as blink plus strikethrough and `58;2;255;0;0` ends in a
+/// `0` that resets every attribute.  The colon form is passed through
+/// untouched by conhost, is what tmux's own `Setulc`/`Setulc1` capabilities
+/// use (tmux `tty-features.c:157`), and is what Windows Terminal, `WezTerm`
+/// and `kitty` accept.  Issue #589.
+fn write_underline_color<W: std::io::Write>(
+    w: &mut W,
+    color: ratatui::style::Color,
+) -> std::io::Result<()> {
+    use ratatui::style::Color as R;
+    match color {
+        R::Reset => w.write_all(b"\x1b[59m"),
+        R::Rgb(r, g, b) => {
+            write!(w, "\x1b[58:2::{r}:{g}:{b}m")
+        }
+        other => {
+            let idx = match other {
+                R::Black => 0,
+                R::Red => 1,
+                R::Green => 2,
+                R::Yellow => 3,
+                R::Blue => 4,
+                R::Magenta => 5,
+                R::Cyan => 6,
+                R::Gray => 7,
+                R::DarkGray => 8,
+                R::LightRed => 9,
+                R::LightGreen => 10,
+                R::LightYellow => 11,
+                R::LightBlue => 12,
+                R::LightMagenta => 13,
+                R::LightCyan => 14,
+                R::White => 15,
+                R::Indexed(i) => i,
+                _ => return Ok(()),
+            };
+            write!(w, "\x1b[58:5:{idx}m")
+        }
+    }
+}
+
 /// TUI backend for the psmux client: [`ratatui::backend::CrosstermBackend`]
 /// over [`PsmuxWriter`], with one twist — `size()`/`window_size()` consult the
 /// pipe-mode override first so a client attached over a Cygwin pty or a
@@ -4571,11 +4806,19 @@ impl std::io::Write for PsmuxBackend {
 impl ratatui::backend::Backend for PsmuxBackend {
     type Error = std::io::Error;
 
+    /// Same cell loop as `CrosstermBackend::draw`, with one addition: psmux
+    /// smuggles the extended underline style (SGR `4:0` .. `4:5`) through
+    /// three unused high bits of ratatui's `Modifier` (see
+    /// `rendering::UL_STYLE_SHIFT`), because ratatui has no modifier for
+    /// double, curly, dotted or dashed underscores.  Those bits are masked off
+    /// here and turned into the matching crossterm attribute, which emits
+    /// `CSI 4:N m`, the same bytes tmux writes through `Smulx` (tmux `tty.c`
+    /// `tty_attributes`).  Issue #589.
     fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
     where
         I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
     {
-        ratatui::backend::Backend::draw(&mut self.inner, content)
+        draw_cells(&mut self.inner, content)
     }
 
     fn hide_cursor(&mut self) -> std::io::Result<()> {
@@ -4627,3 +4870,7 @@ impl ratatui::backend::Backend for PsmuxBackend {
         ratatui::backend::Backend::flush(&mut self.inner)
     }
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue589_undercurl.rs"]
+mod tests_issue589_undercurl;

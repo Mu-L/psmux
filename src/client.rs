@@ -913,7 +913,13 @@ pub(crate) fn render_float_overlays(f: &mut Frame, content_chunk: Rect, floats: 
                 if run.flags & 1  != 0 { style = style.add_modifier(Modifier::DIM); }
                 if run.flags & 2  != 0 { style = style.add_modifier(Modifier::BOLD); }
                 if run.flags & 4  != 0 { style = style.add_modifier(Modifier::ITALIC); }
-                if run.flags & 8  != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+                if run.flags & 8  != 0 {
+                    style = crate::rendering::with_underline(
+                        style,
+                        if run.ul == 0 { 1 } else { run.ul },
+                        run.ulc.as_deref().map(map_color),
+                    );
+                }
                 if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
                 if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
                 if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
@@ -1122,7 +1128,13 @@ pub fn render_layout_json(
                         if run.flags & 1 != 0 { style = style.add_modifier(Modifier::DIM); }
                         if run.flags & 2 != 0 { style = style.add_modifier(Modifier::BOLD); }
                         if run.flags & 4 != 0 { style = style.add_modifier(Modifier::ITALIC); }
-                        if run.flags & 8 != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+                        if run.flags & 8 != 0 {
+                            style = crate::rendering::with_underline(
+                                style,
+                                if run.ul == 0 { 1 } else { run.ul },
+                                run.ulc.as_deref().map(map_color),
+                            );
+                        }
                         if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
                         if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
                         let text: &str = if run.flags & 64 != 0 {
@@ -2092,8 +2104,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Client-side tab position tracking for accurate mouse click detection.
     // The server's update_tab_positions() uses a different algorithm than what
     // the client actually renders, so we track positions at render time.
-    let mut client_tab_positions: Vec<(usize, u16, u16)> = Vec::new(); // (window_display_idx, x_start, x_end)
-    let mut client_status_row: u16 = u16::MAX; // row where status bar tabs are rendered
+    // (row, window_display_idx, x_start, x_end) — one entry per clickable tab
+    // span, on WHICHEVER status row it renders (#593: multi-row bars carry
+    // clickable ranges on every line, matching tmux status_get_range).
+    let mut client_tab_positions: Vec<(u16, usize, u16, u16)> = Vec::new();
+    let mut client_status_row: u16 = u16::MAX; // first status bar row
+    let mut client_status_rows: u16 = 0; // status bar height in rows (0 = hidden)
+    // Display indices of windows that actually exist, so a click on a
+    // #[range=window|N] naming a nonexistent window is ignored like tmux
+    // (server-client.c returns KEYC_UNKNOWN when winlink_find_by_index fails).
+    let mut client_window_indices: Vec<usize> = Vec::new();
     let mut client_pane_rects: Vec<(usize, Rect)> = Vec::new();
     // Per-pane live scrollback offset from the last dump (see view_offset).
     let mut client_pane_view_offsets: Vec<(usize, usize)> = Vec::new();
@@ -4215,19 +4235,30 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         }
                         match me.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
-                                // Status bar tab click
-                                if me.row == client_status_row {
+                                // Status bar tab click. Every status row is
+                                // hit-tested (#593) — tmux server-client.c
+                                // accepts y anywhere in [statusat,
+                                // statusat+statuslines) and resolves the
+                                // clicked row's own ranges. A click on status
+                                // rows never falls through to pane handling.
+                                if client_status_rows > 0
+                                    && me.row >= client_status_row
+                                    && me.row < client_status_row.saturating_add(client_status_rows) {
                                     let mut clicked_tab: Option<usize> = None;
-                                    for &(win_idx, x_start, x_end) in &client_tab_positions {
-                                        if me.column >= x_start && me.column < x_end {
+                                    for &(row, win_idx, x_start, x_end) in &client_tab_positions {
+                                        if me.row == row && me.column >= x_start && me.column < x_end {
                                             clicked_tab = Some(win_idx);
                                             break;
                                         }
                                     }
                                     if let Some(idx) = clicked_tab {
-                                        // client_tab_positions now stores the true display
+                                        // client_tab_positions stores the true display
                                         // index (honors gaps from renumber-windows off).
-                                        cmd_batch.push(format!("select-window -t :{}\n", idx));
+                                        // A range naming a window that does not exist
+                                        // is ignored, matching tmux.
+                                        if client_window_indices.contains(&idx) {
+                                            cmd_batch.push(format!("select-window -t :{}\n", idx));
+                                        }
                                     }
                                 } else {
                                     // Border detection
@@ -6185,8 +6216,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
                 _ => left_w as u16, // "left" default
             };
-            client_tab_positions = tab_rel_positions.iter().map(|&(idx, s, e)| (idx, s + tabs_x_offset, e + tabs_x_offset)).collect();
+            client_tab_positions = tab_rel_positions.iter()
+                .map(|&(idx, s, e)| (status_chunk.y, idx, s + tabs_x_offset, e + tabs_x_offset))
+                .collect();
             client_status_row = status_chunk.y;
+            client_status_rows = status_chunk.height;
+            client_window_indices = windows.iter().map(|w| w.idx).collect();
             // Truncate overall status line to fit the available width
             crate::style::truncate_spans_to_width(&mut status_spans, total_width);
             // If a display-message is active, show it on the status bar
@@ -6221,11 +6256,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     &status_format[0], total_width, sb_base,
                 );
                 // Update tab positions from range info so mouse clicks work
-                // with custom status-format layouts.
+                // with custom status-format layouts. tmux parity (#593): the
+                // range argument IS the window index — tmux passes it raw to
+                // winlink_find_by_index (style.c strtonum, server-client.c
+                // STYLE_RANGE_WINDOW) with no base-index arithmetic, so
+                // `#[range=window|#{window_index}]` works at any base-index.
                 client_tab_positions = layout.ranges.iter().filter_map(|(rt, s, e)| {
                     match rt {
                         crate::style::StatusRangeType::Window(idx) => {
-                            Some((*idx + base_index, *s + status_chunk.x, *e + status_chunk.x))
+                            Some((status_chunk.y, *idx, *s + status_chunk.x, *e + status_chunk.x))
                         }
                     }
                 }).collect();
@@ -6246,6 +6285,17 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 };
                 // Use the layout engine for #[align], #[fill], #[list], #[range] support
                 let layout = crate::style::layout_format_line(&text, line_area.width as usize, sb_base);
+                // Harvest this line's clickable ranges too (#593): tmux keeps
+                // one style_range list per status line (status.c status_redraw
+                // fills sle->ranges for every i in 0..lines) so a window list
+                // on status-format[1] is just as clickable as on line 0.
+                for (rt, s, e) in &layout.ranges {
+                    match rt {
+                        crate::style::StatusRangeType::Window(idx) => {
+                            client_tab_positions.push((line_y, *idx, *s + line_area.x, *e + line_area.x));
+                        }
+                    }
+                }
                 let line_widget = Paragraph::new(Line::from(layout.spans)).style(sb_base);
                 f.render_widget(line_widget, line_area);
             }
@@ -6328,7 +6378,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             if run.flags & 1  != 0 { style = style.add_modifier(Modifier::DIM); }
                             if run.flags & 2  != 0 { style = style.add_modifier(Modifier::BOLD); }
                             if run.flags & 4  != 0 { style = style.add_modifier(Modifier::ITALIC); }
-                            if run.flags & 8  != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+                            if run.flags & 8  != 0 {
+                    style = crate::rendering::with_underline(
+                        style,
+                        if run.ul == 0 { 1 } else { run.ul },
+                        run.ulc.as_deref().map(map_color),
+                    );
+                }
                             if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
                             if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
                             if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }

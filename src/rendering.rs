@@ -21,6 +21,53 @@ pub use crate::style::{
     map_color, parse_tmux_style, parse_inline_styles,
 };
 
+// ─── Extended underline styles (issue #589) ─────────────────────────────────
+
+/// ratatui's `Modifier` bitflags define only bits 0 through 8 (`BOLD` through
+/// `CROSSED_OUT`) and carry no notion of double, curly, dotted or dashed
+/// underscores, which tmux models as `GRID_ATTR_UNDERSCORE_2` through
+/// `GRID_ATTR_UNDERSCORE_5` (tmux `grid.h`).  Rather than fork ratatui, psmux
+/// smuggles the SGR 4 subparameter (0 through 5) through three unused high
+/// bits of the modifier.  `PsmuxBackend::draw` masks them off before anything
+/// ratatui owns sees them, and emits the matching `CSI 4:N m` itself.
+pub const UL_STYLE_SHIFT: u16 = 12;
+
+/// Mask covering the three smuggled underline-style bits.
+pub const UL_STYLE_MASK: u16 = 0b0111_0000_0000_0000;
+
+/// Reads the smuggled underline style back out of a modifier.  Returns the
+/// SGR 4 subparameter: 0 none/plain, 1 single, 2 double, 3 curly, 4 dotted,
+/// 5 dashed.
+#[must_use]
+pub fn ul_style_of(m: Modifier) -> u8 {
+    ((m.bits() & UL_STYLE_MASK) >> UL_STYLE_SHIFT) as u8
+}
+
+/// Strips the smuggled bits so only modifiers ratatui itself defines remain.
+#[must_use]
+pub fn strip_ul_style(m: Modifier) -> Modifier {
+    Modifier::from_bits_truncate(m.bits() & !UL_STYLE_MASK)
+}
+
+/// Adds the underline attributes for one cell to a style: the plain
+/// `UNDERLINED` modifier (so anything that only knows about SGR 4 still draws
+/// a line), the smuggled extended style, and the SGR 58 underline colour.
+#[must_use]
+pub fn with_underline(mut style: Style, ul: u8, ulcolor: Option<Color>) -> Style {
+    if ul == 0 {
+        return style;
+    }
+    style = style.add_modifier(Modifier::UNDERLINED);
+    if ul > 1 {
+        let bits = (u16::from(ul) << UL_STYLE_SHIFT) & UL_STYLE_MASK;
+        style = style.add_modifier(Modifier::from_bits_retain(bits));
+    }
+    if let Some(c) = ulcolor {
+        style = style.underline_color(c);
+    }
+    style
+}
+
 // ─── VT color helpers ───────────────────────────────────────────────────────
 
 pub fn vt_to_color(c: vt100::Color) -> Color {
@@ -349,7 +396,14 @@ pub fn render_node(
                         if cell.dim() { style = style.add_modifier(Modifier::DIM); }
                         if cell.bold() { style = style.add_modifier(Modifier::BOLD); }
                         if cell.italic() { style = style.add_modifier(Modifier::ITALIC); }
-                        if cell.underline() { style = style.add_modifier(Modifier::UNDERLINED); }
+                        style = with_underline(
+                            style,
+                            cell.underline_style().sgr_subparam(),
+                            match cell.underline_color() {
+                                vt100::Color::Default => None,
+                                c => Some(vt_to_color(c)),
+                            },
+                        );
                         if cell.inverse() { style = style.add_modifier(Modifier::REVERSED); }
                         if cell.blink() { style = style.add_modifier(Modifier::SLOW_BLINK); }
                         if cell.strikethrough() { style = style.add_modifier(Modifier::CROSSED_OUT); }

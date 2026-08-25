@@ -28,8 +28,8 @@ A key table is a named set of bindings. psmux consults these tables:
 |-----|--------|--------|
 | `root` | Every keystroke, before the prefix is armed. Bind with `bind-key -n <key>` or `bind-key -T root <key>` | **Empty.** psmux binds nothing here by default |
 | `prefix` | Keystrokes that follow the prefix key. Bind with plain `bind-key <key>` | The full default set listed below |
-| `copy-mode` | Keystrokes while copy mode is active and `mode-keys` is `emacs` | Empty. Bind with `bind-key -T copy-mode <key>` |
-| `copy-mode-vi` | Keystrokes while copy mode is active and `mode-keys` is `vi` (the default) | Empty. Bind with `bind-key -T copy-mode-vi <key>` |
+| `copy-mode` | Keystrokes while copy mode is active and `mode-keys` is `emacs` (the default) | Empty. Bind with `bind-key -T copy-mode <key>` |
+| `copy-mode-vi` | Keystrokes while copy mode is active and `mode-keys` is `vi` | Empty. Bind with `bind-key -T copy-mode-vi <key>` |
 | any custom table | Only after `switch-client -T <table>`, and only for the very next keystroke | Whatever you bind into it |
 
 The `copy-mode` and `copy-mode-vi` tables are empty by default because the built in copy mode keymap
@@ -368,8 +368,13 @@ The keys below are the built in copy mode map. Anything you bind with
 | `j` / `Down` | Move cursor down |
 | `k` / `Up` | Move cursor up |
 | `l` / `Right` | Move cursor right |
+| `Ctrl+p` / `Ctrl+n` | Move cursor up / down (same as `k` / `j`, emacs style, works in vi mode too) |
 | `Ctrl+a` | Start of line (emacs style, works in vi mode too) |
-| `Ctrl+e` | End of line (emacs style, works in vi mode too) |
+| `Ctrl+e` | End of line, **`mode-keys emacs` only** (in vi mode `Ctrl+e` scrolls, use `$`) |
+
+Cursor motions keep the viewport still until the cursor reaches the top or the bottom row of the
+pane. Only then does the view follow, one line at a time. To move the view itself while the cursor
+stays put, use the scrolling keys below.
 
 ### Word Motions
 
@@ -394,7 +399,9 @@ The keys below are the built in copy mode map. Anything you bind with
 | `Ctrl+u` / `Ctrl+d` | Half page up / down |
 | `Ctrl+b` / `PageUp` | Full page up |
 | `Ctrl+f` / `PageDown` | Full page down |
-| `Ctrl+p` / `Ctrl+n` | Scroll up / down one line |
+| `Ctrl+Up` / `Ctrl+Down` | Scroll up / down one line (cursor stays where it is) |
+| `Ctrl+y` / `Ctrl+e` | Scroll up / down one line, **`mode-keys vi` only** |
+| `K` / `J` | Scroll up / down one line, **`mode-keys vi` only** |
 | `g` | Top of scrollback |
 | `G` | Bottom (live output) |
 | `z` | Centre the cursor line in the pane (scroll-middle) |
@@ -507,18 +514,28 @@ Opened by `/`, `?`, `Ctrl+s` or `Ctrl+r`. While it is open the copy mode keys ar
 ### Emacs Copy Mode
 
 `set -g mode-keys emacs` does not add a separate keymap. Most emacs style keys listed above are
-always active, in vi mode too. What `mode-keys emacs` changes is the meaning of three keys that vi
-mode uses for scrolling:
+always active, in vi mode too. What `mode-keys emacs` changes is the meaning of the keys tmux binds
+differently in its `copy-mode` and `copy-mode-vi` tables:
 
-| Key | With `mode-keys vi` (default) | With `mode-keys emacs` |
+| Key | With `mode-keys vi` | With `mode-keys emacs` (default) |
 |-----|--------|--------|
 | `Ctrl+b` | Page up | Move cursor left |
 | `Ctrl+f` | Page down | Move cursor right |
 | `Ctrl+v` | Force rectangle selection | Page down |
+| `Ctrl+e` | Scroll down one line | End of line |
+| `Ctrl+y` | Scroll up one line | Nothing |
+| `J` / `K` | Scroll down / up one line | Nothing |
 
-These keys behave the same under both settings: `Ctrl+n` / `Ctrl+p` scroll one line, `Ctrl+a` /
-`Ctrl+e` go to line start / end, `Alt+f` / `Alt+b` move by word, `Alt+v` pages up, `Alt+w` copies
-and exits, `Ctrl+s` / `Ctrl+r` search forward / backward.
+In vi mode `Ctrl+e` scrolls, so use `$` (or `End`) to reach the end of the line there. This is
+tmux's split: `copy-mode` binds `Ctrl+e` to end-of-line and leaves `Ctrl+y`, `J` and `K` unbound,
+while `copy-mode-vi` binds `Ctrl+e` and `J` to scroll down and `Ctrl+y` and `K` to scroll up.
+
+These keys behave the same under both settings: `Ctrl+p` / `Ctrl+n` move the cursor up / down,
+`Ctrl+Up` / `Ctrl+Down` scroll one line, `Ctrl+a` goes to line start, `Alt+f` / `Alt+b` move by
+word, `Alt+v` pages up, `Alt+w` copies and exits, `Ctrl+s` / `Ctrl+r` search forward / backward.
+
+`Ctrl+p` / `Ctrl+n` are cursor motions, not scrolling, which is what tmux binds them to in its
+`copy-mode` table. psmux keeps them available in vi mode as well, where tmux leaves them unbound.
 
 When in copy mode:
 - The pane border turns **yellow**

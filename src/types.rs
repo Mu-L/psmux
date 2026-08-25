@@ -1573,6 +1573,11 @@ pub enum CtrlReq {
     ToggleSync,
     SetPaneTitle(String),
     SetPaneStyle(String),
+    /// select-pane -T/-P without activation (#592, tmux parity): applies
+    /// title and/or style to the active pane in ONE request so the pair
+    /// survives a single temp-focus window (restore fires after the first
+    /// non-temp request, so two separate sends would mis-target the second).
+    SetPaneAttrs { title: Option<String>, style: Option<String> },
     // send-keys arguments as SEPARATE tokens (#490): each token is either a
     // named key (Enter, C-c, Up, ...) matched in its entirety or literal
     // text typed verbatim with its whitespace intact. Never re-join and
