@@ -1,20 +1,11 @@
-# pi scroll regression (3.3.4 good -> 3.3.5+ bad): mouse wheel over a pane
-# running an inline TUI like pi must enter copy mode (scroll psmux's buffer),
-# NOT be routed into the app.
+# Mouse wheel input over an inline TUI such as pi must enter copy mode and
+# scroll psmux's buffer, not reach the child.
 #
-# pi's pane profile that broke every heuristic-based wheel gate:
+# The test pane combines the signals that exercise pane_wheel_forward:
 #   - foreground process is NOT a shell (node.exe)
 #   - the pane reports an active mouse protocol (PSReadLine enables mouse
 #     tracking spuriously on ConPTY; the sim enables DECSET 1002/1006 itself)
-#   - screen filled, cursor at a bottom input box (is_fullscreen_tui matches)
-#
-# Broken behaviors this guards against:
-#   - 3.3.5 (b64408e): pane_wants_mouse() heuristic forwarded the wheel into
-#     the app via mouse injection.
-#   - 3.3.6/3.3.7 (7d6300b): the "general alternate-scroll" fallback sent
-#     3x arrow keys per wheel notch; pi's focused input box reads Up/Down as
-#     prompt-history navigation, so the wheel cycled history instead of
-#     scrolling the transcript.
+#   - screen filled, cursor at a bottom input box
 #
 # The sim app records any arrow/SGR-wheel sequence reaching its stdin into a
 # leak file; the test asserts copy_mode turns on AND the leak file is empty.

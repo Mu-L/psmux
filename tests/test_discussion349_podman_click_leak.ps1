@@ -1,12 +1,6 @@
-# Discussion #349 (follow-up, comment 17754744): after the motion-leak fix
-# (57813d1), mouse CLICKS still leak SGR reports into an interactive podman
-# container terminal once command output fills the screen. The reporter sees
-# "0;37;26M0;37;26m" for a left click and "0;48;26M0;48;26m" for a right click.
-#
-# ROOT CAUSE: clicks are gated on the permissive pane_wants_mouse(), whose
-# tier-3 is_fullscreen_tui() heuristic false-positives on a filled screen with
-# a NON-shell foreground (podman.exe). Motion was moved to the strict
-# pane_wants_hover() but clicks were deliberately left on pane_wants_mouse.
+# Discussion #349 (follow-up, comment 17754744): pane_wants_click must not
+# forward SGR click reports into an interactive podman container that has not
+# enabled mouse input, even after command output fills the screen.
 #
 # This replays the reporter's EXACT scenario: real visible psmux window, real
 # podman alpine container, real screen fill, and REAL mouse CLICKS injected

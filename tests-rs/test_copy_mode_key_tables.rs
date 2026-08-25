@@ -1,17 +1,9 @@
 //! `bind -T copy-mode-vi` / `-T copy-mode` bindings must actually fire.
 //!
-//! These tables parsed, were stored in `app.key_tables`, and showed up in
-//! `list-keys` — but nothing on the live client/server path ever consulted
-//! them. The only lookup lived in `input::handle_key`, which has no callers
-//! (dead code from the pre-server architecture). The live path hardcodes
-//! copy-mode keys in `send_key_to_active` and `handle_copy_mode_char`.
-//!
-//! The failure was near-invisible, which is why it lasted: the common rebinds
-//! (`v` begin-selection, `y` copy, `Escape` cancel) coincide with psmux's
-//! hardcoded vi defaults, so the keys did something reasonable. What silently
-//! did not happen was the user's own action — for
-//! `bind -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "clip.exe"`, the
-//! selection was yanked to the internal buffer but never piped to `clip.exe`.
+//! Plain characters reach `handle_copy_mode_char`; special keys reach
+//! `send_key_to_active`. Both live handlers must consult `app.key_tables`
+//! before their built-in copy-mode behavior. The tests bind actions that differ
+//! from the defaults so a hardcoded fallback cannot satisfy them.
 
 use super::*;
 

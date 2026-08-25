@@ -696,8 +696,6 @@ pub struct AppState {
     pub last_window_idx: usize,
     /// Last active pane path (for last-pane command)
     pub last_pane_path: Vec<usize>,
-    /// Tab positions on status bar: (window_index, x_start, x_end)
-    pub tab_positions: Vec<(usize, u16, u16)>,
     /// history-limit: scrollback buffer size (default 2000)
     pub history_limit: usize,
     /// display-time: how long messages are shown (ms, default 750)
@@ -1256,7 +1254,6 @@ impl AppState {
             pipe_panes: Vec::new(),
             last_window_idx: 0,
             last_pane_path: Vec::new(),
-            tab_positions: Vec::new(),
             history_limit: 2000,
             display_time_ms: 750,
             display_panes_time_ms: 1000,

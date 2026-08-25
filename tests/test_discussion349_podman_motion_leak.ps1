@@ -1,17 +1,8 @@
 # Discussion #349: mouse motion escape sequences ("35;128;51M...") leak into an
 # interactive podman container terminal after command output fills the screen.
 #
-# ROOT CAUSE (reproduced live before the fix, with this exact harness):
-#   The attached client forwards every bare mouse move as
-#   "pane-mouse <id> 35 <col> <row> M".  handle_pane_mouse / remote_mouse_motion
-#   gated bare motion on the permissive pane_wants_mouse(), whose
-#   is_fullscreen_tui() heuristic false-positives on a filled screen with a
-#   NON-shell foreground (podman.exe is neither a shell nor wsl/ssh, so the
-#   #381 gate does not apply).  psmux then wrote ESC[<35;x;yM to podman's pty
-#   on every mouse move and the container tty echoed it as garbage.
-#
-# FIX: bare motion (SGR 35) is gated on pane_wants_hover() (explicit DECSET
-#   1002/1003), matching the local input path fixed the same way in #296.
+# CONTRACT: bare motion (SGR 35) is gated on pane_wants_hover() (explicit
+#   DECSET 1002/1003) in the live server mouse path.
 #   The byte-level gate contract is pinned by
 #   tests-rs/test_discussion349_podman_motion_leak.rs.
 #

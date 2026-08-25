@@ -2101,9 +2101,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut rsel_block: bool = false;
     let mut selection_changed = false; // forces redraw for selection overlay
     let mut border_drag = false; // true when dragging a pane separator (resize)
-    // Client-side tab position tracking for accurate mouse click detection.
-    // The server's update_tab_positions() uses a different algorithm than what
-    // the client actually renders, so we track positions at render time.
+    // Track rendered tab positions for accurate mouse click detection.
     // (row, window_display_idx, x_start, x_end) — one entry per clickable tab
     // span, on WHICHEVER status row it renders (#593: multi-row bars carry
     // clickable ranges on every line, matching tmux status_get_range).
