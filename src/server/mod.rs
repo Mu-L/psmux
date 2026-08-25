@@ -2758,16 +2758,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     match cmd.as_str() {
                         "cancel" => {
-                            app.mode = Mode::Passthrough;
-                            app.copy_anchor = None;
-                            app.copy_pos = None;
-                            app.copy_scroll_offset = 0;
-                            let win = &mut app.windows[app.active_idx];
-                            if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-                                if let Ok(mut parser) = p.term.lock() {
-                                    parser.screen_mut().set_scrollback(0);
-                                }
-                            }
+                            // Use the canonical exit: it also clears the
+                            // pane-local `copy_state`.  Hand-rolling the exit
+                            // here left that behind, and the next focus change
+                            // (`select-pane`, which every mouse click sends)
+                            // restored it through `switch_with_copy_save`, so a
+                            // plain click after an external `send-keys -X
+                            // cancel` silently re-entered copy mode.
+                            crate::copy_mode::exit_copy_mode(&mut app);
                             if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                         }
                         "begin-selection" => {
@@ -2799,9 +2797,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "copy-selection-and-cancel" => {
                             let _ = yank_selection(&mut app);
                             if let Some(cmds) = app.hooks.get("pane-set-clipboard") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
-                            app.mode = Mode::Passthrough;
-                            app.copy_scroll_offset = 0;
-                            app.copy_pos = None;
+                            crate::copy_mode::exit_copy_mode(&mut app);
                             if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                         }
                         "copy-selection-no-clear" => {
@@ -2837,9 +2833,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 }
                             }
                             if cancel {
-                                app.mode = Mode::Passthrough;
-                                app.copy_scroll_offset = 0;
-                                app.copy_pos = None;
+                                crate::copy_mode::exit_copy_mode(&mut app);
                                 if let Some(cmds) = app.hooks.get("pane-mode-changed") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                             }
                         }
@@ -2890,7 +2884,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         "search-again" => { crate::copy_mode::search_next(&mut app); }
                         "search-reverse" => { crate::copy_mode::search_prev(&mut app); }
-                        "copy-end-of-line" => { let _ = crate::copy_mode::copy_end_of_line(&mut app); app.mode = Mode::Passthrough; app.copy_scroll_offset = 0; app.copy_pos = None; }
+                        "copy-end-of-line" => { let _ = crate::copy_mode::copy_end_of_line(&mut app); crate::copy_mode::exit_copy_mode(&mut app); }
                         "select-word" => {
                             // Select the word under cursor
                             crate::copy_mode::move_word_backward(&mut app);

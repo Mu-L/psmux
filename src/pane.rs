@@ -185,8 +185,29 @@ pub fn cached_shell() -> Option<&'static str> {
     }).as_deref()
 }
 
+/// Strip the explicit-argv marker from a command string for naming purposes.
+///
+/// `new-window -- prog args...` reaches here as `"-- prog args..."`: the
+/// server keeps the `--` marker so `build_command` knows to exec the argv
+/// directly (#582).  Naming code must skip the marker, or the window ends up
+/// called `--` instead of the program (`build_command` decodes it, this used
+/// not to).  `--` with no tail means "just the default shell", so `None`.
+fn command_text_for_naming(cmd: &str) -> Option<&str> {
+    let trimmed = cmd.trim_start();
+    match trimmed.strip_prefix("--") {
+        Some(rest) if rest.is_empty() => None,
+        Some(rest) if rest.starts_with(char::is_whitespace) => {
+            let tail = rest.trim();
+            if tail.is_empty() { None } else { Some(tail) }
+        }
+        // e.g. "--foo": not the argv marker, an ordinary command string.
+        _ => Some(cmd),
+    }
+}
+
 /// Determine the default shell name for window naming (like tmux shows "bash", "zsh").
 fn default_shell_name(command: Option<&str>, configured_shell: Option<&str>) -> String {
+    let command = command.and_then(command_text_for_naming);
     if let Some(cmd) = command {
         // Extract the program name from the command string (space-aware)
         let (prog, _) = resolve_shell_program(cmd);
@@ -2636,3 +2657,7 @@ mod tests_pane_writer_queue;
 #[cfg(test)]
 #[path = "../tests-rs/test_pane_writer_transient_error.rs"]
 mod tests_pane_writer_transient_error;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_dashdash_window_name.rs"]
+mod tests_dashdash_window_name;
