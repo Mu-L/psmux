@@ -7,7 +7,7 @@
 // which coordinates" when the user turns the mouse wheel over that pane.
 //
 // Build: csc /nologo /out:mouse_echo_child.exe mouse_echo_child.cs
-// Log:   %TEMP%\psmux_mouse_echo.txt
+// Log:   %PSMUX_MOUSE_ECHO_LOG%, or %TEMP%\psmux_mouse_echo.txt by default
 using System;
 using System.IO;
 using System.Text;
@@ -45,7 +45,10 @@ class MouseEcho {
     }
 
     static int Main(string[] args) {
-        log = Path.Combine(Environment.GetEnvironmentVariable("TEMP"), "psmux_mouse_echo.txt");
+        string configuredLog = Environment.GetEnvironmentVariable("PSMUX_MOUSE_ECHO_LOG");
+        log = string.IsNullOrWhiteSpace(configuredLog)
+            ? Path.Combine(Environment.GetEnvironmentVariable("TEMP"), "psmux_mouse_echo.txt")
+            : configuredLog;
         File.WriteAllText(log, "MOUSE_ECHO START\n");
 
         IntPtr hIn = GetStdHandle(STD_INPUT_HANDLE);

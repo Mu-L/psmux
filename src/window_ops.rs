@@ -112,155 +112,11 @@ fn is_vt_bridge(name: &str) -> bool {
     lower.contains("wsl") || lower.contains("ssh")
 }
 
-/// Permissive TUI detection for hover events — matches layout.rs heuristic.
-///
-/// Returns true when the last row of the pane screen has non-blank content,
-/// which indicates a fullscreen app (status bar, menu bar, etc.).
-///
-/// This is deliberately less strict than `is_fullscreen_tui()`:
-///   - `is_fullscreen_tui()` also requires the cursor in the bottom 3 rows,
-///     which fails for apps like opencode whose cursor sits at a mid-screen
-///     text input.
-///   - For hover events, false positives are harmless — shells ignore bare
-///     motion (SGR button 35).  False negatives break TUI hover (opencode,
-///     etc.), so we use the permissive check.
-pub(crate) fn screen_has_tui_content(pane: &Pane) -> bool {
-    if let Ok(parser) = pane.term.lock() {
-        let screen = parser.screen();
-        if screen.alternate_screen() {
-            return true;
-        }
-        let last_row = pane.last_rows.saturating_sub(1);
-        for col in 0..pane.last_cols.min(80) {
-            if let Some(cell) = screen.cell(last_row, col) {
-                let t = cell.contents();
-                if !t.is_empty() && t != " " {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Check if the pane is likely running a fullscreen TUI app (htop, vim, etc.)
-/// by detecting alternate screen buffer usage.
-///
-/// ConPTY never passes DECSET 1049h (alternate screen) to the output pipe,
-/// so `screen.alternate_screen()` is always false.  Use the same heuristic
-/// as layout.rs: if the last row of the screen has non-blank content, the
-/// pane is running a fullscreen app.
-pub(crate) fn is_fullscreen_tui(pane: &Pane) -> bool {
-    if let Ok(parser) = pane.term.lock() {
-        let screen = parser.screen();
-        // Fast check: if the parser reports alternate screen, trust it
-        if screen.alternate_screen() {
-            return true;
-        }
-
-        // Issue #381: a plain shell whose output has merely filled the screen
-        // is NOT a fullscreen TUI. Under git bash the fill heuristic below
-        // false-positives once enough output fills the bottom rows with the
-        // prompt at the cursor, so psmux forwarded mouse motion to the shell,
-        // which echoed it as raw SGR text ("15M65;61;..."). If the foreground
-        // process is a shell, skip the heuristic and report "not fullscreen".
-        //
-        // Gate on `== Some(true)`, NOT `.is_some()`: foreground_is_shell returns
-        // Some(false) for a genuine NON-shell fullscreen app (nvim, htop), and
-        // that case must still fall through to the heuristic that #285 relies on
-        // for mouse support on ConPTY builds that strip the mouse DECSETs. Using
-        // `.is_some()` here fires for Some(false) too and would suppress
-        // detection of real TUIs, regressing #285.
-        let foreground_is_shell = pane
-            .child_pid
-            .and_then(crate::platform::process_info::foreground_is_shell)
-            == Some(true);
-
-        if foreground_is_shell {
-            return false;
-        }
-
-        // Heuristic: check if many of the last rows are non-blank AND the
-        // cursor is near the bottom.  Fullscreen TUI apps fill the entire
-        // screen and keep the cursor near the bottom (status bars, menus).
-        // A shell after `dir` may have content on the last row, but the
-        // cursor sits at the current prompt line — not necessarily at the
-        // bottom — and the rows below the cursor are blank.
-        let rows = pane.last_rows;
-        if rows < 3 { return false; }
-        let (cursor_row, _) = screen.cursor_position();
-        let last_row = rows.saturating_sub(1);
-        // Cursor must be in the bottom 3 rows for a fullscreen TUI
-        if cursor_row < last_row.saturating_sub(2) {
-            return false;
-        }
-        // Check that at least 3 of the last 4 rows have non-blank content
-        let check_rows = 4u16.min(rows);
-        let mut filled = 0u16;
-        for r in (last_row + 1 - check_rows)..=last_row {
-            let mut has_content = false;
-            for col in 0..pane.last_cols.min(40) { // only check first 40 cols
-                if let Some(cell) = screen.cell(r, col) {
-                    let t = cell.contents();
-                    if !t.is_empty() && t != " " {
-                        has_content = true;
-                        break;
-                    }
-                }
-            }
-            if has_content { filled += 1; }
-        }
-        return filled >= 3;
-    }
-    false
-}
-
-/// Check if the child process in this pane wants to receive mouse events.
-///
-/// Uses a three-tier detection strategy:
-///
-///   1. **mouse_protocol_mode** (DECSET 1000/1002/1003) — authoritative for
-///      VT bridge children (WSL, SSH) where escape sequences pass through.
-///   2. **alternate_screen** (DECSET 1049h) — works on Windows 11+ where
-///      ConPTY passes DECSET 1049h to the output stream.
-///   3. **is_fullscreen_tui heuristic** — fallback for older Windows 10
-///      builds where ConPTY strips both DECSET 1000 and DECSET 1049h.
-///      Detects fullscreen TUI apps (nvim, htop, vim) by checking that the
-///      last rows are filled and the cursor is near the bottom.
-///
-/// Without tier 3, native TUI apps on older Windows never receive mouse
-/// events because ConPTY makes both tier 1 and tier 2 return false.
-/// (fixes #285, regression from commit 719e604)
-pub(crate) fn pane_wants_mouse(pane: &Pane) -> bool {
-    if let Ok(parser) = pane.term.lock() {
-        let screen = parser.screen();
-        // Tier 1: did the child enable mouse protocol? (VT bridge children)
-        if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
-            return true;
-        }
-        // Tier 2: alternate screen active (newer ConPTY passes DECSET 1049h)
-        if screen.alternate_screen() {
-            return true;
-        }
-    }
-    // Tier 3: heuristic for older ConPTY that strips DECSET 1049h —
-    // detect fullscreen TUI apps by screen content analysis.
-    is_fullscreen_tui(pane)
-}
-
 /// Wheel-forwarding gate: is the pane's child on the alternate screen?
 ///
-/// The wheel is the ONE mouse event that must use this check alone — the
-/// known-good pre-3.3.5 semantics.  Neither of the broader signals is safe
-/// for it:
-///   - mouse_protocol_mode: PSReadLine spuriously enables mouse tracking on
-///     ConPTY, so any pane whose shell is pwsh reports a mouse protocol even
-///     when the foreground app (pi, …) never asked for the wheel.
-///   - is_fullscreen_tui: false-positives on a filled shell (#360) and on
-///     inline TUIs like pi whose input box then eats the wheel as prompt
-///     history instead of psmux entering copy mode.
-/// Apps that genuinely consume the wheel (nvim, htop, less, opencode) run on
-/// the alternate screen, which modern ConPTY reports reliably.
+/// The alternate screen is an authoritative wheel signal. The broader
+/// mouse-protocol signal needs ownership attribution because PSReadLine can
+/// enable it on behalf of the shell.
 pub(crate) fn pane_in_alt_screen(pane: &Pane) -> bool {
     if let Ok(parser) = pane.term.lock() {
         return parser.screen().alternate_screen();
@@ -314,32 +170,15 @@ pub(crate) fn pane_wheel_forward(pane: &Pane) -> bool {
     pane_in_alt_screen(pane) || matches!(pane.mouse_proto_owner, Some((_, true)))
 }
 
-/// Gate for mouse CLICK/button forwarding.  Like `pane_wants_mouse` but WITHOUT
-/// the tier-3 `is_fullscreen_tui` screen-content heuristic.
+/// Gate for mouse click/button forwarding.
 ///
-/// Discussion #349 follow-up: the motion leak was fixed by moving bare motion
-/// to `pane_wants_hover`, but clicks were left on the permissive
-/// `pane_wants_mouse`.  Its tier-3 heuristic false-positives on a filled screen
-/// whose foreground is a NON-shell (podman.exe), so a left/right click at a
-/// container shell prompt was forwarded as SGR (`ESC[<0;x;yM`) into the
-/// container pty, which echoed it as raw text (`0;37;26M0;37;26m`).
-///
-/// A click is forwarded only when the child RELIABLY wants the mouse:
+/// A click is forwarded when the pane's terminal state indicates mouse input:
 ///   1. it enabled a mouse protocol (DECSET 1000/1002/1003 — VT apps like vim,
 ///      and modern crossterm/ratatui apps, which emit DECSET 1000/1006 when
 ///      they turn mouse capture on); or
 ///   2. it is on the alternate screen (fullscreen apps on modern ConPTY).
 ///
-/// This deliberately does NOT use the tier-3 `is_fullscreen_tui` content
-/// heuristic (a plain shell that merely filled the screen trips it) nor the
-/// console `ENABLE_MOUSE_INPUT` flag (which is SET by default on every console,
-/// so it never distinguishes a mouse app from a plain shell).  It matches
-/// tmux, which forwards mouse events only to apps that requested a mouse
-/// mode.  A plain shell — inside a container or not — requests none, so
-/// clicks are no longer leaked into it.  (The wheel uses the even stricter
-/// `pane_in_alt_screen`: mouse_protocol_mode is not trustworthy there because
-/// PSReadLine enables it spuriously, and a wheel misroute is user-visible —
-/// it cycles prompt history in inline TUIs like pi.)
+/// This deliberately does not use screen-content or console-mode heuristics.
 pub(crate) fn pane_wants_click(pane: &Pane) -> bool {
     if let Ok(parser) = pane.term.lock() {
         let screen = parser.screen();
@@ -357,8 +196,8 @@ pub(crate) fn pane_wants_click(pane: &Pane) -> bool {
 /// has EXPLICITLY enabled mouse motion tracking (DECSET 1002 ButtonMotion or
 /// DECSET 1003 AnyMotion).
 ///
-/// Unlike `pane_wants_mouse()`, this does NOT use alt-screen or fullscreen
-/// heuristics.  Sending unsolicited SGR motion sequences to apps that haven't
+/// This does not use alt-screen or screen-content heuristics. Sending
+/// unsolicited SGR motion sequences to apps that haven't
 /// enabled mouse tracking (e.g. nvim without `set mouse=a`, or any TUI app
 /// that only uses alt-screen for rendering) corrupts their input and makes
 /// them appear hung.  (fixes #296)
@@ -689,28 +528,6 @@ pub fn toggle_zoom(app: &mut AppState) {
     resize_all_panes(app);
 }
 
-/// Compute tab positions on the server side to match the client's status bar layout.
-/// The client renders: "[session_name] idx: window_name idx: window_name ..."
-/// NOTE: No longer called — tab clicks are now handled client-side with exact
-/// rendered positions.  Kept for reference / potential embedded-mode use.
-#[allow(dead_code)]
-pub fn update_tab_positions(app: &mut AppState) {
-    let mut tab_pos: Vec<(usize, u16, u16)> = Vec::new();
-    let mut cursor_x: u16 = 0;
-    // Session label: "[session_name] "
-    let session_label_len = app.session_name.len() as u16 + 3; // '[' + name + ']' + ' '
-    cursor_x += session_label_len;
-    // Window tabs: "idx: window_name " for each window
-    for (i, w) in app.windows.iter().enumerate() {
-        let display_idx = app.win_display_index(i);
-        let label = format!("{}: {} ", display_idx, w.name);
-        let start_x = cursor_x;
-        cursor_x += label.len() as u16;
-        tab_pos.push((i, start_x, cursor_x));
-    }
-    app.tab_positions = tab_pos;
-}
-
 pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
     let (x, y) = map_client_coords(app, x, y);
     // Status bar tab clicks are handled client-side via select-window.
@@ -983,13 +800,10 @@ pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press
 /// Forward bare mouse motion (hover) to the child PTY.
 ///
 /// Only forwarded when the child has EXPLICITLY enabled mouse motion
-/// tracking (`pane_wants_hover`, DECSET 1002/1003).  Do NOT use the
-/// permissive pane_wants_mouse() heuristic here: its is_fullscreen_tui
-/// tier false-positives on a filled screen with a NON-shell foreground
+/// tracking (`pane_wants_hover`, DECSET 1002/1003). Screen-content heuristics
+/// false-positive on a filled screen with a NON-shell foreground
 /// (podman/docker interactive containers, discussion #349), spraying raw
 /// SGR motion bytes (35;x;yM...) into the container tty as visible garbage.
-/// This matches the local input path, which was fixed the same way in #296.
-///
 /// SGR button 35 = bare motion with no button held (WT parity).
 /// Windows Terminal encodes hover as WM_MOUSEMOVE -> button 3 + 0x20 = 35.
 ///
@@ -1205,8 +1019,8 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
     //
     // Bare motion (SGR button 35, no button held) requires the child to have
     // EXPLICITLY enabled motion tracking (pane_wants_hover, DECSET 1002/1003).
-    // Clicks/drags (buttons 0/1/2/32) use pane_wants_click, which also drops
-    // the tier-3 is_fullscreen_tui content heuristic: it false-positives on a
+    // Clicks/drags (buttons 0/1/2/32) use pane_wants_click, which avoids
+    // screen-content heuristics that false-positive on a
     // filled screen with a non-shell foreground (podman/docker interactive
     // containers, discussion #349), which forwarded left/right clicks as
     // "0;x;yM0;x;ym" garbage into the container tty (comment 17754744). Real
@@ -1334,8 +1148,8 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
     // process-identity check in platform::process_info::foreground_is_shell
     // (the same tri-state helper Ctrl+C routing uses for issue #381/#285) —
     // never on `None` (probe failure) or `Some(true)` (confirmed shell).
-    // This is deliberately NOT the content-based `is_fullscreen_tui`
-    // heuristic: that one already misclassifies a normal shell whose
+    // This deliberately avoids content-based fullscreen heuristics, which
+    // misclassify a normal shell whose
     // screen happens to be full (prompt at the bottom) as a TUI app, which
     // is exactly the false positive #360 fixed for copy-mode entry. Process
     // identity has no such ambiguity — a real shell binary is never
@@ -2108,10 +1922,6 @@ pub fn heal_respawn_pane(
 #[cfg(test)]
 #[path = "../tests-rs/test_issue81_resize_direction.rs"]
 mod test_issue81_resize_direction;
-
-#[cfg(test)]
-#[path = "../tests-rs/test_issue381_gitbash_fullscreen_falsepositive.rs"]
-mod test_issue381_gitbash_fullscreen_falsepositive;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue400_swap_pane_index_order.rs"]

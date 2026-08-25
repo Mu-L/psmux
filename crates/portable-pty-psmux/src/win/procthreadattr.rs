@@ -22,11 +22,7 @@ impl ProcThreadAttributeList {
                 &mut bytes_required,
             )
         };
-        let mut data = Vec::with_capacity(bytes_required);
-        // We have the right capacity, so force the vec to consider itself
-        // that length.  The contents of those bytes will be maintained
-        // by the win32 apis used in this impl.
-        unsafe { data.set_len(bytes_required) };
+        let mut data = vec![0; bytes_required];
 
         let attr_ptr = data.as_mut_slice().as_mut_ptr() as *mut _;
         let res = unsafe {
@@ -70,3 +66,9 @@ impl Drop for ProcThreadAttributeList {
         unsafe { DeleteProcThreadAttributeList(self.as_mut_ptr()) };
     }
 }
+
+// PR #591 pin: the attribute list buffer is zero-initialised before Win32
+// writes its header into it, and the SAME buffer is what Win32 initialised.
+#[cfg(test)]
+#[path = "../../../../tests-rs/test_pr591_procthreadattr.rs"]
+mod tests_pr591;

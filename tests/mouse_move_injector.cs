@@ -58,7 +58,10 @@ class MouseMoveInjector
 
     static int Main(string[] args)
     {
-        string logPath = Path.Combine(Path.GetTempPath(), "psmux_mouse_move_inject.log");
+        string configuredLog = Environment.GetEnvironmentVariable("PSMUX_MOUSE_MOVE_LOG");
+        string logPath = string.IsNullOrWhiteSpace(configuredLog)
+            ? Path.Combine(Path.GetTempPath(), "psmux_mouse_move_inject.log")
+            : configuredLog;
 
         if (args.Length < 2)
         {
