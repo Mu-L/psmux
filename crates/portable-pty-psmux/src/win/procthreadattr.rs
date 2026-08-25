@@ -66,3 +66,9 @@ impl Drop for ProcThreadAttributeList {
         unsafe { DeleteProcThreadAttributeList(self.as_mut_ptr()) };
     }
 }
+
+// PR #591 pin: the attribute list buffer is zero-initialised before Win32
+// writes its header into it, and the SAME buffer is what Win32 initialised.
+#[cfg(test)]
+#[path = "../../../../tests-rs/test_pr591_procthreadattr.rs"]
+mod tests_pr591;
