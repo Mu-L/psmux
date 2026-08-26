@@ -103,6 +103,38 @@ pub fn psmux_dir() -> String {
     psmux_dir_opt().unwrap_or_else(|| "\\.psmux".to_string())
 }
 
+/// The data root reduced to a comparison key: separators unified and case
+/// folded, because Windows treats `C:/Foo` and `c:\foo` as one directory and
+/// anything keyed on the root must treat them as one too.
+fn normalized_data_root() -> String {
+    psmux_dir().replace('/', "\\").to_lowercase()
+}
+
+/// Stable per-data-root tag for names that live in the machine-wide kernel
+/// object namespace (issue #599).
+///
+/// `PSMUX_DATA_DIR` namespaces the registry: every `.port`/`.key`/`.sid`/`.pid`
+/// file, and therefore every fact the single-server guard protects, lives under
+/// it. That guard's mutex, though, is a machine-wide name. Without the root in
+/// the key two independent registries collide on one session name and the
+/// second root's server is refused as a duplicate of a server it cannot even
+/// see -- including the fixed `__warm__` name, which only the first root then
+/// ever publishes. `-L` already reaches the key through `port_file_base()`;
+/// this makes psmux's other namespace mechanism agree.
+///
+/// Derived from the RESOLVED root rather than the raw variable, so pointing
+/// `PSMUX_DATA_DIR` at the default `~\.psmux` keys identically to leaving it
+/// unset.
+pub fn data_root_tag() -> String {
+    use std::hash::{Hash, Hasher};
+    // A fixed-seed hasher: the name must be identical across processes and
+    // runs, so `RandomState` is deliberately NOT used here (same reasoning as
+    // `namespace_instance_file`).
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    normalized_data_root().hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 /// Path to a fixed-name file directly under the data directory (e.g.
 /// `latency.log`, `last_session`, `next_session_id`, `crash.log`).
 pub fn psmux_dir_file(name: impl AsRef<str>) -> String {

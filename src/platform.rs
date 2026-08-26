@@ -323,6 +323,30 @@ impl Drop for SessionMutex {
     }
 }
 
+/// Name of the machine-wide mutex that guards one server per session base name.
+///
+/// Two parts carry meaning:
+///
+///   - the data-root tag (issue #599). The registry this guard protects is
+///     rooted at `PSMUX_DATA_DIR`, but a kernel object name is machine-wide, so
+///     without the root in the key two isolated registries collide on one
+///     session name: the second root's `new-session -s X` is refused as a
+///     duplicate of a server it cannot see, and the fixed `__warm__` name is
+///     publishable by only the first root on the box. `-L` already reaches this
+///     name through `port_file_base()`; the tag makes psmux's other namespace
+///     mechanism agree.
+///   - `base`, which is `{socket_name}__{session_name}` under `-L` and the bare
+///     session name otherwise.
+///
+/// Backslash is the kernel-object namespace separator and must not appear in the
+/// leaf name; path characters are mapped out. `Local\` scopes the object to this
+/// logon session, matching the per-user scope of the data directory.
+#[cfg(windows)]
+pub fn session_mutex_name(base: &str) -> String {
+    let sanitized: String = base.chars().map(|c| if c == '\\' || c == '/' { '_' } else { c }).collect();
+    format!("Local\\psmux-session-{}-{}", crate::paths::data_root_tag(), sanitized)
+}
+
 /// Acquire the single-server lock for session `name` (P0: kill the duplicate-
 /// same-name-server race). Returns `Some(guard)` when this process MAY run as
 /// the server — because it now owns the mutex, or a previous owner died and left
@@ -340,10 +364,7 @@ pub fn acquire_session_mutex(name: &str) -> Option<SessionMutex> {
     const WAIT_OBJECT_0: u32 = 0x0000_0000;
     const WAIT_ABANDONED: u32 = 0x0000_0080; // prior owner died holding it -> ours now
     const WAIT_TIMEOUT: u32 = 0x0000_0102;   // another live process owns it
-    // Backslash is the kernel-object namespace separator and must not appear in
-    // the leaf name; map path chars out. `Local\` scopes it to this session.
-    let sanitized: String = name.chars().map(|c| if c == '\\' || c == '/' { '_' } else { c }).collect();
-    let obj = format!("Local\\psmux-session-{sanitized}");
+    let obj = session_mutex_name(name);
     let wide: Vec<u16> = obj.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         let h = CreateMutexW(std::ptr::null(), 0, wide.as_ptr());
@@ -4874,3 +4895,7 @@ impl ratatui::backend::Backend for PsmuxBackend {
 #[cfg(test)]
 #[path = "../tests-rs/test_issue589_undercurl.rs"]
 mod tests_issue589_undercurl;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_issue599_data_root_mutex.rs"]
+mod tests_issue599_data_root_mutex;
