@@ -434,6 +434,68 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
         // and passes VT through for nvim/vim.
         mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} -> PTY pipe SGR mouse (Windows Terminal method)",
             col, row, vt_button, press, win_name));
+        // tmux parity for the wheel (#598): a mouse REPORT is only ever
+        // written to a pane whose application actually enabled a mouse
+        // protocol.  tmux enforces that in input_key_mouse (input-keys.c):
+        //
+        //     if (m->ignore || (s->mode & ALL_MOUSE_MODES) == 0)
+        //             return;
+        //
+        // The `alternate_on` term in tmux's default WheelUpPane binding
+        // (key-bindings.c: `if -F '#{||:#{alternate_on},#{pane_in_mode},
+        // #{mouse_any_flag}}' { send -M } { copy-mode -e }`) only decides
+        // "do not fall through to copy-mode".  On the alternate screen with
+        // no mouse mode, `send -M` writes nothing at all.
+        //
+        // psmux forwarded on the alternate screen ALONE, so a full-screen app
+        // that never asked for the mouse had raw `ESC[<64;col;rowM` typed into
+        // it and read the report as keystrokes: htop opened its "Search: "
+        // prompt and filled it with the digits and separators of the report,
+        // and codex lost its transcript (#598).
+        //
+        // Both delivery channels have to obey the gate.  The PTY pipe is the
+        // obvious one, but the Win32 MOUSE_EVENT record injected below is not
+        // self gating as it looks: WriteConsoleInputW puts the record straight
+        // into the input buffer, and a child reading with
+        // ENABLE_VIRTUAL_TERMINAL_INPUT gets conhost's VT translation of that
+        // record, which is the same `ESC[<64;col;rowM`.  Measured on this
+        // tree: suppressing only the pipe write still leaked the report.
+        // Clicks and drags keep their existing `pane_wants_click` gate; only
+        // the wheel path is in scope here.
+        //
+        // "Did the application ask for the mouse" has two authoritative
+        // answers on Windows, and the raw `mouse_protocol_mode()` is NOT one
+        // of them: a freshly spawned console already has ENABLE_MOUSE_INPUT
+        // in its inherited input mode, so conhost emits `ESC[?1003;1006h`
+        // upstream before any application has run, and PSReadLine re-enables
+        // tracking on its own (#360/#548).  Measured on this tree: a pane
+        // whose child had explicitly CLEARED ENABLE_MOUSE_INPUT still showed
+        // `?1003;1006h` in the raw pane stream.  The two signals that do mean
+        // the application asked:
+        //
+        //   1. `mouse_proto_owner` — a DECSET transition that
+        //      `update_mouse_proto_owner` attributed to a confirmed non-shell
+        //      foreground.  This is the accurate signal for VT panes whose
+        //      DECSET actually survives (bridges, passthrough).
+        //   2. ENABLE_MOUSE_INPUT on the child console RIGHT NOW.  Console
+        //      input mode lives on the shared input buffer, so this reports
+        //      whatever the current foreground app last asked for, which is
+        //      exactly how a real Windows TUI (crossterm, ratatui, libuv)
+        //      registers.
+        //
+        // The console query costs an AttachConsole dance (2 second cache), so
+        // it is only run for the wheel, and only after the cheap
+        // `mouse_proto_owner` check has already failed.  Clicks, drags and
+        // motion never reach it.
+        if _event_flags & mouse_inject::MOUSE_WHEELED != 0
+            && !matches!(pane.mouse_proto_owner, Some((_, true)))
+            && !detect_mouse_input(pane)
+        {
+            mouse_log("  -> wheel report SUPPRESSED on both channels: pane app enabled no \
+                       mouse protocol (tmux input_key_mouse parity, #598)");
+            return;
+        }
+
         // #277/#245: conhost silently drops the SGR bytes below unless the
         // child's console already has ENABLE_VIRTUAL_TERMINAL_INPUT set —
         // ensure it first so the sequence actually reaches VT-reading apps
