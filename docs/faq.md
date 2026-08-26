@@ -24,6 +24,9 @@ A: Session creation takes < 100ms. New windows/panes add < 80ms overhead. The bo
 **Q: Does psmux support mouse?**
 A: Full mouse support: click to focus panes, drag to resize borders, scroll wheel, click status-bar tabs, drag-select text (including tmux-like copy-on-release with `pwsh-mouse-selection on`), and right-click copy/paste paths. Plus VT mouse forwarding for TUI apps like vim, htop, and midnight commander.
 
+**Q: The scroll wheel does nothing inside some full screen program. Why?**
+A: Because that program never asked for the mouse, and psmux follows tmux here. tmux only writes a mouse report to a pane whose application has enabled a mouse mode (`input_key_mouse` in `input-keys.c` returns immediately otherwise), and its default `WheelUpPane` binding treats the alternate screen only as a reason NOT to fall through to copy mode. So over a full screen program with no mouse support the wheel is a no-op in tmux, and now in psmux too. Before psmux 3.3.9 psmux forwarded the report anyway, and a program that does not parse mouse reports read the bytes as keystrokes: htop opened its `Search:` prompt and typed the report into it, and codex lost its transcript ([#598](https://github.com/psmux/psmux/issues/598)). Turn the program's own mouse support on (`:set mouse=a` in vim and neovim, `--mouse` for `less`, the mouse setting in htop) and the wheel starts working again. Over a plain shell prompt the wheel still enters copy mode and scrolls psmux's own scrollback, unchanged.
+
 **Q: What shells does psmux support?**
 A: PowerShell 7 (default), PowerShell 5, cmd.exe, Git Bash, WSL, nushell, and any Windows executable. Change with `set -g default-shell <shell>`.
 
