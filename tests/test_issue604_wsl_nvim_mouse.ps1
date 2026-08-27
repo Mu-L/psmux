@@ -202,9 +202,19 @@ if (-not $wslNvim) {
     if (-not $c) {
         Write-Fail "could not start an attached client running wsl nvim"
     } else {
-        $started = @((& wsl.exe -d $wslDistro -e sh -c 'cat /tmp/psmux_i604_click.log 2>/dev/null') | Where-Object { $_ -like 'START*' })
+        # wsl.exe has to boot the distro VM before nvim can even start, and on
+        # a loaded machine (a parallel cargo build) that can take far longer
+        # than the settle above. Poll for nvim's own START marker instead of
+        # trusting a fixed sleep, so a slow boot is a wait and not a skip.
+        $started = @()
+        $bootSw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($bootSw.Elapsed.TotalSeconds -lt 60) {
+            $started = @((& wsl.exe -d $wslDistro -e sh -c 'cat /tmp/psmux_i604_click.log 2>/dev/null') | Where-Object { $_ -like 'START*' })
+            if ($started.Count -gt 0) { break }
+            Start-Sleep -Seconds 2
+        }
         if ($started.Count -eq 0) {
-            Write-Skip "nvim inside WSL never started in the pane - nothing to measure"
+            Write-Skip "nvim inside WSL never started in the pane within 70s - nothing to measure"
         } else {
             foreach ($cell in $cells) { Invoke-Click $c $cell[0] $cell[1] }
             Start-Sleep -Seconds 1
