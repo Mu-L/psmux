@@ -14,6 +14,13 @@
 ###############################################################################
 $ErrorActionPreference = "Continue"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+# The binary the tree currently builds: every installed artifact is compared
+# against this so a stale zip can never be benchmarked or put on PATH.
+$UnderTest = Join-Path $ProjectRoot "target" "release" "psmux.exe"
+# Where psmux resolved BEFORE this suite touched anything, so the teardown
+# can prove it put the machine back: a scoop or choco shim shadows
+# ~\.cargo\bin for every later suite and for the user.
+$PsmuxBefore = (Get-Command psmux -ErrorAction SilentlyContinue).Source
 
 $pass = 0
 $fail = 0
@@ -46,6 +53,78 @@ function Kill-All-Psmux {
     Get-ChildItem "$env:USERPROFILE\.psmux\*.port" -ErrorAction SilentlyContinue | Remove-Item -Force
     Get-ChildItem "$env:USERPROFILE\.psmux\*.key" -ErrorAction SilentlyContinue | Remove-Item -Force
     Start-Sleep -Milliseconds 300
+}
+
+# ---------------------------------------------------------------------------
+# The release zip this suite installs must BE the binary under test.
+#
+# It was not. The scoop manifest pinned a constant version "3.3.0-local" and a
+# constant file:// url, and scoop keys its download cache by
+# <app>#<version>#<url-hash>, so once a zip had been cached that cache was
+# served on every later run no matter what the artifact on disk contained.
+# Measured 2026-08-27: the cache still held a zip from 2026-07-27, and the
+# suite installed, benchmarked and put on PATH a psmux from a month earlier
+# (the scoop shim reported "tmux 3.3.6" while the tree built 3.3.8).
+#
+# That is worse than a meaningless benchmark. The stale binary predates the
+# server ownership markers (#510), the pid anchor (#448) and the kill guard
+# creation time validation, and the manifest post_install starts a warm server
+# with it, so an old reaper runs against a registry it does not understand.
+#
+# So: stamp the manifest version with the artifact hash, which makes a changed
+# zip miss the cache, and refuse to install an artifact whose --version does
+# not match the binary under test.
+function Format-VersionLine {
+    param([string]$Text)
+    if (-not $Text) { return "" }
+    return ((($Text -replace "`r", " ") -replace "`n", " ") -replace "\s+", " ").Trim()
+}
+
+function Get-TestArtifact {
+    param([string]$UnderTest)
+
+    $zip = Join-Path $env:TEMP "psmux-test-artifacts" "psmux-local-test.zip"
+    if (!(Test-Path $zip)) {
+        return @{ Ok = $false; Path = $zip
+                  Reason = "release zip not built: $zip (run scripts\build.ps1 to include this scenario)" }
+    }
+
+    $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+    $tag  = $hash.Substring(0, 12).ToLowerInvariant()
+
+    # What does the artifact actually contain? Extract it and ask. The version
+    # line carries the commit hash on current builds, so this compares the code
+    # and not just the release number.
+    $probe = Join-Path $env:TEMP "psmux-artifact-probe-$tag"
+    $got = ""
+    $wanted = ""
+    try {
+        if (!(Test-Path (Join-Path $probe "psmux.exe"))) {
+            Remove-Item $probe -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force -Path $probe | Out-Null
+            Expand-Archive -LiteralPath $zip -DestinationPath $probe -Force
+        }
+        $exe = Get-ChildItem $probe -Filter psmux.exe -Recurse -ErrorAction SilentlyContinue |
+               Select-Object -First 1
+        if ($exe) { $got = Format-VersionLine (& $exe.FullName --version 2>$null | Out-String) }
+        if ($UnderTest -and (Test-Path $UnderTest)) {
+            $wanted = Format-VersionLine (& $UnderTest --version 2>$null | Out-String)
+        }
+    } catch {
+        return @{ Ok = $false; Path = $zip; Reason = "could not read the artifact: $_" }
+    }
+
+    if (-not $got) {
+        return @{ Ok = $false; Path = $zip; Reason = "artifact contains no runnable psmux.exe" }
+    }
+    if ($wanted -and $got -ne $wanted) {
+        return @{ Ok = $false; Path = $zip
+                  Reason = "STALE artifact: the zip is [$got] but the tree builds [$wanted]. " +
+                           "Rebuild it with scripts\build.ps1. Installing the old one would benchmark " +
+                           "a binary that is not under test and leave it on PATH." }
+    }
+
+    return @{ Ok = $true; Path = $zip; Hash = $hash; Tag = $tag; Version = $got }
 }
 
 function Test-FirstRunSpeed {
@@ -157,18 +236,27 @@ if (!$hasScoop) {
     scoop uninstall psmux-scoop-local 2>$null | Out-Null
 
     # Create local scoop manifest pointing to local zip (built by build.ps1 in TEMP)
-    $zipPath = Join-Path $env:TEMP "psmux-test-artifacts" "psmux-local-test.zip"
-    if (!(Test-Path $zipPath)) {
-        # Missing build artifact = missing prerequisite, not a psmux defect
-        # (same treatment as the choco-not-installed skip below).
-        Write-Host "  [SKIP] Release zip not built: $zipPath (run .\scripts\build.ps1 to include this scenario)" -ForegroundColor Yellow
-        Report "Scoop install" $true "[SKIP: zip not built]"
+    $artifact = Get-TestArtifact -UnderTest $UnderTest
+    $zipPath = $artifact.Path
+    if (-not $artifact.Ok) {
+        # A missing or stale build artifact is a missing prerequisite, not a
+        # psmux defect (same treatment as the choco-not-installed skip below).
+        Write-Host "  [SKIP] $($artifact.Reason)" -ForegroundColor Yellow
+        Report "Scoop install" $true "[SKIP: artifact not usable]"
     } else {
-        $sha256 = (Get-FileHash $zipPath -Algorithm SHA256).Hash
+        $sha256 = $artifact.Hash
         $zipUrl = "file:///$($zipPath -replace '\\','/')"
+        Write-Host "  Artifact: $($artifact.Version)" -ForegroundColor Gray
+
+        # Purge any cache entry for this app before installing. Scoop serves a
+        # cached download whenever <app>#<version>#<url-hash> matches, and the
+        # version is stamped below precisely so that it cannot.
+        scoop cache rm psmux-scoop-local 2>$null | Out-Null
 
         $scoopManifest = @{
-            version = "3.3.0-local"
+            # Stamped with the artifact's own hash so a changed zip always
+            # misses the download cache.
+            version = "3.3.0-local.$($artifact.Tag)"
             description = "psmux local test"
             homepage = "https://github.com/psmux/psmux"
             license = "MIT"
@@ -262,13 +350,15 @@ if (!$hasChoco) {
     Kill-All-Psmux
     choco uninstall psmux -y --force 2>$null | Out-Null
 
-    $zipPath = Join-Path $env:TEMP "psmux-test-artifacts" "psmux-local-test.zip"
-    if (!(Test-Path $zipPath)) {
-        # Missing build artifact = missing prerequisite, not a psmux defect.
-        Write-Host "  [SKIP] Release zip not built: $zipPath (run .\scripts\build.ps1 to include this scenario)" -ForegroundColor Yellow
-        Report "Choco install" $true "[SKIP: zip not built]"
+    $artifact = Get-TestArtifact -UnderTest $UnderTest
+    $zipPath = $artifact.Path
+    if (-not $artifact.Ok) {
+        # Missing or stale build artifact = missing prerequisite, not a psmux defect.
+        Write-Host "  [SKIP] $($artifact.Reason)" -ForegroundColor Yellow
+        Report "Choco install" $true "[SKIP: artifact not usable]"
     } else {
-        $sha256 = (Get-FileHash $zipPath -Algorithm SHA256).Hash
+        $sha256 = $artifact.Hash
+        Write-Host "  Artifact: $($artifact.Version)" -ForegroundColor Gray
         $chocoDir = Join-Path $ProjectRoot "target" "choco-local"
         New-Item -ItemType Directory -Force -Path "$chocoDir/tools" | Out-Null
 
@@ -459,6 +549,25 @@ Write-Host " Results: $pass passed, $fail failed" -ForegroundColor $(if ($fail -
 Write-Host "================================================================`n" -ForegroundColor Cyan
 
 Kill-All-Psmux
+
+# This suite installs and uninstalls psmux through package managers whose shims
+# live EARLIER on PATH than ~\.cargo\bin. If one survives the run it shadows the
+# binary every later suite resolves through Get-Command psmux, and the user keeps
+# a foreign psmux until someone notices. Measured 2026-08-27: a run that died
+# mid-suite left a scoop shim for a month-old build on PATH.
+$psmuxAfter = (Get-Command psmux -ErrorAction SilentlyContinue).Source
+if ($PsmuxBefore -and $psmuxAfter -ne $PsmuxBefore) {
+    Write-Host "  Leftover package-manager shim on PATH, removing it" -ForegroundColor Yellow
+    scoop uninstall psmux-scoop-local 2>$null | Out-Null
+    scoop uninstall psmux 2>$null | Out-Null
+    choco uninstall psmux -y --force 2>$null | Out-Null
+    $psmuxAfter = (Get-Command psmux -ErrorAction SilentlyContinue).Source
+}
+if ($PsmuxBefore -and $psmuxAfter -ne $PsmuxBefore) {
+    Report "PATH restored after install scenarios" $false "psmux now resolves to '$psmuxAfter', was '$PsmuxBefore'"
+} else {
+    Report "PATH restored after install scenarios" $true "$psmuxAfter"
+}
 
 if ($fail -gt 0) { exit 1 }
 exit 0
