@@ -74,19 +74,15 @@ function Send-TcpCommand {
 }
 
 # Probe the single-server-per-name mutex from THIS process. A Windows mutex is
-# recursive per owning thread but scoped per process, so an outside probe sees
-# the real state: WaitOne(0) false means a live process holds the name.
+# recursive for its owning thread but scoped per process, so an outside probe
+# sees the real state: WaitOne(0) false means a live process holds the name.
+# The object name carries a data-root tag since #599; the shared helper is the
+# one place that knows the layout (it used to be spelled out here, and every
+# live session read as unguarded once the tag was inserted).
+. "$PSScriptRoot\psmux_session_mutex.ps1"
 function Test-SessionNameHeld {
     param([string]$Name)
-    $obj = "Local\psmux-session-$Name"
-    $created = $false
-    try {
-        $m = [System.Threading.Mutex]::new($false, $obj, [ref]$created)
-        $owned = $m.WaitOne(0)
-        if ($owned) { $m.ReleaseMutex() }
-        $m.Dispose()
-        return (-not $owned)
-    } catch { return $false }
+    return (Test-PsmuxSessionNameHeld $Name)
 }
 
 function Test-SessionExists($name) {
