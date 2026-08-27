@@ -1569,6 +1569,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     if !crate::session::is_warm_session(&name) {
         let _ = std::fs::write(&last_path, &name);
     }
+    // Attaching is activity: tmux restamps the session in server-client.c when a
+    // client takes it (`server_client_set_session` -> `session_update_activity`).
+    // Bare CLI routing ranks by this stamp, so it has to be written here rather
+    // than left to the `last_session` file, which only ever names ONE session
+    // machine-wide and so cannot express "B is newer than A" (issue #603).
+    crate::session::touch_session_activity(&name);
+    // The name this client keeps restamping while the user types. `None` for a
+    // warm (standby) session, which is internal and never a routing candidate.
+    let activity_name: Option<String> =
+        if crate::session::is_warm_session(&name) { None } else { Some(name.clone()) };
 
     // ── Open persistent TCP connection ───────────────────────────────────
     // A failure here is NOT something to report in the operating system's own
@@ -2515,6 +2525,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         other => {
                             input_log("event", &format!("Other {:?}", other));
                         }
+                    }
+                }
+                // Real input from a real client is what tmux counts as session
+                // activity (server-client.c `server_client_handle_key` restamps
+                // `activity_time` before dispatching, and mouse arrives on the
+                // same path as a key). Resize is deliberately excluded: it is
+                // the terminal talking, not the user. Bare CLI commands rank
+                // sessions by this stamp, so typing in the session you are
+                // sitting in is what makes it win (issue #603).
+                if let Some(ref sess) = activity_name {
+                    if matches!(_cur_evt, Event::Key(_) | Event::Mouse(_) | Event::Paste(_)) {
+                        crate::session::touch_session_activity_throttled(sess);
                     }
                 }
                 match _cur_evt {

@@ -192,6 +192,18 @@ pub fn spawnlock_file(session: impl AsRef<str>) -> String {
     format!("{}\\{}.spawnlock", psmux_dir(), session.as_ref())
 }
 
+/// Path to a session's `.act` file: the last-activity stamp (Unix epoch
+/// microseconds, ASCII) that bare CLI routing ranks candidates by.
+///
+/// This is psmux's registry-visible equivalent of tmux's in-memory
+/// `session.activity_time` (tmux `session.c`). tmux can consult it directly
+/// because the command runs inside the server; a psmux CLI process talks to one
+/// server per session, so the ranking input has to live in the shared registry
+/// where it can be read without connecting to anything (issue #603).
+pub fn activity_file(session: impl AsRef<str>) -> String {
+    format!("{}\\{}.act", psmux_dir(), session.as_ref())
+}
+
 /// Directory holding one namespace-identity file per `-L` namespace (issue #509).
 ///
 /// A subdirectory rather than a `<ns>.instance` sibling: session files are named

@@ -4844,6 +4844,10 @@ fn run_main() -> io::Result<()> {
             // what -l reads.
             let last_path = crate::paths::psmux_dir_file("last_session");
             let _ = std::fs::write(&last_path, &switch_to);
+            // A switch is an attach: tmux restamps the session a client moves to
+            // (`server_client_set_session` -> `session_update_activity`). Bare CLI
+            // routing ranks by that stamp (issue #603).
+            crate::session::touch_session_activity(&switch_to);
             // Continue loop to attach to new session
             continue;
         }

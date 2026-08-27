@@ -853,6 +853,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         let _ = std::fs::remove_file(crate::paths::key_file(&base));
         let _ = std::fs::remove_file(crate::paths::sid_file(&base));
         let _ = std::fs::remove_file(crate::paths::pid_file(&base));
+        let _ = std::fs::remove_file(crate::paths::activity_file(&base));
     }));
     // Install console control handler to prevent termination on client detach
     install_console_ctrl_handler();

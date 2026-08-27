@@ -259,7 +259,7 @@ fn cleanup_stale_port_files_in(psmux_dir: &Path) {
 /// Registry file extensions that only ever exist as satellites of a `.port`
 /// entry. Anything else in the data dir (`next_session_id`, its `.lock`, debug
 /// logs, the `instances/` and `servers/` subdirectories) is never touched.
-const ORPHAN_REGISTRY_EXTS: &[&str] = &["sid", "key", "pid", "spawnlock"];
+const ORPHAN_REGISTRY_EXTS: &[&str] = &["sid", "key", "pid", "spawnlock", "act"];
 
 /// How long a `.port`-less registry file must sit untouched before it is
 /// considered abandoned (issue #530).
@@ -2002,6 +2002,119 @@ pub fn send_control_to_port(port: u16, msg: &str, session_key: &str) -> io::Resu
     Ok(())
 }
 
+/// Shortest gap between two `.act` writes for the same session on the
+/// per-keystroke path.
+///
+/// tmux restamps `session.activity_time` on every single key (server-client.c
+/// `server_client_handle_key`) because the value is a struct in its own address
+/// space. psmux's copy is a file, so a burst of typing would otherwise be a
+/// burst of writes; a one second floor keeps the ranking accurate to well
+/// within any interval a human notices while costing at most one 16 byte write
+/// per second per attached client.
+const ACTIVITY_STAMP_MIN_GAP: Duration = Duration::from_millis(1000);
+
+/// Last `.act` write this process performed, as (session, when). Only the
+/// throttled path consults it; attach and switch always write.
+static LAST_ACTIVITY_STAMP: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// The stamp written into a `.act` file: microseconds since the Unix epoch.
+///
+/// Microseconds, not milliseconds, because the value is compared against a
+/// `.port` file's mtime, which NTFS keeps to 100ns. A millisecond stamp written
+/// just after a port file can truncate to BELOW that file's mtime and lose a
+/// comparison it should win. Microseconds is also the resolution tmux keeps
+/// `activity_time` at (a `struct timeval`).
+fn epoch_micros_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+/// Record `session` as active right now: psmux's `session_update_activity`
+/// (tmux session.c). Warm (standby) sessions are internal and never ranked, so
+/// they are never stamped.
+pub fn touch_session_activity(session: &str) {
+    let Some(dir) = crate::paths::psmux_dir_opt() else { return };
+    touch_session_activity_in(std::path::Path::new(&dir), session);
+}
+
+/// Registry-directory-parameterized variant of [`touch_session_activity`],
+/// matching the `_in` convention the routing resolvers use: taking the dir
+/// explicitly lets the writer be unit-tested without mutating the process-wide
+/// `PSMUX_DATA_DIR`, which other tests read without holding the env lock.
+pub fn touch_session_activity_in(dir: &std::path::Path, session: &str) {
+    if session.is_empty() || is_warm_session(session) {
+        return;
+    }
+    let path = dir.join(format!("{}.act", session));
+    if std::fs::write(path, epoch_micros_now().to_string()).is_ok() {
+        // Arm the throttle too: the stamp this just wrote IS current, so the
+        // first keystroke after an attach has nothing to add.
+        if let Ok(mut guard) = LAST_ACTIVITY_STAMP.lock() {
+            *guard = Some((session.to_string(), std::time::Instant::now()));
+        }
+    }
+}
+
+/// [`touch_session_activity`] for the per-keystroke path: a no-op unless
+/// `ACTIVITY_STAMP_MIN_GAP` has passed since this process last stamped this
+/// same session. A different session always writes, so a client that switches
+/// sessions stamps the new one immediately.
+pub fn touch_session_activity_throttled(session: &str) {
+    if session.is_empty() || is_warm_session(session) {
+        return;
+    }
+    if throttled_out(session) {
+        return;
+    }
+    touch_session_activity(session);
+}
+
+/// Registry-directory-parameterized [`touch_session_activity_throttled`].
+pub fn touch_session_activity_throttled_in(dir: &std::path::Path, session: &str) {
+    if session.is_empty() || is_warm_session(session) {
+        return;
+    }
+    if throttled_out(session) {
+        return;
+    }
+    touch_session_activity_in(dir, session);
+}
+
+/// True while this process's last stamp for `session` is still inside
+/// `ACTIVITY_STAMP_MIN_GAP`.
+fn throttled_out(session: &str) -> bool {
+    let Ok(guard) = LAST_ACTIVITY_STAMP.lock() else { return true };
+    match *guard {
+        Some((ref last, when)) => last == session && when.elapsed() < ACTIVITY_STAMP_MIN_GAP,
+        None => false,
+    }
+}
+
+/// When `base` was last active, as ranked by bare CLI routing.
+///
+/// The `.act` stamp when one exists, else the `.port` file's mtime. The
+/// fallback is the creation time of the session, which is exactly what tmux
+/// seeds `activity_time` with for a session nobody has attached to yet
+/// (session.c `session_create`: `session_update_activity(s, &s->creation_time)`),
+/// and it keeps a registry written by an older psmux ranking sensibly.
+fn session_activity_in(
+    dir: &std::path::Path,
+    base: &str,
+    port_meta: Option<std::fs::Metadata>,
+) -> std::time::SystemTime {
+    if let Ok(text) = std::fs::read_to_string(dir.join(format!("{}.act", base))) {
+        if let Ok(us) = text.trim().parse::<u64>() {
+            return std::time::UNIX_EPOCH + Duration::from_micros(us);
+        }
+    }
+    port_meta
+        .and_then(|m| m.modified().ok())
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
 pub fn resolve_last_session_name() -> Option<String> {
     resolve_last_session_name_ns(None)
 }
@@ -2016,40 +2129,65 @@ pub fn resolve_last_session_name_ns(ns: Option<&str>) -> Option<String> {
 }
 
 /// Registry-directory-parameterized variant of [`resolve_last_session_name_ns`]:
-/// the most recent real (non-warm) session base in namespace `ns`. Taking the
-/// dir explicitly lets routing be unit-tested without mutating `USERPROFILE`/`HOME`.
+/// the most recently ACTIVE real (non-warm) session base in namespace `ns`.
+/// Taking the dir explicitly lets routing be unit-tested without mutating
+/// `USERPROFILE`/`HOME`.
+///
+/// tmux parity (issue #603). tmux picks this session in cmd-find.c
+/// `cmd_find_best_session`, whose comparator `cmd_find_session_better` gets no
+/// `CMD_FIND_PREFER_UNATTACHED` flag for any ordinary command and so collapses
+/// to a single `timercmp` on `activity_time`. The winner
+/// is simply the session with the newest activity, and activity is restamped on
+/// client attach and on every key a real client sends (server-client.c).
+///
+/// psmux used to answer this with the `last_session` file alone: whatever name
+/// was in it won outright as long as its `.port` still existed. That file is
+/// written once per attach and never again, so a session attached long ago and
+/// since detached kept beating the session the user is actually sitting in. It
+/// is now only a tie-break for candidates whose stamps are identical, which in
+/// practice means a registry an older psmux wrote and nobody has attached to
+/// since.
 pub fn resolve_last_session_name_ns_in(dir: &std::path::Path, ns: Option<&str>) -> Option<String> {
-    let last = std::fs::read_to_string(dir.join("last_session")).ok();
-    if let Some(name) = last {
-        let name = name.trim().to_string();
-        // Only accept the cached last_session if it matches the namespace filter
-        let ns_ok = match ns {
-            Some(n) => name.starts_with(&format!("{}__", n)),
-            None => !name.contains("__"),
+    let hint = std::fs::read_to_string(dir.join("last_session"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let ns_prefix = ns.map(|n| format!("{}__", n));
+
+    // (activity, is_last_session_hint, base): ranked in that order, newest and
+    // then hinted first, with the name as a final deterministic tie-break.
+    let mut best: Option<(std::time::SystemTime, bool, String)> = None;
+    let Ok(rd) = std::fs::read_dir(dir) else { return None };
+    for e in rd.flatten() {
+        let Some(fname) = e.file_name().to_str().map(|s| s.to_string()) else { continue };
+        let Some((base, ext)) = fname.rsplit_once('.') else { continue };
+        if ext != "port" || is_warm_session(base) {
+            continue;
+        }
+        // Filter by namespace: -L sessions have "ns__name" format.
+        let in_ns = match ns_prefix {
+            Some(ref prefix) => base.starts_with(prefix.as_str()),
+            None => !base.contains("__"),
         };
-        if ns_ok && dir.join(format!("{}.port", name)).exists() {
-            return Some(name);
+        if !in_ns {
+            continue;
         }
-    }
-    let mut picks: Vec<(String, std::time::SystemTime)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            if let Some(fname) = e.file_name().to_str() {
-                if let Some((base, ext)) = fname.rsplit_once('.') {
-                    if ext == "port" { if let Ok(md) = e.metadata() { picks.push((base.to_string(), md.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH))); } }
-                }
+        let activity = session_activity_in(dir, base, e.metadata().ok());
+        let hinted = hint.as_deref() == Some(base);
+        let better = match best {
+            None => true,
+            Some((best_act, best_hinted, ref best_base)) => {
+                activity > best_act
+                    || (activity == best_act
+                        && ((hinted && !best_hinted)
+                            || (hinted == best_hinted && base < best_base.as_str())))
             }
+        };
+        if better {
+            best = Some((activity, hinted, base.to_string()));
         }
     }
-    // Exclude warm (standby) sessions
-    picks.retain(|(n, _)| !is_warm_session(n));
-    // Filter by namespace: -L sessions have "ns__name" format
-    picks.retain(|(n, _)| match ns {
-        Some(prefix) => n.starts_with(&format!("{}__", prefix)),
-        None => !n.contains("__"),
-    });
-    picks.sort_by_key(|(_, t)| *t);
-    picks.last().map(|(n, _)| n.clone())
+    best.map(|(_, _, base)| base)
 }
 
 /// Resolve the routing target session (the port-file base name) for a CLI
@@ -2311,3 +2449,7 @@ mod tests_issue510_reaper_attribution;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue530_registry_pruning.rs"]
 mod tests_issue530_registry_pruning;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue603_bare_routing.rs"]
+mod tests_issue603_bare_routing;
