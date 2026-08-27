@@ -3342,6 +3342,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // session key" on a later command). app.session_key is correct.
                         let _ = std::fs::remove_file(&old_keypath);
                         let _ = std::fs::write(&new_keypath, &app.session_key);
+                        // The activity stamp follows the session across the rename
+                        // (issue #603); it must move BEFORE remove_session_id_file
+                        // drops the old base's stamp with its .sid/.pid.
+                        crate::session::carry_session_activity_file(&app.port_file_base(), &new_base);
                         // Rename .sid file to match new session name
                         crate::session::remove_session_id_file(&app.port_file_base());
                         crate::session::write_session_id_file(&new_base, app.session_id);
@@ -3397,6 +3401,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // session key" on a later command). app.session_key is correct.
                         let _ = std::fs::remove_file(&old_keypath);
                         let _ = std::fs::write(&new_keypath, &app.session_key);
+                        // The activity stamp follows the session across the rename
+                        // (issue #603); it must move BEFORE remove_session_id_file
+                        // drops the old base's stamp with its .sid/.pid.
+                        crate::session::carry_session_activity_file(&app.port_file_base(), &new_base);
                         // Rename .sid file to match new session name
                         crate::session::remove_session_id_file(&app.port_file_base());
                         crate::session::write_session_id_file(&new_base, app.session_id);

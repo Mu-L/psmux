@@ -156,6 +156,48 @@ pub fn remove_session_id_file(port_file_base: &str) {
     let sid_path = crate::paths::sid_file(port_file_base);
     let _ = std::fs::remove_file(&sid_path);
     remove_session_pid_file(port_file_base);
+    // The `.act` activity stamp (issue #603) is per-session registry state
+    // exactly like `.sid`/`.pid`, so it leaves with them. Left behind, a dead
+    // session's stamp survived kill-server (seen as a stray
+    // `<ns>__<name>.act` after `-L <ns> kill-server` in test_mouse_hover) and
+    // would keep ranking a session that no longer exists.
+    remove_session_activity_file(port_file_base);
+}
+
+/// Remove the `.act` activity stamp for a session (issue #603).
+pub fn remove_session_activity_file(port_file_base: &str) {
+    if let Some(dir) = crate::paths::psmux_dir_opt() {
+        remove_session_activity_file_in(std::path::Path::new(&dir), port_file_base);
+    }
+}
+
+/// Registry-directory-parameterized [`remove_session_activity_file`].
+pub fn remove_session_activity_file_in(dir: &std::path::Path, port_file_base: &str) {
+    let _ = std::fs::remove_file(dir.join(format!("{}.act", port_file_base)));
+}
+
+/// Move a session's `.act` activity stamp from `old_base` to `new_base` on
+/// rename (issue #603). tmux keeps `activity_time` on the session struct, so a
+/// rename never touches it; psmux's copy is keyed by name and has to follow.
+/// Without this a renamed session fell back to its `.port` mtime and lost its
+/// place in bare CLI routing. Best effort: a session that was never stamped
+/// has nothing to carry.
+pub fn carry_session_activity_file(old_base: &str, new_base: &str) {
+    if let Some(dir) = crate::paths::psmux_dir_opt() {
+        carry_session_activity_file_in(std::path::Path::new(&dir), old_base, new_base);
+    }
+}
+
+/// Registry-directory-parameterized [`carry_session_activity_file`].
+pub fn carry_session_activity_file_in(dir: &std::path::Path, old_base: &str, new_base: &str) {
+    if old_base == new_base {
+        return;
+    }
+    let old = dir.join(format!("{}.act", old_base));
+    let new = dir.join(format!("{}.act", new_base));
+    if old.exists() {
+        let _ = std::fs::rename(&old, &new);
+    }
 }
 
 /// Write a `.pid` file recording the OS process ID of the server that owns this
@@ -1296,6 +1338,10 @@ pub(crate) fn remove_session_registry_files(port_path: &Path) {
     // never lingers to be mistaken for a live tracked process by the reaper.
     let pid_path = port_path.with_extension("pid");
     let _ = std::fs::remove_file(&pid_path);
+    // And the `.act` activity stamp (issue #603): a reaped session must not
+    // keep ranking in bare CLI routing.
+    let act_path = port_path.with_extension("act");
+    let _ = std::fs::remove_file(&act_path);
 }
 
 /// Outcome of a single AUTH handshake against the listener on a port.

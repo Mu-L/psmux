@@ -283,3 +283,44 @@ fn touching_activity_writes_a_readable_stamp_and_throttles_repeats() {
         "the warm pool must never be stamped"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Registry hygiene for the stamp (surfaced by test_mouse_hover in sweep
+// 2026-08-27_15-06-34: `<ns>__hover_test.act` survived `-L <ns> kill-server`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_reaped_registry_entry_takes_its_activity_stamp_with_it() {
+    let reg = TempRegistry::new("reap_act");
+    reg.with_session("gone", 40001).with_activity("gone", now_micros());
+    assert!(reg.dir.join("gone.act").exists(), "precondition: stamp written");
+
+    crate::session::remove_session_registry_files(&reg.dir.join("gone.port"));
+    assert!(!reg.dir.join("gone.port").exists(), ".port reaped");
+    assert!(
+        !reg.dir.join("gone.act").exists(),
+        "the .act stamp must be reaped with the .port, or a dead session keeps ranking"
+    );
+
+    // The teardown helper every kill path calls drops it too.
+    reg.with_session("killed", 40002).with_activity("killed", now_micros());
+    crate::session::remove_session_activity_file_in(&reg.dir, "killed");
+    assert!(!reg.dir.join("killed.act").exists(), "teardown removes the stamp");
+}
+
+#[test]
+fn a_rename_carries_the_activity_stamp_to_the_new_name() {
+    let reg = TempRegistry::new("rename_act");
+    let stamp = now_micros();
+    reg.with_session("before", 40003).with_activity("before", stamp);
+
+    crate::session::carry_session_activity_file_in(&reg.dir, "before", "after");
+    assert!(!reg.dir.join("before.act").exists(), "old name's stamp is gone");
+    let carried = std::fs::read_to_string(reg.dir.join("after.act")).expect("stamp moved to the new name");
+    assert_eq!(carried.trim(), stamp.to_string(), "the value is carried, not re-minted");
+
+    // A session that was never stamped has nothing to carry, and must not
+    // manufacture a stamp for the new name.
+    crate::session::carry_session_activity_file_in(&reg.dir, "never", "renamed");
+    assert!(!reg.dir.join("renamed.act").exists(), "no stamp is invented on rename");
+}
