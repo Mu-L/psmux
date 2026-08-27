@@ -66,6 +66,12 @@ if ($active) {
 $me = Get-Process -Id $PID
 "{0}:{1}" -f $PID, $me.StartTime.Ticks | Set-Content $lockFile -Encoding ASCII
 
+# Drop any abort flag left over from a previous run before this one starts, so a
+# stale file cannot stop the new run on its first poll. run_all_tests.ps1 clears
+# it too; doing it here as well closes the window between the lock being taken
+# and the runner starting.
+Remove-Item (Join-Path $env:TEMP 'psmux-teststop.flag') -Force -EA SilentlyContinue
+
 try {
     Get-ChildItem env: |
         Where-Object { $_.Name -like 'CLAUDE*' -or $_.Name -like 'ANTHROPIC*' -or $_.Name -eq 'NO_COLOR' } |
@@ -83,6 +89,10 @@ try {
     Write-Host ('  Started: ' + (Get-Date)) -ForegroundColor Cyan
     Write-Host ('  psmux:   ' + (Get-Command psmux -EA SilentlyContinue).Source) -ForegroundColor Cyan
     Write-Host '============================================================' -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '  TO STOP THIS RUN: run  tests\stop_tests.cmd  from any other window.' -ForegroundColor Yellow
+    Write-Host '  (Ctrl+C works here too, but test suites steal the foreground within' -ForegroundColor DarkGray
+    Write-Host '   seconds, so this window is usually not reachable from the keyboard.)' -ForegroundColor DarkGray
     Write-Host ''
 
     # -IncludeInteractive : run the TUI suites instead of skipping them

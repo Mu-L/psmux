@@ -18,6 +18,9 @@ echo.
 echo ============================================================
 if "%RC%"=="99" (
   echo   NOT STARTED - another run was already active
+) else if "%RC%"=="130" (
+  echo   RUN INTERRUPTED - stopped on request, remaining suites did not run
+  echo   Resume with: tests\run_full_interactive.cmd -Resume
 ) else (
   echo   RUN COMPLETE  -  exit code %RC%
 )
