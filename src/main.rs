@@ -1132,6 +1132,8 @@ fn run_main() -> io::Result<()> {
                 // last instead of NAME. Read -t from the full, unstripped argv so the
                 // requested target always wins. Works for both subcommand-position
                 // (`attach-session -t s2`) and global-position (`-t s2 attach-session`).
+                let explicit_target = args.iter().any(|a| a == "-t")
+                    || sub_args.iter().any(|a| !a.starts_with('-'));
                 let name = args
                     .iter()
                     .position(|a| a == "-t")
@@ -1216,7 +1218,19 @@ fn run_main() -> io::Result<()> {
                     if crate::session::registry_pid_anchor_alive(&name) != Some(true) {
                         crate::session::remove_session_registry(&name);
                     }
-                    eprintln!("psmux: can't find session: {}", shown);
+                    // tmux wording: a bare `attach` that finds nothing to attach
+                    // to says `no sessions`; only an explicit target names the
+                    // session it could not find. The fallback name here was
+                    // never typed by the user (it came from last_session or the
+                    // `0` default), so echoing it back would blame a session
+                    // they never asked for.
+                    if !explicit_target
+                        && crate::session::list_session_names_ns(l_socket_name.as_deref()).is_empty()
+                    {
+                        eprintln!("psmux: no sessions");
+                    } else {
+                        eprintln!("psmux: can't find session: {}", shown);
+                    }
                     std::process::exit(1);
                 }
                 env::set_var("PSMUX_SESSION_NAME", name);

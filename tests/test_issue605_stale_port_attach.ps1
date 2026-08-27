@@ -214,6 +214,24 @@ try {
         Write-Pass "the dead registration was reaped"
     } else { Write-Fail "the dead .port survived; the next attach will re-litigate it" }
 
+    # === 2b. Bare attach (the reporter's `ta` alias shape) ===
+    # No -t: the name comes from the registry fallback, never from the user, so
+    # naming it back would blame a session they never typed. tmux says
+    # `no sessions` here (measured: tmux 3.4 attach with a dead server, rc 1).
+    Write-Host "`n--- bare attach over a stale registry that is the only entry ---" -ForegroundColor Yellow
+    Get-ChildItem -LiteralPath $root -Filter '*.port' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+    Set-StaleRegistry '0' (Get-FreePort)
+    $r = Invoke-Attach @('attach')
+    Write-Info "rc=$($r.rc) ms=$($r.ms) stderr='$($r.err)'"
+    Assert-NoRawOsError "bare attach over a stale .port" $r.err
+    if ($r.err -eq 'psmux: no sessions') {
+        Write-Pass "bare attach says `"no sessions`" (tmux wording)"
+    } else { Write-Fail "expected 'psmux: no sessions', got '$($r.err)'" }
+    if ($r.rc -eq 1) { Write-Pass "exit code 1" } else { Write-Fail "expected exit 1, got $($r.rc)" }
+    if (-not (Test-Path -LiteralPath (Join-Path $root '0.port'))) {
+        Write-Pass "the dead registration was reaped"
+    } else { Write-Fail "the dead 0.port survived" }
+
     # === 3. THE #605 SHAPE: the liveness gate is beaten ===
     # No gate can rule out a server that dies a millisecond after answering the
     # probe. When that happens the user must still get a psmux sentence, not
