@@ -49,9 +49,20 @@ fn warm_base(suffix: &str) -> String {
     format!("psmux-t459-{}-{}____warm__", std::process::id(), suffix)
 }
 
+// Every test below computes a kernel object name through
+// `platform::session_mutex_name`, which embeds `paths::data_root_tag()`. That
+// tag resolves PSMUX_DATA_DIR and then falls back to USERPROFILE/HOME, and
+// three other test files (plugin paths, startup log, home resolution) repoint
+// HOME while holding `util::lock_test_env()`. Without taking the same lock a
+// home swap could land BETWEEN an acquire and its probe, so the two calls
+// named different objects and the probe reported the name free: the #459
+// guard then failed for a reason that has nothing to do with warm servers.
+// The pid in `warm_base` makes the name unique across the three concurrent
+// bin targets; the lock is what makes it stable across threads.
 #[test]
 #[cfg(windows)]
 fn a_second_warm_server_cannot_take_the_warm_name() {
+    let _lock = crate::util::lock_test_env();
     let warm = warm_base("dup");
 
     let first = crate::platform::acquire_session_mutex(&warm);
@@ -73,6 +84,7 @@ fn a_second_warm_server_cannot_take_the_warm_name() {
 #[test]
 #[cfg(windows)]
 fn warm_names_are_isolated_per_namespace() {
+    let _lock = crate::util::lock_test_env();
     // `-L` namespaces must not block each other: jefe runs one warm per agent
     // namespace concurrently and all of them are legitimate.
     let a = warm_base("ns-a");
@@ -93,6 +105,7 @@ fn warm_names_are_isolated_per_namespace() {
 #[test]
 #[cfg(windows)]
 fn claiming_a_warm_frees_the_warm_name_for_its_replacement() {
+    let _lock = crate::util::lock_test_env();
     let warm = warm_base("handoff");
     let claimed = format!("psmux-t459-{}-claimed", std::process::id());
 
@@ -129,6 +142,7 @@ fn claiming_a_warm_frees_the_warm_name_for_its_replacement() {
 #[test]
 #[cfg(windows)]
 fn warm_and_claimed_names_do_not_alias() {
+    let _lock = crate::util::lock_test_env();
     // `port_file_base()` for a namespaced warm is `<ns>____warm__`; a real session
     // in the same namespace is `<ns>__<session>`. A warm guard must not
     // accidentally block a legitimate session name in its own namespace.

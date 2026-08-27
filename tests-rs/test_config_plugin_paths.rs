@@ -47,7 +47,7 @@ impl Drop for EnvGuard {
 #[test]
 fn plugin_discovery_finds_xdg_path() {
     let _lock = crate::util::lock_test_env();
-    let tmp = std::env::temp_dir().join("psmux_test_xdg_plugin");
+    let tmp = std::env::temp_dir().join(format!("psmux_test_xdg_plugin_{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
 
     let plugin_dir = tmp.join(".config").join("psmux").join("plugins")
@@ -75,7 +75,7 @@ fn plugin_discovery_finds_xdg_path() {
 #[test]
 fn plugin_discovery_still_finds_classic_path() {
     let _lock = crate::util::lock_test_env();
-    let tmp = std::env::temp_dir().join("psmux_test_classic_plugin");
+    let tmp = std::env::temp_dir().join(format!("psmux_test_classic_plugin_{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
 
     let plugin_dir = tmp.join(".psmux").join("plugins").join("psmux-test-theme");
@@ -102,7 +102,7 @@ fn plugin_discovery_still_finds_classic_path() {
 #[test]
 fn run_shell_tilde_psmux_fallback_to_xdg() {
     let _lock = crate::util::lock_test_env();
-    let tmp = std::env::temp_dir().join("psmux_test_runshell_fallback");
+    let tmp = std::env::temp_dir().join(format!("psmux_test_runshell_fallback_{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
 
     let xdg_scripts = tmp.join(".config").join("psmux").join("plugins")
@@ -126,7 +126,7 @@ fn run_shell_tilde_psmux_fallback_to_xdg() {
 #[test]
 fn plugin_discovery_xdg_short_name() {
     let _lock = crate::util::lock_test_env();
-    let tmp = std::env::temp_dir().join("psmux_test_xdg_short");
+    let tmp = std::env::temp_dir().join(format!("psmux_test_xdg_short_{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
 
     let plugin_dir = tmp.join(".config").join("psmux").join("plugins")
@@ -153,7 +153,7 @@ fn plugin_discovery_xdg_short_name() {
 #[test]
 fn plugin_discovery_xdg_ps1_entry() {
     let _lock = crate::util::lock_test_env();
-    let tmp = std::env::temp_dir().join("psmux_test_xdg_ps1");
+    let tmp = std::env::temp_dir().join(format!("psmux_test_xdg_ps1_{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
 
     let plugin_dir = tmp.join(".config").join("psmux").join("plugins")
@@ -187,7 +187,7 @@ fn plugin_discovery_xdg_ps1_entry() {
 #[test]
 fn plugin_discovery_strips_branch_suffix() {
     let _lock = crate::util::lock_test_env();
-    let tmp = std::env::temp_dir().join("psmux_test_branch_suffix");
+    let tmp = std::env::temp_dir().join(format!("psmux_test_branch_suffix_{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
 
     let plugin_dir = tmp.join(".psmux").join("plugins").join("psmux-test-branch");
