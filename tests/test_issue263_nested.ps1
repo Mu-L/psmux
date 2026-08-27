@@ -1,8 +1,8 @@
 # Issue #263 — irrefutable proof via NESTED psmux.
 #
 # OUTER psmux session runs an INNER psmux session attached inside one of its
-# panes. The inner psmux is fully attached, so it goes through the LIVE render
-# path (src/rendering.rs) and writes ANSI to the outer pane's PTY.
+# panes. The inner psmux is fully attached, so client::render_layout_json writes
+# ANSI to the outer pane's PTY.
 #
 # We then capture-pane on the OUTER pane, which shows literally what the inner
 # psmux wrote to its parent terminal. This is the smoking gun: if the outer
@@ -71,8 +71,8 @@ $preview = ($bytes[0..50] | ForEach-Object { $_.ToString("X2") }) -join ' '
 Write-Info "First 50 bytes: $preview"
 
 # --- Start INNER psmux INSIDE outer (so inner is attached to outer's pane) ---
-# The inner psmux thinks its terminal is outer's pane PTY, so its render
-# output goes through src/rendering.rs and lands in outer's screen buffer.
+# The inner psmux treats the outer pane PTY as its terminal, so its client
+# rendering lands in the outer screen buffer.
 & $PSMUX send-keys -t $OUTER 'Clear-Host' Enter
 Start-Sleep -Seconds 1
 

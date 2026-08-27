@@ -12,6 +12,7 @@ mod style;
 mod border_lines;
 mod copy_line_numbers;
 mod floating;
+mod render_state;
 mod rendering;
 mod config;
 mod commands;

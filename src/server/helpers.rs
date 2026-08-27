@@ -1,6 +1,7 @@
 use std::io;
 
 use crate::format::expand_format_for_window;
+use crate::render_state::ClientRenderOptions;
 use crate::types::{AppState, Node, Window};
 use crate::util::WinInfo;
 
@@ -137,6 +138,7 @@ pub(crate) struct StatusFormats {
     pub window_status_current_style: String,
     pub mode_style: String,
     pub message_style: String,
+    pub client_render_options: ClientRenderOptions,
     /// Pre-built JSON array for the multi-line status bar.
     pub status_format_json: String,
     /// Expanded `set-titles-string`, or `None` when `set-titles` is off. The
@@ -148,12 +150,26 @@ pub(crate) struct StatusFormats {
 ///
 /// `status_style` is passed in rather than read from `app` because both callers
 /// hold it in a metadata cache that is only rebuilt on structural change.
-pub(crate) fn expand_status_formats(app: &AppState, status_style: &str) -> StatusFormats {
+///
+/// # Errors
+///
+/// Returns an error if a render option escaped catalog validation.
+pub(crate) fn expand_status_formats(
+    app: &AppState,
+    status_style: &str,
+) -> io::Result<StatusFormats> {
     use crate::format::expand_format;
     // The one guard. Everything below expands #() asynchronously against the
     // TTL cache instead of blocking the event loop.
     let _async_fmt = crate::format::AsyncFormatGuard::new();
-    StatusFormats {
+    let pane_border_indicators = app.user_options
+        .get("pane-border-indicators")
+        .map(String::as_str)
+        .unwrap_or(crate::pane_border::INDICATORS_DEFAULT);
+    let pane_border_indicators =
+        crate::pane_border::PaneBorderIndicators::parse(pane_border_indicators)
+            .map_err(io::Error::other)?;
+    Ok(StatusFormats {
         status_style: expand_format(status_style, app),
         status_left: expand_format(&app.status_left, app),
         status_right: expand_format(&app.status_right, app),
@@ -165,6 +181,34 @@ pub(crate) fn expand_status_formats(app: &AppState, status_style: &str) -> Statu
         window_status_current_style: expand_format(&app.window_status_current_style, app),
         mode_style: expand_format(&app.mode_style, app),
         message_style: expand_format(&app.message_style, app),
+        client_render_options: ClientRenderOptions {
+            status_left_style: Some(expand_format(&app.status_left_style, app)),
+            status_right_style: Some(expand_format(&app.status_right_style, app)),
+            window_status_activity_style: Some(expand_format(
+                &app.window_status_activity_style,
+                app,
+            )),
+            window_status_bell_style: Some(expand_format(
+                &app.window_status_bell_style,
+                app,
+            )),
+            window_status_last_style: Some(expand_format(
+                &app.window_status_last_style,
+                app,
+            )),
+            window_style: Some(expand_format(
+                app.user_options.get("window-style").map(String::as_str).unwrap_or(""),
+                app,
+            )),
+            window_active_style: Some(expand_format(
+                app.user_options
+                    .get("window-active-style")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                app,
+            )),
+            pane_border_indicators: Some(pane_border_indicators),
+        },
         status_format_json: {
             let mut sf = String::from("[");
             for (i, fmt_str) in app.status_format.iter().enumerate() {
@@ -188,54 +232,44 @@ pub(crate) fn expand_status_formats(app: &AppState, status_style: &str) -> Statu
         } else {
             None
         },
-    }
+    })
 }
 
-/// Append live-client style fields shared by both render-state producers.
-pub(crate) fn append_extra_style_json(buf: &mut String, app: &AppState) {
-    if !buf.ends_with('}') { return; }
-    // Guard lives HERE, not at the call site. This runs on the per-repaint
-    // render path (both the DumpState handler and the server auto-push block),
-    // so any #() in these style options must expand async or it blocks the one
-    // event loop that also delivers keystrokes. Keeping the guard inside the
-    // function makes that impossible to forget when a new call site appears —
-    // which is exactly how the auto-push path lost it.
-    let _async_fmt = crate::format::AsyncFormatGuard::new();
-    buf.pop();
-    let window_style = app.user_options.get("window-style").map(String::as_str).unwrap_or("");
-    let window_active_style = app.user_options
-        .get("window-active-style")
-        .map(String::as_str)
-        .unwrap_or("");
-    let pane_border_indicators = app.user_options
-        .get("pane-border-indicators")
-        .map(String::as_str)
-        .unwrap_or(crate::pane_border::INDICATORS_DEFAULT);
-    for (key, raw) in [
-        ("status_left_style", app.status_left_style.as_str()),
-        ("status_right_style", app.status_right_style.as_str()),
-        ("wsa_style", app.window_status_activity_style.as_str()),
-        ("wsb_style", app.window_status_bell_style.as_str()),
-        ("wsl_style", app.window_status_last_style.as_str()),
-        ("window_style", window_style),
-        ("window_active_style", window_active_style),
-        ("pane_border_indicators", pane_border_indicators),
-    ] {
-        buf.push_str(",\"");
-        buf.push_str(key);
-        buf.push_str("\":\"");
-        buf.push_str(&json_escape_string(&crate::format::expand_format(raw, app)));
-        buf.push('"');
+/// Append typed client-render options to a buffer ending in `}`.
+///
+/// # Errors
+///
+/// Returns an error if `buf` is not a JSON object or the options cannot be
+/// serialized as one.
+pub(crate) fn append_client_render_options_json(
+    buf: &mut String,
+    options: &ClientRenderOptions,
+) -> io::Result<()> {
+    if !buf.ends_with('}') {
+        return Err(io::Error::other(
+            "render-state JSON does not end with an object delimiter",
+        ));
     }
+    let encoded = serde_json::to_string(options).map_err(io::Error::other)?;
+    let fields = encoded
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .ok_or_else(|| io::Error::other("client render options are not an object"))?;
+    if fields.is_empty() {
+        return Ok(());
+    }
+    buf.pop();
+    buf.push(',');
+    buf.push_str(fields);
     buf.push('}');
+    Ok(())
 }
 
 /// Build windows JSON with pre-expanded tab_text for each window.
 /// The tab_text is the fully expanded window-status-format / window-status-current-format.
 pub(crate) fn list_windows_json_with_tabs(app: &AppState) -> io::Result<String> {
-    // Async #() for the same reason as append_extra_style_json above — and this
-    // one expands window-status-format once PER WINDOW, so a synchronous #()
-    // here multiplies by the window count.
+    // This expands window-status-format once per window, so synchronous #()
+    // work here would multiply with the window count.
     let _async_fmt = crate::format::AsyncFormatGuard::new();
     let mut v: Vec<WinInfo> = Vec::new();
     for (i, w) in app.windows.iter().enumerate() {
