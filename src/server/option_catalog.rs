@@ -20,6 +20,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "default-terminal", scope: "server", option_type: "string", default: "xterm-256color", description: "TERM value for new panes" },
     OptionDef { name: "copy-command", scope: "server", option_type: "string", default: "", description: "External copy command (pipe selection)" },
     OptionDef { name: "exit-empty", scope: "server", option_type: "boolean", default: "on", description: "Exit server when no sessions remain" },
+    OptionDef { name: "priority", scope: "server", option_type: "choice", default: "above-normal", description: "Scheduling class for psmux's own server and client processes (normal/above-normal/high). Pane children are never raised" },
     // ── Session options ──
     OptionDef { name: "prefix", scope: "session", option_type: "string", default: "C-b", description: "Primary prefix key" },
     OptionDef { name: "prefix2", scope: "session", option_type: "string", default: "none", description: "Secondary prefix key" },

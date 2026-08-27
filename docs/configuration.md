@@ -125,6 +125,7 @@ Details worth knowing:
 | `escape-time` | Int | `500` | Escape delay (ms) |
 | `repeat-time` | Int | `500` | How long a key bound with `bind-key -r` keeps repeating without the prefix, in ms. Range `0` to `2000000`; `0` disables repeat |
 | `history-limit` | Int | `2000` | Scrollback lines per pane |
+| `priority` | Str | `above-normal` | Scheduling class for psmux's own processes: `normal`, `above-normal`, `high`. Pane shells and the programs you run are never raised. See [Process Priority](#process-priority) |
 | `display-time` | Int | `750` | Message display time (ms) |
 | `display-panes-time` | Int | `1000` | Pane overlay time (ms) |
 | `status-interval` | Int | `15` | Status refresh (seconds) |
@@ -595,6 +596,65 @@ bind-key C-Space send-prefix
 [Bold Is Bright](#bold-is-bright-color-rendering) and
 [Paste Detection](#paste-detection-ctrlv-passthrough).
 
+### Process Priority
+
+Windows gives its foreground scheduling boost to whichever process owns the foreground window. The
+psmux server owns no window at all, and the attach client draws inside a console window that the
+terminal host owns, so neither of them ever receives that boost. On an idle or lightly loaded
+machine this costs nothing. On a heavily oversubscribed one it means your keystrokes queue behind
+every compute job on the box, and typing starts to lag.
+
+`priority` sets the scheduling class of psmux's **own** processes, and nothing else:
+
+```tmux
+# Default: a small boost, enough to stay ahead of background compute
+set -g priority above-normal
+
+# Turn the boost off entirely
+set -g priority normal
+
+# For a machine you deliberately oversubscribe. Use sparingly
+set -g priority high
+```
+
+Any other value is refused: `set -g priority realtime` exits nonzero with a message and leaves the
+class where it was. Realtime is not offered at all, because a process at that class outranks most of
+the kernel's own threads.
+
+**What it applies to, exactly:**
+
+| | |
+|---|---|
+| The server process | Immediately, the moment the option is set, and again at every server startup |
+| The attach client | At client startup, from `PSMUX_PRIORITY` or from a `priority` line in your config file |
+| A warm standby server | At its own startup, so a session that claims one gets the configured class |
+| Pane shells and your programs | **Never.** A Windows child created with no explicit class flag gets `NORMAL_PRIORITY_CLASS` regardless of its parent, so nothing you run inside a pane is raised |
+
+Two things it does not do. A `set -g priority` issued in one session does not reach a warm standby
+that is already parked in the pool, and it does not retroactively change a client that is already
+attached; both pick the value up the next time they start. And an already running client keeps its
+class for its whole life, so use `PSMUX_PRIORITY` or a config file line if you want every client to
+agree.
+
+`PSMUX_PRIORITY` overrides the option, for both processes. That ordering is deliberate: it is the
+escape hatch that lets you climb out of a configured value from the shell you start psmux in,
+without editing a file. `show-options -g priority` always reports what the process is **actually**
+running at, so if the environment won you will see the environment's value there.
+
+```powershell
+# This shell only
+$env:PSMUX_PRIORITY = "normal"
+psmux
+```
+
+Setting the class can be refused by a restricted token or by a job object that caps it. psmux treats
+that as nothing to report: it carries on at whatever class it already had rather than failing to
+start.
+
+For reference, tmux has no equivalent option. It never sets a scheduling priority anywhere in its
+source, because the Linux scheduler already favours a process that spends its life blocked on a
+read. This is a Windows specific extension rather than a parity feature.
+
 ### Style Value Grammar
 
 Every `*-style` option and every inline `#[...]` block in a format string uses the same comma separated grammar:
@@ -725,6 +785,7 @@ hatch you want for one invocation rather than forever.
 | `PSMUX_ACTIVE` | Set to `1` on a client process to mark that it owns the console. This is what the nesting guard reads |
 | `PSMUX_SWITCH_TO` | Handshake variable carrying the session name across a `switch-client` |
 | `PSMUX_NO_WARM` | Set to `1` to disable warm pane and warm server pre-spawning. Equivalent to `set -g warm off`. See [warm-sessions.md](warm-sessions.md) |
+| `PSMUX_PRIORITY` | Scheduling class for the psmux server and client processes: `normal`, `above-normal` or `high`. Overrides the `priority` option, so it is the per shell way out of a configured value. An unrecognised value is reported and ignored. See [Process Priority](#process-priority) |
 
 ### Appearance and rendering
 

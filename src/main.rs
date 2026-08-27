@@ -3545,6 +3545,21 @@ fn run_main() -> io::Result<()> {
                         // alike: the first installed a 33 minute repeat
                         // window, the second was dropped server-side at exit
                         // 0 so a typo looked like it had been applied.
+                        // #608: `priority` takes a fixed set of three values.
+                        // The generic catalog check only validates numbers and
+                        // booleans, so without this a typo returned 0 and was
+                        // dropped server-side, leaving the class unchanged and
+                        // the mistake invisible.
+                        if *name == "priority"
+                            && crate::platform::normalize_priority(val).is_none()
+                        {
+                            eprintln!(
+                                "psmux: set-option: value for 'priority' must be one of {}, got '{}'",
+                                crate::platform::PRIORITY_VALUES.join(", "),
+                                val
+                            );
+                            std::process::exit(1);
+                        }
                         if *name == "repeat-time" {
                             if let Ok(ms) = val.parse::<i64>() {
                                 if ms < 0 {
@@ -4752,6 +4767,18 @@ fn run_main() -> io::Result<()> {
         return Ok(());
     }
     env::set_var("PSMUX_ACTIVE", "1");
+
+    // Same reasoning as the server (#608), for the other half of the keystroke
+    // path: this process reads the console input buffer and writes the frames,
+    // and the console window belongs to the terminal host, not to us, so we
+    // never inherit its foreground boost. Placed after the non-terminal bail so
+    // a scripted `psmux` that only prints its version does not touch its class.
+    // Fail open: a refused SetPriorityClass is ignored.
+    let client_priority = crate::platform::resolve_priority(
+        crate::config::priority_from_config().as_deref(),
+        true,
+    );
+    crate::platform::set_process_priority(&client_priority);
 
     let mut stdout = crate::platform::create_writer();
     enable_virtual_terminal_processing();

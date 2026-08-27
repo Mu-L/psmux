@@ -712,6 +712,9 @@ pub struct AppState {
     pub status_visible: bool,
     /// status-position: "top" or "bottom" (default "bottom")
     pub status_position: String,
+    /// priority: scheduling class for psmux's OWN processes, never for pane
+    /// children (issue #608). One of "normal", "above-normal", "high".
+    pub priority: String,
     /// status-style: stored for compat
     pub status_style: String,
     /// default-command / default-shell: shell to launch for new panes
@@ -1531,6 +1534,12 @@ impl AppState {
             mode_keys: "emacs".to_string(),
             status_visible: true,
             status_position: "bottom".to_string(),
+            // Deliberately the compile-time default, not the environment: a
+            // fresh AppState must match the catalog default no matter what
+            // PSMUX_PRIORITY happens to be set to in the process that built it
+            // (tests-rs/test_option_default_parity.rs). The environment is
+            // consulted where the class is actually applied, at startup.
+            priority: crate::platform::DEFAULT_PRIORITY.to_string(),
             status_style: "bg=green,fg=black".to_string(),
             default_shell: String::new(),
             word_separators: " -_@".to_string(),

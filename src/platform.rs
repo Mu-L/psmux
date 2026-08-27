@@ -3959,6 +3959,146 @@ pub fn set_bold_is_bright(on: bool) {
     BOLD_IS_BRIGHT.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+// ── Process priority (issue #608) ───────────────────────────────────────────
+//
+// Windows hands its foreground boost to whoever owns the foreground WINDOW.
+// The psmux server owns no window at all, and the attach client draws inside a
+// console window that the terminal host owns, so neither process is ever the
+// one Windows decides to favour. On a box that is merely busy that costs
+// nothing. On a heavily oversubscribed one it means the keystroke path queues
+// behind every compute job on the machine, which is the lag reported in #608.
+//
+// tmux has no equivalent. It never calls setpriority or nice anywhere in its
+// source, because on Linux the CFS scheduler already favours a process that
+// spends its life blocked on a read: interactivity is inferred from the sleep
+// pattern rather than granted to a window. This knob is therefore a Windows
+// specific extension, not a tmux parity item.
+
+/// Priority class psmux's own processes run at unless something overrides it.
+pub const DEFAULT_PRIORITY: &str = "above-normal";
+
+/// The values `priority` and `PSMUX_PRIORITY` accept, in the order shown to a
+/// user who got one wrong.
+pub const PRIORITY_VALUES: &[&str] = &["normal", "above-normal", "high"];
+
+const NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
+const ABOVE_NORMAL_PRIORITY_CLASS: u32 = 0x0000_8000;
+const HIGH_PRIORITY_CLASS: u32 = 0x0000_0080;
+
+/// Canonical spelling of an accepted priority value, or `None` if it is not one.
+///
+/// Deliberately narrow. `realtime` is not offered at any spelling: it outranks
+/// most of the kernel's own threads and a wedged psmux at that class can make a
+/// machine unusable. `idle` and `below-normal` are not offered either, because
+/// they would make the reported symptom worse rather than better.
+pub fn normalize_priority(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some("normal"),
+        "above-normal" | "above_normal" | "abovenormal" => Some("above-normal"),
+        "high" => Some("high"),
+        _ => None,
+    }
+}
+
+fn priority_class(value: &str) -> Option<u32> {
+    match normalize_priority(value)? {
+        "normal" => Some(NORMAL_PRIORITY_CLASS),
+        "above-normal" => Some(ABOVE_NORMAL_PRIORITY_CLASS),
+        "high" => Some(HIGH_PRIORITY_CLASS),
+        _ => None,
+    }
+}
+
+/// `PSMUX_PRIORITY` as a canonical value, or `None` when it is unset, empty or
+/// unusable. Silent: the one place that warns about a bad value is startup.
+pub fn env_priority() -> Option<&'static str> {
+    let raw = std::env::var("PSMUX_PRIORITY").ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    normalize_priority(&raw)
+}
+
+/// Resolve the class this process should run at.
+///
+/// `PSMUX_PRIORITY` outranks the `priority` option, so a user can climb out of
+/// a bad configured value from the shell they start psmux in without editing a
+/// config file. `warn` is for the startup call only: the option arms re-resolve
+/// on every `set -g priority` and must not print on each one.
+pub fn resolve_priority(from_option: Option<&str>, warn: bool) -> String {
+    if let Ok(raw) = std::env::var("PSMUX_PRIORITY") {
+        if !raw.trim().is_empty() {
+            match normalize_priority(&raw) {
+                Some(v) => return v.to_string(),
+                None if warn => eprintln!(
+                    "psmux: PSMUX_PRIORITY: unknown value '{}' (expected {}); ignoring it",
+                    raw.trim(),
+                    PRIORITY_VALUES.join(", ")
+                ),
+                None => {}
+            }
+        }
+    }
+    from_option
+        .and_then(normalize_priority)
+        .unwrap_or(DEFAULT_PRIORITY)
+        .to_string()
+}
+
+/// Set THIS process's priority class. Never raises pane children: a Windows
+/// child created without an explicit class flag gets NORMAL_PRIORITY_CLASS
+/// unless its creator is idle or below-normal, so the shells and programs psmux
+/// spawns stay where the user expects them.
+///
+/// Fail open. A refused SetPriorityClass (a restricted token, a job object that
+/// caps the class) returns false and is otherwise ignored, because losing a few
+/// milliseconds of scheduling is never a reason to refuse to start.
+#[cfg(windows)]
+pub fn set_process_priority(value: &str) -> bool {
+    let Some(class) = priority_class(value) else {
+        return false;
+    };
+    #[link(name = "kernel32")]
+    extern "system" {
+        // *mut c_void to match the other GetCurrentProcess declaration in the
+        // crate (src/paths.rs); a second shape trips clashing_extern_declarations.
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn SetPriorityClass(handle: *mut std::ffi::c_void, class: u32) -> i32;
+    }
+    unsafe { SetPriorityClass(GetCurrentProcess(), class) != 0 }
+}
+
+#[cfg(not(windows))]
+pub fn set_process_priority(value: &str) -> bool {
+    priority_class(value).is_some()
+}
+
+/// This process's current class as one of the accepted names, or `None` when it
+/// is something psmux never sets. Used by the tests and by `#{priority}`-style
+/// introspection rather than by the runtime itself.
+#[cfg(windows)]
+pub fn current_process_priority() -> Option<&'static str> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        // *mut c_void to match the other GetCurrentProcess declaration in the
+        // crate (src/paths.rs); a second shape trips clashing_extern_declarations.
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn GetPriorityClass(handle: *mut std::ffi::c_void) -> u32;
+    }
+    let class = unsafe { GetPriorityClass(GetCurrentProcess()) };
+    match class {
+        NORMAL_PRIORITY_CLASS => Some("normal"),
+        ABOVE_NORMAL_PRIORITY_CLASS => Some("above-normal"),
+        HIGH_PRIORITY_CLASS => Some("high"),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn current_process_priority() -> Option<&'static str> {
+    None
+}
+
 /// Returns true when an SGR parameter list contains only ASCII digits and
 /// `;` separators (the shape crossterm emits).  Anything else (`:` subparams,
 /// private markers) is left untouched.
@@ -4925,3 +5065,7 @@ mod tests_issue589_undercurl;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue599_data_root_mutex.rs"]
 mod tests_issue599_data_root_mutex;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue608_priority.rs"]
+mod tests_issue608_priority;

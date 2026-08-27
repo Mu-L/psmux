@@ -861,6 +861,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let pty_system = native_pty_system();
 
     let mut app = AppState::new(session_name);
+    // Claim a scheduling class before anything else runs (#608). A windowless
+    // server never receives the foreground boost Windows reserves for the
+    // process owning the active window, so on an oversubscribed box its reader
+    // and writer threads queue behind every compute job on the machine and
+    // typing lags. load_config below re-applies this from the `priority`
+    // option if the user set one; PSMUX_PRIORITY outranks both.
+    app.priority = crate::platform::resolve_priority(None, true);
+    crate::platform::set_process_priority(&app.priority);
     // Preinitialize the async #(command) format-job channel (see the
     // format_job_rx doc in types.rs).
     {
@@ -4221,6 +4229,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // option did not exist. Same shape as #559 for
                     // monitor-silence.
                     output.push_str(&format!("repeat-time {}\n", app.repeat_time_ms));
+                    // #608: this dump is hand written, so a new option is
+                    // invisible to a bare `show-options -g` unless it is listed
+                    // here as well as in get_option_value. Same trap as #606.
+                    output.push_str(&format!("priority {}\n", app.priority));
                     output.push_str(&format!("mode-keys {}\n", app.mode_keys));
                     output.push_str(&format!("focus-events {}\n", if app.focus_events { "on" } else { "off" }));
                     output.push_str(&format!("renumber-windows {}\n", if app.renumber_windows { "on" } else { "off" }));

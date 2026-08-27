@@ -117,6 +117,40 @@ pub fn is_warm_disabled_by_config() -> bool {
     false
 }
 
+/// The `priority` option as written in the user's config file, if it is there
+/// and usable.
+///
+/// The attach client never runs load_config: it asks the server for the options
+/// it renders with. But its own scheduling class has to be decided before it
+/// has spoken to anybody, so it peeks at the file the same lightweight way
+/// is_warm_disabled_by_config does (#608). Anything unparseable is simply
+/// absent here; the server's full config pass is what reports it.
+pub fn priority_from_config() -> Option<String> {
+    let content = read_user_config_content()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        if parts[0] != "set" && parts[0] != "set-option" {
+            continue;
+        }
+        let mut i = 1;
+        while i < parts.len() && parts[i].starts_with('-') {
+            i += 1;
+        }
+        if i + 1 < parts.len() && parts[i] == "priority" {
+            let val = parts[i + 1].trim_matches('"').trim_matches('\'');
+            return crate::platform::normalize_priority(val).map(|v| v.to_string());
+        }
+    }
+    None
+}
+
 /// Populate key_tables with PREFIX_DEFAULTS and ROOT_DEFAULTS from help.rs.
 /// This ensures default bindings live in key_tables (like tmux)
 /// so that unbind-key <key> can actually remove them.
@@ -1027,6 +1061,23 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         "mouse-selection-force" => app.mouse_selection_force = matches!(value, "on" | "true" | "1" | "yes"),
         "paste-detection" => app.paste_detection = matches!(value, "on" | "true" | "1" | "yes"),
         "choose-tree-preview" => app.choose_tree_preview = matches!(value, "on" | "true" | "1" | "yes"),
+        // The config-file path is a SEPARATE match from apply_set_option, so an
+        // option that has to do something (rather than just store a field)
+        // needs an arm in both. Same as bold-is-bright just below.
+        // The generic catalog check above validates only "number" and
+        // "boolean", so the restricted value set is enforced here by hand and
+        // a bad one warns instead of silently falling back (#608).
+        "priority" => match crate::platform::normalize_priority(value) {
+            Some(_) => {
+                app.priority = crate::platform::resolve_priority(Some(value), false);
+                crate::platform::set_process_priority(&app.priority);
+            }
+            None => warn_config(app, format!(
+                "invalid value '{}' for option 'priority' (expected {})",
+                value.trim(),
+                crate::platform::PRIORITY_VALUES.join(", ")
+            )),
+        },
         "bold-is-bright" => {
             app.bold_is_bright = matches!(value, "on" | "true" | "1" | "yes");
             crate::platform::set_bold_is_bright(app.bold_is_bright);

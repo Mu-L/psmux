@@ -434,6 +434,8 @@ SET OPTIONS (use with: set -g <option> <value>):
     mouse               Bool Mouse support (default: on)
     status              Bool Show status bar (default: on)
     status-position     Str  "top" or "bottom" (default: bottom)
+    priority            Str  psmux process scheduling class: "normal",
+                             "above-normal" or "high" (default: above-normal)
     focus-events        Bool Pass focus events to apps (default: off)
     mode-keys           Str  "vi" or "emacs" (default: emacs)
     renumber-windows    Bool Auto-renumber on close (default: off)

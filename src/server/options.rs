@@ -109,6 +109,10 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         // repeat-time had no arm at all, so `show-options -v repeat-time`
         // returned an empty string even though the option works.
         "repeat-time" => app.repeat_time_ms.to_string(),
+        // Reports what the server process is ACTUALLY running at, which is not
+        // always what a config file asked for: PSMUX_PRIORITY outranks the
+        // option, and the startup resolve stores the winner here (#608).
+        "priority" => app.priority.clone(),
         "prediction-dimming" => if app.prediction_dimming { "on".into() } else { "off".into() },
         "allow-predictions" => if app.allow_predictions { "on".into() } else { "off".into() },
         "cursor-style" => std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string()),
@@ -352,6 +356,17 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
         "bold-is-bright" => {
             app.bold_is_bright = matches!(value, "on" | "true" | "1" | "yes");
             crate::platform::set_bold_is_bright(app.bold_is_bright);
+        }
+        // Field write plus the platform call in one arm, the bold-is-bright
+        // shape, so every set path (config file, CLI, in-TUI prompt, control
+        // mode) applies to the live server process without its own hook.
+        // An unusable value is refused rather than stored, so the class and
+        // the reported option both stay where they were (#608).
+        "priority" => {
+            if crate::platform::normalize_priority(value).is_some() {
+                app.priority = crate::platform::resolve_priority(Some(value), false);
+                crate::platform::set_process_priority(&app.priority);
+            }
         }
         "scroll-enter-copy-mode" => { app.scroll_enter_copy_mode = matches!(value, "on" | "true" | "1" | "yes"); }
         "pwsh-mouse-selection" => { app.pwsh_mouse_selection = matches!(value, "on" | "true" | "1" | "yes"); }

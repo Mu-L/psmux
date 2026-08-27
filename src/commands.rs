@@ -360,6 +360,7 @@ fn generate_show_options(app: &AppState) -> String {
     output.push_str(&format!("status-right \"{}\"\n", app.status_right));
     output.push_str(&format!("history-limit {}\n", app.history_limit));
     output.push_str(&format!("display-time {}\n", app.display_time_ms));
+    output.push_str(&format!("priority {}\n", app.priority));
     output.push_str(&format!("mode-keys {}\n", app.mode_keys));
     output.push_str(&format!("focus-events {}\n", if app.focus_events { "on" } else { "off" }));
     output.push_str(&format!("renumber-windows {}\n", if app.renumber_windows { "on" } else { "off" }));
