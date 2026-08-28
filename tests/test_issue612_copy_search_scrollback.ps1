@@ -19,7 +19,7 @@
 # window_copy_scroll_to, which parks an off screen match a quarter of a screen
 # up from the bottom. Measured in WSL on the same 400 line / 80x24 geometry,
 # real tmux answers `search-backward LINE_5` with copy_cursor_line=LINE_59 and
-# scroll_position=338; psmux now answers with the same pair.
+# scroll_position=338 (history_size 380); psmux now answers with the same pair.
 #
 # Layer 1 (CLI + display-message) drives the server command path: the
 #         `send-keys -X search-backward <term>` scripting surface and the
@@ -148,10 +148,16 @@ if ($st.inmode -ne "1") {
     & $PSMUX send-keys -t $T -X search-backward LINE_5 2>&1 | Out-Null
     Start-Sleep -Milliseconds 800
     $b = Get-CopyState $T
-    if ($b.line -eq "LINE_59" -and $b.scroll -eq "338") {
-        Write-Pass "tmux 3.4 parity: search-backward LINE_5 gives LINE_59 at scroll_position 338"
+    # tmux window_copy_scroll_to parks an off screen match rows/4 lines up from
+    # the bottom, so the cursor row is rows - rows/4 regardless of how many
+    # prompt lines the shell happened to emit. The WSL measurement (LINE_59 at
+    # scroll_position 338) had history_size 380; the scroll value moves with
+    # history_size, the cursor row and the landing line do not.
+    $expectCy = $ROWS - [math]::Floor($ROWS / 4)
+    if ($b.line -eq "LINE_59" -and [int]$b.cy -eq $expectCy -and [int]$b.scroll -gt 0) {
+        Write-Pass "tmux 3.4 parity: search-backward LINE_5 gives LINE_59 at cy=$expectCy (rows - rows/4), scroll_position=$($b.scroll) for history_size=$($b.hist)"
     } else {
-        Write-Fail "tmux parity: expected LINE_59 / scroll 338, got [$($b.line)] / scroll $($b.scroll)"
+        Write-Fail "tmux parity: expected LINE_59 at cy=$expectCy with the viewport in history, got [$($b.line)] cy=$($b.cy) scroll=$($b.scroll) hist=$($b.hist)"
     }
 
     # ── 1c. n / N repeat, still inside history ──
