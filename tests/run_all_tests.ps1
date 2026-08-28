@@ -295,7 +295,7 @@ public static class PsmuxTestJob {
 function Get-SuiteTimeout {
     param([string]$Name)
     # Perf/stress/latency suites legitimately run long; everything else gets the default.
-    if ($Name -match 'perf|stress|latency|benchmark|extreme|battle|install_speed|e2e|sustained|exhaustive|nsis|installer|realistic_typing|robust_|win32_tui_flag_parity') { return $LongTimeoutSec }
+    if ($Name -match 'perf|stress|latency|benchmark|extreme|battle|install_speed|e2e|sustained|exhaustive|nsis|installer|realistic_typing|robust_|win32_tui_flag_parity|issue615_wsl_pane_path') { return $LongTimeoutSec }
     return $DefaultTimeoutSec
 }
 
