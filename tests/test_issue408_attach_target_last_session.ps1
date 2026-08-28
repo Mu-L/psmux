@@ -70,12 +70,33 @@ $landed = Get-AttachedSession -ArgList @('attach-session','-t','s1') -ForceLastS
 if ($landed -eq 's1') { Write-Pass "Client attached to s1 (target honoured)" }
 else { Write-Fail "Client attached to '$landed', expected s1" }
 
-# --- Test 4: bare `attach` (no -t) still falls back to last_session (tmux parity) ---
-Write-Host "`n[Test 4] bare attach with last_session=s1 falls back to s1" -ForegroundColor Yellow
+# --- Test 4: bare `attach` (no -t) picks the most recently active session ---
+#
+# This case used to assert the opposite, that a bare attach follows the
+# `last_session` file, and called that tmux parity. It is not. Measured against
+# tmux 3.4 with two detached sessions created in order s1 then s2 and no client
+# anywhere:
+#
+#   s1 created=1787878619 activity=1787878619
+#   s2 created=1787878620 activity=1787878620
+#   tmux display-message -p '#S'  ->  s2
+#
+# tmux resolves an unqualified target through cmd_find_best_session, which ranks
+# by activity_time and consults no "last session" file at all. psmux's global
+# last_session file was written once per attach and never refreshed, so a
+# session visited long ago and since detached kept winning: that is #603, and
+# the fallback this case pinned was the bug rather than the contract.
+#
+# What #408 is actually about is that an EXPLICIT target must never lose to that
+# fallback, which Tests 1, 2, 3 and 5 cover. Here the expectation is now tmux's:
+# with no target given, the most recently active session wins, so pointing
+# last_session at the OLDER s1 must not drag the attach away from s2.
+# The activity ranking itself is proven in tests/test_issue603_bare_routing.ps1.
+Write-Host "`n[Test 4] bare attach ignores a stale last_session and takes the newest" -ForegroundColor Yellow
 New-TwoDetachedSessions
 $landed = Get-AttachedSession -ArgList @('attach') -ForceLastSession 's1'
-if ($landed -eq 's1') { Write-Pass "Bare attach used last_session=s1 (fallback intact)" }
-else { Write-Fail "Bare attach landed on '$landed', expected s1" }
+if ($landed -eq 's2') { Write-Pass "Bare attach used the most recently active session (tmux rule)" }
+else { Write-Fail "Bare attach landed on '$landed', expected s2 (the newer session)" }
 
 # --- Test 5: positional target `attach s2` still works (no regression) ---
 Write-Host "`n[Test 5] positional 'attach s2' with last_session=s1" -ForegroundColor Yellow
