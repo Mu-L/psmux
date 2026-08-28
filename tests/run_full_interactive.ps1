@@ -66,6 +66,62 @@ if ($active) {
 $me = Get-Process -Id $PID
 "{0}:{1}" -f $PID, $me.StartTime.Ticks | Set-Content $lockFile -Encoding ASCII
 
+# ---------------------------------------------------------------------------
+# Turn OFF QuickEdit on this console before anything long starts.
+#
+# With QuickEdit on, a single stray click or drag in the runner window puts the
+# console into selection mode, and selection mode BLOCKS the next write. The
+# runner writes a heartbeat every ten seconds, so it freezes on the first one
+# after the click and never comes back: no heartbeat, no timeout, no summary,
+# and the process sits in a UserRequest wait looking alive.
+#
+# Measured 2026-08-28: run 2026-08-28_03-45-22 stopped dead at suite 470 of 657
+# with the suite process already exited, the runner pwsh idle across all 14
+# threads, and progress.log frozen at the exact second the next suite started.
+# Roughly four hours of a sweep were lost to a mouse click.
+#
+# ENABLE_EXTENDED_FLAGS must be set in the same call, otherwise clearing the
+# QuickEdit bit alone is ignored. Insert mode is preserved. This only touches
+# THIS console, and only for the life of the run.
+try {
+    if (-not ('PsmuxRunnerConsole' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class PsmuxRunnerConsole {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    const int  STD_INPUT_HANDLE          = -10;
+    const uint ENABLE_QUICK_EDIT_MODE    = 0x0040;
+    const uint ENABLE_INSERT_MODE        = 0x0020;
+    const uint ENABLE_EXTENDED_FLAGS     = 0x0080;
+
+    // Returns true when QuickEdit was on and is now off.
+    public static bool DisableQuickEdit() {
+        IntPtr h = GetStdHandle(STD_INPUT_HANDLE);
+        uint mode;
+        if (!GetConsoleMode(h, out mode)) { return false; }
+        if ((mode & ENABLE_QUICK_EDIT_MODE) == 0) { return false; }
+        uint want = (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS | ENABLE_INSERT_MODE;
+        return SetConsoleMode(h, want);
+    }
+}
+'@ -ErrorAction Stop
+    }
+    if ([PsmuxRunnerConsole]::DisableQuickEdit()) {
+        Write-Host '  QuickEdit disabled on this console: a stray click can no longer freeze the run.' -ForegroundColor DarkGray
+    }
+} catch {
+    # Never fatal. A run in a host without a real console still works, it just
+    # keeps whatever selection behaviour that host has.
+    Write-Host "  (could not adjust console mode: $_)" -ForegroundColor DarkGray
+}
+
 # Drop any abort flag left over from a previous run before this one starts, so a
 # stale file cannot stop the new run on its first poll. run_all_tests.ps1 clears
 # it too; doing it here as well closes the window between the lock being taken
