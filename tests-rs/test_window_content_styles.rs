@@ -219,3 +219,59 @@ fn inactive_window_background_fills_columns_after_explicit_row_run() {
     assert_eq!(buffer[(1, 0)].style().bg, Some(Color::DarkGray));
     assert_eq!(buffer[(2, 0)].style().bg, Some(Color::DarkGray));
 }
+
+#[test]
+fn explicit_hidden_run_background_covers_the_full_run_width() {
+    let layout = leaf(
+        true,
+        false,
+        3,
+        Vec::new(),
+        vec![RowRunsJson {
+            runs: vec![CellRunJson {
+                text: "ABC".to_string(),
+                fg: "red".to_string(),
+                bg: "magenta".to_string(),
+                flags: 64,
+                width: 3,
+                link: None,
+                ul: 0,
+                ulc: None,
+            }],
+        }],
+    );
+    let styles = WindowContentStyles {
+        inactive: None,
+        active: Some(Style::default().bg(Color::Blue)),
+    };
+
+    let buffer = render(&layout, 3, styles);
+    for x in 0..3 {
+        assert_eq!(buffer[(x, 0)].symbol(), " ");
+        assert_eq!(buffer[(x, 0)].style().fg, Some(Color::Red));
+        assert_eq!(buffer[(x, 0)].style().bg, Some(Color::Magenta));
+    }
+}
+
+#[test]
+fn clock_overlay_preserves_the_active_window_background() {
+    let backend = TestBackend::new(40, 5);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            crate::client::render_clock_overlay(
+                frame,
+                Rect::new(0, 0, 40, 5),
+                Color::Red,
+                Some(Style::default().bg(Color::Blue)),
+            );
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    for y in 0..5 {
+        for x in 5..34 {
+            assert_eq!(buffer[(x, y)].style().bg, Some(Color::Blue));
+        }
+    }
+}

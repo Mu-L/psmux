@@ -678,11 +678,9 @@ pub fn dump_separators(
     out
 }
 
-/// Render a `LayoutJson` window dump into `area` so the preview is a
-/// pixel-for-pixel miniature of the real psmux window.  Reuses the
-/// canonical `crate::client::render_layout_json` so every separator,
-/// every color, every cell of pane content matches what the user
-/// would see if they switched to that window.
+/// Render the target's pane contents and separators into the preview area.
+/// Target window styles are not part of `window-dump`, so cross-session
+/// previews retain default pane-content colours.
 pub fn render_dump_tree(
     f: &mut ratatui::Frame,
     layout: &crate::layout::LayoutJson,
@@ -754,4 +752,3 @@ mod tests_ansi {
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
     }
 }
-

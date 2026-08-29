@@ -452,6 +452,13 @@ fn drain_plugin_req(
                     "status-left" => app.status_left.push_str(&value),
                     "status-right" => app.status_right.push_str(&value),
                     "status-style" => app.status_style.push_str(&value),
+                    "window-style" | "window-active-style" => {
+                        app.user_options
+                            .entry(option.clone())
+                            .or_default()
+                            .push_str(&value);
+                        app.user_set_options.insert(option);
+                    }
                     _ => {}
                 }
             }
@@ -4230,6 +4237,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "pane-border-style" => { app.pane_border_style.push_str(&value); }
                             "pane-active-border-style" => { app.pane_active_border_style.push_str(&value); }
                             "pane-border-hover-style" => { app.pane_border_hover_style.push_str(&value); }
+                            "window-style" | "window-active-style" => {
+                                app.user_options
+                                    .entry(option.clone())
+                                    .or_default()
+                                    .push_str(&value);
+                                app.user_set_options.insert(option.clone());
+                                state_dirty = true;
+                            }
                             "window-status-format" => { app.window_status_format.push_str(&value); }
                             "window-status-current-format" => { app.window_status_current_format.push_str(&value); }
                             _ => {}

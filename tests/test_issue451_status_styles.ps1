@@ -1,20 +1,4 @@
-# Issue #451: window-status / status style options had no effect.
-#
-# Regression from the app.rs -> client.rs modularization: the server render-state
-# JSON only shipped ws_style/wsc_style, so these five options never reached the
-# client renderer and were dead (window-status-activity-style was additionally
-# hard-coded to black/white/bold):
-#   - window-status-activity-style
-#   - window-status-bell-style
-#   - window-status-last-style
-#   - status-left-style
-#   - status-right-style
-#
-# This test PROVES each one now renders by hosting psmux under a REAL pseudoconsole
-# (exactly how Windows Terminal hosts it), driving genuine state via CLI, and
-# grepping the raw status-bar VT stream for a distinctive colour (colour201 ->
-# SGR 38;5;201) assigned to each style. A positive control (current/status style)
-# renders the same colour, proving the capture method is valid.
+# End-to-end VT checks for live status and global pane-content style rendering.
 
 $ErrorActionPreference = "Continue"
 $PSMUX = (Get-Command psmux -EA Stop).Source
@@ -23,7 +7,7 @@ $BIN = "$env:TEMP\conpty_out.bin"
 $CTRL = "$env:TEMP\conpty_ctrl.txt"
 $SESSION = "test_issue451"
 $NEEDLE = "38;5;201"
-$SECOND_NEEDLE = "38;5;202"
+$REAPPLIED_NEEDLE = "38;5;202"
 $COLOR = "fg=colour201,bg=colour21"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
@@ -95,6 +79,12 @@ Test-Style "window-active-style" {
     & $PSMUX set-option -g window-active-style $COLOR 2>&1 | Out-Null
 }
 
+Test-Style "window-active-style append" {
+    & $PSMUX set-option -g status off 2>&1 | Out-Null
+    & $PSMUX set-option -g window-active-style "bg=black" 2>&1 | Out-Null
+    & $PSMUX set-option -ga window-active-style ",$COLOR" 2>&1 | Out-Null
+}
+
 Write-Host "`n[window-active-style unset clears the style]" -ForegroundColor Yellow
 $p = Start-Host
 & $PSMUX set-option -g status off 2>&1 | Out-Null
@@ -121,12 +111,12 @@ if (
     $existingClientAfterUnset -notmatch $NEEDLE -and
     $afterUnset -match '<ESC>\[' -and
     $afterUnset -notmatch $NEEDLE -and
-    $afterOnlyIfUnset -match $SECOND_NEEDLE -and
+    $afterOnlyIfUnset -match $REAPPLIED_NEEDLE -and
     $afterOnlyIfUnset -notmatch $NEEDLE
 ) {
     Write-Pass "window-active-style clears on unset and -o can apply a new value"
 } else {
-    Write-Fail "window-active-style reset evidence wrong (before=$($beforeUnset -match $NEEDLE) existingRepaint=$($existingClientAfterUnset -match 'STYLEMARK') existingCleared=$($existingClientAfterUnset -notmatch $NEEDLE) freshCleared=$($afterUnset -notmatch $NEEDLE) reapplied=$($afterOnlyIfUnset -match $SECOND_NEEDLE))"
+    Write-Fail "window-active-style reset evidence wrong (before=$($beforeUnset -match $NEEDLE) existingRepaint=$($existingClientAfterUnset -match 'STYLEMARK') existingCleared=$($existingClientAfterUnset -notmatch $NEEDLE) freshCleared=$($afterUnset -notmatch $NEEDLE) reapplied=$($afterOnlyIfUnset -match $REAPPLIED_NEEDLE))"
 }
 
 Test-Style "window-style on inactive pane" {
