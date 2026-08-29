@@ -1,5 +1,7 @@
 # Features
 
+psmux brings the tmux feature set to Windows natively: sessions that outlive the terminal window, split panes and windows, full mouse support, a vim style copy mode, tmux themes and plugins, 90+ tmux compatible commands and 140+ format variables, all in one Rust binary on ConPTY with no WSL, Cygwin or MSYS2. This page is the complete list; the [Getting Started tutorial](tutorials/getting-started-windows.md) shows the essentials in ten minutes.
+
 ## Highlights
 
 - 🦠 **Made in Rust** : opt-level 3, full LTO, single codegen unit. Maximum performance.

@@ -1,5 +1,7 @@
 # FAQ
 
+Answers to the questions people ask most about psmux, the native tmux for Windows: what it runs on, how it relates to tmux and Windows Terminal, whether an existing `.tmux.conf` carries over, how the mouse and the wheel behave inside programs, and what to do when a key, a colour or a path does not look right. Each answer links to the guide that has the full detail.
+
 **Q: Is psmux cross-platform?**
 A: No. psmux is built exclusively for Windows using the Windows ConPTY API. For Linux/macOS, use tmux. psmux is the Windows counterpart.
 
