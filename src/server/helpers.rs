@@ -832,8 +832,8 @@ pub(crate) const TMUX_COMMANDS: &[&str] = &[
 ];
 
 #[cfg(test)]
-#[path = "../../tests-rs/test_issue451_status_styles.rs"]
-mod tests_issue451_status_styles;
+#[path = "../../tests-rs/test_live_client_styles.rs"]
+mod tests_live_client_styles;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_render_path_async_format.rs"]

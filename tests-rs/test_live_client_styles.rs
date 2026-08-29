@@ -6,7 +6,7 @@
 use super::*;
 
 fn mk_app() -> AppState {
-    let mut app = AppState::new("issue451".to_string());
+    let mut app = AppState::new("live_client_styles".to_string());
     app.window_base_index = 0;
     app.pane_base_index = 0;
     app
@@ -35,9 +35,9 @@ fn mk_window(name: &str, id: usize) -> crate::types::Window {
     }
 }
 
-// ── 1. The render-state JSON must include every style that was dropped ──
+// ── 1. The render-state JSON carries live-client status styles ──
 #[test]
-fn append_extra_style_json_emits_all_five_dropped_styles() {
+fn append_extra_style_json_emits_status_styles() {
     let mut app = mk_app();
     app.status_left_style = "fg=colour201".to_string();
     app.status_right_style = "bg=colour21".to_string();
@@ -48,7 +48,6 @@ fn append_extra_style_json_emits_all_five_dropped_styles() {
     let mut buf = String::from("{\"status_style\":\"x\"}");
     append_extra_style_json(&mut buf, &app);
 
-    // Every dropped option is now present with its configured value.
     assert!(buf.contains("\"status_left_style\":\"fg=colour201\""), "status-left-style missing: {buf}");
     assert!(buf.contains("\"status_right_style\":\"bg=colour21\""), "status-right-style missing: {buf}");
     assert!(buf.contains("\"wsa_style\":\"reverse\""), "activity-style missing: {buf}");

@@ -87,7 +87,7 @@ psmux aims to keep the preview feature on par with tmux, with a few intentional 
 * `choose-session` and `choose-tree` both have a preview pane.
 * `p` toggles the preview while a chooser is open.
 * The preview is a live mirror of the target, not a frozen snapshot.
-* Pane borders, colours, and styles are preserved.
+* Serialized cell colours and styles, plus pane-border geometry, are preserved.
 * Wide characters are handled correctly.
 * The preview width is roughly half the popup width, with the picker list on the left.
 * The preview never modifies the target session in any way (it is read only).
@@ -104,7 +104,7 @@ psmux aims to keep the preview feature on par with tmux, with a few intentional 
 
 * The option name `choose-tree-preview` is psmux specific. tmux does not recognise it. Adding it to a shared configuration file is safe because tmux's set-option command will warn but not fail; if you want to be strict, guard the line with `if-shell` or split your config.
 * The option key in `show-options` output and in the JSON sent to the client uses kebab-case (`choose-tree-preview`) and snake_case (`choose_tree_preview`) respectively, matching the existing psmux convention.
-* The preview uses the target's serialized cell styles and the chooser's pane-border styles. The current `window-dump` response does not include target `window-style` or `window-active-style` options.
+* The preview uses the target's serialized cell styles and the chooser's pane-border styles. The `window-dump` response does not include target `window-style` or `window-active-style` options.
 
 ## Performance
 

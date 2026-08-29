@@ -102,27 +102,29 @@ fn none_border_draws_content_without_box() {
 
 #[test]
 fn floating_panes_apply_active_and_inactive_window_colors() {
+    use ratatui::style::{Color, Style};
+
     let window_styles = WindowContentStyles {
         inactive: Some(
-            ratatui::style::Style::default()
-                .fg(ratatui::style::Color::Cyan)
-                .bg(ratatui::style::Color::DarkGray),
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(Color::DarkGray),
         ),
         active: Some(
-            ratatui::style::Style::default()
-                .fg(ratatui::style::Color::Yellow)
-                .bg(ratatui::style::Color::Blue),
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::Blue),
         ),
     };
     let active = make_float(1, 1, 8, 5, "single");
     let active_buffer = render_with_styles(&active, 20, 10, window_styles);
     assert_eq!(
         active_buffer[(2, 2)].style().fg,
-        Some(ratatui::style::Color::Yellow),
+        Some(Color::Yellow),
     );
     assert_eq!(
         active_buffer[(2, 2)].style().bg,
-        Some(ratatui::style::Color::Blue),
+        Some(Color::Blue),
     );
 
     let mut inactive = active;
@@ -131,15 +133,15 @@ fn floating_panes_apply_active_and_inactive_window_colors() {
     let inactive_buffer = render_with_styles(&inactive, 20, 10, window_styles);
     assert_eq!(
         inactive_buffer[(2, 2)].style().bg,
-        Some(ratatui::style::Color::Magenta),
+        Some(Color::Magenta),
     );
     assert_eq!(
         inactive_buffer[(3, 2)].style().fg,
-        Some(ratatui::style::Color::Cyan),
+        Some(Color::Cyan),
     );
     assert_eq!(
         inactive_buffer[(3, 2)].style().bg,
-        Some(ratatui::style::Color::DarkGray),
+        Some(Color::DarkGray),
     );
 }
 

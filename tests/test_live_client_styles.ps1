@@ -5,7 +5,7 @@ $PSMUX = (Get-Command psmux -EA Stop).Source
 $HOSTEXE = "$env:TEMP\conpty_style_host.exe"
 $BIN = "$env:TEMP\conpty_out.bin"
 $CTRL = "$env:TEMP\conpty_ctrl.txt"
-$SESSION = "test_issue451"
+$SESSION = "live_client_styles"
 $NEEDLE = "38;5;201"
 $REAPPLIED_NEEDLE = "38;5;202"
 $COLOR = "fg=colour201,bg=colour21"
@@ -167,7 +167,7 @@ Test-Style "status-right-style" {
 
 # ── Layer 2: Win32 TUI visual verification (visible window, CLI-driven) ──
 Write-Host "`n[Layer 2] Win32 TUI visual verification" -ForegroundColor Yellow
-$TUI = "test_issue451_tui"
+$TUI = "live_client_styles_tui"
 & $PSMUX kill-session -t $TUI 2>&1 | Out-Null; Start-Sleep -Milliseconds 300
 $proc = Start-Process -FilePath $PSMUX -ArgumentList "new-session","-s",$TUI -PassThru
 Start-Sleep -Seconds 4

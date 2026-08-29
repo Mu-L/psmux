@@ -1157,7 +1157,7 @@ fn config_file_window_active_style() {
 }
 
 #[test]
-fn config_unset_allows_only_if_unset_to_set_window_style() {
+fn config_only_if_unset_sets_window_style_after_unset() {
     let mut app = mock_app();
     parse_config_content(
         &mut app,
