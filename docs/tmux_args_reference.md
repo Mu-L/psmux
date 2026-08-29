@@ -97,26 +97,26 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `select-layout` | `selectl` | `npoEt:` plus a positional layout name | CLI, SRV, CFG, CTL |
 | `select-pane` | `selectp` | `UDLRlZmMedP:T:t:` | CLI, SRV, CFG, CTL |
 | `select-window` | `selectw` | `lnpt:` | CLI, SRV, CFG, CTL |
-| `send-keys` | `send`, `send-key` | `lRXN:t:` | CLI, SRV, CFG, CTL |
-| `send-paste` | *(none)* | `t:` plus a positional payload | CLI, SRV |
+| `send-keys` | `send`, `send-key` | `lRXHN:t:` plus `--` | CLI, SRV, CFG, CTL |
+| `send-paste` | *(none)* | `t:` plus one base64 positional payload | CLI, SRV |
 | `send-prefix` | *(none)* | none | CLI, SRV, CFG |
 | `send-text` | *(none)* | none, takes the text as positional arguments | SRV |
 | `server-info` | `info` | none | CLI, SRV, CFG, CTL |
 | `set-buffer` | `setb` | `wb:` | CLI, SRV, CFG |
 | `set-environment` | `setenv` | `grhut:` | CLI, SRV, CFG, CTL |
 | `set-hook` | *(none)* | `gua` | CLI, SRV, CFG, CTL |
-| `set-option` | `set` | `guaqowt:p:` | CLI, SRV, CFG, CTL |
+| `set-option` | `set` | `guaqopwUt:` plus `--` | CLI, SRV, CFG, CTL |
 | `set-pane-title` | *(none)* | none, takes the title as positional arguments | SRV |
-| `set-window-option` | `setw` | `guaqowt:p:` | CLI, SRV, CFG, CTL |
+| `set-window-option` | `setw` | `guaqopwUt:` plus `--` | CLI, SRV, CFG, CTL |
 | `show-buffer` | `showb` | `b:` | CLI, SRV, CFG, CTL |
 | `show-environment` | `showenv` | `gsht:` | CLI, SRV, CFG, CTL |
 | `show-hooks` | *(none)* | `g` | CLI, SRV, CFG, CTL |
 | `show-messages` | `showmsgs` | none | CLI, SRV, CFG |
-| `show-options` | `show` | `Aswvqt:` | CLI, SRV, CFG, CTL |
+| `show-options` | `show`, `show-option` | `Aswvqt:` | CLI, SRV, CFG, CTL |
 | `show-prompt-history` | `showphist` | none | SRV |
-| `show-window-options` | `showw` | `Aswvqt:` | CLI, SRV, CFG, CTL |
+| `show-window-options` | `showw`, `show-window-option` | `Aswvqt:` | CLI, SRV, CFG, CTL |
 | `source-file` | `source` | `qnv` | CLI, SRV, CFG, CTL |
-| `split-window` | `splitw`, `split-pane`, `splitp` | `hvdPc:e:F:l:p:T:t:` | CLI, SRV, CFG, CTL |
+| `split-window` | `splitw`, `split-pane`, `splitp` | `hvdPZc:e:F:l:p:T:t:` | CLI, SRV, CFG, CTL |
 | `start-server` | `start`, `warmup` | none | CLI, SRV, CFG |
 | `suspend-client` | `suspendc` | none | CLI, SRV, CFG |
 | `swap-pane` | `swapp` | `UDds:t:` | CLI, SRV, CFG, CTL |
@@ -128,7 +128,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `wait-for` | `wait` | `LSU` | CLI, SRV, CFG |
 | `zoom-pane` | *(none)* | none | CLI, SRV, CFG, CTL |
 
-102 command names. `warmup`, `resp`, `a` and `at` are CLI only aliases. `nextl` and `prevl` are recognised on the server, config and control layers but not by the CLI front end, so use the full name when typing in a shell.
+104 command names. `warmup`, `resp`, `a` and `at` are CLI only aliases. `show-option` and `show-window-option` are the singular spellings tmux also accepts (#586). `nextl` and `prevl` are recognised on the server, config and control layers but not by the CLI front end, so use the full name when typing in a shell.
 
 ### Commands deliberately not listed
 
@@ -215,6 +215,7 @@ Five mouse wire commands are an exception and are genuinely usable for scripting
 - Value: `-n` (window name), `-c` (start directory), `-T` (pane title), `-e` (environment `KEY=VALUE`), `-F` (format, also accepted glued as `-F<format>`), `-t` (target, value consumed)
 - Accepted but ignored: `-a`, `-D`, `-k`, `-S`
 - Not accepted: `-b`
+- `--` ends option parsing. What follows is the command for the new pane, with tmux's two shapes (#582): a **single** token after `--` is a shell command string and runs through the pane shell (so `-- "cargo build 2>&1 | tee log.txt"` keeps its pipes, redirections and variables), while **two or more** tokens are an argv that psmux executes directly with no shell in between, exactly as tmux's `execvp` does. `-- node app.js --port 8080` therefore starts `node` itself, not `pwsh -c "node app.js --port 8080"`, so a shell profile cannot slow it down or alter its arguments, and `#{pane_current_command}` reports the program you named. If you need shell features with several tokens, wrap the whole thing in one quoted string. The same rule applies to `split-window` and `new-session`.
 
 **kill-window** (`killw`)
 - Boolean: `-a` (kill all windows but the current one)
@@ -237,15 +238,18 @@ Five mouse wire commands are an exception and are genuinely usable for scripting
 
 **move-window** (`movew`)
 - Boolean: `-a` (after), `-b` (before), `-r` (renumber), `-d` (do not switch), `-k` (kill the target if it exists)
-- Value: `-s` (source window), `-t` (destination window). A bare numeric `-t` is treated as a window index, not a session.
+- Value: `-s` (source window, honoured since #602; before that the active window always moved), `-t` (destination window)
+- Both values are resolved on the server by the one tmux parity window resolver (#602), in tmux's order: `@id`, `+N` / `-N`, the symbols `^` `!` `$` `+` `-` and their `{start}` `{last}` `{end}` `{next}` `{previous}` spellings, a window index, then an exact window name. A leading `session:` is dropped because routing already chose the server. For `-t`, `+N` / `-N` are arithmetic on the current window index and a number that names no window is a free destination slot, as in tmux. An index that is already in use fails with `index in use` at exit 1 unless `-k` is given.
+- An attached client sees the new window list immediately (#601).
 
 **link-window** (`linkw`)
 - Value: `-s` (source window index), `-t` (destination window index)
 - Not accepted: `-a`, `-b`, `-d`, `-k`
 
 **swap-window** (`swapw`)
-- Boolean: `-d` (do not switch)
-- Value: `-s` (source window), `-t` (destination window). A bare numeric `-t` is treated as a window index.
+- Boolean: `-d` (keep the current window current: the active window follows the swap to its new index)
+- Value: `-s` (source window, defaults to the current window), `-t` (destination window, required)
+- Targets go through the same resolver as `move-window` (#602). Here `+N` / `-N` step through the session's window list and wrap, and a number that names no window is `can't find window: N` at exit 1. The two windows exchange index numbers. Without `-d` the active window **number** is left alone, so the window that moved into it becomes the active one, as in tmux; with `-d` the active window keeps its identity and its new number. Either way an attached client sees the change at once (#601).
 
 **rotate-window** (`rotatew`)
 - Boolean: `-U` (rotate up), `-D` (rotate down)
@@ -273,8 +277,10 @@ Five mouse wire commands are an exception and are genuinely usable for scripting
 
 **split-window** (`splitw`, `split-pane`, `splitp`)
 - Boolean: `-h` (horizontal), `-v` (vertical), `-d` (do not switch), `-P` (print the new pane info)
+- Boolean, since PR #572: `-Z` (zoom the new pane once the split is made)
 - Value: `-p` (percentage size), `-l` (size in cells or a percentage), `-c` (start directory), `-T` (pane title), `-F` (format), `-e` (environment `KEY=VALUE`), `-t` (target, value consumed)
-- Accepted but ignored: `-b`, `-f`, `-I`, `-Z`
+- `--` ends option parsing and follows the same single string versus argv rule as `new-window` (#582).
+- Accepted but ignored: `-b`, `-f`, `-I`
 
 **new-pane** (`newp`)
 A psmux extension that creates a pane floating above the tiled layout.
@@ -284,6 +290,7 @@ A psmux extension that creates a pane floating above the tiled layout.
 **select-pane** (`selectp`)
 - Boolean: `-U`, `-D`, `-L`, `-R` (directional), `-l` (last pane), `-Z` (keep the zoom while navigating), `-m` (mark), `-M` (unmark), `-e` (enable input), `-d` (disable input)
 - Value: `-T` (set and lock the pane title), `-P` (pane style), `-t` (target pane)
+- `-T` and `-P` without a direction flag are attribute only (#592): `select-pane -t %7 -T logs` titles pane `%7` and leaves the active window and pane exactly where they were, as tmux does. Combine with `-U`/`-D`/`-L`/`-R`/`-l` if you also want to move.
 - `-t` also accepts positional targets: `{top}`, `{bottom}`, `{left}`, `{right}`, `{top-left}`, `{top-right}`, `{bottom-left}`, `{bottom-right}`
 - Not accepted: `-g`
 
@@ -414,9 +421,10 @@ A psmux extension that creates a pane floating above the tiled layout.
 - Not accepted: `-1`, `-a`, `-N`, `-P`
 
 **send-keys** (`send`, `send-key`)
-- Boolean: `-l` (literal), `-R` (reset the terminal state), `-X` (run a copy mode command)
+- Boolean: `-l` (literal), `-R` (reset the terminal state), `-X` (run a copy mode command), `-H` (every operand is one hexadecimal byte value, written to the pane verbatim, PR #524)
 - Value: `-N` (repeat count, value consumed), `-t` (target pane)
-- Not accepted: `-c`, `-F`, `-H`, `-K`, `-M`
+- `--` ends option parsing (#562). Every token after it is a key to deliver even if it begins with `-`, so `send-keys -l -- -rf` types `-rf`. An empty argument sends nothing, as in tmux.
+- Not accepted: `-c`, `-F`, `-K`, `-M`
 - Named key tokens accepted as arguments: `ENTER`, `TAB`, `BTAB` / `BACKTAB`, `ESCAPE` / `ESC`, `SPACE`, `BSPACE` / `BACKSPACE`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `HOME`, `END`, `PAGEUP` / `PPAGE`, `PAGEDOWN` / `NPAGE`, `DELETE` / `DC`, `INSERT` / `IC`
 
 **send-prefix**
@@ -425,21 +433,24 @@ A psmux extension that creates a pane floating above the tiled layout.
 
 **send-text**, **send-paste**
 - psmux extensions. `send-text` takes the raw text as positional arguments and does no key name parsing. `send-paste` wraps the payload in a bracketed paste sequence and also accepts `-t` at the CLI.
+- `send-paste` takes exactly one positional argument, the text **base64 encoded** (PR #584). Base64 is the wire boundary: the payload can carry newlines, quotes and `;` without ever being read as a second command, and it is not subject to the 8191 character command line limit that `-EncodedCommand` wrappers hit. Anything that is not valid base64, or a second positional, fails with `send-paste requires exactly one UTF-8 base64 payload` at exit 1. PowerShell: `psmux send-paste -t %1 ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)))`.
 
 ### Configuration commands
 
 **set-option** (`set`) and **set-window-option** (`setw`)
-- Boolean: `-g` (global, accepted, psmux has one scope so this is effectively a selector no-op), `-u` (unset), `-U` (unset alias of `-u`, tmux parity, #553), `-a` (append to the current value), `-q` (quiet), `-o` (only set if currently unset), `-w` (window scope, does **not** consume the next argument)
-- Value: `-t` (target, value consumed), `-p` (pane, value consumed)
+- Boolean: `-g` (global, accepted, psmux has one scope so this is effectively a selector no-op), `-u` (unset), `-U` (unset alias of `-u`, tmux parity, #553), `-a` (append to the current value), `-q` (quiet), `-o` (only set if currently unset), `-w` (window scope), `-p` (pane scope, #580). None of these consume the next argument.
+- Value: `-t` (target, value consumed)
+- Flags parse only **before** the option name, as tmux's getopt does (#583). Once the option name has been seen, everything that follows is the value, dashes included: `set @k -u` stores the literal string `-u`, where it used to consume `-u` as the unset flag and delete `@k` at exit 0. `--` ends option parsing outright, so `set -- @k -g` also stores `-g`.
 - Flags are also matched inside combined tokens such as `-ga`, `-gu` and `-gq`.
 - A `@name` argument is never treated as a flag.
-- Not accepted: `-F`, `-s` — and since #553 any flag outside the accepted set is rejected with `unknown flag -X` at exit 1 instead of being silently dropped while the write lands.
+- Not accepted: `-F`, `-s`. Since #553 any flag outside the accepted set is rejected with `unknown flag -X` at exit 1 instead of being silently dropped while the write lands.
 
-**show-options** (`show`) and **show-window-options** (`showw`)
+**show-options** (`show`, `show-option`) and **show-window-options** (`showw`, `show-window-option`)
 - Boolean: `-A` (include inherited), `-s` (server scope), `-w` (window scope), `-v` (value only), `-q` (quiet)
 - Value: `-t` (window selector)
 - Combined tokens are handled the same way as for `set-option`.
-- Not accepted: `-g` as a distinct behavior (it is absorbed but tolerated), `-H`, `-p` — since #553 flags outside `-A -g -q -s -v -w` (plus `-t <target>`) are rejected with `unknown flag -X` at exit 1.
+- The singular aliases `show-option` and `show-window-option` are accepted on every layer (#586), so a `.tmux.conf` or plugin that uses tmux's singular spelling works unchanged.
+- Not accepted: `-g` as a distinct behavior (it is absorbed but tolerated), `-H`, `-p`. Since #553 flags outside `-A -g -q -s -v -w` (plus `-t <target>`) are rejected with `unknown flag -X` at exit 1.
 
 **set-hook** and **show-hooks**
 - Boolean: `-u` (unset, also as `-gu` or `-ug`), `-a` (append, also as `-ga` or `-ag`), `-g` (global, accepted and absorbed)
@@ -535,7 +546,9 @@ These are parsed before psmux looks at the command name.
 | `-h`, `--help` | Usage. |
 | `-V`, `-v`, `--version` | Version. |
 
-Glued short flags of the form `-x=VALUE` are normalized to `-x VALUE` before parsing.
+Glued short flags of the form `-x=VALUE` are normalized to `-x VALUE` before parsing. tmux's attached spellings are accepted too: `-Lwork` is `-L work`, and a command level `-tname` is `-t name`.
+
+When a command carries no `-t` at all, psmux picks the session the way tmux's `cmd_find_best_session` does (#603): a `$TMUX` inherited from the pane you are typing in wins if it belongs to the requested namespace, otherwise the session with the newest activity does, where activity is stamped on attach, on `switch-client`, and on every key an attached client sends. The `last_session` file is only a tie break. See the target syntax section of [scripting.md](scripting.md) for the full rule.
 
 ## User defined command aliases
 

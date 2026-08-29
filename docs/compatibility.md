@@ -127,7 +127,7 @@ BEL characters (`\x07`) from programs are forwarded to your host terminal for au
 
 ### Multi-line Status Bar
 
-`set -g status 2` enables a multi-line status bar with `status-format[0]` and `status-format[1]` fully rendering style directives like `#[fg=red]`, `#[align=left]`, and `#[fill=blue]`.
+`set -g status 2` enables a multi-line status bar with `status-format[0]` and `status-format[1]` fully rendering style directives like `#[fg=red]`, `#[align=left]`, and `#[fill=blue]`. Mouse clicks are hit tested on every status row, not only the first, and `#[range=window|N]` regions on any row switch to window index `N` (#593), so a window list placed on the second line is clickable.
 
 ### Status Bar Style Directives
 
@@ -173,6 +173,34 @@ The `#{window_zoomed_flag}` format variable is correctly maintained during zoom/
 ### Split Window Working Directory
 
 `split-window -c "#{pane_current_path}"` correctly resolves the format variable and opens the new pane in the current pane's working directory.
+
+### End of Options and Dash-leading Values
+
+`set-option` stops parsing flags at the option name, as tmux's getopt does, so a value that begins with a dash is stored rather than eaten: `set @k -u` writes the literal `-u` instead of silently deleting `@k` (#583). `send-keys` and `set-option` both honour `--` as an end of options marker (#562, #583), so `send-keys -l -- -rf` types `-rf`.
+
+### Direct argv Execution after `--`
+
+`new-window`, `split-window` and `new-session` treat a multi token command after `--` as an argv and execute it directly, exactly like tmux's `execvp` (#582). A single token stays a shell command string. Scripts that used `-- program arg arg` to bypass the shell on Linux now behave the same way on Windows, with no PowerShell profile in the path and `#{pane_current_command}` reporting the program.
+
+### Window Target Resolver
+
+`move-window` and `swap-window` honour `-s` and resolve `+N`, `-N`, `!`, `^`, `$`, `@id`, `{last}` style symbols, indexes and window names through a single tmux parity resolver (#602), and attached clients see the new window list immediately instead of a stale one (#601).
+
+### Title-only `select-pane`
+
+`select-pane -T` and `select-pane -P` set the pane title or style without moving the active window or pane, matching tmux (#592). Only a direction flag or `-l` changes focus.
+
+### Bare Command Routing
+
+A command with no `-t` reaches the session with the most recent activity, the same choice tmux's `cmd_find_best_session` makes, rather than whichever session was attached last according to a stale file (#603). A bare `attach` with nothing to attach to prints `no sessions` (#605).
+
+### Singular Option Aliases
+
+`show-option` and `show-window-option` are accepted alongside the plural forms (#586).
+
+### Hexadecimal and Base64 Transport
+
+`send-keys -H 68 69` writes single bytes to the pane, byte exact. `send-paste` takes a base64 payload at the CLI, so multi line text with quotes and semicolons is delivered as one bracketed paste and can never be misread as a second command.
 
 ### UTF-8 and CJK Support
 

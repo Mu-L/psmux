@@ -101,6 +101,15 @@ PROMPT_COMMAND='printf "\033]9;9;%s\033\\" "$PWD"'
 
 This is optional. Without it nothing breaks: `#{pane_current_path}` simply keeps the last directory it could observe, which is where you were before you typed `wsl`. Note that Windows Terminal needs the same shell integration for its own "duplicate tab in the same directory", so many WSL users already have it.
 
+**Q: Task Manager shows psmux at "Above normal" priority. Why, and can I turn it off?**
+A: By design. Windows gives its foreground scheduling boost to the process that owns the foreground window; the psmux server owns no window and the client draws inside a window the terminal host owns, so neither gets it and keystrokes queue behind compute jobs on a loaded machine. psmux therefore runs its own server and client at `above-normal`. Only psmux's processes are raised: the shells and programs inside panes always start at normal priority. Change it with `set -g priority normal` (or `high`) in your config, or per shell with `$env:PSMUX_PRIORITY = "normal"`, which outranks the option. `realtime` is refused. See [Process Priority](configuration.md#process-priority).
+
+**Q: `bind ы ...` or `bind M-ф ...` from my tmux config does nothing.**
+A: It works on current builds. Key names are parsed by character, so any single Unicode character is a valid key with or without `C-`, `M-` and `S-`. A key name psmux cannot parse is now reported rather than dropped: the CLI prints `unknown key: <name>` and exits 1, a config file line lands in the boot summary and in `~/.psmux/config-warnings.log`. tmux's mouse names (`WheelUpPane` and friends) are accepted so a ported config loads, though psmux does not act on them. See [Supported Key Names](keybindings.md#supported-key-names).
+
+**Q: Copy mode search cannot find text that has scrolled off screen.**
+A: It can on current builds. `/`, `?`, `Ctrl+s`, `Ctrl+r` and `n` / `N` walk the whole scrollback, and an off screen match scrolls the view to it the way tmux does. `send-keys -X search-backward <text>` from a script does the same and updates `#{search_match}`.
+
 **Q: How do I prevent psmux from nesting inside itself?**
 A: psmux automatically detects when it is already running inside a psmux session and prevents accidental nesting. If you try to start `psmux` inside an existing session, it will warn you instead of creating a nested instance. To explicitly create a new session from within psmux, use the command prompt (`Prefix + :`) and type `new-session`.
 

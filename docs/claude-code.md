@@ -179,7 +179,66 @@ Get-Command claude | Format-List
 
 If the wrapper is active, this shows a `Function` (not an `Application`). The wrapper auto-injects `--teammate-mode tmux` when calling `claude.exe`, unless `teammateMode` is already configured in your settings.json (user, project, or managed scope) or passed explicitly on the command line. Your own configuration always outranks the psmux default.
 
+## What the Teammate Backend Asks of psmux
+
+Claude Code's `TmuxBackend` drives the multiplexer with a small, fixed set of tmux commands. All
+of them work against psmux, and the whole sequence is pinned by an end to end test
+(`tests/test_issue580_teammate_backend.ps1`, [#580](https://github.com/psmux/psmux/issues/580)):
+
+| What Claude Code runs | What psmux does |
+|---|---|
+| `new-session -d -s <team> -- cat` | tmux's blocker idiom: a pane that sits and reads stdin. On Windows a bare `cat` would hit PowerShell's `Get-Content` alias and wedge at a parameter prompt, so psmux substitutes a real stdin draining blocker, on both the `new-session` and `new-window` shapes and on the direct exec (`--`) path |
+| `split-window -t %N ...`, `send-keys -t %N ...`, `respawn-pane -t %N` | Bare `%id` pane targets resolve across every window of the session, not just the active one, and a target that does not exist is refused with an error at exit 1 instead of silently acting on the active pane |
+| `set-option -p -t %N remain-on-exit failed` | Pane scoped options. `-p` is the tmux pane scope flag, not a target flag. `remain-on-exit` follows tmux semantics per pane (`on`, `off`, `failed`): a teammate that crashes stays visible with its error, a teammate that exits cleanly closes its pane |
+| `show-options -p -t %N` | Lists the pane's options as `name value` lines. The `-v` flag and an option name filter are not yet applied at pane scope (still open under #580), so parse the `name value` shape |
+
+Exactly two pane scoped options exist, `remain-on-exit` and psmux's own `@mouse-force` (see
+below). Any other name is refused with
+`pane-scoped option 'x' is not supported (supported: remain-on-exit, @mouse-force)` at exit 1
+rather than stored as a silent no-op, and a `%id` that does not exist answers
+`can't find pane: %N`.
+
+## Mouse and the Wheel in a Claude Code Pane
+
+Claude Code reads the mouse as VT bytes on stdin and enables mouse tracking itself (it sends
+DECSET 1000, 1002, 1003 and 1006 at startup). Two Windows specifics affect it:
+
+- **Windows builds below 22523** (Windows 10, Windows Server 2019 and 2022): conhost does not hand
+  an SGR mouse report on the ConPTY input pipe to the child, so Claude Code cannot receive the
+  wheel there at all. On those builds a dropped console registration used to turn each wheel
+  notch into Up and Down arrow keys, which is the "Scroll wheel is sending arrow keys" message
+  ([#597](https://github.com/psmux/psmux/issues/597)). psmux now keeps the registration alive on
+  every build, so the wheel is a no-op over Claude Code on those builds rather than a stream of
+  arrow keys. On 22523 and above the wheel works.
+- **A `node` child entering raw mode** overwrites the pane console's mode word and drops
+  `ENABLE_MOUSE_INPUT` permanently, which used to silence the wheel for the rest of the pane's
+  life. psmux now latches the wheel authorization on the pane for as long as the process that
+  earned it is alive ([#613](https://github.com/psmux/psmux/issues/613)). If a pane still never
+  earns it, `set-option -p -t %N @mouse-force on` exempts that pane from the gate.
+
+See [mouse-ssh.md](mouse-ssh.md) and [faq.md](faq.md) for the full picture.
+
 ## Troubleshooting
+
+### Teammates stop landing in panes after you open Agent View
+
+Pressing Left in Claude Code to open Agent View makes Claude Code re-execute itself with a fresh
+argv, spawned directly from the binary rather than through your shell. The `--teammate-mode tmux`
+flag that psmux's `claude` wrapper function injected is not carried across, so the relaunched
+process falls back to Claude Code's built in default, which is `in-process`. Every environment
+variable survives the round trip; it is only the flag that is lost
+([#578](https://github.com/psmux/psmux/issues/578), upstream behaviour).
+
+The fix that survives Agent View is to set the mode in your Claude Code settings so it does not
+depend on argv at all. In `~/.claude/settings.json`:
+
+```json
+{ "teammateMode": "tmux" }
+```
+
+The `/config` screen inside Claude Code sets the same key. Once `teammateMode` is configured there,
+psmux deliberately stops injecting the flag so the two never fight. Typing `claude` again at the
+pane prompt also restores it for that launch, because that goes back through the wrapper.
 
 ### Agents still running in-process
 

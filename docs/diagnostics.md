@@ -11,7 +11,7 @@ path can be reproduced on a machine that is not that platform.
 
 ## Debug Logging
 
-psmux has eleven independent debug loggers. All of them are **off by default** and cost nothing
+psmux has fourteen independent debug loggers. All of them are **off by default** and cost nothing
 when disabled (one atomic load per call site). Each writes a timestamped line per event, and the
 loggers under `~/.psmux/` are capped at a fixed number of entries so an enabled log can never fill
 your disk.
@@ -23,9 +23,12 @@ your disk.
 | `PSMUX_INPUT_DEBUG=1` | `~/.psmux/input_debug.log` | Every input event plus the console mode in effect when it arrived |
 | `PSMUX_SERVER_DEBUG=1` | `~/.psmux/server_debug.log` | Server side request tracing and session switching |
 | `PSMUX_SESSION_DEBUG=1` | `~/.psmux/session_debug.log` | Session registry scans and stale port cleanup |
-| `PSMUX_MOUSE_DEBUG=1` | `~/.psmux/mouse_debug.log` | Mouse injection and screen to pane coordinate mapping |
+| `PSMUX_MOUSE_DEBUG=1` | `~/.psmux/mouse_debug.log` | Mouse injection, screen to pane coordinate mapping, and the wheel gate's decision per notch (which mouse protocol the pane holds and who enabled it) |
 | `PSMUX_SSH_DEBUG=1` | `~/.psmux/ssh_input.log` | SSH escape sequence decoding into Win32 input records |
 | `PSMUX_LATENCY_LOG=1` | `~/.psmux/latency.log` | Keypress to render latency, measured client side |
+| `PSMUX_PANE_RAW=1` | `~/.psmux/pane_raw.bin` | The raw byte stream a pane's child wrote, before psmux's VT parser touched it. The file to read when a colour, a mode switch or a mouse DECSET seems to be missing: it shows what the program (and conhost, which echoes console mode changes into the same stream as `ESC [ ? 1003 ; 1006 h` / `l`) actually emitted |
+| `PSMUX_AUTORENAME_DEBUG=1` | `~/.psmux/autorename.log` | The process tree walk behind `automatic-rename` and `#{pane_current_command}` |
+| `PSMUX_ROUTE_DEBUG=1` | stderr of the CLI process | Which session a bare `psmux <command>` (no `-t`, no `$TMUX`) was routed to and why |
 | `PSMUX_POPUP_DEBUG=1` | `%TEMP%\psmux_popup_debug.log` | Popup creation, resize, and teardown |
 | `PSMUX_WARM_DEBUG=1` | `%TEMP%\psmux_warm_debug.log` | Warm server and warm pane lifecycle |
 | `PSMUX_AUTH_DEBUG=1` | `%TEMP%\psmux_auth_debug.log` | The `.port` and `.key` handshake between client and server |
@@ -133,7 +136,10 @@ artifact in a bug report.
 
 psmux keeps all of its runtime bookkeeping in one directory, `%USERPROFILE%\.psmux\`. The home
 directory is resolved from `USERPROFILE` first, then the Win32 profile API, then
-`HOMEDRIVE` plus `HOMEPATH`, then `HOME`.
+`HOMEDRIVE` plus `HOMEPATH`, then `HOME`. Setting `PSMUX_DATA_DIR` to an absolute path moves the
+whole directory, which gives you a second, fully independent registry (its own sessions, its own
+warm server, its own `last_session`) without touching the default one. See
+[configuration.md](configuration.md#environment-variables).
 
 Per-session files are named after the session:
 
@@ -143,6 +149,7 @@ Per-session files are named after the session:
 | `<session>.key` | The auth key a client must present to that server |
 | `<session>.sid` | The session's stable id, the `$N` used in targets |
 | `<session>.pid` | Liveness anchor, stored as `pid:creation_filetime` |
+| `<session>.act` | Last activity stamp, Unix epoch microseconds. Written on client attach and on real keystrokes from an attached client (throttled to one write per second), the same `activity_time` tmux keeps. It is what a bare `psmux <command>` with no `-t` uses to pick the session you are actually working in ([#603](https://github.com/psmux/psmux/issues/603)). A detached session that was never attached has none and ranks by its `.port` file's age |
 | `<session>.spawnlock` | Warm pool spawn lock, prevents two racing spawns |
 
 The `.pid` file is worth understanding, because it is what makes psmux safe to clean up after
@@ -164,8 +171,16 @@ Three files have fixed names and are not tied to any session:
 | File | Purpose |
 |---|---|
 | `latency.log` | Client latency trace, only written under `PSMUX_LATENCY_LOG=1` |
-| `last_session` | The session name to reattach to for a bare `psmux` invocation |
+| `last_session` | The session name written on the most recent attach. A bare `psmux` invocation no longer trusts it outright: routing ranks sessions by their `.act` stamp first, and this file only breaks a tie between sessions with identical activity, which in practice means a registry written by an older psmux that nobody has attached to since |
 | `next_session_id` | Counter that hands out the next stable session id |
+
+A stale `.port` (a server that is gone but whose registry files survived) is reaped by the next
+client that trips over it. `psmux attach -t name` against one prints tmux's
+`can't find session: name` and exits 1, and a bare `psmux attach` that finds nothing left prints
+`no sessions`. Neither surfaces the underlying winsock error any more
+([#605](https://github.com/psmux/psmux/issues/605)). If you see a raw
+`No connection could be made because the target machine actively refused it` you are on an older
+build.
 
 The same directory also holds `plugins\` (see [plugins.md](plugins.md)) and, in control mode,
 `cc_debug.log` (see [iterm2-control-mode.md](iterm2-control-mode.md)).
@@ -206,7 +221,9 @@ Collect these before opening an issue at
 5. **A relevant debug log**, if you can guess the subsystem. Keys or modifiers not arriving,
    use `PSMUX_INPUT_DEBUG`. Mouse misbehaving, use `PSMUX_MOUSE_DEBUG`. Anything over SSH, use
    `PSMUX_SSH_DEBUG`. Wrong colors or a broken theme, use `PSMUX_STYLE_DEBUG`. A client that will
-   not attach, use `PSMUX_AUTH_DEBUG`.
+   not attach, use `PSMUX_AUTH_DEBUG`. A program inside a pane that seems to lose a colour, a
+   screen mode or its mouse registration, use `PSMUX_PANE_RAW` and look at what the program
+   really wrote. A bare command landing in the wrong session, use `PSMUX_ROUTE_DEBUG`.
 6. **A directory listing** of `%USERPROFILE%\.psmux\` when the problem is about sessions not being
    found, servers not starting, or stale sessions appearing in `psmux ls`.
 7. **Your Windows version.** `[System.Environment]::OSVersion.Version` prints it. Several

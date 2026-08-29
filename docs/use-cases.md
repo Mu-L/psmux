@@ -285,6 +285,11 @@ Windows Terminal draws windows. psmux runs a **server**. That difference is the 
 
 | Topic | Description |
 |-------|-------------|
+| [Getting Started on Windows](tutorials/getting-started-windows.md) | First session, prefix key, splits, detach and reattach, first config file |
+| [Cross Platform tmux Scripts](tutorials/cross-platform-tmux-scripts.md) | One bootstrap script that runs on Windows through psmux and on Linux or macOS through tmux |
+| [Terminal AI Agents and TUIs](tutorials/terminal-agents-and-tuis.md) | Scenario 5 in depth: driving, logging and restarting agents and TUIs from scripts |
+| [Dev Environment Layouts](tutorials/dev-environment-layouts.md) | Scenario 6 in depth: layouts, sizing, synchronize-panes, save and restore |
+| [Architecture](architecture.md) | Why the detached server model works natively on Windows: ConPTY per pane, client and server, warm pool |
 | [Scripting & Automation](scripting.md) | Every command used above, plus hooks, targets, and format variables |
 | [Claude Code Agent Teams](claude-code.md) | Deep dive on running AI agents in visible panes |
 | [Developer Integration](integration.md) | Python (libtmux), control mode, and IDE integration |

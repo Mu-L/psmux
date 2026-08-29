@@ -357,6 +357,10 @@ Enter copy mode with `Prefix + [`, or with `Prefix + PageUp` to start one page u
 
 Mouse scroll wheel also enters copy mode by default. To disable this, set `scroll-enter-copy-mode off` in your config.
 
+Copy mode belongs to the pane it was entered in, as in tmux. Splitting, opening a window or
+killing another pane leaves that pane in copy mode and starts the new or newly focused pane live;
+several panes can be in copy mode at once, and `#{pane_in_mode}` answers for the pane you target.
+
 The keys below are the built in copy mode map. Anything you bind with
 `bind-key -T copy-mode-vi <key>` is checked first and wins for that key.
 
@@ -484,6 +488,10 @@ bind-key -T copy-mode-vi v send-keys -X begin-selection
 | `Ctrl+s` / `Ctrl+r` | Search forward / backward (emacs style, works in vi mode too) |
 | `n` / `N` | Next / previous match |
 
+Search covers the whole scrollback, not just the rows on screen. A match that is off screen
+scrolls the view to it, parked a quarter of a screen from the bottom the way tmux does, and
+`?` stops at the nearest match above the cursor.
+
 ### Text Objects & Registers
 
 | Key | Action |
@@ -554,6 +562,7 @@ When `mouse on` (default):
 | Left-click/drag border | Resize split interactively |
 | Scroll up/down | Scroll pane (or enter copy mode at prompt) |
 | Mouse drag in copy mode | Select text, auto-copy on release |
+| Drag held on the pane's first or last row | Auto-scroll the selection through scrollback (faster once the pointer leaves the pane) |
 | Right-click | Paste clipboard |
 
 ## Supported Key Names
@@ -571,10 +580,17 @@ Key names for `bind-key` and `send-keys`:
 | Shift+key | Use uppercase letter: `T` for `Shift+t` |
 | Shift+Enter | `S-Enter` (sends proper escape sequence) |
 | Shift+Tab | `BTab` (sends `ESC [ Z`) |
+| Ctrl+Backspace | `C-BSpace` (writes `0x08`, the native Windows encoding, so PSReadLine runs BackwardKillWord; `M-BSpace` writes `ESC 0x7f`). A terminal that sends a bare `0x08` for Ctrl+Backspace is seen as `C-h`, which is also what tmux reports for it |
+| Non-ASCII keys | Any single Unicode character: `ы`, `é`, `ß`, with the usual modifiers (`M-ф`, `C-ы`, `S-ы`). `list-keys` prints the character as typed |
+| Mouse key names | tmux's mouse names (`WheelUpPane`, `MouseDown1Pane`, `DoubleClick1Pane`, and so on), `Any`, `None`, `Mouse`, `FocusIn`/`FocusOut`, `PasteStart`/`PasteEnd` and `UserN` are accepted so a ported tmux config loads, but psmux does not act on them |
 
 Aliases are accepted for several of these: `Return` for `Enter`, `Esc` for `Escape`,
 `BSpace` for `Backspace`, `PPage` or `PgUp` for `PageUp`, `NPage` or `PgDn` for `PageDown`,
 `IC` for `Insert`, `DC` for `Delete`, `BackTab` for `BTab`.
+
+A key name psmux cannot parse is never dropped silently. `psmux bind-key WheelUpPain ...` prints
+`unknown key: WheelUpPain` and exits 1, like tmux; the same line in a config file is reported in
+the boot summary and in `~/.psmux/config-warnings.log` (see [diagnostics.md](diagnostics.md)).
 
 ## Custom Key Bindings
 

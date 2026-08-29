@@ -414,14 +414,14 @@ row per object. The full catalogue, including the human facing status bar variab
 | `#{client_pid}` | `32944` | PID of the attached client |
 | `#{client_key_table}` | `root` | Key table the client is currently in |
 | `#{version}` | `3.3.7` | psmux version, for capability gating |
-| `#{pid}` / `#{server_pid}` | `19004` | PID of the server process that answered — **session-scoped**, see below |
-| `#{server_instance}` | `b644f0a347fa5e14` | Stable identity of the `-L` namespace — poll this to detect a real restart |
+| `#{pid}` / `#{server_pid}` | `19004` | PID of the server process that answered. **Session-scoped**, see below |
+| `#{server_instance}` | `b644f0a347fa5e14` | Stable identity of the `-L` namespace. Poll this to detect a real restart |
 | `#{socket_path}` | `C:\Users\me/.psmux/default` | Server discovery path |
 | `#{host}` / `#{host_short}` / `#{user}` | `BOX` / `me` | Host and user identity |
 
 > **Supervising a namespace.** Unlike tmux, psmux runs one server process per
 > session, so `#{pid}` (and its alias `#{server_pid}`) report whichever session's
-> server handled the request — creating a session changes the value even though
+> server handled the request. Creating a session changes the value even though
 > nothing restarted. A watchdog that polls `#{pid}` to answer *"is this still the
 > server I was talking to?"* will read every new session as a server restart.
 >
@@ -566,12 +566,17 @@ psmux sets these environment variables in child processes, matching tmux:
 
 | Variable | Example | Description |
 |----------|---------|-------------|
-| `TMUX` | `/tmp/tmux-1000/default,12345,0` | Indicates a tmux/psmux session is active |
-| `TMUX_PANE` | `%0` | The pane ID of the current pane |
+| `TMUX` | `/tmp/psmux-58828/default,51961,0` | Indicates a tmux/psmux session is active. The shape is `/tmp/psmux-<server pid>/<socket name>,<port>,0`, so the middle field is the server's TCP port rather than a Unix pid |
+| `TMUX_PANE` | `%1` | The pane ID of the current pane |
+| `PSMUX_SESSION` | `work` | The session the pane belongs to (psmux extension) |
 | `TERM` | `xterm-256color` | Terminal type |
 | `COLORTERM` | `truecolor` | Indicates 24-bit color support |
 
-Tools that check for `$TMUX` to detect tmux will correctly detect psmux as well.
+Tools that check for `$TMUX` to detect tmux will correctly detect psmux as well. Git Bash and
+MSYS2 shells are told not to convert `TMUX` into a Windows path (`MSYS2_ENV_CONV_EXCL=TMUX`), so
+the value survives intact there too. Windows gives each process a private copy of its environment,
+so psmux can only set these when the pane's first process starts; nothing can add, change or remove
+a variable inside a program that is already running.
 
 ### Propagating Environment Variables
 
@@ -613,6 +618,30 @@ psmux -CC
 ```
 
 The double underscore separates namespace from session name.
+
+### A Separate Data Root
+
+`-L` shares one registry directory and prefixes the names. For a tool that must not see or touch
+the user's own sessions at all (a test harness, a sandboxed agent), point `PSMUX_DATA_DIR` at an
+absolute directory of its own instead. Everything psmux keeps on disk (`.port`, `.key`, `.pid`,
+`last_session`, the warm server) lives under that root, and two roots can hold sessions of the
+same name at the same time, including their own `__warm__` standbys
+([#599](https://github.com/psmux/psmux/issues/599)). Set it in the environment of every psmux
+process you launch, server and CLI alike:
+
+```powershell
+$env:PSMUX_DATA_DIR = "C:\work\agent-registry"
+psmux new-session -d -s work      # invisible to a plain `psmux ls` in another shell
+```
+
+### Which Session a Bare Command Hits
+
+A command with no `-t` and no `$TMUX` in its environment (a script run from a plain PowerShell
+window, for example) is routed to the session with the most recent activity: the last one a client
+attached to or typed into, ranked the way tmux's `cmd_find_best_session` ranks by `activity_time`
+([#603](https://github.com/psmux/psmux/issues/603)). A session that was attached once and detached
+long ago does not outrank the one the user is sitting in. Do not rely on this in a tool: pass `-t`
+with the session name or `$N` id every time.
 
 ## Targeting Syntax Reference
 
@@ -719,9 +748,13 @@ psmux send-keys -t %1 "cargo build && psmux wait-for -S ready" Enter
 
 ## Troubleshooting
 
-### "no server running" Error
+### "no server running", "no sessions" and "can't find session" Errors
 
-psmux requires a running session. Create one first:
+psmux requires a running session. A bare `psmux attach` with nothing to attach to prints
+`no sessions` and exits 1; `psmux attach -t work` against a session that does not exist, or whose
+server has gone away and left a stale `.port` behind, prints `can't find session: work` and exits
+1 (and reaps the stale registration). Those are tmux's words for the same situations, and a tool
+can match on them. Create the session first:
 
 ```powershell
 psmux new-session -d -s work
@@ -763,9 +796,10 @@ psmux -CC
 
 When porting Unix tmux integrations to Windows:
 
-- **Alternate screen buffer**: ConPTY processes SMCUP/RMCUP internally. The `alternate_on` flag is always false in psmux. Use content-based heuristics to detect fullscreen TUI apps.
+- **Alternate screen buffer**: `#{alternate_on}` reports `1` while a full screen program (nvim, htop, less) holds the alternate screen and `0` at a shell prompt, the same as tmux. It is read from the pane's own parser, so a program that switches buffers through the Win32 console API rather than by writing `ESC [ ? 1049 h` (a plain `Write-Host` of the sequence from PowerShell, for example) does not flip it. Real TUIs write the sequence and are detected.
 - **Output normalization**: ConPTY may normalize line endings. `%output` data may differ slightly from Unix tmux output.
-- **Ctrl+C**: `GenerateConsoleCtrlEvent` sends to all processes sharing the console. Prefer app-specific quit keys over `C-c` in automation.
+- **Ctrl+C**: tmux writes a raw `0x03` and lets the pane's tty discipline decide. On Windows psmux routes `C-c` by what is in the foreground of the pane: a shell prompt or a native console program gets a console `CTRL_C_EVENT`, a raw mode TUI (vim, Copilot CLI) gets the byte, and a bridge such as `wsl.exe` or `ssh.exe` gets the byte with console processing turned off so conhost cannot convert it into a console wide event ([#579](https://github.com/psmux/psmux/issues/579)). Prefer app-specific quit keys over `C-c` in automation where you can.
+- **Closing the terminal window**: closing the Windows Terminal tab or console window that hosts an attached client detaches that client, exactly as closing an xterm running `tmux attach` does. The server and every process inside every pane keep running until you `kill-session` or `kill-server` ([#585](https://github.com/psmux/psmux/issues/585)). A tool that wants "close the window, stop the work" must issue the kill itself.
 - **TUI exit timing**: After a TUI exits, ConPTY needs 4 to 6 seconds to restore the screen. Add a delay before `capture-pane` after TUI exit.
 
 ## Related Documentation

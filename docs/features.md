@@ -53,7 +53,8 @@
 
 - **53 vi-style key bindings** : motions, selections, search, text objects
 - Visual, line, and **rectangle selection** modes (`v`, `V`, `Ctrl+v`)
-- `/` and `?` search with `n`/`N` navigation
+- `/` and `?` search with `n`/`N` navigation, across the whole scrollback (an off screen match scrolls the view to it)
+- Copy mode is a property of the pane, as in tmux: new panes start live, and more than one pane can be in copy mode at once
 - `f`/`F`/`t`/`T` character find, `%` bracket matching, `{`/`}` paragraph jump
 - Named registers (`"a` through `"z`), count prefixes, word/WORD variants
 - Mouse drag-select copies to Windows clipboard on release and returns to the live view (tmux parity); dragging at the pane's first/last row auto-scrolls through scrollback

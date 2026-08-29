@@ -54,6 +54,38 @@ When warm is disabled:
 
 You can re-enable warm at runtime with `set -g warm on`.
 
+## What a Claim Carries Over
+
+A warm server and a warm pane are spawned ahead of time, so they know nothing about the client
+that later claims them. psmux carries the parts that matter across the claim:
+
+- **Start directory.** `new-session -c`, `new-window -c` and `split-window -c` cannot set the
+  working directory of a shell that is already running, so psmux types a `cd` line into the warm
+  shell and clears the screen. The line uses the syntax of the shell in the pane, chosen from the
+  effective `default-shell`: PowerShell, cmd.exe and the POSIX shells each get their own form.
+  Before [#600](https://github.com/psmux/psmux/issues/600) every Windows pane got the PowerShell
+  form, which Git Bash and cmd.exe rejected. See
+  [multi-shell.md](multi-shell.md#start-directories-and-warm-panes) for the exact lines.
+- **Process priority.** The claiming client's `PSMUX_PRIORITY` (or its config file `priority`
+  line) is applied to the claimed server, so `show-options -g priority` and the real scheduling
+  class agree whether the session was cold started or claimed
+  ([#608](https://github.com/psmux/psmux/issues/608)). See
+  [configuration.md](configuration.md#process-priority).
+- **Config.** The claimed server reloads your config file on the claim, so a `set -g` line you
+  added since the standby was spawned is honoured.
+
+What does not carry over: `-e VAR=value` on `new-session`, `new-window` or `split-window` cannot
+reach a shell that already has its environment, so a spawn with `-e` skips the warm pool and starts
+cold.
+
+## One Warm Server per Registry
+
+The warm server belongs to the registry that spawned it. Each `-L <name>` namespace keeps its own
+(`<name>____warm__`), and each `PSMUX_DATA_DIR` keeps its own as well: the single server guard that
+stops two servers from publishing the same session name is keyed by the resolved data root, so two
+registries can each hold a `__warm__` without refusing one another
+([#599](https://github.com/psmux/psmux/issues/599)).
+
 ## Accessing the Warm Session (Advanced)
 
 If you need to inspect or manage the warm session directly (debugging, development):

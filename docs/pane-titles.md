@@ -13,6 +13,15 @@ Programs running inside a pane can change its title by sending **OSC (Operating 
 
 When psmux receives one of these from a child process, it updates `pane_title` so that format variables, status bar, and border labels all reflect the new value.
 
+Two more OSC sequences are understood, and they never touch the title. They tell psmux where the shell is:
+
+| Sequence | Name | Effect |
+|----------|------|--------|
+| `ESC ] 7 ; file://host/path ESC \` | OSC 7 | Announces the shell's working directory. Feeds `#{pane_current_path}` for panes whose directory Windows cannot see (WSL, SSH) |
+| `ESC ] 9 ; 9 ; path ESC \` | OSC 9;9 | ConEmu's form of the same announcement |
+
+A POSIX path in either form is translated to a native Windows one (`/mnt/c/Users` to `C:\Users`, `/home/you` to `\\wsl.localhost\<distro>\home\you`). PowerShell, cmd, Git Bash and Cygwin panes do not need it, since their `cd` moves the Win32 working directory and psmux reads that directly. See the WSL section of [multi-shell.md](multi-shell.md#wsl-panes).
+
 ## PowerShell and OSC Titles
 
 Here is the important part for Windows users: **PowerShell 7 sends OSC 0 automatically on every single prompt**. It sets the terminal title to the current working directory (e.g. `C:\Users\you\Projects\myapp`).

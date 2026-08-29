@@ -19,8 +19,11 @@
 <p align="center">
   <a href="#installation">Install</a> ·
   <a href="#usage">Usage</a> ·
+  <a href="docs/tutorials/getting-started-windows.md">Get Started</a> ·
   <a href="docs/use-cases.md">Use Cases</a> ·
+  <a href="docs/README.md#tutorials">Tutorials</a> ·
   <a href="docs/claude-code.md">Claude Code</a> ·
+  <a href="docs/architecture.md">Architecture</a> ·
   <a href="docs/features.md">Features</a> ·
   <a href="docs/compatibility.md">Compatibility</a> ·
   <a href="docs/performance.md">Performance</a> ·
@@ -146,9 +149,23 @@ No extra configuration needed. Full guide: **[docs/claude-code.md](docs/claude-c
 
 ## Documentation
 
+The full index with one line summaries of every page lives in **[docs/README.md](docs/README.md)**. AI assistants and crawlers can start from **[llms.txt](llms.txt)**.
+
+### Tutorials
+
+| Tutorial | What you will learn |
+|----------|---------------------|
+| **[Getting Started on Windows](docs/tutorials/getting-started-windows.md)** | Install, first session, prefix key, splits, detach and reattach, first config, Windows Terminal profile |
+| **[Cross Platform tmux Scripts](docs/tutorials/cross-platform-tmux-scripts.md)** | Write one tmux automation script that runs unchanged on Windows (psmux), Linux and macOS (tmux) |
+| **[Terminal AI Agents and TUIs](docs/tutorials/terminal-agents-and-tuis.md)** | Run Claude Code, Codex CLI, Gemini CLI, neovim, lazygit and other TUIs in scripted multi pane layouts |
+| **[Dev Environment Layouts](docs/tutorials/dev-environment-layouts.md)** | Multi window and multi pane project sessions, layout presets, bootstrap scripts, save and restore |
+
+### Guides and reference
+
 | Topic | Description |
 |-------|-------------|
 | **[Windows Use Cases](docs/use-cases.md)** | Practical Windows scenarios: startup services, AI agents, dashboards, remote admin |
+| **[Architecture](docs/architecture.md)** | How psmux multiplexes natively: client/server, one ConPTY per pane, input and output paths, warm pool |
 | **[Features](docs/features.md)** | Full feature list: mouse, copy mode, layouts, format engine |
 | **[Compatibility](docs/compatibility.md)** | tmux command/config compatibility matrix |
 | **[Performance](docs/performance.md)** | Benchmarks and optimization details |

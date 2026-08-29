@@ -46,8 +46,20 @@ psmux send-keys -p
 psmux send-keys -N 5 Up
 
 # Send a copy mode command by name (see "Copy Mode Commands (send-keys -X)")
+psmux send-keys -X begin-selection
 psmux send-keys -X cursor-up
 psmux send-keys -X copy-selection-and-cancel
+
+# Send a dash-leading operand: `--` ends option parsing (#562)
+psmux send-keys -l -- "-rf"
+
+# Send raw bytes, one hexadecimal byte per operand (tmux send-keys -H)
+psmux send-keys -H 65 63 68 6f 20 68 69 0d      # types "echo hi" then CR
+
+# Paste a block of text safely: send-paste takes the text base64 encoded, so
+# newlines, quotes and semicolons can never be read as a second command
+$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("line one`nline two"))
+psmux send-paste -t %1 $b64
 
 # Special keys supported:
 # Enter, Tab, Escape, Space, Backspace
@@ -132,7 +144,8 @@ Programs running inside a pane can set the title via OSC escape sequences. Power
 # Set a title on the active pane
 psmux select-pane -T "my build pane"
 
-# Set pane title on a specific pane
+# Set pane title on a specific pane. -T and -P are attribute only (#592): the
+# active window and pane stay where they are, even when %3 lives in another window
 psmux select-pane -t %3 -T "logs"
 
 # Set per-pane style (foreground/background color override)
@@ -233,6 +246,38 @@ psmux move-pane -s %5 -t %3
 # Find a window by name or content
 psmux find-window "search term"
 ```
+
+## Moving and Swapping Windows
+
+`move-window` and `swap-window` resolve their `-s` and `-t` values on the server with the same
+resolver tmux uses, so the whole tmux target vocabulary works (#602):
+
+```powershell
+# Move the current window to index 7 (a free index is fine)
+psmux move-window -t 7
+
+# Move a specific window, not the active one
+psmux move-window -s work:2 -t work:9
+
+# Replace whatever is at the destination
+psmux move-window -s :2 -t :0 -k
+
+# Renumber windows to close the gaps
+psmux move-window -r
+
+# Swap the current window with the next one, or with a named window
+psmux swap-window -t +1
+psmux swap-window -t logs
+
+# The symbolic forms work everywhere a window target does
+psmux swap-window -s '{last}' -t '{end}'
+```
+
+For `move-window -t`, `+N` and `-N` are arithmetic on the current index and a number that names no
+window is a free slot. For `swap-window`, `+N` and `-N` step through the window list and wrap, and a
+number that names no window is an error. Both commands push the change to attached clients at once
+(#601). After a swap without `-d` the active window number stays put, so whichever window moved into
+it is now current, as in tmux; with `-d` the window you were in stays current at its new number.
 
 ## Environment Variables
 
@@ -417,7 +462,7 @@ bind-key -n C-h if-shell -F "#{pane_at_left}" "send-keys C-h" "select-pane -L"
 | `#{host}` / `#{hostname}` | Full hostname |
 | `#{host_short}` | Hostname up to the first dot |
 | `#{user}` / `#{username}` | Current user name |
-| `#{pid}` / `#{server_pid}` | PID of the server process that answered the request. psmux runs one server per session, so this is session-scoped and changes when a session is created — use `#{server_instance}` to identify the namespace |
+| `#{pid}` / `#{server_pid}` | PID of the server process that answered the request. psmux runs one server per session, so this is session-scoped and changes when a session is created. Use `#{server_instance}` to identify the namespace |
 | `#{server_instance}` | Stable identity of the `-L` namespace. Constant while the namespace is up, whichever of its servers answers; changes only after a genuine restart. Empty for a namespace that has no server |
 | `#{version}` | psmux version, for example `3.3.7` |
 | `#{start_time}` | Server start time |
@@ -602,7 +647,13 @@ psmux switch-client -t other-session
 # Config at runtime
 psmux source-file ~/.psmux.conf
 psmux show-options
+psmux show-option -g status-left           # tmux's singular spelling works too (#586)
 psmux set-option -g status-left "[#S]"
+
+# Flags parse only before the option name (#583): a dash-leading VALUE is data
+psmux set -g @my-flag -u                   # stores the string "-u"
+psmux set -gu @my-flag                     # this is how you unset it
+psmux set -- @literal -g                   # `--` ends option parsing
 
 # Layout/history/stream control
 psmux next-layout
@@ -812,22 +863,22 @@ psmux pipe-pane
 `cat >> <path>` (path may be quoted) is serviced by the psmux server itself:
 the pane's raw ConPTY bytes are written straight to the file, byte-for-byte,
 with no shell in between. This exists because arbitrary sink commands run
-under PowerShell, where `cat` is the `Get-Content` alias — it never reads
+under PowerShell, where `cat` is the `Get-Content` alias, it never reads
 stdin, so the idiom cannot work as a shell command on Windows.
 
 Prefer an **absolute path**: a relative path resolves against the psmux
 server's working directory (the session's start directory), not your
-shell's. The path must be a literal **local file** path — anything a shell
+shell's. The path must be a literal **local file** path. Anything a shell
 would expand (`$var`, `` `...` ``, `%var%`, `#I`, leading `~`) falls
 through to the shell sink, and UNC paths, mapped network drives, and DOS
 device names (`CON`, `NUL`, ...) are refused loudly: an unreachable host
 would stall the whole server, and a device is not a log file. To log to a
-network location, use a sink command that reads stdin — it runs as a child
+network location, use a sink command that reads stdin, which runs as a child
 process and stalls only itself.
 
 **Arbitrary command sinks.** Any other command runs under the sink shell
 (`pwsh`/`powershell -NoProfile -Command`, falling back to `cmd /c`) and
-**must actually read its stdin** — that is where the pane bytes arrive. In
+**must actually read its stdin**, because that is where the pane bytes arrive. In
 PowerShell, read `$input` or `[Console]::In`:
 
 ```powershell
@@ -908,6 +959,25 @@ psmux select-window -t !               # last (previous) window
 
 Prefix a name with `=` for an exact match, for example `-t '=work'`, when a session name would
 otherwise be ambiguous.
+
+### Which session a bare command reaches
+
+A command with no `-t` still has to land somewhere. psmux resolves it the way tmux's
+`cmd_find_best_session` does (#603), in this order:
+
+1. `-t`, if given, always wins. So does a positional session name on `attach`.
+2. Inside a psmux pane, the `$TMUX` variable names the server the pane belongs to, and that
+   session is used when it is in the namespace you asked for (`-L`).
+3. Otherwise the session with the **newest activity** in the namespace. Activity is stamped when a
+   client attaches, on `switch-client`, and on every key an attached client sends, so a bare
+   `psmux display -p '#S'` from a second terminal answers with the session you are actually
+   typing in. Warm standby servers never qualify.
+4. With `-L <ns>` and no session at all, the namespaced default `<ns>__default` is used.
+
+The `last_session` file that older releases relied on is now only a tie break between sessions
+whose activity stamps are identical. A bare `psmux attach` that finds no session prints
+`psmux: no sessions` and exits 1, like tmux, while an explicit `-t` that does not resolve prints
+`can't find session: <name>` (#605).
 
 ### Positional pane targets
 
@@ -1051,9 +1121,17 @@ psmux new-window -n "build" -- cargo watch
 
 # Create a window at a specific index
 psmux new-window -t 5
+
+# Two or more tokens after `--` are an argv and run WITHOUT a shell (#582, tmux execvp)
+psmux new-window -n api -- node server.js --port 8080
+
+# One token after `--` is a shell command string, so pipes and redirections work
+psmux new-window -n log -- "cargo watch -x test 2>&1 | tee watch.log"
 ```
 
 When you set a window name with `-n`, automatic renaming is disabled for that window so the foreground process name does not overwrite your chosen name.
+
+The `--` rule mirrors tmux exactly: a single token is handed to the pane's shell as a command string, while a multi token argv is executed directly, so no PowerShell profile runs first, arguments reach the program byte for byte, and `#{pane_current_command}` names the program rather than `pwsh`. Environment assignments, `&&`, pipes and wildcards need the shell, so put those in one quoted string. `split-window` and `new-session` follow the same rule.
 
 ### split-window
 

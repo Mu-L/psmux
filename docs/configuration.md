@@ -113,6 +113,12 @@ Details worth knowing:
   escaped, so `"#{session_name}"` and `"#[fg=red]"` are safe.
 - `#{p<n>:}` still pads at render time and remains useful for padding that
   should follow the rendered width rather than a fixed number of spaces.
+- Flags are only parsed before the option name. `set -g @k -u` stores the
+  value `-u` rather than unsetting `@k`, and a value that starts with a dash
+  can also be written after `--`, the tmux end of options marker:
+  `psmux set-option -g -- status-left "-> "`.
+- `show-option` and `show-window-option` are accepted as singular spellings of
+  `show-options` and `show-window-options`, as they are in tmux.
 
 ## All Set Options
 
@@ -777,6 +783,7 @@ hatch you want for one invocation rather than forever.
 | Variable | Effect |
 |---|---|
 | `PSMUX_CONFIG_FILE` | Replaces the config file search entirely. Set for you by `psmux -f <file>`. A leading `~` is expanded |
+| `PSMUX_DATA_DIR` | Absolute path of the directory that holds the server registry (`.port`, `.key`, `.sid`, `.pid` files), logs and other runtime state, instead of `~\.psmux`. Two data directories are fully independent: each has its own single server guard, so both can hold a session of the same name, including the `__warm__` standby. Must be absolute and non empty |
 | `PSMUX_DEFAULT_SESSION` | Session name used when nothing else determines one |
 | `PSMUX_SESSION_NAME` | Target session for a bare `psmux` or a control mode invocation. psmux also sets this itself when it spawns |
 | `PSMUX_TARGET_SESSION` | Session that CLI commands address when you give no `-t`. Exported into panes, which is how a command run inside a pane knows where it is |
@@ -785,6 +792,8 @@ hatch you want for one invocation rather than forever.
 | `PSMUX_REMOTE_ATTACH` | Marks the invocation as a remote attach, which skips the bare invocation session bootstrap |
 | `PSMUX_ACTIVE` | Set to `1` on a client process to mark that it owns the console. This is what the nesting guard reads |
 | `PSMUX_SWITCH_TO` | Handshake variable carrying the session name across a `switch-client` |
+| `PSMUX_CLIENT_LAST_SESSION` | Handshake variable set by `switch-client` with the session the client is leaving, so `switch-client -l` returns to a session this client actually visited |
+| `PSMUX_SESSION_DISPLAY_NAME` | The session name as you typed it, kept alongside the on disk `<namespace>__<session>` spelling that `-L` produces, so error messages show the name you used |
 | `PSMUX_NO_WARM` | Set to `1` to disable warm pane and warm server pre-spawning. Equivalent to `set -g warm off`. See [warm-sessions.md](warm-sessions.md) |
 | `PSMUX_PRIORITY` | Scheduling class for the psmux server and client processes: `normal`, `above-normal` or `high`. Overrides the `priority` option, so it is the per shell way out of a configured value. An unrecognised value is reported and ignored. See [Process Priority](#process-priority) |
 
@@ -816,6 +825,7 @@ These are exported into every pane, so scripts can detect that they are running 
 | `TMUX` | Socket path and server info, for tmux compatibility. This is what most tools check |
 | `TMUX_PANE` | Current pane id (`%0`, `%1`, and so on) |
 | `PSMUX_SESSION` | Current session name |
+| `PSMUX_POPUP` | Set to `1` on the child of a `display-popup`, so the nesting guard does not mistake it for a pane and a popup can run `psmux` commands |
 
 Setting a variable for one shell, or for good:
 

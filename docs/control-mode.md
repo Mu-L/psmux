@@ -219,7 +219,7 @@ These commands exist in psmux but not in tmux. The "In control mode" column matt
 | `dump-layout` | No | Returns the pane layout tree structure |
 | `list-tree` | No | Returns a hierarchical session/window/pane tree view |
 | `send-text <text>` | No | Send raw text directly to the active pane (no key name parsing) |
-| `send-paste <text>` | No | Send text as a bracketed paste sequence. Also available at the CLI as `psmux send-paste`. |
+| `send-paste <base64>` | No | Send text as a bracketed paste sequence. The single argument is the text base64 encoded. Also available at the CLI as `psmux send-paste`. |
 | `claim-session` | No | Internal warm pool claim used during session startup |
 | `set-pane-title <title>` | No | Set the title of the current pane |
 | `toggle-sync` | No | Toggle synchronized input across all panes in a window |
@@ -368,6 +368,8 @@ psmux control mode is wire-compatible with tmux's protocol. The flow control and
 | `%extended-output` | Implemented | Emitted instead of `%output` once a client has set `pause-after=N`, carrying the output age in milliseconds. |
 | `%subscription-changed` | Implemented | Emitted when a subscribed format string changes value. |
 | Unlinked window notifications | Not implemented | psmux never emits `%unlinked-window-add`, `%unlinked-window-close` or `%unlinked-window-renamed`. Each psmux server process owns exactly one session, so no window is ever outside the attached session's window list. |
+| Slow client handling | Write timeout | Without `pause-after`, output is not buffered per client. Writes to a control client carry a 5 second timeout, and a client that stalls longer than that is disconnected and must reconnect and resync with `capture-pane`. Set `refresh-client -f pause-after=N` to get `%pause` / `%continue` flow control instead of a drop. |
+| `%output` line size | One line per read | A burst from a pane arrives as one `%output` line per server read, which can be large for a chatty pane. Parse by line, not by fixed buffer. |
 
 The core protocol (framing, notifications, escaping, IDs, command dispatch) is fully compatible. Plugins targeting the basic tmux control mode protocol will work identically on psmux.
 

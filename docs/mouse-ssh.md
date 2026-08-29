@@ -71,6 +71,49 @@ as Claude Code, reported that the scroll wheel was sending arrow keys
 `PSMUX_FORCE_MOUSE=0` still pins mouse off completely, on any build, including
 this re-assert.
 
+### What reaches the program inside the pane below 22523
+
+The build gate above is about the client to terminal direction. There is a
+second, independent limitation in the opposite direction, from psmux into the
+pane's child, and it is a property of the pane's conhost rather than of the
+terminal you attach from. Below build 22523 conhost does not hand an SGR mouse
+report written into a pane's ConPTY input pipe to the child, so a program that
+reads the mouse as VT bytes on stdin (node based TUIs such as Claude Code,
+anything reading raw stdin) never sees it. There is no psmux level fix for
+that half; the bytes are lost inside conhost.
+
+Programs that read console `INPUT_RECORD`s do get the mouse on those builds,
+because psmux also injects a Win32 `MOUSE_EVENT` record straight into the
+pane's console input buffer with `WriteConsoleInputW`, which skips the VT
+parser. That covers crossterm and ratatui apps, Bubble Tea and other Go TUIs,
+PSReadLine and native Windows TUIs. Since psmux 3.3.9 the record carries
+clicks, releases, drags and motion on those builds and not only the wheel
+([#597](https://github.com/psmux/psmux/issues/597)). On 22523 and above the
+wheel keeps its record and everything else travels on the pipe alone, so
+nothing changes there.
+
+Both channels obey the same audience rule, on every build: a report is only
+delivered to a pane whose application asked for the mouse, by sending a mouse
+DECSET or by holding `ENABLE_MOUSE_INPUT` on its console. A full screen program
+that never asked (htop with the mouse off, codex) receives nothing, because it
+would read the report as literal keystrokes
+([#598](https://github.com/psmux/psmux/issues/598)). psmux keeps that
+authorization on the pane for as long as the process that earned it is alive,
+so a `node` child putting its console into raw mode (which overwrites the
+console mode word and drops `ENABLE_MOUSE_INPUT` for good) can no longer
+silence the wheel for the rest of the pane's life
+([#613](https://github.com/psmux/psmux/issues/613)). For a program that
+registers through neither channel, `set-option -p -t %N @mouse-force on`
+exempts that one pane, and `PSMUX_FORCE_WHEEL=1` is the server wide last
+resort. Both are described in [configuration.md](configuration.md).
+
+Inside a VT bridge such as `wsl.exe` or `ssh.exe` the report is written as a
+Win32 record as well, and psmux no longer toggles the console's quick edit
+mode around that write, which conhost used to echo back into the pane as a
+DECSET/DECRST pair that cancelled the mouse mode the program had asked for.
+Clicks in `nvim` inside WSL work again as a result
+([#604](https://github.com/psmux/psmux/issues/604)).
+
 ## Windows 10 client wrapper
 
 Copy `scripts/psmux-ssh.sh` to the macOS or Linux client, then run:
