@@ -732,11 +732,15 @@ fn run_main() -> io::Result<()> {
                 target.to_string()
             };
             env::set_var("PSMUX_TARGET_FULL", &resolved_full);
-            // Apply -L namespace prefix for port file lookup
-            let port_file_base = if let Some(ref l) = l_socket_name {
-                format!("{}__{}", l, session)
-            } else {
-                session.clone()
+            // Apply -L namespace prefix for port file lookup. A `$N` id has
+            // already been resolved to the on disk name, which carries the
+            // prefix, so do not add it a second time: `-L ns cmd -t $N` used
+            // to route to `ns__ns__name`, a server that does not exist.
+            let port_file_base = match l_socket_name {
+                Some(ref l) if !session.starts_with(&format!("{}__", l)) => {
+                    format!("{}__{}", l, session)
+                }
+                _ => session.clone(),
             };
             // If the -t target includes an explicit session name, use it
             // directly. Otherwise (e.g. -t %2, -t :1.0) fall through to
@@ -1032,6 +1036,12 @@ fn run_main() -> io::Result<()> {
                 let dir = crate::paths::psmux_dir();
                 // Compute namespace prefix for -L filtering
                 let ns_prefix = l_socket_name.as_ref().map(|l| format!("{l}__"));
+                // Servers that answered in this namespace, counted BEFORE the
+                // -f filter is applied. tmux exits 1 with `no server running`
+                // when there is nothing to list at all, but a filter that
+                // matches nothing on a live server is an empty listing at
+                // exit 0, and the two must stay distinguishable to scripts.
+                let mut live_servers: usize = 0;
                 if let Ok(entries) = std::fs::read_dir(&dir) {
                     for e in entries.flatten() {
                         if let Some(name) = e.file_name().to_str() {
@@ -1099,6 +1109,7 @@ fn run_main() -> io::Result<()> {
                                                     // Auth failed, skip this session
                                                     continue;
                                                 }
+                                                live_servers += 1;
                                                 // When -F format is provided, the server already
                                                 // expanded it; use the result even if empty (tmux
                                                 // prints an empty line for unknown format vars).
@@ -1160,6 +1171,18 @@ fn run_main() -> io::Result<()> {
                             }
                         }
                     }
+                }
+                if live_servers == 0 {
+                    // Nothing answered: no user session in this namespace (a
+                    // `__warm__` standby is not a session). tmux prints
+                    // `no server running on <socket>` and exits 1 here, and
+                    // scripts lean on that code (`tmux ls || start`), so an
+                    // empty listing at exit 0 was a portability trap.
+                    match l_socket_name.as_deref() {
+                        Some(l) => eprintln!("psmux: no server running on {} (-L {})", dir, l),
+                        None => eprintln!("psmux: no server running on {}", dir),
+                    }
+                    std::process::exit(1);
                 }
                 return Ok(());
             }
@@ -2649,11 +2672,16 @@ fn run_main() -> io::Result<()> {
                                 let resolved = crate::cli::parse_target(t)
                                     .session
                                     .unwrap_or_else(|| t.to_string());
-                                // Apply -L namespace prefix for port file lookup
-                                let namespaced = if let Some(ref l) = l_socket_name {
-                                    format!("{}__{}", l, resolved)
-                                } else {
-                                    resolved
+                                // Apply -L namespace prefix for port file lookup.
+                                // A `$N` id resolves to the on disk name, which
+                                // already carries the prefix, so do not add it
+                                // twice: `-L ns kill-session -t $N` used to look
+                                // for `ns__ns__name`, find nothing, and exit 0.
+                                let namespaced = match l_socket_name {
+                                    Some(ref l) if !resolved.starts_with(&format!("{}__", l)) => {
+                                        format!("{}__{}", l, resolved)
+                                    }
+                                    _ => resolved,
                                 };
                                 target = Some(namespaced);
                                 i += 1;
@@ -2683,8 +2711,32 @@ fn run_main() -> io::Result<()> {
                 // "server dead" — that used to delete a live-but-busy server's
                 // port file, orphaning it and triggering relaunch storms.
                 let port_path = crate::paths::port_file(&session_name);
+                // tmux: `kill-session -t NAME` on a name that is not a session
+                // is `can't find session: NAME` at exit 1. This arm used to read
+                // "no port file" as "already gone" and return success, so a
+                // misspelt name, or a script killing a session it never
+                // created, reported OK for a kill that did nothing.
+                let shown = l_socket_name
+                    .as_deref()
+                    .and_then(|l| session_name.strip_prefix(&format!("{}__", l)))
+                    .unwrap_or(&session_name)
+                    .to_string();
+                if !std::path::Path::new(&port_path).exists() {
+                    eprintln!("psmux: can't find session: {}", shown);
+                    std::process::exit(1);
+                }
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                let mut gone = !probe_session_alive(&session_name);
+                let was_alive = probe_session_alive(&session_name);
+                if !was_alive && crate::session::registry_pid_anchor_alive(&session_name) != Some(true) {
+                    // A registry with nobody behind it: the server went away and
+                    // left its files. Reap them so the next `ls` does not stall
+                    // on them, and tell the caller the truth, which is that
+                    // there was no such session to kill.
+                    crate::session::remove_session_registry(&session_name);
+                    eprintln!("psmux: can't find session: {}", shown);
+                    std::process::exit(1);
+                }
+                let mut gone = !was_alive;
                 let mut refused = false;
                 while !gone {
                     match send_control("kill-session\n".to_string()) {

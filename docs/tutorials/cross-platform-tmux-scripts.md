@@ -148,9 +148,9 @@ rc=1
 
 The message prefix is `psmux:` rather than `tmux:`. If you match on the text, match on the part after the colon (`can't find window`, `can't find pane`, `can't find session`), which is tmux's wording.
 
-One difference to know: `kill-session -t NAME` on a name that does not exist exits 0 in psmux today, where tmux exits 1. Gate it with `has-session` if your script relies on that code.
+`kill-session -t NAME` on a name that is not a session exits 1 with `can't find session: NAME`, as in tmux, so a typo in a teardown script is not a silent success.
 
-`list-sessions` with no server running prints nothing and exits 0 in psmux (tmux prints `no server running` and exits 1). Test for an empty string rather than the exit code if you need to detect "nothing running" on both.
+`list-sessions` with nothing running prints `no server running on <data dir>` and exits 1, as tmux does, which keeps the `tmux ls 2>/dev/null || tmux new -d -s work` idiom portable. A `-f` filter that matches nothing on a live server is still an empty listing at exit 0.
 
 ## How does psmux parse `--`, dashes, quotes and backslashes?
 
@@ -292,8 +292,8 @@ Inside the pane, `$TMUX_PANE` is the current pane id (`%1`), which is what `tmux
 | `pipe-pane` sink path | POSIX | Windows path | `cygpath -w "$TEMP"` in Git Bash |
 | `#{pane_current_path}` inside WSL | n/a | Frozen unless the Linux shell emits OSC 7 | Add the one line from the [FAQ](../faq.md) to `~/.bashrc` in the distro |
 | Unresolvable `-t` target | error, rc 1 | error, rc 1 (`psmux: can't find ...`) | Match the text after `psmux:`/`tmux:` |
-| `kill-session` on a missing name | rc 1 | rc 0 | Gate with `has-session` |
-| `list-sessions` with no server | `no server running`, rc 1 | empty output, rc 0 | Test for empty output |
+| `kill-session` on a missing name | `can't find session`, rc 1 | `can't find session`, rc 1 | Same code |
+| `list-sessions` with no server | `no server running on <socket>`, rc 1 | `no server running on <data dir>`, rc 1 | `tmux ls 2>/dev/null \|\| tmux new -d` works on both |
 | `$TMUX` inside a pane | socket path | not a socket | Use only as a "running inside tmux" flag |
 | `--` end of options | supported | supported | Use it before any dash leading operand |
 | `send-keys -l`, newline payloads | supported | supported | Same code |

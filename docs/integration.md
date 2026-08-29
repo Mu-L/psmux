@@ -753,8 +753,10 @@ psmux send-keys -t %1 "cargo build && psmux wait-for -S ready" Enter
 psmux requires a running session. A bare `psmux attach` with nothing to attach to prints
 `no sessions` and exits 1; `psmux attach -t work` against a session that does not exist, or whose
 server has gone away and left a stale `.port` behind, prints `can't find session: work` and exits
-1 (and reaps the stale registration). Those are tmux's words for the same situations, and a tool
-can match on them. Create the session first:
+1 (and reaps the stale registration). `psmux ls` with nothing running prints
+`no server running on <data dir>` and exits 1, and `kill-session -t work` on a name that is not a
+session prints `can't find session: work` and exits 1. Those are tmux's words for the same
+situations, and a tool can match on them. Create the session first:
 
 ```powershell
 psmux new-session -d -s work
