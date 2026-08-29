@@ -208,7 +208,7 @@ fn focused_float_leaves_tiled_content_with_inactive_window_style() {
                 1,
                 crate::border_lines::border_chars("single"),
                 None,
-                window_styles.for_tiled_focus(true),
+                window_styles.for_tiled_panes(true),
             );
             render_float_overlays(
                 frame,

@@ -680,7 +680,7 @@ pub fn dump_separators(
 
 /// Render the target's pane contents and separators into the preview area.
 /// Target window styles are not part of `window-dump`, so cross-session
-/// previews retain default pane-content colours.
+/// previews use only the colours serialized in the dump.
 pub fn render_dump_tree(
     f: &mut ratatui::Frame,
     layout: &crate::layout::LayoutJson,

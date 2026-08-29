@@ -1021,7 +1021,7 @@ impl WindowContentStyles {
         if active { self.active } else { self.inactive }
     }
 
-    pub(crate) fn for_tiled_focus(self, floating_pane_focused: bool) -> Self {
+    pub(crate) fn for_tiled_panes(self, floating_pane_focused: bool) -> Self {
         if floating_pane_focused {
             Self {
                 inactive: self.inactive,
@@ -5643,7 +5643,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 pane_active_border_fg, clock_active, clock_col, active_rect,
                 &mode_style_str, state.zoomed, border_status, border_format,
                 total_panes, bchars, copy_ln,
-                window_styles.for_tiled_focus(floating_pane_focused),
+                window_styles.for_tiled_panes(floating_pane_focused),
             );
             let border_mask = border_mask_from_layout(&root, content_chunk, f.buffer_mut().area, state.zoomed);
             fix_border_intersections(f.buffer_mut(), bchars, &border_mask);
