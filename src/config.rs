@@ -925,6 +925,7 @@ fn parse_set_option(app: &mut AppState, line: &str) {
     let mut only_if_unset = false;  // -o: only set if not already set
     let mut append_mode = false;    // -a: append to current value
     let mut unset_mode = false;     // -u: unset (reset to default)
+    let mut quiet = false;          // -q: suppress the "already set" error
 
     while i < toks.len() {
         let p = toks[i].1.as_str();
@@ -942,7 +943,11 @@ fn parse_set_option(app: &mut AppState, line: &str) {
             // -U is an unset alias of -u (tmux parity, #553); the contains
             // check is case-sensitive so both must be tested.
             if p.contains('u') || p.contains('U') { unset_mode = true; }
-            // -q (quiet): no-op — we don't produce errors for unknown options
+            // -q (quiet) suppresses the `-o` "already set" refusal below, which
+            // is the one error tmux's cmd-set-option.c lets `-q` swallow at
+            // exit 0 (`if (args_has(args, 'q')) goto out;`). Unknown options
+            // are still reported.
+            if p.contains('q') { quiet = true; }
             // -w: window option — treat same as global for our single-server model
             i += 1;
             if p.contains('t') && i < toks.len() { i += 1; }
@@ -962,7 +967,7 @@ fn parse_set_option(app: &mut AppState, line: &str) {
         None => String::new(),
     };
 
-    // Handle -u (unset): reset option to empty.
+    // Handle -u (unset): restore the option's table default.
     //
     // Issue #619: the `user_set_options` erase used to be reachable only for
     // window-style and window-active-style (the two options #617 repaired), so
@@ -972,20 +977,16 @@ fn parse_set_option(app: &mut AppState, line: &str) {
     // dropped the 77 on the floor. tmux clears the option at the scope on `-u`
     // (cmd-set-option.c calls options_remove_or_default) and then `-o` finds
     // nothing set (`already = (o != NULL)` in the same file), so it applies.
-    // The erase is now unconditional, which subsumes the #617 special case.
     //
-    // `@user` options need the key itself gone, not blanked: `-o` tests them
-    // with `user_options.contains_key`, so an entry left holding "" reads as
-    // set for ever. tmux removes user options outright on `-u` because they
-    // carry no table entry to fall back to (options.c options_remove_or_default
-    // takes the options_remove branch when `o->tableentry == NULL`).
+    // #619 follow up: this branch also wrote an EMPTY value where tmux writes
+    // the TABLE DEFAULT, so `set -gu escape-time` in a config file left the old
+    // number in place while the CLI route restored 500, and `set -gu
+    // status-style` produced a styleless status bar rather than the stock
+    // green one. Both the value restore and the explicit-set erase now live in
+    // one shared helper that the server request loop and the plugin drain loop
+    // call too, so all three unset routes land on the same value.
     if unset_mode {
-        if key.starts_with('@') || matches!(key, "window-style" | "window-active-style") {
-            app.user_options.remove(key);
-        } else {
-            parse_option_value(app, key, "", is_global);
-        }
-        app.user_set_options.remove(key);
+        crate::server::options::reset_option_to_default(app, key);
         return;
     }
 
@@ -998,7 +999,26 @@ fn parse_set_option(app: &mut AppState, line: &str) {
         }
     }
 
-    // Handle -o (only set if not currently set)
+    // Handle -o (only set if not currently set).
+    //
+    // Refusing is not enough: tmux REPORTS the refusal. cmd-set-option.c ends
+    // its `-o` guard with
+    //
+    //     if (already) {
+    //             if (args_has(args, 'q'))
+    //                     goto out;
+    //             cmdq_error(item, "already set: %s", argument);
+    //             goto fail;
+    //     }
+    //
+    // so without `-q` the command FAILS and names the option. psmux dropped the
+    // write in silence on every route, which made `-o` useless for its one job:
+    // a plugin that seeds a default it does not want to clobber could not tell
+    // "I set it" from "the user already had it" (#619 follow up). The config
+    // route records it as a config warning, exactly like "unknown option", so
+    // it reaches ~/.psmux/config-warnings.log and the attach-time summary; the
+    // in-TUI command prompt runs through this same parser, so it also gets a
+    // status message the way a failed command should.
     if only_if_unset {
         // For @-prefixed user options, check if key exists
         // For built-in options, check the user_set_options tracker
@@ -1007,7 +1027,19 @@ fn parse_set_option(app: &mut AppState, line: &str) {
         } else {
             app.user_set_options.contains(key)
         };
-        if already_set { return; }
+        if already_set {
+            if !quiet {
+                warn_config(app, format!("already set: {}", key));
+                if !in_startup_load() {
+                    app.status_message = Some((
+                        format!("already set: {}", key),
+                        std::time::Instant::now(),
+                        None,
+                    ));
+                }
+            }
+            return;
+        }
     }
 
     // Expand format strings in the value if -F flag is set. No quote trimming
@@ -2630,3 +2662,7 @@ mod tests_issue616_unicode_bind;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue619_set_option_unset_only.rs"]
 mod tests_issue619_set_option_unset_only;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue619_set_option_already_set.rs"]
+mod tests_issue619_set_option_already_set;

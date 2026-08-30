@@ -2530,7 +2530,23 @@ match cmd {
             } else if has_a {
                 let _ = tx.send(CtrlReq::SetOptionAppend(option, value));
             } else if has_o {
-                let _ = tx.send(CtrlReq::SetOptionOnlyIfUnset(option, value));
+                // `-o` on an option that is already set is an ERROR in tmux
+                // (`already set: <name>`, exit 1), quiet only under `-q`. The
+                // request used to be fire and forget, so the refusal was
+                // invisible on this route; ask for the answer unless the
+                // caller passed -q (#619 follow up).
+                if has_q {
+                    let _ = tx.send(CtrlReq::SetOptionOnlyIfUnset(option, value, None));
+                } else {
+                    let (rtx, rrx) = mpsc::channel::<String>();
+                    let _ = tx.send(CtrlReq::SetOptionOnlyIfUnset(option, value, Some(rtx)));
+                    if let Ok(reply) = rrx.recv_timeout(Duration::from_millis(2000)) {
+                        if !reply.is_empty() {
+                            let _ = write!(write_stream, "{}\n", reply);
+                            let _ = write_stream.flush();
+                        }
+                    }
+                }
             } else {
                 let _ = tx.send(CtrlReq::SetOptionQuiet(option, value, has_q));
             }
@@ -4244,7 +4260,18 @@ fn dispatch_control_command(
                 } else if append {
                     let _ = tx.send(CtrlReq::SetOptionAppend(key, val));
                 } else if only_if_unset {
-                    let _ = tx.send(CtrlReq::SetOptionOnlyIfUnset(key, val));
+                    // Same as the one-shot handler above: report tmux's
+                    // `already set: <name>` refusal instead of dropping the
+                    // command in silence, unless -q asked for silence (#619).
+                    if quiet {
+                        let _ = tx.send(CtrlReq::SetOptionOnlyIfUnset(key, val, None));
+                    } else {
+                        let (rtx, rrx) = mpsc::channel::<String>();
+                        let _ = tx.send(CtrlReq::SetOptionOnlyIfUnset(key, val, Some(rtx)));
+                        let reply = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
+                        let _ = resp_tx.send(reply);
+                        return true;
+                    }
                 } else if quiet || global {
                     let _ = tx.send(CtrlReq::SetOptionQuiet(key, val, quiet));
                 } else {

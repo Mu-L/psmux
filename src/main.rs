@@ -3567,7 +3567,7 @@ fn run_main() -> io::Result<()> {
             "set-option" | "set" | "set-window-option" | "setw" => {
                 // Validate that known integer-valued options receive a numeric value,
                 // erroring (nonzero exit) like tmux instead of silently accepting junk.
-                let cli_pane_scope = {
+                let (cli_pane_scope, cli_only_if_unset) = {
                     // NOTE: "lock-after-time" is intentionally excluded. Unlike the
                     // options below, psmux has no real numeric business logic for it
                     // anywhere server-side -- config.rs stores it as an opaque
@@ -3705,7 +3705,15 @@ fn run_main() -> io::Result<()> {
                             }
                         }
                     }
-                    flags.contains('p')
+                    // `-o` on an option that is already set is an error in tmux
+                    // (`already set: <name>`, exit 1) and silent at exit 0 only
+                    // under `-q`, so the no-q case has to read the server's
+                    // answer instead of firing and forgetting (#619 follow up).
+                    // `-u` disarms the guard entirely: tmux skips it whenever
+                    // `-u` is present, so that stays a plain unset.
+                    let only_if_unset =
+                        flags.contains('o') && !has_unset && !flags.contains('q');
+                    (flags.contains('p'), only_if_unset)
                 };
                 let cmd_str: String = cmd_args.iter().map(|s| {
                     let s = s.as_str();
@@ -3747,6 +3755,30 @@ fn run_main() -> io::Result<()> {
                     if resp.trim_start().starts_with("ERROR") {
                         eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
                         std::process::exit(1);
+                    }
+                    return Ok(());
+                }
+                // `set-option -o` without `-q`: the server answers "" when the
+                // write landed and "ERROR: already set: <name>" when it
+                // refused, which tmux reports on stderr at exit 1. Without
+                // this the refusal was a silent exit 0 with empty output, so a
+                // script seeding defaults could not tell "I set it" from "the
+                // user already had it" (#619 follow up).
+                if cli_only_if_unset {
+                    match send_control_with_response(format!("{}\n", cmd_str)) {
+                        Ok(resp) => {
+                            let t = resp.trim();
+                            if t.starts_with("ERROR") {
+                                // tmux prints the bare cmdq_error text.
+                                eprintln!("{}", t.trim_start_matches("ERROR:").trim());
+                                std::process::exit(1);
+                            }
+                        }
+                        Err(e) if e.to_string().contains("no session")
+                            || e.to_string().contains("no server running") => {
+                            eprintln!("warning: no active session; option will take effect when set inside a session or via config file");
+                        }
+                        Err(e) => return Err(e),
                     }
                     return Ok(());
                 }
