@@ -50,6 +50,7 @@ impl NumberKind {
 pub enum ChoiceKind {
     Priority,
     Unvalidated,
+    PaneBorderIndicators,
 }
 
 impl ChoiceKind {
@@ -60,6 +61,9 @@ impl ChoiceKind {
                 crate::platform::PRIORITY_VALUES.join(", "),
                 value,
             )),
+            Self::PaneBorderIndicators => {
+                crate::pane_border::PaneBorderIndicators::parse(value).map(|_| ())
+            }
             Self::Priority | Self::Unvalidated => Ok(()),
         }
     }
@@ -67,12 +71,14 @@ impl ChoiceKind {
     const fn allows_append(self) -> bool {
         match self {
             Self::Priority | Self::Unvalidated => true,
+            Self::PaneBorderIndicators => false,
         }
     }
 
     const fn allows_local_window_override(self) -> bool {
         match self {
             Self::Priority | Self::Unvalidated => true,
+            Self::PaneBorderIndicators => false,
         }
     }
 }
@@ -261,6 +267,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "window-status-activity-style", scope: Window, option_type: OptionType::String, default: "reverse", description: "Window style on activity alert" },
     OptionDef { name: "window-status-bell-style", scope: Window, option_type: OptionType::String, default: "reverse", description: "Window style on bell alert" },
     OptionDef { name: "window-status-last-style", scope: Window, option_type: OptionType::String, default: "default", description: "Previously active window style" },
+    OptionDef { name: "pane-border-indicators", scope: Window, option_type: Choice(ChoiceKind::PaneBorderIndicators), default: crate::pane_border::INDICATORS_DEFAULT, description: "Active pane indicator mode (off/colour/arrows/both)" },
     // ── Pane options ──
     OptionDef { name: "pane-border-style", scope: Pane, option_type: OptionType::String, default: "default", description: "Inactive pane border style" },
     OptionDef { name: "pane-active-border-style", scope: Pane, option_type: OptionType::String, default: "fg=green", description: "Active pane border style" },
@@ -288,6 +295,7 @@ pub static WINDOW_OPTION_NAMES: &[&str] = &[
     "window-status-activity-style",
     "window-status-bell-style",
     "window-status-last-style",
+    "pane-border-indicators",
     "main-pane-width",
     "main-pane-height",
     "window-size",

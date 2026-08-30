@@ -22,6 +22,7 @@ fn effective_when_unset(name: &str) -> Option<&'static str> {
     Some(match name {
         // Consumed at src/rendering.rs, missing entry means border_lines::DEFAULT.
         "pane-border-lines" => crate::border_lines::DEFAULT,
+        "pane-border-indicators" => crate::pane_border::INDICATORS_DEFAULT,
         // Consumed at src/server/helpers.rs, a missing entry disables the gutter.
         "copy-mode-line-numbers" => "off",
         "copy-mode-line-number-style" => "fg=brightblack",
@@ -353,11 +354,16 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
         return;
     }
 
-    // Drop any stored override first. Options that live ONLY in `user_options`
-    // (window-style and window-active-style, terminal-overrides) have no typed
-    // field to restore and `get_option_value` already answers with the built in
-    // for a missing entry, so removal is the whole restore for them.
+    // Drop any stored override first. Options whose default is represented by
+    // a missing entry are fully restored by removal; applying their catalog
+    // default would turn an unset option back into an explicit override.
     app.user_options.remove(key);
+    if matches!(
+        key,
+        "window-style" | "window-active-style" | "pane-border-indicators"
+    ) {
+        return;
+    }
 
     if let Some(default) = crate::server::option_catalog::default_for(key) {
         let _ = apply_set_option(app, key, default, true);

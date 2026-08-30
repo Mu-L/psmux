@@ -1,4 +1,5 @@
 use super::*;
+use crate::pane_border::PaneBorderIndicators;
 use crate::layout::LayoutJson;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -106,6 +107,7 @@ fn two_pane_separator_and_labels_preserve_active_and_inactive_backgrounds() {
                 crate::border_lines::border_chars("single"),
                 None,
                 WindowContentStyles::default(),
+                PaneBorderIndicators::Colour,
             );
         })
         .unwrap();
@@ -231,6 +233,7 @@ fn render_border_layout(
                 chars,
                 None,
                 WindowContentStyles::default(),
+                PaneBorderIndicators::Colour,
             );
             borders = border_geometry_from_layout(
                 layout,

@@ -207,6 +207,7 @@ Details worth knowing:
 | `pane-border-style` | Str | | Inactive border style |
 | `pane-active-border-style` | Str | `fg=green` | Active border style |
 | `pane-border-hover-style` | Str | `fg=yellow` | Border style while the mouse hovers a draggable pane border |
+| `pane-border-indicators` | Str | `colour` | Active pane cues: `off`, `colour`, `arrows`, `both`. See [Pane Border Indicators](#pane-border-indicators) |
 | `pane-border-lines` | Str | `single` | Border glyph set: `single`, `double`, `heavy`, `simple`, `number`, `spaces`, `none`. See [Pane Border Lines](#pane-border-lines) |
 | `pane-border-format` | Str | | Pane border format string (e.g. `#{pane_index}: #{pane_title}`) |
 | `pane-border-status` | Str | | Pane border status position (`top`/`bottom`/`off`) |
@@ -289,6 +290,23 @@ set -g pane-border-lines none
 ```
 
 `number` is accepted for tmux compatibility and renders the same as `single`. Any unrecognised value also falls back to `single`.
+
+### Pane Border Indicators
+
+`pane-border-indicators` controls the extra cues that identify the focused pane.
+The default `colour` mode splits a two-pane divider between the active and
+inactive border colours. `arrows` places inward-pointing markers on internal
+dividers adjacent to the active tiled pane and on the focused floating pane's
+border. `both` combines the colour and arrow cues. `off` disables both extra
+cues. `pane-active-border-style` applies to the focused pane's border in every
+mode. When a floating pane owns focus, tiled active cues are suppressed.
+
+```tmux
+set -g pane-border-indicators arrows
+```
+
+`pane-border-indicators` is a global/default setting; per-window values are
+unsupported.
 
 ### Copy Mode Line Numbers
 

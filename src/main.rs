@@ -17,6 +17,7 @@ mod commands;
 mod pane;
 mod warm_pane_sync;
 mod popup;
+mod pane_border;
 mod clipboard;
 mod copy_mode;
 mod input;
@@ -928,6 +929,7 @@ fn run_main() -> io::Result<()> {
                     border_chars,
                     None,
                     crate::client::WindowContentStyles::default(),
+                    crate::pane_border::PaneBorderIndicators::Colour,
                 );
                 let borders = crate::client::border_geometry_from_layout(
                     &layout,

@@ -267,6 +267,11 @@ fn probe_value(def: &crate::server::option_catalog::OptionDef) -> String {
         crate::server::option_catalog::OptionType::Boolean => {
             if def.default == "on" { "off".to_string() } else { "on".to_string() }
         }
+        crate::server::option_catalog::OptionType::Choice(
+            crate::server::option_catalog::ChoiceKind::PaneBorderIndicators,
+        ) => {
+            if def.default == "colour" { "arrows".to_string() } else { "colour".to_string() }
+        }
         _ => {
             if def.default == "i619probe" {
                 "i619probe2".to_string()

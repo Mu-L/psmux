@@ -246,6 +246,7 @@ fn dim_reaches_the_rendered_pane_background() {
             false,
             Color::Reset, active_rect, "", false, "off", "", 1,
             crate::border_lines::border_chars("single"), None, styles,
+            crate::pane_border::PaneBorderIndicators::Colour,
         );
     }).unwrap();
     let buffer = terminal.backend().buffer().clone();

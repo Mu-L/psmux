@@ -98,6 +98,7 @@ fn render_at(
                 crate::border_lines::border_chars("single"),
                 None,
                 styles,
+                crate::pane_border::PaneBorderIndicators::Colour,
             );
         })
         .unwrap();

@@ -1390,34 +1390,20 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                                 crate::server::option_catalog::default_for(
                                     &options[*selected].0,
                                 )
-                                .map(|value| {
-                                    (options[*selected].0.clone(), value.to_string())
-                                })
+                                .map(|_| options[*selected].0.clone())
                             }
                             _ => None,
                         };
-                        if let Some((name, value)) = pending {
-                            match crate::server::options::apply_set_option(
-                                app, &name, &value, true,
-                            ) {
-                                Ok(()) => {
-                                    app.user_set_options.remove(&name);
-                                    if let Mode::CustomizeMode {
-                                        ref mut options,
-                                        selected,
-                                        ..
-                                    } = app.mode
-                                    {
-                                        options[selected].1 = value;
-                                    }
-                                }
-                                Err(error) => {
-                                    app.status_message = Some((
-                                        format!("set-option: {}", error),
-                                        Instant::now(),
-                                        None,
-                                    ));
-                                }
+                        if let Some(name) = pending {
+                            crate::server::options::reset_option_to_default(app, &name);
+                            let value = crate::server::options::get_option_value(app, &name);
+                            if let Mode::CustomizeMode {
+                                ref mut options,
+                                selected,
+                                ..
+                            } = app.mode
+                            {
+                                options[selected].1 = value;
                             }
                         }
                     }

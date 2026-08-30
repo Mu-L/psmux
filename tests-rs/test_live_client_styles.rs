@@ -92,6 +92,26 @@ fn append_extra_style_json_emits_empty_global_window_content_styles_when_unset()
     assert_eq!(parsed["window_active_style"], "");
 }
 
+#[test]
+fn append_extra_style_json_emits_pane_border_indicators_and_default() {
+    let mut app = mk_app();
+    let mut default_buf = String::from("{\"layout\":{}}");
+    append_extra_style_json(&mut default_buf, &app);
+    let default_json: serde_json::Value =
+        serde_json::from_str(&default_buf).expect("valid default JSON");
+    assert_eq!(default_json["pane_border_indicators"], "colour");
+
+    app.user_options.insert(
+        "pane-border-indicators".to_string(),
+        "arrows".to_string(),
+    );
+    let mut arrows_buf = String::from("{\"layout\":{}}");
+    append_extra_style_json(&mut arrows_buf, &app);
+    let arrows_json: serde_json::Value =
+        serde_json::from_str(&arrows_buf).expect("valid arrows JSON");
+    assert_eq!(arrows_json["pane_border_indicators"], "arrows");
+}
+
 // Guard the injection contract: never touch a buffer that is not a closed object.
 #[test]
 fn append_extra_style_json_noop_when_not_object() {

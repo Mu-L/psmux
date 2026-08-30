@@ -684,7 +684,8 @@ pub fn dump_separators(
 
 /// Render the target's pane contents and separators into the preview area.
 /// Target window styles are not part of `window-dump`, so cross-session
-/// previews use only the colours serialized in the dump.
+/// previews use the colours serialized in the dump, the caller's border
+/// styles, and the default colour indicator mode.
 pub fn render_dump_tree(
     f: &mut ratatui::Frame,
     layout: &crate::layout::LayoutJson,
@@ -711,6 +712,7 @@ pub fn render_dump_tree(
         crate::border_lines::border_chars(crate::border_lines::DEFAULT),
         None,
         crate::client::WindowContentStyles::default(),
+        crate::pane_border::PaneBorderIndicators::Colour,
     );
     let borders = crate::client::border_geometry_from_layout(
         layout,

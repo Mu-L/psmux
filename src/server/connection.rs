@@ -5002,3 +5002,7 @@ mod tests_refresh_client_flags;
 #[cfg(test)]
 #[path = "../../tests-rs/test_set_option_control.rs"]
 mod tests_set_option_control;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_pane_border_indicator_control.rs"]
+mod tests_pane_border_indicator_control;

@@ -230,6 +230,14 @@ impl BorderGeometry {
         self.cells.contains_key(idx)
     }
 
+    pub(crate) fn contains_vertical(&self, idx: usize) -> bool {
+        self.has_orientation(idx, BorderOrientation::Vertical)
+    }
+
+    pub(crate) fn contains_horizontal(&self, idx: usize) -> bool {
+        self.has_orientation(idx, BorderOrientation::Horizontal)
+    }
+
     fn has_orientation(&self, idx: usize, orientation: BorderOrientation) -> bool {
         self.cells.get(&idx) == Some(&orientation)
     }

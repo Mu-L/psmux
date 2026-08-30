@@ -471,6 +471,7 @@ SET OPTIONS (use with: set -g <option> <value>):
     pane-border-style   Str  Inactive pane border style
     pane-active-border-style Str Active pane border style
     pane-border-hover-style Str Border hover highlight style
+    pane-border-indicators Str Active pane indicator (off/colour/arrows/both)
     window-status-format        Str  Inactive window tab format
     window-status-current-format Str  Active window tab format
     window-status-separator     Str  Separator between tabs

@@ -52,16 +52,20 @@ Inside the chooser, `p` always toggles the preview for the current session regar
 
 ## How the Preview Renders
 
-The preview pane is fed by the same renderer that draws the main viewport. Each open chooser fetches a JSON dump of the target window using the internal `window-dump` TCP command. The dump includes per-cell text, foreground and background colours, and style flags (bold, underline, italic, reversed, etc.) for every visible row of every pane in that window.
+The preview pane uses the tiled-pane renderer from the main viewport. Each open chooser fetches a JSON layout dump of the target window using the internal `window-dump` TCP command. The dump includes per-cell text, foreground and background colours, and style flags for every visible tiled pane.
 
 That dump is then drawn into the preview area using `render_layout_json`, the same function that draws the live psmux viewport. The result is a styled miniature of the serialized pane content, including:
 
-* Pane borders, including their colours and the active pane highlight.
-* Pane title bars and status indicators.
+* Internal pane dividers.
 * Foreground and background colours from any TUI program running in the pane.
 * Bold, italic, underline, reversed, dim, blink, and strikethrough attributes.
 * True-colour (24-bit) and 256-colour palettes.
 * Wide characters (CJK).
+
+Persistent floating panes and pane title bars are not drawn. All previews use
+single border lines and `colour` indicators. Border colours come from the
+chooser and can differ in a cross-session preview because `window-dump`
+carries layout only.
 
 The preview is updated on a short cache window (about 1.5 seconds) so navigating quickly through a long session list does not flood the network with dump requests, but content still appears live for a steady selection.
 
@@ -72,7 +76,7 @@ Real panes are usually much larger than the preview area. For example, a 200x50 
 Instead, the preview shows the pane at one to one with two simple rules:
 
 1. **Bottom rows win.** Any trailing fully blank rows are trimmed first so that a shell prompt or the bottom edge of a TUI sits at the bottom of the preview rather than being scrolled off by empty viewport space. The bottom rows of what remains are then shown.
-2. **Columns clip naturally.** Cells that fall outside the preview width are not drawn. The grid stays pixel accurate, so column aligned output (process tables, file listings, source code) keeps its alignment.
+2. **Columns clip naturally.** Cells that fall outside the preview width are not drawn. The grid stays one to one, so column aligned output (process tables, file listings, source code) keeps its alignment.
 
 The trade off is that very wide content is cut on the right edge instead of being squeezed in. In practice this matches what tmux itself does in `choose-tree` previews and is much more useful than a scrambled "scaled" view.
 
@@ -95,7 +99,7 @@ psmux aims to keep the preview feature on par with tmux, with a few intentional 
 ### Things that differ
 
 * **`choose-tree-preview` option.** Standard tmux does not have an option to make the preview visible by default. You must press `p` every time. psmux adds the `choose-tree-preview` option (default `off`, matching tmux behaviour) so you can opt in to a preview that is always visible.
-* **Render fidelity.** psmux uses its own `window-dump` snapshot pipeline rather than tmux's `capture-pane` text. This carries full per-cell styling (24-bit colour, all SGR attributes) into the preview, so a preview of a Powerline prompt or a syntax-highlighted file looks right rather than being plain text.
+* **Render fidelity.** psmux uses its own `window-dump` snapshot pipeline rather than tmux's `capture-pane` text. This carries per-cell colours and supported attributes into the preview, so a preview of a Powerline prompt or a syntax-highlighted file remains styled rather than becoming plain text.
 * **Resize behaviour.** tmux scales / squeezes the preview content when the pane is wider than the preview slot, which can produce visually surprising results for column aligned output. psmux clips at one to one as described above. The result is that long lines or wide TUIs are cropped on the right edge in psmux but stay perfectly aligned, while in tmux they may be scaled but mis aligned.
 * **Cache window.** psmux caches the preview dump for about 1.5 seconds. tmux re-renders on every selection change. The psmux behaviour reduces network traffic when scrolling through many sessions but a very recent change to a target may take up to 1.5 seconds to appear in the preview.
 * **Movable popup.** The chooser popup itself can be dragged with the mouse in psmux. Standard tmux choosers are fixed in place. The preview pane moves with the popup.
@@ -108,7 +112,7 @@ psmux aims to keep the preview feature on par with tmux, with a few intentional 
 
 ## Performance
 
-The preview path is cheap: it shares the same dump cache between the main viewport and the chooser, so opening the preview adds at most one extra `window-dump` request per cached interval (about 1.5 seconds). Rendering is done client side using the existing renderer, so there is no extra server work for each frame after the dump is fetched.
+The preview path has a dedicated layout cache, so an open chooser sends at most one `window-dump` request per target during each cached interval. Rendering is done client side using the tiled-pane renderer, so there is no extra server work for each frame after the dump is fetched.
 
 If you have very many sessions and the chooser feels slow, that is almost always due to scanning many session port files in `~/.psmux/`, not the preview itself. The preview only fetches the dump for the currently highlighted target.
 
@@ -120,15 +124,11 @@ The target window may not have responded yet. Move the selection away and back, 
 **Long lines are cut off on the right.**
 This is by design. See "How psmux Handles Size Differences" above. If you want to see the full content, switch to the target with Enter.
 
-**The preview text looks fine but the borders are missing.**
-Check that `pane-border-style` is set to a non empty value. Empty styles render as transparent which can hide borders against the popup background.
-
 **Setting `choose-tree-preview on` does not seem to take effect.**
 The option is read when the chooser opens, not while it is open. Close the chooser with Esc and reopen it. Verify the option is set with `psmux show-options -g | Select-String choose-tree-preview`.
 
 ## Related Options and Commands
 
-* `pane-border-style`, `pane-active-border-style`: control how borders look in both the main view and the preview.
 * `mode-style`: controls how the selected entry in the chooser list is highlighted.
 * `mouse on`: enables clicking entries in the chooser list and dragging the popup.
 

@@ -1346,7 +1346,7 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         "status-left-style" => { app.status_left_style = value.to_string(); }
         "status-right-style" => { app.status_right_style = value.to_string(); }
         "clock-mode-colour" | "clock-mode-style" => { app.user_options.insert(key.to_string(), value.to_string()); }
-        "pane-border-format" | "pane-border-status" => { app.user_options.insert(key.to_string(), value.to_string()); }
+        "pane-border-format" | "pane-border-status" | "pane-border-indicators" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "popup-style" | "popup-border-style" | "popup-border-lines" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "window-style" | "window-active-style" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "wrap-search" => { app.user_options.insert(key.to_string(), value.to_string()); }

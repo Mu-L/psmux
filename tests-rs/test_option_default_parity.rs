@@ -79,6 +79,23 @@ fn status_right_catalog_default_matches_runtime_default() {
     );
 }
 
+#[test]
+fn pane_border_indicators_is_listed_as_a_window_option_with_global_default() {
+    let app = fresh_app();
+    assert_eq!(
+        crate::server::options::get_window_option_value(
+            &app,
+            "pane-border-indicators",
+        ),
+        "colour",
+    );
+    assert!(
+        crate::server::options::render_window_options(&app)
+            .lines()
+            .any(|line| line == "pane-border-indicators colour"),
+    );
+}
+
 /// The catalog is what customize-mode renders. An option missing a default there
 /// cannot be reset at all, so a blank default on a non-string option is a defect.
 #[test]
@@ -123,6 +140,7 @@ fn window_option_listing_preserves_its_supported_surface() {
         "window-status-activity-style",
         "window-status-bell-style",
         "window-status-last-style",
+        "pane-border-indicators",
         "main-pane-width",
         "main-pane-height",
         "window-size",

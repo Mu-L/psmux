@@ -6188,31 +6188,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             editing: false,
                             ..
                         } => option_catalog::default_for(&options[*selected].0)
-                            .map(|value| {
-                                (options[*selected].0.clone(), value.to_string())
-                            }),
+                            .map(|_| options[*selected].0.clone()),
                         _ => None,
                     };
-                    if let Some((name, value)) = pending {
-                        match options::apply_set_option(&mut app, &name, &value, true) {
-                            Ok(()) => {
-                                app.user_set_options.remove(&name);
-                                if let Mode::CustomizeMode {
-                                    ref mut options,
-                                    selected,
-                                    ..
-                                } = app.mode
-                                {
-                                    options[selected].1 = value;
-                                }
-                            }
-                            Err(error) => {
-                                app.status_message = Some((
-                                    format!("set-option: {}", error),
-                                    Instant::now(),
-                                    None,
-                                ));
-                            }
+                    if let Some(name) = pending {
+                        options::reset_option_to_default(&mut app, &name);
+                        let value = options::get_option_value(&app, &name);
+                        if let Mode::CustomizeMode {
+                            ref mut options,
+                            selected,
+                            ..
+                        } = app.mode
+                        {
+                            options[selected].1 = value;
                         }
                         state_dirty = true;
                     }
