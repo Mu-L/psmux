@@ -1252,8 +1252,15 @@ fn config_flag_g_global() {
 fn config_flag_u_unset_user_option() {
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g @test hello\nset -gu @test\n");
-    // -gu sets @user option to empty string
-    assert_eq!(app.user_options.get("@test").unwrap(), "");
+    // -gu REMOVES the @user option (#619). It used to blank it in place, which
+    // left the key present, so `set -o` afterwards still read the option as
+    // set and refused to apply. tmux removes a user option outright on -u:
+    // it has no table entry, so options_remove_or_default takes the
+    // options_remove branch.
+    assert!(
+        app.user_options.get("@test").is_none(),
+        "set -gu @test must remove the key, not leave it holding an empty string"
+    );
 }
 
 #[test]
@@ -1340,7 +1347,9 @@ fn config_flag_F_format_expand() {
 fn config_combined_flags_gu() {
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g @x hello\nset -gu @x\n");
-    assert_eq!(app.user_options.get("@x").unwrap(), "");
+    // The combined token takes the same route as `-g -u`, so it removes the
+    // key rather than blanking it (#619).
+    assert!(app.user_options.get("@x").is_none());
 }
 
 #[test]

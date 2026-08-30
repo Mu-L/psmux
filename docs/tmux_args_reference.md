@@ -443,6 +443,9 @@ A psmux extension that creates a pane floating above the tiled layout.
 - Value: `-t` (target, value consumed)
 - Flags parse only **before** the option name, as tmux's getopt does (#583). Once the option name has been seen, everything that follows is the value, dashes included: `set @k -u` stores the literal string `-u`, where it used to consume `-u` as the unset flag and delete `@k` at exit 0. `--` ends option parsing outright, so `set -- @k -g` also stores `-g`.
 - Flags are also matched inside combined tokens such as `-ga`, `-gu` and `-gq`.
+- `-u` clears the option for every scope spelling, and it clears the record that the user ever set it, so a following `-o` sees an unset option and applies (#619). `set -gu escape-time` then `set -go escape-time 77` leaves escape-time at 77. Before that fix only `window-style` and `window-active-style` behaved this way (#617) and the `-o` was silently swallowed at exit 0 for every other non `@` option. On a `@name` option `-u` removes the key outright rather than blanking it, which is what tmux does: a user option carries no table default to fall back to.
+- `-u` and `-o` in the same command is an unset, never a set: tmux skips the `-o` guard whenever `-u` is present, so `set -guo status-left NEVER` clears `status-left` and stores nothing.
+- `-o` on an option that **is** set is a no-op. tmux additionally prints `already set: <name>` and exits 1 unless `-q` is given; psmux is silent at exit 0 in both cases, so a script cannot yet tell the two apart.
 - A `@name` argument is never treated as a flag.
 - Not accepted: `-F`. Since #553 any flag outside the accepted set is rejected with `unknown flag -X` at exit 1 instead of being silently dropped while the write lands.
 
