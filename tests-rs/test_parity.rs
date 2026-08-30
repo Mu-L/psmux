@@ -345,30 +345,6 @@ fn option_catalog_default_for_unknown_returns_none() {
 }
 
 #[test]
-fn option_catalog_all_entries_have_valid_types() {
-    let valid_types = ["number", "boolean", "choice", "string"];
-    for def in crate::server::option_catalog::OPTION_CATALOG {
-        assert!(
-            valid_types.contains(&def.option_type),
-            "option '{}' has invalid type '{}' (expected one of {:?})",
-            def.name, def.option_type, valid_types
-        );
-    }
-}
-
-#[test]
-fn option_catalog_all_entries_have_valid_scopes() {
-    let valid_scopes = ["server", "session", "window", "pane"];
-    for def in crate::server::option_catalog::OPTION_CATALOG {
-        assert!(
-            valid_scopes.contains(&def.scope),
-            "option '{}' has invalid scope '{}' (expected one of {:?})",
-            def.name, def.scope, valid_scopes
-        );
-    }
-}
-
-#[test]
 fn option_catalog_no_duplicate_names() {
     let mut seen = std::collections::HashSet::new();
     for def in crate::server::option_catalog::OPTION_CATALOG {

@@ -202,8 +202,16 @@ fn catalog_describes_repeat_time() {
         .iter()
         .find(|d| d.name == "repeat-time")
         .expect("repeat-time must be in the option catalog");
-    assert_eq!(def.option_type, "number");
-    assert_eq!(def.scope, "session");
+    assert_eq!(
+        def.option_type,
+        crate::server::option_catalog::OptionType::Number(
+            crate::server::option_catalog::NumberKind::RepeatTime,
+        ),
+    );
+    assert_eq!(
+        def.scope,
+        crate::server::option_catalog::OptionScope::Session,
+    );
     assert_eq!(def.default, "500");
 }
 

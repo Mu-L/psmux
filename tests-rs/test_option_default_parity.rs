@@ -85,7 +85,12 @@ fn status_right_catalog_default_matches_runtime_default() {
 fn catalog_defaults_are_present_for_scalar_options() {
     let mut missing: Vec<&str> = Vec::new();
     for def in OPTION_CATALOG.iter() {
-        let scalar = matches!(def.option_type, "number" | "boolean" | "choice");
+        let scalar = matches!(
+            def.option_type,
+            crate::server::option_catalog::OptionType::Number(_)
+                | crate::server::option_catalog::OptionType::Boolean
+                | crate::server::option_catalog::OptionType::Choice(_)
+        );
         if scalar && def.default.trim().is_empty() {
             missing.push(def.name);
         }
@@ -95,4 +100,49 @@ fn catalog_defaults_are_present_for_scalar_options() {
         "these non-string options have an empty catalog default, so customize-mode \
          cannot reset them: {missing:?}"
     );
+}
+
+#[test]
+fn window_option_listing_preserves_its_supported_surface() {
+    let app = fresh_app();
+    let output = crate::server::options::render_window_options(&app);
+    let actual: Vec<&str> = output
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    let expected = [
+        "automatic-rename",
+        "monitor-activity",
+        "monitor-silence",
+        "remain-on-exit",
+        "window-status-format",
+        "window-status-current-format",
+        "window-status-separator",
+        "window-status-style",
+        "window-status-current-style",
+        "window-status-activity-style",
+        "window-status-bell-style",
+        "window-status-last-style",
+        "main-pane-width",
+        "main-pane-height",
+        "window-size",
+    ];
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn window_option_lookup_preserves_its_supported_surface() {
+    let app = fresh_app();
+    for name in [
+        "copy-mode-line-numbers",
+        "copy-mode-line-number-style",
+        "copy-mode-current-line-number-style",
+        "aggressive-resize",
+    ] {
+        assert_eq!(
+            crate::server::options::get_window_option_value(&app, name),
+            "",
+            "{name} is catalogued as window-scoped but is not exposed by show-window-options",
+        );
+    }
 }
