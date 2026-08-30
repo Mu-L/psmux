@@ -68,6 +68,11 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "allow-set-title", scope: "session", option_type: "boolean", default: "off", description: "Allow programs to set pane title via escape sequences" },
     OptionDef { name: "update-environment", scope: "session", option_type: "string", default: "DISPLAY KRB5CCNAME SSH_ASKPASS SSH_AUTH_SOCK SSH_AGENT_PID SSH_CONNECTION WINDOWID XAUTHORITY", description: "Environment variables to update on attach" },
     OptionDef { name: "synchronize-panes", scope: "session", option_type: "boolean", default: "off", description: "Send input to all panes simultaneously" },
+    // Catalogued for #619: `set-option -u` restores an option to its catalog
+    // default, so an option missing from here could not be restored at all.
+    // Both already had a hand written arm in the server's old restore table;
+    // this is the same value, in the one place that now owns it.
+    OptionDef { name: "choose-tree-preview", scope: "session", option_type: "boolean", default: "off", description: "Show a live pane preview in choose-tree" },
     // ── psmux extensions (session scope) ──
     OptionDef { name: "prediction-dimming", scope: "session", option_type: "boolean", default: "off", description: "Dim PSReadLine prediction text" },
     OptionDef { name: "allow-predictions", scope: "session", option_type: "boolean", default: "off", description: "Allow PSReadLine predictions" },
@@ -96,6 +101,8 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "pane-border-style", scope: "pane", option_type: "string", default: "default", description: "Inactive pane border style" },
     OptionDef { name: "pane-active-border-style", scope: "pane", option_type: "string", default: "fg=green", description: "Active pane border style" },
     OptionDef { name: "pane-border-lines", scope: "pane", option_type: "choice", default: "single", description: "Pane border line style (single/double/heavy/simple/number/spaces/none)" },
+    // See the choose-tree-preview note above (#619).
+    OptionDef { name: "pane-border-hover-style", scope: "pane", option_type: "string", default: "fg=yellow", description: "Pane border style under the mouse pointer" },
 ];
 
 /// Build the flattened option list for CustomizeMode using live values from AppState.

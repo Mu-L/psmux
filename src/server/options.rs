@@ -330,6 +330,74 @@ pub(crate) fn toggle_option(app: &mut AppState, option: &str) -> bool {
     true
 }
 
+/// Restore one option to the value a freshly started server reports for it,
+/// which is what `set-option -u` means (#619 follow up).
+///
+/// tmux does this in one place, `options_remove_or_default` (options.c ~1457):
+///
+/// ```c
+/// if (o->tableentry != NULL &&
+///     (oo == global_options || oo == global_s_options || oo == global_w_options))
+///         options_default(oo, o->tableentry);
+/// else
+///         options_remove(o);
+/// ```
+///
+/// so at a global scope a table option goes back to its options table default
+/// and only a **user** option, which carries no table entry, is removed
+/// outright.
+///
+/// psmux had no such single place. The unset was open coded three times and
+/// each copy was wrong in its own way:
+///
+/// * the server request loop carried a hand written per option restore table of
+///   about thirty arms with a `_ => {}` catch all, so every option it had never
+///   heard of simply kept its value: `set -s default-terminal xterm-256color`
+///   followed by `set -su default-terminal` still read `xterm-256color`, and
+///   `status-left` was restored to `psmux:#I` where a fresh server reports
+///   `[#S] `;
+/// * the config parser wrote an EMPTY value instead of a default, so
+///   `set -gu escape-time` in a config file left the old number where the CLI
+///   restored 500;
+/// * the plugin drain loop only erased the explicit set mark and never touched
+///   the value at all.
+///
+/// `OPTION_CATALOG` already carries a default for every option it lists, and
+/// `tests-rs/test_option_default_parity.rs` pins each of those defaults to a
+/// freshly constructed `AppState`, so the catalog IS the options table psmux
+/// was missing. Restoring through it means the table is written once, and the
+/// parity test keeps it honest.
+pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
+    let key = option.trim();
+    if key.is_empty() {
+        return;
+    }
+
+    // Forget that the user ever set it, so a following `-o` sees an unset
+    // option and applies (#619). tmux gets this for free because `-o` is
+    // judged by `options_get_only`, which the unset has already cleared.
+    app.user_set_options.remove(key);
+
+    // A `@user` option has no table entry, so tmux takes the `options_remove`
+    // branch: the key goes away rather than falling back to a default that
+    // does not exist. `-o` tests user options by key presence, so an entry
+    // left holding "" would read as set for ever.
+    if key.starts_with('@') {
+        app.user_options.remove(key);
+        return;
+    }
+
+    // Drop any stored override first. Options that live ONLY in `user_options`
+    // (window-style and window-active-style, terminal-overrides) have no typed
+    // field to restore and `get_option_value` already answers with the built in
+    // for a missing entry, so removal is the whole restore for them.
+    app.user_options.remove(key);
+
+    if let Some(default) = crate::server::option_catalog::default_for(key) {
+        apply_set_option(app, key, default, true);
+    }
+}
+
 /// Apply a set-option command. If `quiet` is true, unknown options are silently ignored.
 pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _quiet: bool) {
     match option {

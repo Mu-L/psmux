@@ -2001,7 +2001,16 @@ pub enum CtrlReq {
     SetOptionQuiet(String, String, bool),  // set-option with quiet flag
     SetOptionUnset(String),  // set-option -u
     SetOptionAppend(String, String),  // set-option -a
-    SetOptionOnlyIfUnset(String, String),  // set-option -o
+    /// `set-option -o`: apply only when the option is not already set.
+    ///
+    /// The third field is an OPTIONAL reply channel. tmux fails a `-o` on an
+    /// option that is already set (`already set: <name>`, exit 1) and only
+    /// swallows it under `-q`, so a caller that wants that answer passes a
+    /// channel and gets `""` on success or `ERROR: already set: <name>` on the
+    /// refusal. `-q` callers pass `None` and the request stays fire and
+    /// forget, which is what every caller used to do unconditionally: the
+    /// refusal was invisible on every route (#619 follow up).
+    SetOptionOnlyIfUnset(String, String, Option<mpsc::Sender<String>>),  // set-option -o
     SetOptionToggle(String),  // set-option <bool-option> with no value (#535)
     /// Per-window `window-size` override; None unsets the local value.
     SetWindowSize(Option<String>),

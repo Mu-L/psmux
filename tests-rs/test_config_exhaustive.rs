@@ -1265,19 +1265,25 @@ fn config_flag_u_unset_user_option() {
 
 #[test]
 fn config_flag_u_unset_numeric_option() {
-    // -u on numeric options: tries to parse empty string as number, silently fails
+    // -u RESTORES THE TABLE DEFAULT (#619). This used to assert 100, pinning
+    // the defect: the config parser applied an EMPTY value on -u, `"".parse()`
+    // failed, and the number the user had set simply stayed. The same
+    // `set -gu escape-time` on the CLI route restored 500, so the two routes
+    // disagreed about what an unset even means. tmux runs every unset through
+    // options_remove_or_default (options.c), which writes the options-table
+    // default at a global scope.
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g escape-time 100\nset -gu escape-time\n");
-    // escape-time stays at 100 because "".parse::<u64>() fails
-    assert_eq!(app.escape_time_ms, 100);
+    assert_eq!(app.escape_time_ms, 500);
 }
 
 #[test]
 fn config_flag_u_unset_string_option() {
+    // Same fix (#619): the default, not a blank. Blanking status-left produced
+    // an empty left status section where a fresh server shows `[#S] `.
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g status-left HELLO\nset -gu status-left\n");
-    // -u on string option sets to empty string
-    assert_eq!(app.status_left, "");
+    assert_eq!(app.status_left, "[#S] ");
 }
 
 #[test]

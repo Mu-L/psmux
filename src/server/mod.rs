@@ -464,16 +464,12 @@ fn drain_plugin_req(
             }
         }
         CtrlReq::SetOptionUnset(option) => {
-            if option.starts_with('@')
-                || matches!(option.as_str(), "window-style" | "window-active-style")
-            {
-                app.user_options.remove(&option);
-            }
-            // Issue #619: erase the explicit-set mark for EVERY option, not
-            // just the two #617 repaired, so a following `set -o` sees an
-            // unset option and applies. See the matching comment in the main
-            // request loop.
-            app.user_set_options.remove(&option);
+            // The same shared restore the main request loop and the config
+            // parser use: the catalog default for a table option, removal for
+            // a `@user` option, and the explicit-set mark erased either way so
+            // a following `set -o` applies (#619). This arm used to touch only
+            // the mark and leave the VALUE exactly where the user had put it.
+            crate::server::options::reset_option_to_default(app, &option);
         }
         CtrlReq::SetOptionToggle(option) => {
             // `set -g <bool-option>` with no value flips it (#535). The client
@@ -483,7 +479,7 @@ fn drain_plugin_req(
                 app.user_set_options.insert(option.clone());
             }
         }
-        CtrlReq::SetOptionOnlyIfUnset(option, value) => {
+        CtrlReq::SetOptionOnlyIfUnset(option, value, resp) => {
             // Only set if the option hasn't been explicitly set by user/config.
             // For @-prefixed user options, check if the key exists.
             // For built-in options, check the user_set_options tracker.
@@ -492,13 +488,22 @@ fn drain_plugin_req(
             } else {
                 app.user_set_options.contains(&option)
             };
-            if !already_set {
+            if already_set {
+                // `already set: <name>`, tmux's cmd-set-option.c refusal, sent
+                // back so the CLI can exit 1 with it (#619 follow up).
+                if let Some(r) = resp {
+                    let _ = r.send(format!("ERROR: already set: {}", option));
+                }
+            } else {
                 apply_set_option(app, &option, &value, false);
                 app.user_set_options.insert(option.clone());
                 if option == "command-alias" {
                     if let Ok(mut map) = shared_aliases.write() {
                         *map = app.command_aliases.clone();
                     }
+                }
+                if let Some(r) = resp {
+                    let _ = r.send(String::new());
                 }
             }
         }
@@ -4182,60 +4187,31 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::SetOptionUnset(option) => {
-                    // Reset option to default or remove @user-option
-                    if option.starts_with('@') {
-                        app.user_options.remove(&option);
-                    } else {
-                        match option.as_str() {
-                            "status-left" => { app.status_left = "psmux:#I".to_string(); }
-                            "status-right" => { app.status_right = "#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}\"#{=21:pane_title}\" %H:%M %d-%b-%y".to_string(); }
-                            "mouse" => { app.mouse_enabled = true; }
-                            "scroll-enter-copy-mode" => { app.scroll_enter_copy_mode = true; }
-                            "pwsh-mouse-selection" => { app.pwsh_mouse_selection = false; }
-                            "mouse-selection" => { app.mouse_selection = true; }
-                            "mouse-selection-force" => { app.mouse_selection_force = false; }
-                            "paste-detection" => { app.paste_detection = true; }
-                            "choose-tree-preview" => { app.choose_tree_preview = false; }
-                            "escape-time" => { app.escape_time_ms = 500; }
-                            // #606: tmux restores the table default on -u.
-                            "repeat-time" => { app.repeat_time_ms = 500; }
-                            "history-limit" => { app.history_limit = 2000; }
-                            "alternate-screen" => { app.allow_alternate_screen = true; }
-                            "display-time" => { app.display_time_ms = 750; }
-                            "mode-keys" => { app.mode_keys = "emacs".to_string(); }
-                            "status" => { app.status_visible = true; }
-                            "status-position" => { app.status_position = "bottom".to_string(); }
-                            "status-style" => { app.status_style = String::new(); }
-                            "renumber-windows" => { app.renumber_windows = false; }
-                            "remain-on-exit" => { app.remain_on_exit = false; }
-                            "destroy-unattached" => { app.destroy_unattached = false; }
-                            "exit-empty" => { app.exit_empty = true; }
-                            "automatic-rename" => { app.automatic_rename = true; }
-                            "pane-border-style" => { app.pane_border_style = String::new(); }
-                            "pane-active-border-style" => { app.pane_active_border_style = "fg=green".to_string(); }
-                            "pane-border-hover-style" => { app.pane_border_hover_style = "fg=yellow".to_string(); }
-                            "window-style" | "window-active-style" => {
-                                app.user_options.remove(&option);
-                                state_dirty = true;
-                            }
-                            "window-status-format" => { app.window_status_format = "#I:#W#{?window_flags,#{window_flags}, }".to_string(); }
-                            "window-status-current-format" => { app.window_status_current_format = "#I:#W#{?window_flags,#{window_flags}, }".to_string(); }
-                            "window-status-separator" => { app.window_status_separator = " ".to_string(); }
-                            "cursor-style" => { std::env::set_var("PSMUX_CURSOR_STYLE", "bar"); }
-                            "cursor-blink" => { std::env::set_var("PSMUX_CURSOR_BLINK", "1"); }
-                            _ => {}
+                    // Restore the table default, or remove an @user-option.
+                    //
+                    // This arm used to carry a hand written restore table of
+                    // about thirty options with a `_ => {}` catch all, so an
+                    // option it had never heard of kept its value: `set -s
+                    // default-terminal xterm-256color` then `set -su
+                    // default-terminal` still read xterm-256color, and every
+                    // -u on status-left restored `psmux:#I` where a fresh
+                    // server reports `[#S] `. The one restore table now lives
+                    // in OPTION_CATALOG, which
+                    // tests-rs/test_option_default_parity.rs already pins to a
+                    // freshly constructed AppState (#619 follow up).
+                    crate::server::options::reset_option_to_default(&mut app, &option);
+                    // The value moved, so reconcile the warm pane the same way
+                    // a plain set does (default-shell, history-limit and the
+                    // claude-code-* options all matter here).
+                    let sync = crate::warm_pane_sync::for_option_change(&option, &app);
+                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+                    if option == "command-alias" {
+                        if let Ok(mut map) = shared_aliases_main.write() {
+                            *map = app.command_aliases.clone();
                         }
                     }
-                    // Issue #619: forget that the user ever set this option.
-                    // The erase used to live inside the window-style arm alone
-                    // (the pair #617 repaired), so every other non `@` option
-                    // stayed marked as explicitly set after `-u` and the
-                    // SetOptionOnlyIfUnset arm below refused the following
-                    // `set -o`, silently. tmux clears the option at the scope
-                    // on `-u` (cmd-set-option.c: options_remove_or_default)
-                    // and then judges `-o` by whether anything is set there
-                    // (`already = (o != NULL)`), so `-u` then `-o` applies.
-                    app.user_set_options.remove(&option);
+                    meta_dirty = true;
+                    state_dirty = true;
                 }
                 CtrlReq::SetOptionAppend(option, value) => {
                     // Append to existing option value
@@ -4276,13 +4252,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         state_dirty = true;
                     }
                 }
-                CtrlReq::SetOptionOnlyIfUnset(option, value) => {
+                CtrlReq::SetOptionOnlyIfUnset(option, value, resp) => {
                     let already_set = if option.starts_with('@') {
                         app.user_options.contains_key(&option)
                     } else {
                         app.user_set_options.contains(&option)
                     };
-                    if !already_set {
+                    if already_set {
+                        // tmux does not merely skip the write, it FAILS:
+                        // cmd-set-option.c prints `already set: <name>` through
+                        // cmdq_error and returns CMD_RETURN_ERROR unless -q.
+                        // psmux swallowed the refusal on every route, so `-o`
+                        // could not answer the only question it exists to ask
+                        // (#619 follow up). A -q caller passes no channel and
+                        // still gets the silent exit 0 tmux gives it.
+                        if let Some(r) = resp {
+                            let _ = r.send(format!("ERROR: already set: {}", option));
+                        }
+                    } else {
                         apply_set_option(&mut app, &option, &value, false);
                         app.user_set_options.insert(option.clone());
                         if option == "command-alias" {
@@ -4292,6 +4279,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                         meta_dirty = true;
                         state_dirty = true;
+                        if let Some(r) = resp {
+                            let _ = r.send(String::new());
+                        }
                     }
                 }
                 CtrlReq::ShowOptions(resp) => {
