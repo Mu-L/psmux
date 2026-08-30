@@ -3,7 +3,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::net::TcpStream;
 
-use crate::types::{CtrlReq, LayoutKind, WaitForOp, ControlNotification};
+use crate::types::{
+    ControlNotification, CtrlReq, LayoutKind, WaitForOp, WindowDumpFormat,
+};
 
 /// Clear HANDLE_FLAG_INHERIT on a connection socket (see the comment at the
 /// clone sites in `handle_connection`). No-op off Windows.
@@ -1547,15 +1549,18 @@ match cmd {
         if !persistent { break; }
     }
     "window-dump" => {
-        // Issue #257: return full styled `LayoutJson` (with rows_v2 cell
-        // runs, titles, sizes) for a specific window id. The client uses
-        // this for cross-session previews so every pane is rendered with
-        // its own content via the same code path as the main viewport.
-        // Usage: window-dump <window_id>
+        // Return a fully styled LayoutJson, or the layout plus preview styles
+        // and focus metadata when `state` is requested.
+        // Usage: window-dump <window_id> [state]
         let wid: Option<usize> = args.get(0).and_then(|a| a.trim_start_matches('@').parse::<usize>().ok());
         if let Some(wid) = wid {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::WindowDump(wid, rtx));
+            let format = if args.get(1) == Some(&"state") {
+                WindowDumpFormat::PreviewState
+            } else {
+                WindowDumpFormat::Layout
+            };
+            let _ = tx.send(CtrlReq::WindowDump(wid, format, rtx));
             if let Ok(text) = rrx.recv() {
                 let _ = write!(write_stream, "{}\n", text);
                 let _ = write_stream.flush();

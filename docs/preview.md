@@ -52,22 +52,17 @@ Inside the chooser, `p` always toggles the preview for the current session regar
 
 ## How the Preview Renders
 
-The preview pane uses the tiled-pane renderer from the main viewport. Each open chooser fetches a JSON layout dump of the target window using the internal `window-dump` TCP command. The dump includes per-cell text, foreground and background colours, and style flags for every visible tiled pane.
+The preview pane uses the tiled-pane renderer from the main viewport. Preview state travels over the internal `window-dump <id> state` TCP command. The response includes the tiled layout, pane border settings, floating-focus state, and per-cell text, colours, and style flags for every visible tiled pane.
 
-That dump is then drawn into the preview area using `render_layout_json`, the same function that draws the live psmux viewport. The result is a styled miniature of the serialized pane content, including:
+That state is drawn into the preview area using `render_layout_json`. The result is a styled miniature of the target's tiled layout, including:
 
-* Internal pane dividers.
+* Internal pane dividers, including their colours and active-pane indicators.
 * Foreground and background colours from any TUI program running in the pane.
 * Bold, italic, underline, reversed, dim, blink, and strikethrough attributes.
 * True-colour (24-bit) and 256-colour palettes.
 * Wide characters (CJK).
 
-Persistent floating panes and pane title bars are not drawn. All previews use
-single border lines and `colour` indicators. Border colours come from the
-chooser and can differ in a cross-session preview because `window-dump`
-carries layout only.
-
-The preview is updated on a short cache window (about 1.5 seconds) so navigating quickly through a long session list does not flood the network with dump requests, but content still appears live for a steady selection.
+Persistent floating panes and pane title bars are not drawn. When a floating pane owns focus, the preview suppresses active indicators on the tiled layout to avoid highlighting the wrong pane.
 
 ## How psmux Handles Size Differences
 
@@ -101,25 +96,26 @@ psmux aims to keep the preview feature on par with tmux, with a few intentional 
 * **`choose-tree-preview` option.** Standard tmux does not have an option to make the preview visible by default. You must press `p` every time. psmux adds the `choose-tree-preview` option (default `off`, matching tmux behaviour) so you can opt in to a preview that is always visible.
 * **Render fidelity.** psmux uses its own `window-dump` snapshot pipeline rather than tmux's `capture-pane` text. This carries per-cell colours and supported attributes into the preview, so a preview of a Powerline prompt or a syntax-highlighted file remains styled rather than becoming plain text.
 * **Resize behaviour.** tmux scales / squeezes the preview content when the pane is wider than the preview slot, which can produce visually surprising results for column aligned output. psmux clips at one to one as described above. The result is that long lines or wide TUIs are cropped on the right edge in psmux but stay perfectly aligned, while in tmux they may be scaled but mis aligned.
-* **Cache window.** psmux caches the preview dump for about 1.5 seconds. tmux re-renders on every selection change. The psmux behaviour reduces network traffic when scrolling through many sessions but a very recent change to a target may take up to 1.5 seconds to appear in the preview.
+* **Cache window.** tmux re-renders on every selection change. See [Performance](#performance) for psmux's cache policy.
 * **Movable popup.** The chooser popup itself can be dragged with the mouse in psmux. Standard tmux choosers are fixed in place. The preview pane moves with the popup.
 
 ### Compatibility notes
 
 * The option name `choose-tree-preview` is psmux specific. tmux does not recognise it. Adding it to a shared configuration file is safe because tmux's set-option command will warn but not fail; if you want to be strict, guard the line with `if-shell` or split your config.
 * The option key in `show-options` output and in the JSON sent to the client uses kebab-case (`choose-tree-preview`) and snake_case (`choose_tree_preview`) respectively, matching the existing psmux convention.
-* The preview uses the target's serialized cell styles and the chooser's pane-border styles. The `window-dump` response does not include target `window-style` or `window-active-style` options.
+* The preview uses the target's pane-border settings and serialized cell styles. The `window-dump` response does not include target `window-style` or `window-active-style` options.
+* `window-dump <id> state` is optional on the wire. Clients accept a layout-only response and use chooser border colours with single lines and `colour` indicators. The layout-only request and response remain compatible with state-aware servers and clients.
 
 ## Performance
 
-The preview path has a dedicated layout cache, so an open chooser sends at most one `window-dump` request per target during each cached interval. Rendering is done client side using the tiled-pane renderer, so there is no extra server work for each frame after the dump is fetched.
+The preview path caches successful responses for about 1.5 seconds. Unreachable targets are retried while selected. Rendering is done client side using the existing tiled-pane renderer, so there is no extra server work for each frame after state is fetched.
 
 If you have very many sessions and the chooser feels slow, that is almost always due to scanning many session port files in `~/.psmux/`, not the preview itself. The preview only fetches the dump for the currently highlighted target.
 
 ## Troubleshooting
 
 **The preview shows an empty box.**
-The target window may not have responded yet. Move the selection away and back, or wait about 1.5 seconds for the cache to expire.
+The target window may not have responded yet. Verify that its session is reachable, or move the selection away and back to retry.
 
 **Long lines are cut off on the right.**
 This is by design. See "How psmux Handles Size Differences" above. If you want to see the full content, switch to the target with Enter.
@@ -130,6 +126,8 @@ The option is read when the chooser opens, not while it is open. Close the choos
 ## Related Options and Commands
 
 * `mode-style`: controls how the selected entry in the chooser list is highlighted.
+* `pane-border-style` and `pane-active-border-style`: control the inactive and active border colours copied from the target window.
+* `pane-border-indicators` and `pane-border-lines`: control the active cues and border glyphs copied from the target window.
 * `mouse on`: enables clicking entries in the chooser list and dragging the popup.
 
 ## See Also

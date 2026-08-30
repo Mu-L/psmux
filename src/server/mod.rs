@@ -2566,9 +2566,60 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         .unwrap_or_else(|_| "{}".to_string());
                     let _ = resp.send(json);
                 }
-                CtrlReq::WindowDump(wid, resp) => {
-                    let json = crate::layout::dump_window_layout_json(&mut app, wid)
-                        .unwrap_or_else(|_| "{}".to_string());
+                CtrlReq::WindowDump(wid, format, resp) => {
+                    let result = if format == crate::types::WindowDumpFormat::Layout {
+                        crate::layout::dump_window_layout_json(&mut app, wid)
+                    } else {
+                        crate::layout::dump_window_layout(&mut app, wid)
+                            .and_then(|layout| {
+                                let border_lines =
+                                    options::get_option_value(&app, "pane-border-lines");
+                                let border_indicators =
+                                    crate::pane_border::PaneBorderIndicators::parse(
+                                        &options::get_option_value(
+                                            &app,
+                                            "pane-border-indicators",
+                                        ),
+                                    )
+                                    .map_err(std::io::Error::other)?;
+                                let window_index = app.windows
+                                    .iter()
+                                    .position(|window| window.id == wid)
+                                    .ok_or_else(|| std::io::Error::other("window not found"))?;
+                                let _async_fmt = crate::format::AsyncFormatGuard::new();
+                                let pane_border_style = if app.pane_border_style.is_empty() {
+                                    String::new()
+                                } else {
+                                    crate::format::expand_format_for_window(
+                                        &app.pane_border_style,
+                                        &app,
+                                        window_index,
+                                    )
+                                };
+                                let pane_active_border_style =
+                                    if app.pane_active_border_style.is_empty() {
+                                        String::new()
+                                    } else {
+                                        crate::format::expand_format_for_window(
+                                            &app.pane_active_border_style,
+                                            &app,
+                                            window_index,
+                                        )
+                                    };
+                                let floating_pane_focused =
+                                    app.windows[window_index].floating_focus.is_some();
+                                serde_json::to_string(&crate::types::PreviewWindowState {
+                                    layout,
+                                    border_lines,
+                                    border_indicators,
+                                    pane_border_style: Some(pane_border_style),
+                                    pane_active_border_style: Some(pane_active_border_style),
+                                    floating_pane_focused,
+                                })
+                                .map_err(std::io::Error::other)
+                            })
+                    };
+                    let json = result.unwrap_or_else(|_| "{}".to_string());
                     let _ = resp.send(json);
                 }
                 CtrlReq::ToggleSync => { app.sync_input = !app.sync_input; }

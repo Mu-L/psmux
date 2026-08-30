@@ -1196,7 +1196,7 @@ fn complete_pane_border_colors(style: Style) -> Style {
         .bg(style.bg.unwrap_or(Color::Reset))
 }
 
-fn parse_pane_border_colors(raw: Option<&str>, default: Style) -> Style {
+pub(crate) fn parse_pane_border_colors(raw: Option<&str>, default: Style) -> Style {
     let Some(raw) = raw.filter(|style| !style.is_empty()) else {
         return complete_pane_border_colors(default);
     };
@@ -2045,12 +2045,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Live preview cache for choose-tree / choose-session pickers (issue #257).
     // Keyed by "session\twin_id\tpane_id"; pane_id == usize::MAX => active pane.
     let mut preview_cache: crate::preview::PreviewCache = std::collections::HashMap::new();
-    // Full-styled dump cache: every pane in a window with its own
-    // `rows_v2` content, fetched in one round trip via `window-dump`.
-    // This is the primary preview source — it sidesteps the per-pane
-    // `capture-pane -t` round trips that mis-targeted the active pane,
-    // and lets the client reuse the same renderer the main view uses.
-    let mut dump_cache: crate::preview::DumpCache = std::collections::HashMap::new();
+    // Target-window preview state keyed by session and window.
+    let mut preview_state_cache: crate::preview::PreviewWindowStateCache =
+        std::collections::HashMap::new();
     // Whether the right-side preview pane is shown. Toggled by `p`
     // while a chooser is open. Persisted across reopens.
     let mut preview_enabled: bool = false;
@@ -6162,16 +6159,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         });
 
                         if let Some(wid) = win_id {
-                            if let Some(layout) = crate::preview::get_or_fetch_dump(
-                                &mut dump_cache, sname, wid,
+                            if let Some(preview_state) = crate::preview::get_or_fetch_preview_window_state(
+                                &mut preview_state_cache, sname, wid,
                             ) {
-                                crate::preview::render_dump_tree(
+                                let (preview_border_style, preview_active_border_style) =
+                                    preview_state.pane_border_styles(
+                                        pane_border_style,
+                                        pane_active_border_style,
+                                    );
+                                crate::preview::render_preview_layout(
                                     f,
-                                    &layout,
+                                    &preview_state.layout,
                                     parea,
-                                    pane_border_style,
-                                    pane_active_border_style,
-                                    None,
+                                    preview_border_style,
+                                    preview_active_border_style,
+                                    crate::border_lines::border_chars(&preview_state.border_lines),
+                                    preview_state.border_indicators,
+                                    preview_state.floating_pane_focused,
                                 );
                                 rendered = true;
                             }
@@ -6349,20 +6353,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         };
 
                         if let Some(twid) = target_win {
-                            if let Some(layout) = crate::preview::get_or_fetch_dump(
-                                &mut dump_cache, &sess, twid,
+                            if let Some(preview_state) = crate::preview::get_or_fetch_preview_window_state(
+                                &mut preview_state_cache, &sess, twid,
                             ) {
-                                // Highlight which pane the user is hovering on
-                                // (for pane-level entries). Active pane gets a
-                                // brighter separator anyway.
-                                let highlight_pid = if !is_win { Some(pid) } else { None };
-                                crate::preview::render_dump_tree(
+                                let (preview_border_style, preview_active_border_style) =
+                                    preview_state.pane_border_styles(
+                                        pane_border_style,
+                                        pane_active_border_style,
+                                    );
+                                crate::preview::render_preview_layout(
                                     f,
-                                    &layout,
+                                    &preview_state.layout,
                                     parea,
-                                    pane_border_style,
-                                    pane_active_border_style,
-                                    highlight_pid,
+                                    preview_border_style,
+                                    preview_active_border_style,
+                                    crate::border_lines::border_chars(&preview_state.border_lines),
+                                    preview_state.border_indicators,
+                                    preview_state.floating_pane_focused,
                                 );
                                 rendered = true;
                             }

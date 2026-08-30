@@ -1742,6 +1742,43 @@ pub enum Action {
 #[derive(Clone)]
 pub struct Bind { pub key: (KeyCode, KeyModifiers), pub action: Action, pub repeat: bool }
 
+/// Tiled layout, border settings, and focus state used by chooser previews.
+/// Persistent floating panes and pane title bars are not included.
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+pub struct PreviewWindowState {
+    pub layout: crate::layout::LayoutJson,
+    pub border_lines: String,
+    pub border_indicators: crate::pane_border::PaneBorderIndicators,
+    #[serde(default)]
+    pub pane_border_style: Option<String>,
+    #[serde(default)]
+    pub pane_active_border_style: Option<String>,
+    pub floating_pane_focused: bool,
+}
+
+/// Parse preview state while accepting the layout-only `window-dump <id>`
+/// response.
+pub(crate) fn parse_preview_window_state(raw: &str) -> Option<PreviewWindowState> {
+    if let Ok(state) = serde_json::from_str(raw) {
+        return Some(state);
+    }
+    let layout = serde_json::from_str(raw).ok()?;
+    Some(PreviewWindowState {
+        layout,
+        border_lines: crate::border_lines::DEFAULT.to_string(),
+        border_indicators: crate::pane_border::PaneBorderIndicators::default(),
+        pane_border_style: None,
+        pane_active_border_style: None,
+        floating_pane_focused: false,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowDumpFormat {
+    Layout,
+    PreviewState,
+}
+
 pub enum CtrlReq {
     NewWindow(Option<String>, Option<String>, bool, Option<String>, Option<String>, bool, Vec<(String, String)>),  // cmd, name, detached, start_dir, title (-T), empty (-E), env (-e, #489)
     NewWindowPrint(Option<String>, Option<String>, bool, Option<String>, Option<String>, mpsc::Sender<String>, Option<String>, bool, Vec<(String, String)>),  // cmd, name, detached, start_dir, format, resp, title (-T), empty (-E), env (-e, #489)
@@ -1880,11 +1917,8 @@ pub enum CtrlReq {
     /// Issue #257: simplified layout (split kind/sizes + pane ids)
     /// for a specific window, used for choose-tree preview rendering.
     WindowLayout(usize, mpsc::Sender<String>),
-    /// Issue #257: full styled `LayoutJson` (rows_v2 cell runs, titles,
-    /// etc.) for a specific window. Lets cross-session previews reuse the
-    /// exact same renderer the main viewport uses, instead of replaying
-    /// `capture-pane -e` per pane and parsing ANSI by hand.
-    WindowDump(usize, mpsc::Sender<String>),
+    /// Issue #257: fully styled layout or preview state for a specific window.
+    WindowDump(usize, WindowDumpFormat, mpsc::Sender<String>),
     ToggleSync,
     SetPaneTitle(String),
     SetPaneStyle(String),
@@ -2691,3 +2725,7 @@ mod tests_base_index_rebase;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue601_602_move_swap_window.rs"]
 mod tests_issue601_602_move_swap_window;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_preview_window_state.rs"]
+mod tests_preview_window_state;

@@ -900,10 +900,22 @@ fn run_main() -> io::Result<()> {
             let win_id: usize = cmd_args[2].parse().expect("win_id must be a number");
             let w: u16 = cmd_args[3].parse().expect("width must be a number");
             let h: u16 = cmd_args[4].parse().expect("height must be a number");
-            let layout = match crate::preview::fetch_window_dump(&sess, win_id) {
-                Some(l) => l,
+            let preview_state = match crate::preview::fetch_preview_window_state(&sess, win_id) {
+                Some(state) => state,
                 None => { eprintln!("failed to fetch window-dump for {}:@{}", sess, win_id); std::process::exit(3); }
             };
+            let (border_style, active_border_style) = preview_state.pane_border_styles(
+                ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+                ratatui::style::Style::default().fg(ratatui::style::Color::Green),
+            );
+            let crate::types::PreviewWindowState {
+                layout,
+                border_lines,
+                border_indicators,
+                pane_border_style: _,
+                pane_active_border_style: _,
+                floating_pane_focused,
+            } = preview_state;
             use ratatui::Terminal;
             use ratatui::backend::TestBackend;
             use ratatui::layout::Rect;
@@ -912,42 +924,15 @@ fn run_main() -> io::Result<()> {
             let mut term = Terminal::new(backend).unwrap();
             term.draw(|f| {
                 let area = Rect::new(0, 0, w, h);
-                let active_rect = crate::client::compute_active_rect_json(&layout, area);
-                let total_panes = layout.count_leaves();
-                let border_style = ratatui::style::Style::default().fg(Color::DarkGray);
-                let active_border_style = ratatui::style::Style::default().fg(Color::Green);
-                let border_chars = crate::border_lines::border_chars(crate::border_lines::DEFAULT);
-                crate::client::render_layout_json(
-                    f, &layout, area,
-                    false,
-                    border_style,
-                    active_border_style,
-                    false, Color::Reset,
-                    active_rect,
-                    "", false, "off", "",
-                    total_panes,
-                    border_chars,
-                    None,
-                    crate::client::WindowContentStyles::default(),
-                    crate::pane_border::PaneBorderIndicators::Colour,
-                );
-                let borders = crate::client::border_geometry_from_layout(
+                crate::preview::render_preview_layout(
+                    f,
                     &layout,
                     area,
-                    f.buffer_mut().area,
-                    false,
-                );
-                let junctions = crate::rendering::fix_border_intersections(
-                    f.buffer_mut(),
-                    border_chars,
-                    &borders,
-                );
-                crate::client::recolor_border_junctions(
-                    f.buffer_mut(),
-                    &junctions,
-                    active_rect,
                     border_style,
                     active_border_style,
+                    crate::border_lines::border_chars(&border_lines),
+                    border_indicators,
+                    floating_pane_focused,
                 );
             }).unwrap();
             // Dump the buffer as ANSI escape sequences so colors are visible.

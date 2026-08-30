@@ -438,60 +438,75 @@ pub fn layout_separators(
     out
 }
 
-// ---------------------------------------------------------------------
-// Full styled preview (issue #257 follow-up): reuse the same rich
-// `LayoutJson` (with `rows_v2` cell runs) the main viewport renders,
-// instead of replaying `capture-pane -e` per pane and parsing ANSI.
-// This fixes two problems at once:
-//   1. `capture-pane -t :@W.%P` resolved through transient -t focus and
-//      could return the active pane's content for every pane id, so all
-//      preview cells showed the same buffer.
-//   2. The hand-rolled ANSI pipeline duplicated rendering logic that
-//      already exists in the main viewport (border, color, attribute
-//      handling). Sharing the structured `LayoutJson` keeps previews
-//      visually identical to the real window.
-// ---------------------------------------------------------------------
+impl crate::types::PreviewWindowState {
+    /// Empty state styles use target defaults; missing fields use chooser fallbacks.
+    pub fn pane_border_styles(
+        &self,
+        border_fallback: Style,
+        active_fallback: Style,
+    ) -> (Style, Style) {
+        let border_default = Style::default().fg(Color::DarkGray);
+        let active_default = Style::default().fg(Color::Green);
+        (
+            match self.pane_border_style.as_deref() {
+                Some(style) => {
+                    crate::client::parse_pane_border_colors(Some(style), border_default)
+                }
+                None => crate::client::parse_pane_border_colors(None, border_fallback),
+            },
+            match self.pane_active_border_style.as_deref() {
+                Some(style) => {
+                    crate::client::parse_pane_border_colors(Some(style), active_default)
+                }
+                None => crate::client::parse_pane_border_colors(None, active_fallback),
+            },
+        )
+    }
+}
 
-/// Cache for full layout dumps keyed by "sess\twin_id".
-pub type DumpCache = HashMap<String, (crate::layout::LayoutJson, Instant)>;
+/// Cache for preview state keyed by "sess\twin_id".
+pub type PreviewWindowStateCache =
+    HashMap<String, (crate::types::PreviewWindowState, Instant)>;
 
-pub const DUMP_TTL: Duration = Duration::from_millis(1500);
-
-/// Fetch the full styled layout (rows_v2) for a window in any session
-/// via TCP using the new `window-dump` command.
-pub fn fetch_window_dump(sess: &str, win_id: usize) -> Option<crate::layout::LayoutJson> {
+/// Fetch the layout, border options, and floating-focus state required to
+/// preview a window in any session.
+pub fn fetch_preview_window_state(
+    sess: &str,
+    win_id: usize,
+) -> Option<crate::types::PreviewWindowState> {
     let port_path = crate::paths::port_file(sess);
     let port: u16 = std::fs::read_to_string(&port_path).ok()?.trim().parse().ok()?;
     let key = read_session_key(sess).ok()?;
-    let cmd = format!("window-dump {}\n", win_id);
-    let resp = fetch_authed_response_multi(
-        &format!("127.0.0.1:{}", port),
+    let addr = format!("127.0.0.1:{}", port);
+    let cmd = format!("window-dump {} state\n", win_id);
+    let response = fetch_authed_response_multi(
+        &addr,
         &key,
         cmd.as_bytes(),
         CONNECT_TIMEOUT,
         READ_TIMEOUT,
     )?;
-    let trimmed = resp.trim();
+    let trimmed = response.trim();
     if trimmed.is_empty() || trimmed == "{}" {
         return None;
     }
-    serde_json::from_str::<crate::layout::LayoutJson>(trimmed).ok()
+    crate::types::parse_preview_window_state(trimmed)
 }
 
-pub fn get_or_fetch_dump(
-    cache: &mut DumpCache,
+pub fn get_or_fetch_preview_window_state(
+    cache: &mut PreviewWindowStateCache,
     sess: &str,
     win_id: usize,
-) -> Option<crate::layout::LayoutJson> {
+) -> Option<crate::types::PreviewWindowState> {
     let key = format!("{}\t{}", sess, win_id);
-    if let Some((layout, ts)) = cache.get(&key) {
-        if ts.elapsed() < DUMP_TTL {
-            return Some(layout.clone());
+    if let Some((state, ts)) = cache.get(&key) {
+        if ts.elapsed() < PREVIEW_TTL {
+            return Some(state.clone());
         }
     }
-    let layout = fetch_window_dump(sess, win_id)?;
-    cache.insert(key, (layout.clone(), Instant::now()));
-    Some(layout)
+    let state = fetch_preview_window_state(sess, win_id)?;
+    cache.insert(key, (state.clone(), Instant::now()));
+    Some(state)
 }
 
 /// Map a vt100-style color name (as emitted by `crate::util::color_to_name`)
@@ -682,20 +697,26 @@ pub fn dump_separators(
     out
 }
 
-/// Render the target's pane contents and separators into the preview area.
-/// Target window styles are not part of `window-dump`, so cross-session
-/// previews use the colours serialized in the dump, the caller's border
-/// styles, and the default colour indicator mode.
-pub fn render_dump_tree(
+/// Render a clipped view of a target's tiled layout. Floating panes, pane title
+/// bars, and zoom are deliberately omitted.
+pub fn render_preview_layout(
     f: &mut ratatui::Frame,
     layout: &crate::layout::LayoutJson,
     area: ratatui::layout::Rect,
     border_style: ratatui::style::Style,
     active_border_style: ratatui::style::Style,
-    _highlight_pid: Option<usize>,
+    border_chars: Option<crate::border_lines::BorderChars>,
+    border_indicators: crate::pane_border::PaneBorderIndicators,
+    floating_pane_focused: bool,
 ) {
     if area.width == 0 || area.height == 0 { return; }
     let active_rect = crate::client::compute_active_rect_json(layout, area);
+    let (active_rect, active_border_style) = crate::client::tiled_border_focus(
+        active_rect,
+        border_style,
+        active_border_style,
+        floating_pane_focused,
+    );
     let total_panes = layout.count_leaves();
     crate::client::render_layout_json(
         f, layout, area,
@@ -709,10 +730,10 @@ pub fn render_dump_tree(
         "off",            // border_status off (no per-pane title bar)
         "",               // border_format irrelevant
         total_panes,
-        crate::border_lines::border_chars(crate::border_lines::DEFAULT),
+        border_chars,
         None,
         crate::client::WindowContentStyles::default(),
-        crate::pane_border::PaneBorderIndicators::Colour,
+        border_indicators,
     );
     let borders = crate::client::border_geometry_from_layout(
         layout,
@@ -722,7 +743,7 @@ pub fn render_dump_tree(
     );
     let junctions = crate::rendering::fix_border_intersections(
         f.buffer_mut(),
-        crate::border_lines::border_chars(crate::border_lines::DEFAULT),
+        border_chars,
         &borders,
     );
     crate::client::recolor_border_junctions(
@@ -731,6 +752,13 @@ pub fn render_dump_tree(
         active_rect,
         border_style,
         active_border_style,
+    );
+    crate::client::draw_pane_border_arrows(
+        f.buffer_mut(),
+        &borders,
+        border_chars,
+        active_rect,
+        border_indicators,
     );
 }
 

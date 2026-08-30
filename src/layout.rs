@@ -228,7 +228,7 @@ impl LayoutJson {
 }
 
 pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
-    dump_layout_json_inner(app, None)
+    serialize_layout(&dump_layout_inner(app, None)?)
 }
 
 /// Same as `dump_layout_json` but for a specific window id, regardless of
@@ -238,7 +238,16 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
 /// transient focus and was returning the active pane's content for every
 /// requested pane id).
 pub fn dump_window_layout_json(app: &mut AppState, win_id: usize) -> io::Result<String> {
-    dump_layout_json_inner(app, Some(win_id))
+    serialize_layout(&dump_window_layout(app, win_id)?)
+}
+
+pub fn dump_window_layout(app: &mut AppState, win_id: usize) -> io::Result<LayoutJson> {
+    dump_layout_inner(app, Some(win_id))
+}
+
+fn serialize_layout(layout: &LayoutJson) -> io::Result<String> {
+    serde_json::to_string(layout)
+        .map_err(|error| io::Error::new(io::ErrorKind::Other, format!("json error: {error}")))
 }
 
 /// Copy-mode screen freeze (issue #494, tmux parity): while the session is in
@@ -304,7 +313,7 @@ fn sync_copy_freeze(app: &mut AppState, in_copy_mode: bool) {
     if let Some(v) = new_offset { app.copy_scroll_offset = v; }
 }
 
-fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::Result<String> {
+fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::Result<LayoutJson> {
     let in_copy_mode = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
     if win_id_override.is_none() {
         sync_copy_freeze(app, in_copy_mode);
@@ -659,8 +668,7 @@ fn dump_layout_json_inner(app: &mut AppState, win_id_override: Option<usize>) ->
         if win_id_override.is_none() { app.copy_anchor } else { None },
         if win_id_override.is_none() { app.copy_pos } else { None },
     );
-    let s = serde_json::to_string(&root).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("json error: {e}")))?;
-    Ok(s)
+    Ok(root)
 }
 
 /// Direct JSON serialisation of the layout tree – writes JSON straight into

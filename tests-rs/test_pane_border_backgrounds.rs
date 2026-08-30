@@ -152,13 +152,15 @@ fn preview_preserves_active_and_inactive_border_backgrounds() {
 
     terminal
         .draw(|frame| {
-            crate::preview::render_dump_tree(
+            crate::preview::render_preview_layout(
                 frame,
                 &layout,
                 Rect::new(0, 0, 10, 6),
                 inactive_style,
                 active_style,
-                None,
+                crate::border_lines::border_chars("single"),
+                PaneBorderIndicators::Colour,
+                false,
             );
         })
         .unwrap();
@@ -382,13 +384,15 @@ fn nested_preview_junction_background_tracks_active_pane() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| {
-            crate::preview::render_dump_tree(
+            crate::preview::render_preview_layout(
                 frame,
                 &layout,
                 Rect::new(0, 0, 12, 8),
                 inactive_style,
                 active_style,
-                None,
+                crate::border_lines::border_chars("single"),
+                PaneBorderIndicators::Colour,
+                false,
             );
         })
         .unwrap();
