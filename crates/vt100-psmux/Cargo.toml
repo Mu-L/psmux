@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.70"
 name = "vt100-psmux"
-version = "0.16.11"
+version = "0.16.12"
 authors = ["Jesse Luehrs <doy@tozt.net>"]
 build = false
 include = [
@@ -74,33 +74,33 @@ name = "issue589_undercurl"
 path = "tests/issue589_undercurl.rs"
 
 [dependencies.itoa]
-version = "1.0.15"
+version = "1.0.18"
 
 [dependencies.unicode-width]
-version = "0.2.1"
+version = "0.2.2"
 
 [dependencies.vte]
 version = "0.15.0"
 
 [dev-dependencies.nix]
-version = "0.31"
+version = "0.31.3"
 features = ["term"]
 
 [dev-dependencies.quickcheck]
-version = "1.0"
+version = "1.1.0"
 
 [dev-dependencies.rand]
-version = "0.10"
+version = "0.10.2"
 
 [dev-dependencies.serde]
-version = "1.0.219"
+version = "1.0.229"
 features = ["derive"]
 
 [dev-dependencies.serde_json]
-version = "1.0.140"
+version = "1.0.151"
 
 [dev-dependencies.terminal_size]
-version = "0.4.2"
+version = "0.4.4"
 
 
 
