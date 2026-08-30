@@ -212,8 +212,8 @@ Details worth knowing:
 | `pane-border-status` | Str | | Pane border status position (`top`/`bottom`/`off`) |
 | `copy-mode-line-number-style` | Str | `fg=brightblack` | Style of the copy-mode line number gutter |
 | `copy-mode-current-line-number-style` | Str | `fg=yellow,bold` | Style of the line number on the copy-mode cursor row |
-| `window-style` | Str | | Style applied to the contents of panes that are not the active pane (tmux `options-table.c` wording); fills only cells whose colour is the terminal default |
-| `window-active-style` | Str | | Style applied to the contents of the active pane; explicit application colours always win |
+| `window-style` | Str | | Style applied to the contents of panes that are not the active pane (tmux `options-table.c` wording), and the fallback for the active pane; fills only cells whose colour is the terminal default. Also accepts `dim=N` (0 to 100 percent) |
+| `window-active-style` | Str | | Style applied to the contents of the active pane; each of `fg` and `bg` falls back to `window-style` when this option does not name it. Explicit application colours always win. Also accepts `dim=N` |
 | `popup-border-style` | Str | `fg=yellow` | Border style of `display-popup` overlays |
 | `popup-border-lines` | Str | `single` | Popup border glyph set: `single`, `double`, `heavy`, `rounded` |
 | `popup-style` | Str | | Accepted and stored, but never read. See [Accepted but Not Functional](#accepted-but-not-functional) |
@@ -338,6 +338,39 @@ set -g window-active-style "fg=colour250,bg=black"
 
 # Colour of the clock-mode digits (Prefix + t)
 set -g clock-mode-colour cyan
+```
+
+### How the two window styles combine
+
+`window-active-style` does not replace `window-style` for the active pane, it
+layers on top of it one attribute at a time, matching tmux `tty.c`
+`tty_default_colours`. The active pane takes `fg` from `window-active-style`
+only when that option actually names an `fg`, and the same holds separately for
+`bg`. Anything it leaves unnamed comes from `window-style`.
+
+Three consequences worth knowing:
+
+* `set -g window-style "bg=colour52"` on its own tints **every** pane, the
+  active one included. You do not need to repeat the colour in
+  `window-active-style`.
+* Mixing works. With `window-style "bg=blue"` and
+  `window-active-style "fg=red"`, the active pane is red on blue while the
+  other panes keep the terminal foreground on blue.
+* `bg=default` (tmux colour 8) names no colour, so
+  `window-active-style "bg=default"` reads as "inherit `window-style`", not as
+  "use the terminal background".
+
+Both options also accept a `dim=N` percentage, where `N` runs from 0 to 100, as
+newer tmux does. It scales the pane's colours toward black by that percentage
+and applies to application colours too, not only to the ones the window style
+supplies. Unlike `fg` and `bg`, `dim` does not fall back: the active pane uses
+the `dim` from `window-active-style`, other panes use the one from
+`window-style`.
+
+```tmux
+# Every pane sits on a dark red ground, the active pane simply undimmed
+set -g window-style "bg=colour52,dim=40"
+set -g window-active-style "bg=colour52"
 ```
 
 `popup-border-lines` accepts `single` (the default), `double`, `heavy` and `rounded`. The values `none` and `simple` are accepted but render as plain single lines, because a popup always draws a border.

@@ -167,8 +167,20 @@ pub fn render_window(f: &mut Frame, app: &mut AppState, area: Rect) {
     let border_style = parse_tmux_style(&app.pane_border_style);
     let active_border_style = parse_tmux_style(&app.pane_active_border_style);
     let copy_cursor = if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) { app.copy_pos } else { None };
-    let window_style = app.user_options.get("window-style").map(|s| parse_tmux_style(s));
-    let window_active_style = app.user_options.get("window-active-style").map(|s| parse_tmux_style(s));
+    // Same resolver as the live client renderer (src/client.rs), so the two
+    // paths agree on the tmux `tty_default_colours` fallback (#619).
+    let window_styles = crate::client::WindowContentStyles {
+        inactive: app.user_options.get("window-style")
+            .filter(|s| !s.is_empty())
+            .map(|s| parse_tmux_style(s)),
+        active: app.user_options.get("window-active-style")
+            .filter(|s| !s.is_empty())
+            .map(|s| parse_tmux_style(s)),
+        inactive_dim: app.user_options.get("window-style")
+            .map(|s| crate::style::parse_style_dim(s)).unwrap_or(0),
+        active_dim: app.user_options.get("window-active-style")
+            .map(|s| crate::style::parse_style_dim(s)).unwrap_or(0),
+    };
     let border_status = app.user_options.get("pane-border-status").cloned().unwrap_or_else(|| "off".to_string());
     // tmux ships a non-empty default for pane-border-format, so enabling
     // `pane-border-status top` alone shows the pane title on the border. psmux
@@ -186,7 +198,7 @@ pub fn render_window(f: &mut Frame, app: &mut AppState, area: Rect) {
     let bchars = crate::border_lines::border_chars(&border_lines_name);
     let win = &mut app.windows[app.active_idx];
     let active_rect = compute_active_rect(&win.root, &win.active_path, area);
-    render_node(f, &mut win.root, &win.active_path, &mut Vec::new(), area, dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_style, window_active_style, &border_status, &border_format, &mut 0, bchars);
+    render_node(f, &mut win.root, &win.active_path, &mut Vec::new(), area, dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_styles, &border_status, &border_format, &mut 0, bchars);
     let buf_area = f.buffer_mut().area;
     let mask = border_mask_from_node(&win.root, area, buf_area);
     fix_border_intersections(f.buffer_mut(), bchars, &mask);
@@ -337,8 +349,7 @@ pub fn render_node(
     active_border_style: Style,
     copy_cursor: Option<(u16, u16)>,
     active_rect: Option<Rect>,
-    window_style: Option<Style>,
-    window_active_style: Option<Style>,
+    window_styles: crate::client::WindowContentStyles,
     border_status: &str,
     border_format: &str,
     pane_idx: &mut usize,
@@ -347,6 +358,10 @@ pub fn render_node(
     match node {
         Node::Leaf(pane) => {
             let is_active = *cur_path == *active_path;
+            // window-style / window-active-style for this pane, with the tmux
+            // per attribute fallback applied for the active pane (#619).
+            let ws = window_styles.for_pane(is_active);
+            let ws_dim = window_styles.dim_for_pane(is_active);
             // When pane-border-status is enabled, reserve 1 row for the
             // border label so it doesn't overlap pane content (#288).
             let has_border_label = border_status != "off" && !border_format.is_empty() && area.height > 1;
@@ -382,10 +397,15 @@ pub fn render_node(
                         let mut fg = vt_to_color(cell.fgcolor());
                         let mut bg = vt_to_color(cell.bgcolor());
                         // Apply window-style / window-active-style defaults for unset colors
-                        let ws = if is_active { window_active_style } else { window_style };
                         if let Some(ws) = ws {
                             if fg == Color::Reset { if let Some(wfg) = ws.fg { fg = wfg; } }
                             if bg == Color::Reset { if let Some(wbg) = ws.bg { bg = wbg; } }
+                        }
+                        // tmux `tty_attributes` dims the resolved colours by the
+                        // window style's `dim=N` percentage (#619 item 4).
+                        if ws_dim != 0 {
+                            fg = crate::style::dim_colour_percent(fg, ws_dim);
+                            bg = crate::style::dim_colour_percent(bg, ws_dim);
                         }
                         if dim_preds && !screen.alternate_screen()
                             && (r > cur_r || (r == cur_r && c >= cur_c))
@@ -482,7 +502,7 @@ pub fn render_node(
             for (i, child) in children.iter_mut().enumerate() {
                 cur_path.push(i);
                 if i < rects.len() {
-                    render_node(f, child, active_path, cur_path, rects[i], dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_style, window_active_style, border_status, border_format, pane_idx, bchars);
+                    render_node(f, child, active_path, cur_path, rects[i], dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_styles, border_status, border_format, pane_idx, bchars);
                 }
                 cur_path.pop();
             }

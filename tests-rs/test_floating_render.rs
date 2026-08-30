@@ -115,6 +115,7 @@ fn floating_panes_apply_active_and_inactive_window_colors() {
                 .fg(Color::Yellow)
                 .bg(Color::Blue),
         ),
+        ..Default::default()
     };
     let active = make_float(1, 1, 8, 5, "single");
     let active_buffer = render_with_styles(&active, 20, 10, window_styles);
@@ -184,6 +185,7 @@ fn focused_float_leaves_tiled_content_with_inactive_window_style() {
     let window_styles = WindowContentStyles {
         inactive: Some(Style::default().bg(Color::DarkGray)),
         active: Some(Style::default().bg(Color::Blue)),
+        ..Default::default()
     };
     let floating = make_float(2, 1, 6, 4, "single");
     let backend = TestBackend::new(12, 6);
