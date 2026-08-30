@@ -103,11 +103,15 @@ if ($fg -and $bg) {
 }
 
 # 3. window-active-style still wins where it names the attribute.
+#    The stream is cumulative from session start, so window-active-style goes
+#    first: with the fallback in place, window-style alone would tint the
+#    active pane during the repaint between the two commands and 48;5;21
+#    would appear legitimately. Ordered this way it must never appear.
 Write-Host "`n[window-active-style overrides window-style where it names a colour]" -ForegroundColor Yellow
 $esc = Get-Stream {
     & $PSMUX set-option -g status off 2>&1 | Out-Null
-    & $PSMUX set-option -g window-style "bg=colour21" 2>&1 | Out-Null
     & $PSMUX set-option -g window-active-style "bg=colour52" 2>&1 | Out-Null
+    & $PSMUX set-option -g window-style "bg=colour21" 2>&1 | Out-Null
 }
 if (($esc -match "48;5;52") -and ($esc -notmatch "48;5;21")) {
     Write-Pass "active pane uses window-active-style bg (48;5;52 present, 48;5;21 absent)"
