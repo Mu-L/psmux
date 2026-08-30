@@ -248,3 +248,14 @@ fn dim_reaches_the_rendered_pane_background() {
     let buffer = terminal.backend().buffer().clone();
     assert_eq!(buffer[(0, 0)].style().bg, Some(Color::Rgb(127, 0, 0)));
 }
+
+#[test]
+fn parse_style_dim_survives_a_multibyte_part_that_straddles_byte_four() {
+    // "aéé" is 5 bytes and byte 4 is inside the second "é". A byte slice at
+    // index 4 panics; the parser must test the prefix by chars instead.
+    assert_eq!(crate::style::parse_style_dim("fg=red,aéé"), 0);
+    assert_eq!(crate::style::parse_style_dim("dim=40,aéé"), 40);
+    assert_eq!(crate::style::parse_style_dim("DIM=25%"), 25);
+    assert_eq!(crate::style::parse_style_dim("dim=101"), 0);
+    assert_eq!(crate::style::parse_style_dim("dim"), 0);
+}

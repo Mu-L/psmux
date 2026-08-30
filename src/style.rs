@@ -248,8 +248,12 @@ pub fn parse_style_dim(style_str: &str) -> u8 {
     let mut dim = 0u8;
     for part in style_str.split(',') {
         let part = part.trim();
-        if part.len() > 4 && part[..4].eq_ignore_ascii_case("dim=") {
-            let value = part[4..].trim_end_matches('%');
+        // Split on the first '=' by char, never by byte offset: a style
+        // part such as "aéé" has no char boundary at byte 4 and a byte slice
+        // there panics.
+        let Some((name, value)) = part.split_once('=') else { continue };
+        if name.eq_ignore_ascii_case("dim") {
+            let value = value.trim_end_matches('%');
             match value.parse::<u16>() {
                 Ok(n) if n <= 100 => dim = n as u8,
                 _ => return 0,
