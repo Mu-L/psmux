@@ -212,8 +212,8 @@ Details worth knowing:
 | `pane-border-status` | Str | | Pane border status position (`top`/`bottom`/`off`) |
 | `copy-mode-line-number-style` | Str | `fg=brightblack` | Style of the copy-mode line number gutter |
 | `copy-mode-current-line-number-style` | Str | `fg=yellow,bold` | Style of the line number on the copy-mode cursor row |
-| `window-style` | Str | | Style applied to the contents of every pane |
-| `window-active-style` | Str | | Style applied to the contents of the active pane |
+| `window-style` | Str | | Style applied to the contents of panes that are not the active pane (tmux `options-table.c` wording); fills only cells whose colour is the terminal default |
+| `window-active-style` | Str | | Style applied to the contents of the active pane; explicit application colours always win |
 | `popup-border-style` | Str | `fg=yellow` | Border style of `display-popup` overlays |
 | `popup-border-lines` | Str | `single` | Popup border glyph set: `single`, `double`, `heavy`, `rounded` |
 | `popup-style` | Str | | Accepted and stored, but never read. See [Accepted but Not Functional](#accepted-but-not-functional) |
