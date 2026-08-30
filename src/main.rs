@@ -58,6 +58,23 @@ use crate::session::{cleanup_stale_port_files, reap_orphaned_servers, read_sessi
 use crate::rendering::apply_cursor_style;
 use crate::server::run_server;
 use crate::client::run_remote;
+
+/// Boolean flags the CLI accepts for set-option / set / set-window-option /
+/// setw. -t carries a value and never reaches this set; every other character
+/// is refused with "unknown flag" and exit 1 (#553).
+///
+/// tmux 3.4 spells set-option's as "aFgopqst:uUw" (cmd-set-option.c). psmux
+/// omits -F there because the CLI forwards the value verbatim and the server
+/// expands it, and accepts -s on setw as well, where tmux's own
+/// set-window-option table ("aFgoqt:u") has no -s: psmux shares one flag guard
+/// across all four spellings, and refusing -s on just the setw alias would be a
+/// second, differently shaped hard failure for the tools this change exists to
+/// unbreak (#618).
+pub(crate) const SET_OPTION_CLI_FLAGS: &str = "agopqstuUw";
+
+/// Boolean flags the CLI accepts for show-options and friends. tmux 3.4 uses
+/// "AgHpqst:vw" (cmd-show-options.c); psmux has no -H (hooks-only listing).
+pub(crate) const SHOW_OPTIONS_CLI_FLAGS: &str = "Agpqsvw";
 use crate::ssh_input::{send_mouse_enable, InputSource};
 
 /// Convert a ratatui Color to an ANSI SGR escape sequence.
@@ -3606,8 +3623,19 @@ fn run_main() -> io::Result<()> {
                     // principle as dd84b97 for refresh-client. -t/-p never
                     // reach `flags` (skipped with their values above); -U is
                     // the unset alias, -w a scope flag.
+                    //
+                    // Issue #618: -s is the SERVER scope flag. tmux 3.2 moved
+                    // default-terminal, extended-keys and friends onto the
+                    // server option table and tools write them the documented
+                    // way (`set-option -s default-terminal xterm-256color`).
+                    // Rejecting it turned every such bootstrap into a hard
+                    // failure. psmux runs one server per session and keeps a
+                    // single option store, so -s selects the same store as -g
+                    // rather than a genuinely cross-session one; the write
+                    // lands where the caller expects it, but it is not true
+                    // cross-session server-option storage.
                     for ch in flags.chars() {
-                        if !"agopqtuUw".contains(ch) {
+                        if !SET_OPTION_CLI_FLAGS.contains(ch) {
                             eprintln!("psmux: set-option: unknown flag -{}", ch);
                             std::process::exit(1);
                         }
@@ -3754,7 +3782,9 @@ fn run_main() -> io::Result<()> {
                         if a.starts_with('-') && a.len() > 1 {
                             for ch in a[1..].chars() {
                                 // 'p' = pane scope (#580), forwarded as-is.
-                                if !"Agpqsvw".contains(ch) {
+                                // 's' = server scope (#618); the server narrows
+                                // a bare listing to the server options.
+                                if !SHOW_OPTIONS_CLI_FLAGS.contains(ch) {
                                     eprintln!("psmux: show-options: unknown flag -{}", ch);
                                     std::process::exit(1);
                                 }

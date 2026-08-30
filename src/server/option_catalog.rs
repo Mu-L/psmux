@@ -112,6 +112,32 @@ pub fn default_for(name: &str) -> Option<&'static str> {
     OPTION_CATALOG.iter().find(|d| d.name == name).map(|d| d.default)
 }
 
+/// Names of the options this catalog marks server scope, sorted.
+///
+/// tmux keeps a separate server option table (options-table.c,
+/// OPTIONS_TABLE_SERVER) and `options_scope_from_flags` points `-s` at it, so a
+/// bare `show-options -s` there prints server options only. psmux runs one
+/// server per session and keeps a single option store, so `-s` cannot select a
+/// different store; it selects this SLICE of the one store, which is the part a
+/// caller passing `-s` is actually asking about (#618).
+pub fn server_option_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = OPTION_CATALOG
+        .iter()
+        .filter(|d| d.scope == "server")
+        .map(|d| d.name)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// True when the catalog marks `name` server scope. `set-option -s` accepts any
+/// option name (tmux does the same: for a table option `options_scope_from_name`
+/// ignores `-s` entirely rather than erroring), so this only ever narrows a
+/// listing, never rejects a write.
+pub fn is_server_option(name: &str) -> bool {
+    OPTION_CATALOG.iter().any(|d| d.name == name && d.scope == "server")
+}
+
 #[cfg(test)]
 #[path = "../../tests-rs/test_option_default_parity.rs"]
 mod tests_option_default_parity;
