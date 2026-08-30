@@ -930,6 +930,12 @@ fn parse_set_option(app: &mut AppState, line: &str) {
         let p = toks[i].1.as_str();
         if p.starts_with('-') {
             if p.contains('g') { is_global = true; }
+            // -s is tmux's server scope (#618). psmux keeps a single option
+            // store, so it resolves to the global one, exactly like -g. A
+            // config carrying `set -s default-terminal xterm-256color` (or the
+            // very common `set -sg escape-time 0`) must land the value, not
+            // drop the scope on the floor.
+            if p.contains('s') { is_global = true; }
             if p.contains('F') { format_expand = true; }
             if p.contains('o') { only_if_unset = true; }
             if p.contains('a') { append_mode = true; }

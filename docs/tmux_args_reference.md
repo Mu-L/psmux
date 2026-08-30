@@ -105,16 +105,16 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `set-buffer` | `setb` | `wb:` | CLI, SRV, CFG |
 | `set-environment` | `setenv` | `grhut:` | CLI, SRV, CFG, CTL |
 | `set-hook` | *(none)* | `gua` | CLI, SRV, CFG, CTL |
-| `set-option` | `set` | `guaqopwUt:` plus `--` | CLI, SRV, CFG, CTL |
+| `set-option` | `set` | `guaqopswUt:` plus `--` | CLI, SRV, CFG, CTL |
 | `set-pane-title` | *(none)* | none, takes the title as positional arguments | SRV |
-| `set-window-option` | `setw` | `guaqopwUt:` plus `--` | CLI, SRV, CFG, CTL |
+| `set-window-option` | `setw` | `guaqopswUt:` plus `--` | CLI, SRV, CFG, CTL |
 | `show-buffer` | `showb` | `b:` | CLI, SRV, CFG, CTL |
 | `show-environment` | `showenv` | `gsht:` | CLI, SRV, CFG, CTL |
 | `show-hooks` | *(none)* | `g` | CLI, SRV, CFG, CTL |
 | `show-messages` | `showmsgs` | none | CLI, SRV, CFG |
-| `show-options` | `show`, `show-option` | `Aswvqt:` | CLI, SRV, CFG, CTL |
+| `show-options` | `show`, `show-option` | `Agpqsvwt:` plus `--` | CLI, SRV, CFG, CTL |
 | `show-prompt-history` | `showphist` | none | SRV |
-| `show-window-options` | `showw`, `show-window-option` | `Aswvqt:` | CLI, SRV, CFG, CTL |
+| `show-window-options` | `showw`, `show-window-option` | `Agpqsvwt:` plus `--` | CLI, SRV, CFG, CTL |
 | `source-file` | `source` | `qnv` | CLI, SRV, CFG, CTL |
 | `split-window` | `splitw`, `split-pane`, `splitp` | `hvdPZc:e:F:l:p:T:t:` | CLI, SRV, CFG, CTL |
 | `start-server` | `start`, `warmup` | none | CLI, SRV, CFG |
@@ -438,19 +438,21 @@ A psmux extension that creates a pane floating above the tiled layout.
 ### Configuration commands
 
 **set-option** (`set`) and **set-window-option** (`setw`)
-- Boolean: `-g` (global, accepted, psmux has one scope so this is effectively a selector no-op), `-u` (unset), `-U` (unset alias of `-u`, tmux parity, #553), `-a` (append to the current value), `-q` (quiet), `-o` (only set if currently unset), `-w` (window scope), `-p` (pane scope, #580). None of these consume the next argument.
+- Boolean: `-g` (global, accepted, psmux has one scope so this is effectively a selector no-op), `-s` (server scope, #618), `-u` (unset), `-U` (unset alias of `-u`, tmux parity, #553), `-a` (append to the current value), `-q` (quiet), `-o` (only set if currently unset), `-w` (window scope), `-p` (pane scope, #580). None of these consume the next argument.
+- `-s` is the tmux 3.2+ server scope flag, the documented way to write `default-terminal`, `extended-keys` and `extended-keys-format`. psmux runs one server per session and keeps a single option store, so `-s` resolves to the same store as `-g`: the write lands where a caller using tmux syntax expects to find it, but this is **not** genuine cross-session server-option storage. tmux's own `set-window-option` table has no `-s`; psmux shares one flag guard across all four spellings and accepts it on `setw` too.
 - Value: `-t` (target, value consumed)
 - Flags parse only **before** the option name, as tmux's getopt does (#583). Once the option name has been seen, everything that follows is the value, dashes included: `set @k -u` stores the literal string `-u`, where it used to consume `-u` as the unset flag and delete `@k` at exit 0. `--` ends option parsing outright, so `set -- @k -g` also stores `-g`.
 - Flags are also matched inside combined tokens such as `-ga`, `-gu` and `-gq`.
 - A `@name` argument is never treated as a flag.
-- Not accepted: `-F`, `-s`. Since #553 any flag outside the accepted set is rejected with `unknown flag -X` at exit 1 instead of being silently dropped while the write lands.
+- Not accepted: `-F`. Since #553 any flag outside the accepted set is rejected with `unknown flag -X` at exit 1 instead of being silently dropped while the write lands.
 
 **show-options** (`show`, `show-option`) and **show-window-options** (`showw`, `show-window-option`)
-- Boolean: `-A` (include inherited), `-s` (server scope), `-w` (window scope), `-v` (value only), `-q` (quiet)
+- Boolean: `-A` (include inherited), `-g` (global), `-s` (server scope), `-w` (window scope), `-p` (pane scope, #580), `-v` (value only), `-q` (quiet)
 - Value: `-t` (window selector)
+- A bare `show-options -s` lists the server-scope options only, as tmux does (#618). Before that fix the flag was parsed and then ignored, so it printed the whole store, session options included. A named query such as `show-options -s escape-time` ignores `-s`, which is what tmux does for a table option too.
 - Combined tokens are handled the same way as for `set-option`.
 - The singular aliases `show-option` and `show-window-option` are accepted on every layer (#586), so a `.tmux.conf` or plugin that uses tmux's singular spelling works unchanged.
-- Not accepted: `-g` as a distinct behavior (it is absorbed but tolerated), `-H`, `-p`. Since #553 flags outside `-A -g -q -s -v -w` (plus `-t <target>`) are rejected with `unknown flag -X` at exit 1.
+- Not accepted: `-H`. `-g` is absorbed rather than acted on, psmux having one store. Since #553 flags outside `-A -g -p -q -s -v -w` (plus `-t <target>`) are rejected with `unknown flag -X` at exit 1.
 
 **set-hook** and **show-hooks**
 - Boolean: `-u` (unset, also as `-gu` or `-ug`), `-a` (append, also as `-ga` or `-ag`), `-g` (global, accepted and absorbed)

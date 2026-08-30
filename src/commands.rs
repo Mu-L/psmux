@@ -2641,6 +2641,10 @@ mod tests_mega_unit_coverage;
 mod tests_flag_parity;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue618_set_option_server_scope.rs"]
+mod tests_issue618_set_option_server_scope;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_issue227_remain_on_exit_hooks.rs"]
 mod tests_issue227_remain_on_exit_hooks;
 
