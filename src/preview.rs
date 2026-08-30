@@ -525,15 +525,19 @@ pub fn render_runs_line(
         if c >= width { break; }
         let style = run_style(&run.fg, &run.bg, run.flags);
         last_bg = style.bg.unwrap_or(Color::Reset);
-        // Hidden cells render as spaces to match the main view's behavior.
+        let run_w = run.width.max(1);
+        // Hidden cells render as spaces to match the main view's behavior, one
+        // space per column of the run: the column accounting below advances by
+        // `run_w`, so a single space would claim `run_w` columns while painting
+        // one and shift every later run on the row (#617, #619).
+        let hidden = " ".repeat(run_w as usize);
         let text: &str = if run.flags & 64 != 0 {
-            " "
+            &hidden
         } else if run.text.is_empty() {
             " "
         } else {
             &run.text
         };
-        let run_w = run.width.max(1);
         if c + run_w > width {
             // Truncate to the available width.
             let avail = (width - c) as usize;

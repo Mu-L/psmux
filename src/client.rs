@@ -929,6 +929,10 @@ pub(crate) fn render_float_overlays(
         };
         let bcol = if fl.focused { Color::Green } else { Color::DarkGray };
         let window_style = window_styles.for_pane(fl.focused);
+        let window_dim = window_styles.dim_for_pane(fl.focused);
+        // Paths that paint straight from the window style take it pre dimmed;
+        // `apply_window_content_style` dims the cell colours itself.
+        let window_fill = crate::style::dim_window_style(window_style, window_dim);
         let inner_w = if border_type.is_some() { w.saturating_sub(2) } else { w };
         let mut lines: Vec<Line<'static>> = Vec::new();
         for row_data in &fl.rows {
@@ -938,7 +942,7 @@ pub(crate) fn render_float_overlays(
                 if col >= inner_w { break; }
                 let mut fg = crate::style::map_color(&run.fg);
                 let mut bg = crate::style::map_color(&run.bg);
-                apply_window_content_style(&mut fg, &mut bg, window_style);
+                apply_window_content_style(&mut fg, &mut bg, window_style, window_dim);
                 let mut style = Style::default().fg(fg).bg(bg);
                 if run.flags & 1  != 0 { style = style.add_modifier(Modifier::DIM); }
                 if run.flags & 2  != 0 { style = style.add_modifier(Modifier::BOLD); }
@@ -985,14 +989,14 @@ pub(crate) fn render_float_overlays(
                 f.render_widget(block, area);
                 f.render_widget(
                     Paragraph::new(Text::from(lines))
-                        .style(window_content_fill_style(window_style)),
+                        .style(window_content_fill_style(window_fill)),
                     inner,
                 );
             }
             None => {
                 f.render_widget(
                     Paragraph::new(Text::from(lines))
-                        .style(window_content_fill_style(window_style)),
+                        .style(window_content_fill_style(window_fill)),
                     area,
                 );
             }
@@ -1014,11 +1018,32 @@ pub struct CopyLnRender {
 pub struct WindowContentStyles {
     pub inactive: Option<Style>,
     pub active: Option<Style>,
+    /// `dim=N` percentage from `window-style` (tmux `wp->cached_dim`).
+    pub inactive_dim: u8,
+    /// `dim=N` percentage from `window-active-style` (tmux `wp->cached_active_dim`).
+    pub active_dim: u8,
 }
 
 impl WindowContentStyles {
-    fn for_pane(self, active: bool) -> Option<Style> {
-        if active { self.active } else { self.inactive }
+    /// The effective content style for a pane.
+    ///
+    /// The active pane merges `window-active-style` over `window-style` per
+    /// attribute, matching tmux `tty.c` `tty_default_colours`. See
+    /// `crate::style::active_window_style_with_fallback`.
+    pub(crate) fn for_pane(self, active: bool) -> Option<Style> {
+        if active {
+            crate::style::active_window_style_with_fallback(self.active, self.inactive)
+        } else {
+            self.inactive
+        }
+    }
+
+    /// The `dim` percentage for a pane.
+    ///
+    /// tmux `tty_default_colours` picks `cached_active_dim` or `cached_dim`
+    /// outright: unlike fg and bg, `dim` has no fallback between the two styles.
+    pub(crate) fn dim_for_pane(self, active: bool) -> u8 {
+        if active { self.active_dim } else { self.inactive_dim }
     }
 
     pub(crate) fn for_tiled_panes(self, floating_pane_focused: bool) -> Self {
@@ -1026,6 +1051,8 @@ impl WindowContentStyles {
             Self {
                 inactive: self.inactive,
                 active: self.inactive,
+                inactive_dim: self.inactive_dim,
+                active_dim: self.inactive_dim,
             }
         } else {
             self
@@ -1033,7 +1060,62 @@ impl WindowContentStyles {
     }
 }
 
-fn apply_window_content_style(fg: &mut Color, bg: &mut Color, style: Option<Style>) {
+/// Render one popup or menu row's run list into a `Line`, clipping to `inner_w`.
+///
+/// Extracted from the popup draw path so the run accounting is unit testable.
+pub(crate) fn render_popup_runs_line(
+    runs: &[crate::layout::CellRunJson],
+    inner_w: u16,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut col: u16 = 0;
+    for run in runs {
+        if col >= inner_w { break; }
+        let fg = crate::style::map_color(&run.fg);
+        let bg = crate::style::map_color(&run.bg);
+        let mut style = Style::default().fg(fg).bg(bg);
+        if run.flags & 1  != 0 { style = style.add_modifier(Modifier::DIM); }
+        if run.flags & 2  != 0 { style = style.add_modifier(Modifier::BOLD); }
+        if run.flags & 4  != 0 { style = style.add_modifier(Modifier::ITALIC); }
+        if run.flags & 8  != 0 {
+            style = crate::rendering::with_underline(
+                style,
+                if run.ul == 0 { 1 } else { run.ul },
+                run.ulc.as_deref().map(map_color),
+            );
+        }
+        if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
+        if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
+        if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
+        let run_w = run.width.max(1);
+        // ratatui-crossterm omits SGR 8 (HIDDEN), render as spaces. One space
+        // per column of the run: the column accounting below advances by
+        // `run_w`, so a single space would claim `run_w` columns while painting
+        // one and shift every later run on the row (#617, #619).
+        let hidden = " ".repeat(run_w as usize);
+        let text: &str = if run.flags & 64 != 0 {
+            &hidden
+        } else if run.text.is_empty() {
+            " "
+        } else {
+            &run.text
+        };
+        if col + run_w > inner_w {
+            let avail = (inner_w - col) as usize;
+            let truncated: String = text.chars().take(avail).collect();
+            if !truncated.is_empty() {
+                spans.push(Span::styled(truncated, style));
+            }
+            col = inner_w;
+        } else {
+            spans.push(Span::styled(text.to_string(), style));
+            col += run_w;
+        }
+    }
+    Line::from(spans)
+}
+
+fn apply_window_content_style(fg: &mut Color, bg: &mut Color, style: Option<Style>, dim: u8) {
     if let Some(style) = style {
         if *fg == Color::Reset {
             if let Some(default_fg) = style.fg {
@@ -1045,6 +1127,12 @@ fn apply_window_content_style(fg: &mut Color, bg: &mut Color, style: Option<Styl
                 *bg = default_bg;
             }
         }
+    }
+    // tmux `tty.c` `tty_attributes` dims the resolved colours, application
+    // colours included, by the window style's `dim=N` percentage (#619 item 4).
+    if dim != 0 {
+        *fg = crate::style::dim_colour_percent(*fg, dim);
+        *bg = crate::style::dim_colour_percent(*bg, dim);
     }
 }
 
@@ -1101,6 +1189,10 @@ pub fn render_layout_json(
             title,
         } => {
             let window_style = window_styles.for_pane(*active);
+            let window_dim = window_styles.dim_for_pane(*active);
+            // Paths that paint straight from the window style take it pre
+            // dimmed; `apply_window_content_style` dims the cell colours itself.
+            let window_fill = crate::style::dim_window_style(window_style, window_dim);
             // Reserve 1 row for the border label so it doesn't overlap content (#288).
             let has_border_label = border_status != "off" && !border_format.is_empty() && area.height > 1;
             let inner = pane_content_inner(area, border_status, border_format);
@@ -1133,7 +1225,7 @@ pub fn render_layout_json(
                         let cell = &row[c as usize];
                         let mut fg = map_color(&cell.fg);
                         let mut bg = map_color(&cell.bg);
-                        apply_window_content_style(&mut fg, &mut bg, window_style);
+                        apply_window_content_style(&mut fg, &mut bg, window_style, window_dim);
                         let in_selection = if *copy_mode && *active {
                             if let (Some(sr), Some(sc), Some(er), Some(ec)) = (sel_start_row, sel_start_col, sel_end_row, sel_end_col) {
                                 let mode = sel_mode.as_deref().unwrap_or("char");
@@ -1195,7 +1287,7 @@ pub fn render_layout_json(
                         let last_bg = if !spans.is_empty() {
                             spans.last().unwrap().style.bg.unwrap_or(Color::Reset)
                         } else { Color::Reset };
-                        let padding_bg = window_style
+                        let padding_bg = window_fill
                             .and_then(|style| style.bg)
                             .unwrap_or(last_bg);
                         let pad = " ".repeat((inner.width - c) as usize);
@@ -1207,14 +1299,14 @@ pub fn render_layout_json(
                 for r in 0..inner.height.min(rows_v2_eff.len() as u16) {
                     let mut spans: Vec<Span> = Vec::new();
                     let mut c: u16 = 0;
-                    let mut last_bg = window_style
+                    let mut last_bg = window_fill
                         .and_then(|style| style.bg)
                         .unwrap_or(Color::Reset);
                     for run in &rows_v2_eff[r as usize].runs {
                         if c >= inner.width { break; }
                         let mut fg = map_color(&run.fg);
                         let mut bg = map_color(&run.bg);
-                        apply_window_content_style(&mut fg, &mut bg, window_style);
+                        apply_window_content_style(&mut fg, &mut bg, window_style, window_dim);
                         last_bg = bg;
                         if *active && dim_preds && !*alternate_screen
                             && (r > *cursor_row || (r == *cursor_row && c >= *cursor_col))
@@ -1275,7 +1367,7 @@ pub fn render_layout_json(
                         }
                     }
                     if c < inner.width {
-                        let padding_bg = window_style
+                        let padding_bg = window_fill
                             .and_then(|style| style.bg)
                             .unwrap_or(last_bg);
                         let pad = " ".repeat((inner.width - c) as usize);
@@ -1305,7 +1397,7 @@ pub fn render_layout_json(
 
             f.render_widget(Clear, inner);
             let para = Paragraph::new(Text::from(lines))
-                .style(window_content_fill_style(window_style));
+                .style(window_content_fill_style(window_fill));
             f.render_widget(para, inner);
 
             // tmux draws the copy-mode position indicator out of each pane's
@@ -1339,7 +1431,7 @@ pub fn render_layout_json(
 
             if *active && !*copy_mode {
                 if clock_mode {
-                    render_clock_overlay(f, inner, clock_colour, window_style);
+                    render_clock_overlay(f, inner, clock_colour, window_fill);
                 }
             }
 
@@ -5635,6 +5727,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 active: state.window_active_style.as_deref()
                     .filter(|style| !style.is_empty())
                     .map(crate::style::parse_tmux_style),
+                // tmux `style.c` reads a `dim=N` percentage out of both window
+                // styles and `tty.c` applies it via `colour_dim` (#619 item 4).
+                inactive_dim: state.window_style.as_deref()
+                    .map(crate::style::parse_style_dim).unwrap_or(0),
+                active_dim: state.window_active_style.as_deref()
+                    .map(crate::style::parse_style_dim).unwrap_or(0),
             };
             let floating_pane_focused =
                 srv_floats.iter().any(|float| float.focused);
@@ -6605,48 +6703,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 if !srv_popup_rows.is_empty() {
                     // Render with full color/style data from popup_rows (#154)
                     for row_data in &srv_popup_rows {
-                        let mut spans: Vec<Span<'static>> = Vec::new();
-                        let mut col: u16 = 0;
-                        for run in &row_data.runs {
-                            if col >= inner_w { break; }
-                            let fg = crate::style::map_color(&run.fg);
-                            let bg = crate::style::map_color(&run.bg);
-                            let mut style = Style::default().fg(fg).bg(bg);
-                            if run.flags & 1  != 0 { style = style.add_modifier(Modifier::DIM); }
-                            if run.flags & 2  != 0 { style = style.add_modifier(Modifier::BOLD); }
-                            if run.flags & 4  != 0 { style = style.add_modifier(Modifier::ITALIC); }
-                            if run.flags & 8  != 0 {
-                    style = crate::rendering::with_underline(
-                        style,
-                        if run.ul == 0 { 1 } else { run.ul },
-                        run.ulc.as_deref().map(map_color),
-                    );
-                }
-                            if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
-                            if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
-                            if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
-                            // ratatui-crossterm omits SGR 8 (HIDDEN), render as spaces
-                            let text: &str = if run.flags & 64 != 0 {
-                                " "
-                            } else if run.text.is_empty() {
-                                " "
-                            } else {
-                                &run.text
-                            };
-                            let run_w = run.width.max(1);
-                            if col + run_w > inner_w {
-                                let avail = (inner_w - col) as usize;
-                                let truncated: String = text.chars().take(avail).collect();
-                                if !truncated.is_empty() {
-                                    spans.push(Span::styled(truncated, style));
-                                }
-                                col = inner_w;
-                            } else {
-                                spans.push(Span::styled(text.to_string(), style));
-                                col += run_w;
-                            }
-                        }
-                        lines.push(Line::from(spans));
+                        lines.push(render_popup_runs_line(&row_data.runs, inner_w));
                     }
                 } else {
                     // Fallback: plain text lines for non-PTY popups
@@ -7277,3 +7334,7 @@ mod test_issue605_stale_port_attach;
 #[cfg(test)]
 #[path = "../tests-rs/test_window_content_styles.rs"]
 mod test_window_content_styles;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue619_window_style_fallback.rs"]
+mod test_issue619_window_style_fallback;

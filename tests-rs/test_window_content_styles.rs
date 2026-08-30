@@ -123,6 +123,7 @@ fn active_window_style_defaults_full_cells_without_overriding_explicit_colors() 
     let styles = WindowContentStyles {
         inactive: Some(Style::default().fg(Color::Cyan).bg(Color::White)),
         active: Some(Style::default().fg(Color::Yellow).bg(Color::Blue)),
+        ..Default::default()
     };
 
     let buffer = render(&layout, 2, styles);
@@ -150,6 +151,7 @@ fn inactive_window_style_defaults_row_runs_without_overriding_explicit_colors() 
     let styles = WindowContentStyles {
         inactive: Some(Style::default().fg(Color::LightBlue).bg(Color::DarkGray)),
         active: Some(Style::default().fg(Color::Yellow).bg(Color::Blue)),
+        ..Default::default()
     };
 
     let buffer = render(&layout, 4, styles);
@@ -167,6 +169,7 @@ fn active_window_style_fills_unrepresented_pane_rows() {
     let styles = WindowContentStyles {
         inactive: Some(Style::default().fg(Color::Cyan).bg(Color::White)),
         active: Some(Style::default().fg(Color::Yellow).bg(Color::Blue)),
+        ..Default::default()
     };
 
     let buffer = render_at(&layout, 3, 3, styles);
@@ -190,6 +193,7 @@ fn active_window_background_fills_columns_after_explicit_full_cell() {
     let styles = WindowContentStyles {
         inactive: None,
         active: Some(Style::default().bg(Color::Blue)),
+        ..Default::default()
     };
 
     let buffer = render(&layout, 3, styles);
@@ -212,6 +216,7 @@ fn inactive_window_background_fills_columns_after_explicit_row_run() {
     let styles = WindowContentStyles {
         inactive: Some(Style::default().bg(Color::DarkGray)),
         active: None,
+        ..Default::default()
     };
 
     let buffer = render(&layout, 3, styles);
@@ -243,6 +248,7 @@ fn explicit_hidden_run_background_covers_the_full_run_width() {
     let styles = WindowContentStyles {
         inactive: None,
         active: Some(Style::default().bg(Color::Blue)),
+        ..Default::default()
     };
 
     let buffer = render(&layout, 3, styles);
