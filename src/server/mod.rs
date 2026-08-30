@@ -464,12 +464,16 @@ fn drain_plugin_req(
             }
         }
         CtrlReq::SetOptionUnset(option) => {
-            if option.starts_with('@') {
+            if option.starts_with('@')
+                || matches!(option.as_str(), "window-style" | "window-active-style")
+            {
                 app.user_options.remove(&option);
-            } else if matches!(option.as_str(), "window-style" | "window-active-style") {
-                app.user_options.remove(&option);
-                app.user_set_options.remove(&option);
             }
+            // Issue #619: erase the explicit-set mark for EVERY option, not
+            // just the two #617 repaired, so a following `set -o` sees an
+            // unset option and applies. See the matching comment in the main
+            // request loop.
+            app.user_set_options.remove(&option);
         }
         CtrlReq::SetOptionToggle(option) => {
             // `set -g <bool-option>` with no value flips it (#535). The client
@@ -4212,7 +4216,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "pane-border-hover-style" => { app.pane_border_hover_style = "fg=yellow".to_string(); }
                             "window-style" | "window-active-style" => {
                                 app.user_options.remove(&option);
-                                app.user_set_options.remove(&option);
                                 state_dirty = true;
                             }
                             "window-status-format" => { app.window_status_format = "#I:#W#{?window_flags,#{window_flags}, }".to_string(); }
@@ -4223,6 +4226,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             _ => {}
                         }
                     }
+                    // Issue #619: forget that the user ever set this option.
+                    // The erase used to live inside the window-style arm alone
+                    // (the pair #617 repaired), so every other non `@` option
+                    // stayed marked as explicitly set after `-u` and the
+                    // SetOptionOnlyIfUnset arm below refused the following
+                    // `set -o`, silently. tmux clears the option at the scope
+                    // on `-u` (cmd-set-option.c: options_remove_or_default)
+                    // and then judges `-o` by whether anything is set there
+                    // (`already = (o != NULL)`), so `-u` then `-o` applies.
+                    app.user_set_options.remove(&option);
                 }
                 CtrlReq::SetOptionAppend(option, value) => {
                     // Append to existing option value

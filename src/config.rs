@@ -962,14 +962,30 @@ fn parse_set_option(app: &mut AppState, line: &str) {
         None => String::new(),
     };
 
-    // Handle -u (unset): reset option to empty
+    // Handle -u (unset): reset option to empty.
+    //
+    // Issue #619: the `user_set_options` erase used to be reachable only for
+    // window-style and window-active-style (the two options #617 repaired), so
+    // for every other non `@` option the key survived the unset and the `-o`
+    // guard below still read it as set. `set -gu escape-time` followed by
+    // `set -go escape-time 77` therefore left escape-time at its default and
+    // dropped the 77 on the floor. tmux clears the option at the scope on `-u`
+    // (cmd-set-option.c calls options_remove_or_default) and then `-o` finds
+    // nothing set (`already = (o != NULL)` in the same file), so it applies.
+    // The erase is now unconditional, which subsumes the #617 special case.
+    //
+    // `@user` options need the key itself gone, not blanked: `-o` tests them
+    // with `user_options.contains_key`, so an entry left holding "" reads as
+    // set for ever. tmux removes user options outright on `-u` because they
+    // carry no table entry to fall back to (options.c options_remove_or_default
+    // takes the options_remove branch when `o->tableentry == NULL`).
     if unset_mode {
-        if matches!(key, "window-style" | "window-active-style") {
+        if key.starts_with('@') || matches!(key, "window-style" | "window-active-style") {
             app.user_options.remove(key);
-            app.user_set_options.remove(key);
         } else {
             parse_option_value(app, key, "", is_global);
         }
+        app.user_set_options.remove(key);
         return;
     }
 
@@ -2610,3 +2626,7 @@ mod tests_issue606_repeat_time;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue616_unicode_bind.rs"]
 mod tests_issue616_unicode_bind;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue619_set_option_unset_only.rs"]
+mod tests_issue619_set_option_unset_only;
