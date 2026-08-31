@@ -45,7 +45,10 @@ if (Test-Alive $NS1 $NS1) { Write-Pass "session created and alive before kill" }
 else { Write-Fail "session did not come up (setup failed)" }
 
 $lsBefore = (& $PSMUX -L $NS1 ls 2>&1 | Out-String)
-if ($lsBefore -match [regex]::Escape($NS1)) { Write-Pass "ls lists the session before kill" }
+# Match the listing line shape ("name: N windows"), not the bare name: since
+# 2502955 an empty ls prints "no server running on <dir> (-L <ns>)", and the
+# namespace here is the session name, so a bare match would hit the message.
+if ($lsBefore -match ('(?m)^(?:[^\s:]+__)?' + [regex]::Escape($NS1) + ':')) { Write-Pass "ls lists the session before kill" }
 else { Write-Fail "ls did not list the session before kill: $lsBefore" }
 
 & $PSMUX -L $NS1 kill-session -t $NS1 2>$null | Out-Null
@@ -60,7 +63,7 @@ if (-not (Test-Alive $NS1 $NS1)) { Write-Pass "has-session reports the session G
 else { Write-Fail "BUG #458: kill-session returned success but session SURVIVES (has-session still 0)" }
 
 $lsAfter = (& $PSMUX -L $NS1 ls 2>&1 | Out-String)
-if ($lsAfter -notmatch [regex]::Escape($NS1)) { Write-Pass "ls no longer lists the session after kill" }
+if ($lsAfter -notmatch ('(?m)^(?:[^\s:]+__)?' + [regex]::Escape($NS1) + ':')) { Write-Pass "ls no longer lists the session after kill" }
 else { Write-Fail "BUG #458: ls still lists the session after a 'successful' kill-session: $lsAfter" }
 Cleanup $NS1
 
