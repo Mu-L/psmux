@@ -3502,12 +3502,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // how many sessions exist, so the picker stays responsive (no
                                 // sequential O(N * timeout) cleanup pass).
                                 let mut targets: Vec<(String, String, String)> = Vec::new();
+                                // A -L socket is a separate server in tmux; a client never
+                                // sees another socket's sessions. Same rule `ls` applies.
+                                let picker_ns = crate::session::session_namespace(&current_session);
                                 if let Ok(entries) = std::fs::read_dir(&dir) {
                                     for e in entries.flatten() {
                                         if let Some(fname) = e.file_name().to_str() {
                                             if let Some((base, ext)) = fname.rsplit_once('.') {
                                                 if ext == "port" {
                                                     if crate::session::is_warm_session(base) { continue; }
+                                                    if !crate::session::session_visible_from(base, picker_ns) { continue; }
                                                     if let Ok(port_str) = std::fs::read_to_string(e.path()) {
                                                         if let Ok(p) = port_str.trim().parse::<u16>() {
                                                             let sess_addr = format!("127.0.0.1:{}", p);

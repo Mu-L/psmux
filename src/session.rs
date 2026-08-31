@@ -28,6 +28,39 @@ pub fn is_warm_session(base: &str) -> bool {
     base == "__warm__" || base.ends_with("____warm__")
 }
 
+/// The `-L` socket namespace a registry base name belongs to.
+///
+/// A namespaced session is stored as `<ns>__<name>`, so the namespace is the
+/// text before the first `__`. A bare name has none, and neither does the
+/// default namespace's own warm helper `__warm__` (its `__` is not a
+/// separator). Used to work out which server family a client belongs to from
+/// the full name it was attached with.
+pub fn session_namespace(full: &str) -> Option<&str> {
+    if is_warm_session(full) {
+        return None;
+    }
+    match full.split_once("__") {
+        Some((ns, _)) if !ns.is_empty() => Some(ns),
+        _ => None,
+    }
+}
+
+/// Whether the registry base `base` is visible from namespace `ns`.
+///
+/// tmux parity: a `-L` socket is a separate server, and a client on one
+/// socket can never see sessions of another. psmux keeps every namespace in
+/// one registry directory, so listings that enumerate `.port` files must
+/// apply this rule. `ls`, `$N` resolution and the reaper already did; the
+/// interactive session and tree choosers did not, and a session from another
+/// namespace (`amx-6c9b6ad63d__main`) sorted itself between the default
+/// namespace's own sessions and shifted every `j`/`k` step in the picker.
+pub fn session_visible_from(base: &str, ns: Option<&str>) -> bool {
+    match ns {
+        Some(n) => base.starts_with(&format!("{}__", n)),
+        None => !base.contains("__"),
+    }
+}
+
 /// Find the next available numeric session name (tmux-compatible).
 /// tmux uses a monotonically incrementing counter, but since psmux has
 /// no persistent server state, we scan existing port files and pick
@@ -2365,21 +2398,25 @@ pub struct TreeEntry {
     pub is_active_window: bool,
 }
 
-/// List all running sessions and their windows for choose-tree display.
-/// Queries each running server via its TCP port for window list info.
-pub fn list_all_sessions_tree(current_session: &str, current_windows: &[(String, usize, String, bool, usize)]) -> Vec<TreeEntry> {
-    let Some(psmux_dir) = crate::paths::psmux_dir_opt() else {
-        return vec![];
-    };
+/// The sessions the tree chooser offers to a client attached as
+/// `current_session`: every live registry entry in the same `-L` namespace,
+/// warm helpers excluded, sorted by name. Directory parameterised so it can
+/// be tested without touching `USERPROFILE`.
+pub fn tree_chooser_sessions_in(
+    dir: &std::path::Path,
+    current_session: &str,
+) -> Vec<(String, u16, std::time::SystemTime)> {
+    let ns = session_namespace(current_session);
     let mut sessions: Vec<(String, u16, std::time::SystemTime)> = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(&psmux_dir) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map(|e| e == "port").unwrap_or(false) {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     // Hide warm (standby) sessions from choose-tree
                     if is_warm_session(stem) { continue; }
+                    // Another -L namespace is another server: never listed.
+                    if !session_visible_from(stem, ns) { continue; }
                     if let Ok(port_str) = std::fs::read_to_string(&path) {
                         if let Ok(port) = port_str.trim().parse::<u16>() {
                             let mtime = entry.metadata()
@@ -2392,8 +2429,17 @@ pub fn list_all_sessions_tree(current_session: &str, current_windows: &[(String,
             }
         }
     }
-
     sessions.sort_by_key(|(name, _, _)| name.clone());
+    sessions
+}
+
+/// List all running sessions and their windows for choose-tree display.
+/// Queries each running server via its TCP port for window list info.
+pub fn list_all_sessions_tree(current_session: &str, current_windows: &[(String, usize, String, bool, usize)]) -> Vec<TreeEntry> {
+    let Some(psmux_dir) = crate::paths::psmux_dir_opt() else {
+        return vec![];
+    };
+    let sessions = tree_chooser_sessions_in(std::path::Path::new(&psmux_dir), current_session);
 
     let mut tree = Vec::new();
     for (name, port, _) in &sessions {
@@ -2499,3 +2545,7 @@ mod tests_issue530_registry_pruning;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue603_bare_routing.rs"]
 mod tests_issue603_bare_routing;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_picker_namespace_filter.rs"]
+mod tests_picker_namespace_filter;
