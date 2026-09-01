@@ -3,9 +3,11 @@
 # Must REPRODUCE the bug before looking at any code
 
 $ErrorActionPreference = "Continue"
-$PSMUX = (Get-Command psmux -EA Stop).Source
+# Binary and data root are overridable so this suite can be pointed at a build
+# under test without disturbing the installed psmux or its sessions.
+$PSMUX = if ($env:PSMUX_BIN) { $env:PSMUX_BIN } else { (Get-Command psmux -EA Stop).Source }
 $SESSION = "scroll_repro_277"
-$psmuxDir = "$env:USERPROFILE\.psmux"
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 $mouseInjector = "$env:TEMP\psmux_mouse_injector.exe"

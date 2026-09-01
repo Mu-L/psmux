@@ -191,12 +191,17 @@ pub struct Pane {
     /// When true, the child's console input has VTI set, meaning VT mouse
     /// sequences can be delivered.  Refreshed every 2 seconds.
     pub vti_mode_cache: Option<(Instant, bool)>,
-    /// Cached ENABLE_MOUSE_INPUT query result (for mouse injection heuristic).
-    /// When true, the child's console has ENABLE_MOUSE_INPUT set, meaning it
-    /// reads MOUSE_EVENT records via ReadConsoleInputW (crossterm/ratatui apps).
-    /// When false, the child expects VT SGR mouse sequences (nvim, vim).
+    /// Cached console INPUT MODE WORD of the pane's child (for the mouse
+    /// injection heuristics).  `None` inside the tuple means the probe itself
+    /// failed; the whole field being `None` means it has not run yet.
     /// Refreshed every 2 seconds.
-    pub mouse_input_cache: Option<(Instant, bool)>,
+    ///
+    /// The whole word is cached rather than one bit because the two questions
+    /// asked of it need different parts of it: `ENABLE_MOUSE_INPUT` alone says
+    /// the console can deliver MOUSE_EVENT records (it is set in the inherited
+    /// Windows default, so it does NOT mean the child asked), while the raw
+    /// mode shape says the child deliberately configured itself to read them.
+    pub mouse_input_cache: Option<(Instant, Option<u32>)>,
     /// Cached foreground-process classification for the scroll-wheel
     /// alternate-scroll decision (issue #277): `(timestamp, is_shell,
     /// foreground_exe_name)`. `is_shell` mirrors
