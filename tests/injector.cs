@@ -115,7 +115,7 @@ class Injector
         if (args.Length < 2)
         {
             File.WriteAllText(logFile, "Usage: injector.exe <pid> <keys>\n" +
-                "Keys: chars, ^x=Ctrl+x, {ALT:x}, {ENTER}, {ESC}, {LBRACE}, {RBRACE}, {SLEEP:ms}");
+                "Keys: chars, ^x=Ctrl+x, {ALT:x}, {ENTER}, {ESC}, {F1}..{F12}, {LBRACE}, {RBRACE}, {SLEEP:ms}");
             return 99;
         }
 
@@ -204,6 +204,25 @@ class Injector
                     else if (token == "PGDN" || token == "PAGEDOWN")
                     {
                         if (SendKey(handle, 0x22, '\0', 0, log)) injected++;
+                    }
+                    else if (token.Length >= 2 && token.Length <= 3 && token[0] == 'F'
+                             && token[1] >= '0' && token[1] <= '9'
+                             && (token.Length == 2 || (token[2] >= '0' && token[2] <= '9')))
+                    {
+                        // {F1}..{F12} function keys. VK_F1 is 0x70 and the
+                        // function keys are contiguous through VK_F12 at 0x7B.
+                        // UnicodeChar stays NUL: a real keyboard reports no
+                        // character for a function key, and apps that read
+                        // INPUT_RECORDs (Far Manager) key off the virtual key.
+                        int fn = int.Parse(token.Substring(1));
+                        if (fn >= 1 && fn <= 12)
+                        {
+                            if (SendKey(handle, (ushort)(0x70 + fn - 1), '\0', 0, log)) injected++;
+                        }
+                        else
+                        {
+                            log.Add("  SKIP {" + token + "}: only F1..F12 exist");
+                        }
                     }
                     else if (token.StartsWith("ALT:"))
                     {

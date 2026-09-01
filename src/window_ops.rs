@@ -504,11 +504,42 @@ fn detect_mouse_input(pane: &mut Pane) -> bool {
 /// Cached for 2 seconds per pane (same TTL as the other mouse-inject
 /// detectors) to avoid the AttachConsole/CreateFileW/SetConsoleMode dance on
 /// every wheel tick once VTI is confirmed on.
+///
+/// # Never for a record reader (issue #623)
+///
+/// The flip is permanent, since nothing here restores the mode afterwards, and
+/// it is the console's mode rather than psmux's, so it changes how conhost
+/// treats EVERY later byte psmux writes to that ConPTY, keys included.  With
+/// VTI off conhost PARSES the input stream and hands the child real
+/// INPUT_RECORDs, so the three bytes psmux sends for F1 (`\x1bOP`) arrive as
+/// one `VK_F1` press.  With VTI on conhost stops parsing and passes the bytes
+/// through verbatim, so the same F1 arrives as the characters ESC, 'O', 'P'.
+///
+/// An application that reads `INPUT_RECORD`s cannot use those (Far Manager
+/// ignores them), and the first thing it does when it wakes to read them is
+/// re-apply its own console mode, which clears VTI again, so the key after the
+/// lost one works.  That is exactly the reported symptom: inside psmux, Far's
+/// F1 opened no help until it was pressed a second time.
+///
+/// Such a child does not need the flip in the first place.  It asked for
+/// `ENABLE_MOUSE_INPUT`, which is conhost's cue to turn the very SGR report
+/// this function is preparing into a `MOUSE_EVENT` record, and the record
+/// channel in `inject_mouse_combined` delivers the wheel to it directly.  The
+/// #277/#245 apps this was written for (nvim, vim, opencode reading SGR bytes)
+/// have mouse input OFF, so they still get the flip.
 fn ensure_vti(pane: &mut Pane) {
     if let Some((ts, cached)) = pane.vti_mode_cache {
         if cached || ts.elapsed().as_secs() < 2 {
             return;
         }
+    }
+    // Issue #623: leave a record reader's console mode alone.  Re-checked on
+    // the same 2 second cadence as the rest of the probe (and
+    // `detect_mouse_input` has its own cache), so a pane that later switches
+    // to a VT reading app still gets the flip it needs for #277.
+    if detect_mouse_input(pane) {
+        pane.vti_mode_cache = Some((std::time::Instant::now(), false));
+        return;
     }
     if pane.child_pid.is_none() {
         pane.child_pid = mouse_inject::get_child_pid(&*pane.child);
