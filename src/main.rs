@@ -2819,10 +2819,14 @@ fn run_main() -> io::Result<()> {
                         let addr = format!("127.0.0.1:{}", port);
                         // Actually authenticate and query the server to ensure it's healthy
                         let session_key = read_session_key(&target).unwrap_or_default();
-                        if let Ok(mut s) = std::net::TcpStream::connect_timeout(
+                        let conn = std::net::TcpStream::connect_timeout(
                             &addr.parse().unwrap(),
                             Duration::from_millis(500)
-                        ) {
+                        );
+                        // Only prune a session that ACTIVELY refused (truly dead);
+                        // a timeout means busy-but-alive and must not be deleted.
+                        let refused = matches!(&conn, Err(e) if e.kind() == io::ErrorKind::ConnectionRefused);
+                        if let Ok(mut s) = conn {
                             let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
                             let _ = write!(s, "AUTH {}\n", session_key);
                             let _ = write!(s, "session-info\n");
@@ -2838,10 +2842,19 @@ fn run_main() -> io::Result<()> {
                             }
                             // Fallback: connection succeeded so session likely exists
                             std::process::exit(0);
-                        } else {
-                            // Stale port file - clean it up
-                            let _ = std::fs::remove_file(&path);
+                        } else if refused
+                            || crate::session::registry_pid_anchor_alive(&target) == Some(false)
+                        {
+                            // Truly dead: it either refused outright, or its PID
+                            // anchor names a process that is gone (a dead loopback
+                            // port can time out rather than refuse on Windows).
+                            // Reap the WHOLE set: dropping the `.port` alone would
+                            // strand its siblings where no sweep can reach them (#530).
+                            crate::session::remove_session_registry(&target);
                         }
+                        // Anything else (a plain timeout against a live server that
+                        // was merely slow to accept) exits 1 without touching the
+                        // registry: has-session is a predicate, not a reaper (#622).
                     }
                 }
                 std::process::exit(1);
