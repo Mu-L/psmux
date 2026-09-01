@@ -465,14 +465,18 @@ fn detect_vt_bridge(pane: &mut Pane) -> bool {
     result
 }
 
-/// Detect whether the child's console has ENABLE_MOUSE_INPUT (0x0010) set.
+/// `ENABLE_MOUSE_INPUT` — the console can hand the child MOUSE_EVENT records.
+pub(crate) const ENABLE_MOUSE_INPUT: u32 = 0x0010;
+/// `ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT` — the cooked-input pair.  A console
+/// still carrying either of these is line buffered and echoing, which no
+/// application that reads `INPUT_RECORD`s ever leaves in place.
+pub(crate) const COOKED_INPUT_MODE: u32 = 0x0002 | 0x0004;
+
+/// The pane child's whole console input mode word, cached for 2 seconds.
 ///
-/// When true, the child reads MOUSE_EVENT records via ReadConsoleInputW
-/// (crossterm/ratatui apps like pstop, claude).  When false, the child
-/// reads input as text / VT sequences (nvim, vim, opencode).
-///
-/// Result is cached for 2 seconds per pane.
-fn detect_mouse_input(pane: &mut Pane) -> bool {
+/// One probe answers both mouse questions below, and the AttachConsole /
+/// CreateFileW dance behind it is expensive enough to be worth sharing.
+fn console_input_mode(pane: &mut Pane) -> Option<u32> {
     if let Some((ts, cached)) = pane.mouse_input_cache {
         if ts.elapsed().as_secs() < 2 {
             return cached;
@@ -481,13 +485,62 @@ fn detect_mouse_input(pane: &mut Pane) -> bool {
     if pane.child_pid.is_none() {
         pane.child_pid = mouse_inject::get_child_pid(&*pane.child);
     }
-    let result = if let Some(pid) = pane.child_pid {
-        mouse_inject::query_mouse_input_enabled(pid).unwrap_or(false)
-    } else {
-        false
-    };
+    let result = pane.child_pid.and_then(mouse_inject::query_console_input_mode);
     pane.mouse_input_cache = Some((std::time::Instant::now(), result));
     result
+}
+
+/// Detect whether the child's console has ENABLE_MOUSE_INPUT (0x0010) set.
+///
+/// When true, the console CAN deliver MOUSE_EVENT records to the child
+/// (crossterm/ratatui apps like pstop, claude read them).  This is the
+/// permissive answer to "may the wheel be forwarded at all": the bit is set in
+/// the inherited Windows default, so a `true` here does NOT establish that the
+/// child asked for the mouse.  Use [`detect_record_reader`] for that.
+///
+/// Result is cached for 2 seconds per pane.
+fn detect_mouse_input(pane: &mut Pane) -> bool {
+    console_input_mode(pane).map_or(false, |m| m & ENABLE_MOUSE_INPUT != 0)
+}
+
+/// Did the child DELIBERATELY configure its console to read `INPUT_RECORD`s?
+///
+/// `ENABLE_MOUSE_INPUT` on its own cannot answer this.  The mode a freshly
+/// spawned console inherits is Windows' documented default, `0x01F7`, and that
+/// word already contains `ENABLE_MOUSE_INPUT`, so every pane child looks like a
+/// record reader from the moment it starts, before it has run a line of its own
+/// code.  Measured on this tree, pane children with no `SetConsoleMode` call of
+/// their own between them:
+///
+/// ```text
+///   pwsh reading via [Console]::ReadKey  0x01F7  mouse=1 line=1 echo=1
+///   Far Manager                          0x01B8  mouse=1 line=0 echo=0
+///   pstop (crossterm)                    0x0098  mouse=1 line=0 echo=0
+/// ```
+///
+/// What separates them is the rest of the word: a record reader always takes
+/// the console out of cooked mode first, because line buffering and echo would
+/// swallow the very keystrokes it wants as records.  So the discriminator is
+/// `ENABLE_MOUSE_INPUT` set AND [`COOKED_INPUT_MODE`] clear.
+///
+/// `ENABLE_QUICK_EDIT_MODE` looks like it would work too (both readers above
+/// clear it, the default sets it) but it must NOT be used: psmux clears that
+/// very bit itself.  `mouse_inject::send_mouse_event` sets
+/// `ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS` and clears
+/// `ENABLE_QUICK_EDIT_MODE` on the child console before every injected record
+/// and never restores it, so one forwarded wheel notch turns any pane into a
+/// quick-edit-free "record reader".  Measured: the pwsh reader above went
+/// `0x01F6 -> 0x01B6` across a single wheel event.  psmux never touches
+/// `ENABLE_LINE_INPUT` or `ENABLE_ECHO_INPUT`, which is why the cooked pair is
+/// the signal that survives its own mouse traffic.
+fn detect_record_reader(pane: &mut Pane) -> bool {
+    console_input_mode(pane).map_or(false, mode_is_deliberate_record_reader)
+}
+
+/// The pure classification behind [`detect_record_reader`], split out so it can
+/// be pinned by unit tests against the modes measured from real applications.
+pub(crate) fn mode_is_deliberate_record_reader(mode: u32) -> bool {
+    mode & ENABLE_MOUSE_INPUT != 0 && mode & COOKED_INPUT_MODE == 0
 }
 
 /// Ensure the child's console has ENABLE_VIRTUAL_TERMINAL_INPUT set before
@@ -521,12 +574,22 @@ fn detect_mouse_input(pane: &mut Pane) -> bool {
 /// lost one works.  That is exactly the reported symptom: inside psmux, Far's
 /// F1 opened no help until it was pressed a second time.
 ///
-/// Such a child does not need the flip in the first place.  It asked for
-/// `ENABLE_MOUSE_INPUT`, which is conhost's cue to turn the very SGR report
-/// this function is preparing into a `MOUSE_EVENT` record, and the record
-/// channel in `inject_mouse_combined` delivers the wheel to it directly.  The
-/// #277/#245 apps this was written for (nvim, vim, opencode reading SGR bytes)
-/// have mouse input OFF, so they still get the flip.
+/// Such a child does not need the flip in the first place.  It configured its
+/// console to receive `MOUSE_EVENT` records, which is conhost's cue to turn the
+/// very SGR report this function is preparing into one, and the record channel
+/// in `inject_mouse_combined` delivers the wheel to it directly.
+///
+/// The gate has to be [`detect_record_reader`], NOT `ENABLE_MOUSE_INPUT` on its
+/// own.  That bit is part of the console mode a child INHERITS (`0x01F7`), so
+/// gating on it alone excused every freshly spawned pane app from the flip,
+/// including the #277/#245 class this function exists for: an application that
+/// writes DECSET 1000/1002/1003/1006 and then reads the SGR bytes itself never
+/// calls `SetConsoleMode` at all, so it still carries the inherited word and was
+/// misread as a record reader.  conhost then dropped every SGR report psmux
+/// wrote, and the Win32 record injected alongside is no help to it because a
+/// byte reader discards `MOUSE_EVENT` records.  Measured: the wheel stopped
+/// reaching such a pane entirely.  A real record reader is recognised by the
+/// rest of its mode word instead (see `detect_record_reader`).
 fn ensure_vti(pane: &mut Pane) {
     if let Some((ts, cached)) = pane.vti_mode_cache {
         if cached || ts.elapsed().as_secs() < 2 {
@@ -535,9 +598,9 @@ fn ensure_vti(pane: &mut Pane) {
     }
     // Issue #623: leave a record reader's console mode alone.  Re-checked on
     // the same 2 second cadence as the rest of the probe (and
-    // `detect_mouse_input` has its own cache), so a pane that later switches
+    // `console_input_mode` has its own cache), so a pane that later switches
     // to a VT reading app still gets the flip it needs for #277.
-    if detect_mouse_input(pane) {
+    if detect_record_reader(pane) {
         pane.vti_mode_cache = Some((std::time::Instant::now(), false));
         return;
     }
@@ -795,6 +858,15 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
         // anchored to the process that earned it — and consults it last, after
         // both live signals have already said no.  A pane that never earned an
         // authorization is exactly as silent as #598 made it.
+        //
+        // This site keeps the PERMISSIVE `detect_mouse_input`, while the #623
+        // gate in `ensure_vti` uses the strict `detect_record_reader`, and the
+        // asymmetry is deliberate: here a `true` only lets the wheel THROUGH,
+        // so the inherited `ENABLE_MOUSE_INPUT` erring towards delivery costs
+        // nothing (the `mouse_protocol_mode` check above has already run, and
+        // the `wheel_auth` latch is the real backstop).  There a `true`
+        // WITHHOLDS the VTI flip, and the same inherited bit would then silence
+        // the #277 apps for good.
         if _event_flags & mouse_inject::MOUSE_WHEELED != 0 && !wheel_forced(pane) {
             if matches!(pane.mouse_proto_owner, Some((_, true))) || detect_mouse_input(pane) {
                 // A live signal answered yes: refresh the latch so the
@@ -2734,3 +2806,7 @@ mod test_issue613_wheel_gate_durability;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue621_wheel_stdin_block.rs"]
 mod test_issue621_wheel_stdin_block;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue623_record_reader_gate.rs"]
+mod test_issue623_record_reader_gate;

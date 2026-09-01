@@ -5,9 +5,11 @@
 # Uses a Python mouse-event detector to prove forwarding
 
 $ErrorActionPreference = "Continue"
-$PSMUX = (Get-Command psmux -EA Stop).Source
+# Binary and data root are overridable so this suite can be pointed at a build
+# under test without disturbing the installed psmux or its sessions.
+$PSMUX = if ($env:PSMUX_BIN) { $env:PSMUX_BIN } else { (Get-Command psmux -EA Stop).Source }
 $SESSION = "scroll_ctrl_277"
-$psmuxDir = "$env:USERPROFILE\.psmux"
+$psmuxDir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR } else { "$env:USERPROFILE\.psmux" }
 $mouseInjector = "$env:TEMP\psmux_mouse_injector.exe"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
@@ -76,7 +78,12 @@ Write-Host "==========================================================" -Foregro
 
 # === SETUP ===
 Cleanup
-Get-Process psmux -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+# Sweeping every psmux on the machine is only safe when this suite owns the
+# default data root. Pointed at a private build or root it runs BESIDE other
+# servers, and killing them by image name would take those down too.
+if (-not $env:PSMUX_BIN -and -not $env:PSMUX_DATA_DIR) {
+    Get-Process psmux -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+}
 Start-Sleep -Seconds 1
 
 # ================================================================
