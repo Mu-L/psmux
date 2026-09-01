@@ -2699,3 +2699,7 @@ mod test_issue597_legacy_mouse_bypass;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue613_wheel_gate_durability.rs"]
 mod test_issue613_wheel_gate_durability;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue621_wheel_stdin_block.rs"]
+mod test_issue621_wheel_stdin_block;
