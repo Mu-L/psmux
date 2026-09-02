@@ -198,20 +198,26 @@ else {
 }
 
 # ---------------------------------------------------------------------------
-# Test 2: on the REAL build a click must NOT produce a MOUSE_EVENT record.  psmux
-# forces ENABLE_VIRTUAL_TERMINAL_INPUT on every pane (ensure_vti, #277/#245), and
-# with VTI on conhost hands the SGR click through as KEY_EVENT text rather than
-# converting it to a record.  That is today's behaviour on 22523+ and this widening
-# must not touch it.
+# Test 2: on the REAL build (22523+) a click reaches a record reader as EXACTLY ONE
+# press record and one release record, delivered by conhost's own SGR conversion of
+# the pipe write, never by this widening.  History: this check originally asserted
+# ZERO records, because pre #623 psmux forced ENABLE_VIRTUAL_TERMINAL_INPUT on
+# every pane (ensure_vti) and with VTI on conhost handed the SGR click through as
+# KEY_EVENT text, starving the record reader entirely.  The #623 record-reader
+# gate (dc6ff84/36bbaf7) stopped forcing VTI onto a deliberate record reader, so
+# conhost now converts the click for it, exactly one copy.  What this widening
+# must still never do on 22523+ is add a SECOND copy.
 # ---------------------------------------------------------------------------
-Write-Host "`n[Test 2] real build: a click delivers no MOUSE_EVENT record (unchanged on 22523+)" -ForegroundColor Yellow
+Write-Host "`n[Test 2] real build: a click delivers exactly one record pair via conhost, no widening copy" -ForegroundColor Yellow
 $c = Start-Case -FakeBuild $null -ChildCmd $recCmd -ChildLog $recLog -ReadyMark "NATIVE_MOUSE START"
 if (-not $c) { Write-Fail "could not start the record reading child" }
 else {
     $lines = Invoke-Click $c
-    $m = Select-Mouse $lines '0x0' ''
-    if ($m.Count -eq 0) { Write-Pass "no click record on the real build, behaviour unchanged" }
-    else { Write-Fail "REGRESSION: the widening leaked onto a 22523+ build: $($m -join ' | ')" }
+    $press   = Select-Mouse $lines '0x0' '0x1'
+    $release = Select-Mouse $lines '0x0' '0x0'
+    if ($press.Count -eq 1 -and $release.Count -eq 1) { Write-Pass "one press and one release record via conhost conversion: $($press[0]) | $($release[0])" }
+    elseif ($press.Count -eq 0) { Write-Fail "record reader starved on the real build: the #623 gate should leave conhost conversion working: $($lines -join ' | ')" }
+    else { Write-Fail "DOUBLE DELIVERY: the widening added a second copy on a 22523+ build: $((Select-Mouse $lines '0x0' '') -join ' | ')" }
     Stop-Case $c
 }
 
@@ -302,16 +308,21 @@ else {
 
 # ---------------------------------------------------------------------------
 # Test 7: the boundary.  CONPTY_MOUSE_MIN_BUILD itself is NOT below the threshold,
-# so at exactly 22523 the widening is off and behaviour matches the real build.
+# so at exactly 22523 the widening is off and behaviour matches the real build:
+# exactly one press and one release record from conhost's conversion, never a
+# second copy from the widening.  (Same history as Test 2: the pre #623 zero
+# record expectation encoded ensure_vti starving the record reader.)
 # ---------------------------------------------------------------------------
-Write-Host "`n[Test 7] build 22523 (the threshold itself): no click record, widening is off" -ForegroundColor Yellow
+Write-Host "`n[Test 7] build 22523 (the threshold itself): one record pair via conhost, widening is off" -ForegroundColor Yellow
 $c = Start-Case -FakeBuild "22523" -ChildCmd $recCmd -ChildLog $recLog -ReadyMark "NATIVE_MOUSE START"
 if (-not $c) { Write-Fail "could not start the record reading child" }
 else {
     $lines = Invoke-Click $c
-    $m = Select-Mouse $lines '0x0' ''
-    if ($m.Count -eq 0) { Write-Pass "no click record at 22523, the gate is strictly below the threshold" }
-    else { Write-Fail "the widening fired at 22523, the comparison is wrong: $($m -join ' | ')" }
+    $press   = Select-Mouse $lines '0x0' '0x1'
+    $release = Select-Mouse $lines '0x0' '0x0'
+    if ($press.Count -eq 1 -and $release.Count -eq 1) { Write-Pass "one press and one release at 22523, the gate is strictly below the threshold: $($press[0]) | $($release[0])" }
+    elseif ($press.Count -eq 0) { Write-Fail "record reader starved at 22523: conhost conversion should deliver the click: $($lines -join ' | ')" }
+    else { Write-Fail "the widening fired at 22523, the comparison is wrong (second copy delivered): $((Select-Mouse $lines '0x0' '') -join ' | ')" }
     Stop-Case $c
 }
 
