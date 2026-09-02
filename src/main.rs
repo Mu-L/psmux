@@ -7,6 +7,7 @@ mod platform;
 mod cli;
 mod session;
 mod tree;
+mod choose_tree;
 mod style;
 mod border_lines;
 mod copy_line_numbers;
