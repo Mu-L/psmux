@@ -66,6 +66,31 @@ fn extract_confirm_command(args: &str) -> String {
     args.to_string()
 }
 
+/// One row of the choose-tree model: `(is_win, win_id, pane_id, label, session)`.
+/// A session header is `is_win == true` with `win_id == usize::MAX`.
+pub(crate) type TreeRow = (bool, usize, usize, String, String);
+
+/// Classify every row of a choose-tree model so the tmux line rules in
+/// `crate::choose_tree` can be applied to it.
+pub(crate) fn tree_row_kinds(rows: &[TreeRow]) -> Vec<crate::choose_tree::RowKind> {
+    rows.iter()
+        .map(|(is_win, wid, _, _, _)| crate::choose_tree::row_kind(*is_win, *wid))
+        .collect()
+}
+
+/// Recompute the visible rows from the model, mirroring tmux's
+/// `mode_tree_build_lines`. Returns `(visible rows, visible index -> model
+/// index)`.
+pub(crate) fn tree_rebuild_visible(
+    all: &[TreeRow],
+    collapsed: &std::collections::HashSet<usize>,
+) -> (Vec<TreeRow>, Vec<usize>) {
+    let kinds = tree_row_kinds(all);
+    let map = crate::choose_tree::visible_lines(&kinds, collapsed);
+    let rows = map.iter().map(|&i| all[i].clone()).collect();
+    (rows, map)
+}
+
 /// Build a send-key name with modifier prefix (e.g. "C-Left", "S-Right", "C-S-Up").
 pub(crate) fn modified_key_name(base: &str, mods: KeyModifiers) -> String {
     let mut prefix = String::new();
@@ -1845,14 +1870,22 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut window_idx_buf = String::new();
 
     let mut tree_chooser = false;
+    // The VISIBLE rows of the chooser, which is what tmux calls line_list:
+    // the cursor, the renderer, Enter and the jump keys all index this list.
     let mut tree_entries: Vec<(bool, usize, usize, String, String)> = Vec::new();  // (is_win, id, sub_id, label, session_name)
+    // The full tree behind those rows. Panes of a collapsed window live here
+    // but never reach tree_entries, matching mode_tree_build_lines, which only
+    // recurses into the children of an expanded item.
+    let mut tree_all: Vec<(bool, usize, usize, String, String)> = Vec::new();
+    // Indices into tree_all that are collapsed. Seeded by
+    // choose_tree::default_collapsed so every window starts collapsed, which is
+    // what `choose-tree -w` (the command prefix+w runs) does in tmux.
+    let mut tree_collapsed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // visible row index -> tree_all index, so expand/collapse can find the
+    // model row behind the cursor.
+    let mut tree_vis_map: Vec<usize> = Vec::new();
     let mut tree_selected: usize = 0;
     let mut tree_scroll: usize = 0;
-    // Digit-jump buffer for the choose-tree / choose-window picker.
-    // Same UX as session_num_buffer: digits append, Enter jumps, Backspace
-    // edits, Esc clears. Numbered prefix is rendered next to each row so
-    // the digit-to-row mapping is visible.
-    let mut tree_num_buffer = String::new();
     let mut buffer_chooser = false;
     let mut buffer_entries: Vec<(usize, usize, String)> = Vec::new();  // (index, byte_len, preview)
     let mut buffer_selected: usize = 0;
@@ -3129,8 +3162,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 keys_viewer = false;
                                 confirm_cmd = None;
                                 // Drop any pending digit-jump buffers when the
-                                // pickers are dismissed via Esc.
-                                tree_num_buffer.clear();
+                                // pickers are dismissed via Esc. The tree chooser
+                                // has none: its jump keys act immediately.
                                 buffer_num_buffer.clear();
                                 session_num_buffer.clear();
                                 // Also clear any lingering selection
@@ -3387,9 +3420,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             if do_choose_tree {
                                 tree_chooser = true;
                                 tree_entries.clear();
+                                tree_all.clear();
+                                tree_collapsed.clear();
+                                tree_vis_map.clear();
                                 tree_selected = 0;
                                 tree_scroll = 0;
-                                tree_num_buffer.clear();
                                 popup_offset = (0, 0);
                                 popup_dragging = false;
                                 popup_rect_last = None;
@@ -3445,18 +3480,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         let is_current = sess_name == &current_session;
                                         let attached = if is_current { " (attached)" } else { "" };
                                         let nw = wins.len();
-                                        tree_entries.push((true, usize::MAX, 0,
+                                        tree_all.push((true, usize::MAX, 0,
                                             format!("{}: {} windows{}", sess_name, nw, attached),
                                             sess_name.clone()));
                                         if is_current {
                                             for (wid, wname, active, panes, disp) in wins.iter() {
                                                 let marker = if *active { "*" } else { "" };
-                                                if *active { active_tree_row = Some(tree_entries.len()); }
-                                                tree_entries.push((true, *wid, 0,
+                                                if *active { active_tree_row = Some(tree_all.len()); }
+                                                tree_all.push((true, *wid, 0,
                                                     format!("  {}: {}{} ({} panes)", disp, wname, marker, panes.len()),
                                                     sess_name.clone()));
                                                 for (pid, ptitle) in panes {
-                                                    tree_entries.push((false, *wid, *pid,
+                                                    tree_all.push((false, *wid, *pid,
                                                         format!("    {}", ptitle),
                                                         sess_name.clone()));
                                                 }
@@ -3464,7 +3499,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         } else {
                                             for (wid, wname, active, panes, disp) in wins.iter() {
                                                 let marker = if *active { "*" } else { "" };
-                                                tree_entries.push((true, *wid, 0,
+                                                tree_all.push((true, *wid, 0,
                                                     format!("  {}: {}{} ({} panes)", disp, wname, marker, panes.len()),
                                                     sess_name.clone()));
                                             }
@@ -3472,16 +3507,31 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     }
                                     if let Some(r) = active_tree_row { tree_selected = r; }
                                 }
-                                if tree_entries.is_empty() {
+                                if tree_all.is_empty() {
                                     for wi in &last_tree {
                                         let marker = if wi.active { "*" } else { "" };
-                                        if wi.active { tree_selected = tree_entries.len(); }
-                                        tree_entries.push((true, wi.id, 0, format!("{}{}", wi.name, marker), current_session.clone()));
+                                        if wi.active { tree_selected = tree_all.len(); }
+                                        tree_all.push((true, wi.id, 0, format!("{}{}", wi.name, marker), current_session.clone()));
                                         for pi in &wi.panes {
-                                            tree_entries.push((false, wi.id, pi.id, pi.title.clone(), current_session.clone()));
+                                            tree_all.push((false, wi.id, pi.id, pi.title.clone(), current_session.clone()));
                                         }
                                     }
                                 }
+                                // tmux `window_tree_build_window` under `choose-tree -w`:
+                                // every window row opens collapsed, so the visible lines are
+                                // the session headers and their windows and nothing else.
+                                // That is what makes the jump digit line up with the window
+                                // number in the status bar however many panes a window holds.
+                                let kinds = tree_row_kinds(&tree_all);
+                                tree_collapsed = crate::choose_tree::default_collapsed(&kinds);
+                                let model_cursor = tree_selected;
+                                let (rows, map) = tree_rebuild_visible(&tree_all, &tree_collapsed);
+                                tree_entries = rows;
+                                tree_vis_map = map;
+                                tree_selected = tree_vis_map
+                                    .iter()
+                                    .position(|&i| i == model_cursor)
+                                    .unwrap_or(0);
                             }
                             if do_choose_session {
                                 session_chooser = true;
@@ -3686,7 +3736,37 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 paste_suppress_until.map_or(false, |t| Instant::now() < t);
                             #[cfg(not(windows))]
                             let paste_burst_active = false;
-                            match key.code {
+                            // tmux `mode_tree_key`: a jump key is not a prompt and
+                            // never waits for Enter. It looks the key up among the
+                            // visible lines, moves the cursor there and REWRITES
+                            // itself to `\r`, so `window_tree_key` activates the
+                            // target on the very same keystroke:
+                            //
+                            //     mtd->current = choice;
+                            //     *key = '\r';
+                            //
+                            // `mode_tree_build_lines` stamps '0'..'9' on the first
+                            // ten VISIBLE lines and M-a..M-z on lines 10..35, so the
+                            // key is a zero based visible line index.
+                            let mut effective_code = key.code;
+                            if tree_chooser {
+                                let jump = match key.code {
+                                    KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::ALT) => {
+                                        crate::choose_tree::meta_line(c)
+                                    }
+                                    KeyCode::Char(c) => crate::choose_tree::digit_line(c),
+                                    _ => None,
+                                };
+                                if let Some(line) = jump {
+                                    // A line with no such key is simply not found by
+                                    // tmux's lookup loop, so the key does nothing.
+                                    if line < tree_entries.len() {
+                                        tree_selected = line;
+                                        effective_code = KeyCode::Enter;
+                                    }
+                                }
+                            }
+                            match effective_code {
                                 KeyCode::Up if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
                                 KeyCode::Down if session_chooser => {
                                     let visible_len = session_filtered_indices(&session_entries, &session_filter).len();
@@ -3826,6 +3906,40 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 // Absorb any other char while the session picker is open so
                                 // it cannot leak through to the focused pane's PTY.
                                 KeyCode::Char(_) if session_chooser => {}
+                                // Left/Right collapse and expand, ported from the
+                                // KEYC_LEFT and KEYC_RIGHT arms of tmux's mode_tree_key.
+                                // Left on an already collapsed row climbs to the parent and
+                                // collapses that; Right on an expanded row just steps down.
+                                // h/j/k/l stay plain cursor movement (issue #259), which is
+                                // what tmux itself does whenever line->flat holds.
+                                KeyCode::Left if tree_chooser => {
+                                    let kinds = tree_row_kinds(&tree_all);
+                                    let model = tree_vis_map.get(tree_selected).copied();
+                                    match model.map(|m| crate::choose_tree::collapse_action(&kinds, &tree_collapsed, m)) {
+                                        Some(crate::choose_tree::CollapseAction::Collapse(t)) => {
+                                            tree_collapsed.insert(t);
+                                            let (rows, map) = tree_rebuild_visible(&tree_all, &tree_collapsed);
+                                            tree_entries = rows;
+                                            tree_vis_map = map;
+                                            tree_selected = tree_vis_map.iter().position(|&i| i == t).unwrap_or(0);
+                                        }
+                                        _ => { if tree_selected > 0 { tree_selected -= 1; } }
+                                    }
+                                }
+                                KeyCode::Right if tree_chooser => {
+                                    let kinds = tree_row_kinds(&tree_all);
+                                    let model = tree_vis_map.get(tree_selected).copied();
+                                    match model.map(|m| crate::choose_tree::expand_action(&kinds, &tree_collapsed, m)) {
+                                        Some(crate::choose_tree::ExpandAction::Expand(t)) => {
+                                            tree_collapsed.remove(&t);
+                                            let (rows, map) = tree_rebuild_visible(&tree_all, &tree_collapsed);
+                                            tree_entries = rows;
+                                            tree_vis_map = map;
+                                            tree_selected = tree_vis_map.iter().position(|&i| i == t).unwrap_or(tree_selected);
+                                        }
+                                        _ => { if tree_selected + 1 < tree_entries.len() { tree_selected += 1; } }
+                                    }
+                                }
                                 KeyCode::Up if tree_chooser => { if tree_selected > 0 { tree_selected -= 1; } }
                                 KeyCode::Down if tree_chooser => { if tree_selected + 1 < tree_entries.len() { tree_selected += 1; } }
                                 // hjkl parity with tmux mode-tree (issue #259): h/k = up, j/l = down
@@ -3841,99 +3955,105 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Home if tree_chooser => { tree_selected = 0; }
                                 KeyCode::End if tree_chooser => { tree_selected = tree_entries.len().saturating_sub(1); }
                                 KeyCode::Enter if tree_chooser => {
-                                    // Digit-jump: if a number was typed, prefer it over the
-                                    // arrow cursor. Buffer is 1-based: "1" -> first row,
-                                    // "12" -> twelfth. Out-of-range or unparseable -> no-op
-                                    // (keep buffer so user can Backspace and fix).
-                                    let target_idx: Option<usize> = if tree_num_buffer.is_empty() {
-                                        Some(tree_selected)
-                                    } else {
-                                        match tree_num_buffer.parse::<usize>() {
-                                            Ok(n) if n >= 1 && n <= tree_entries.len() => Some(n - 1),
-                                            _ => None,
-                                        }
-                                    };
-                                    if let Some(sel_idx) = target_idx {
-                                        if let Some((is_win, wid, pid, _label, sess_name)) = tree_entries.get(sel_idx) {
-                                            if *wid == usize::MAX {
-                                                // Session header — switch to that session
-                                                if *sess_name != current_session {
-                                                    cmd_batch.push("client-detach\n".into());
-                                                    env::set_var("PSMUX_SWITCH_TO", sess_name);
-                                                    quit = true;
-                                                }
-                                                tree_chooser = false;
-                                                tree_num_buffer.clear();
-                                            } else if *sess_name != current_session {
-                                                // Window/pane in another session — switch to that session
+                                    // tmux `window_tree_key`, case '\r': resolve the row
+                                    // under the cursor, run the chooser's command against it
+                                    // and finish. Reached either by a real Enter or by a jump
+                                    // key that mode_tree_key rewrote to '\r' above, so both
+                                    // paths always close the chooser.
+                                    //
+                                    // tmux ends the mode with window_pane_reset_mode, which
+                                    // sets PANE_REDRAW. Closing on a target that needs no
+                                    // command (the current session's own header, `0` in a
+                                    // single session tree) queues nothing for the server, so
+                                    // without this the popup stayed painted until the next
+                                    // keystroke forced a frame.
+                                    selection_changed = true;
+                                    if let Some((is_win, wid, pid, _label, sess_name)) = tree_entries.get(tree_selected) {
+                                        if *wid == usize::MAX {
+                                            // Session header: switch to that session
+                                            if *sess_name != current_session {
                                                 cmd_batch.push("client-detach\n".into());
                                                 env::set_var("PSMUX_SWITCH_TO", sess_name);
                                                 quit = true;
-                                                tree_chooser = false;
-                                                tree_num_buffer.clear();
-                                            } else if *is_win {
-                                                cmd_batch.push(format!("focus-window {}\n", wid));
-                                                tree_chooser = false;
-                                                tree_num_buffer.clear();
-                                            } else {
-                                                cmd_batch.push(format!("focus-pane {}\n", pid));
-                                                tree_chooser = false;
-                                                tree_num_buffer.clear();
                                             }
+                                            tree_chooser = false;
+                                        } else if *sess_name != current_session {
+                                            // Window/pane in another session: switch to that session
+                                            cmd_batch.push("client-detach\n".into());
+                                            env::set_var("PSMUX_SWITCH_TO", sess_name);
+                                            quit = true;
+                                            tree_chooser = false;
+                                        } else if *is_win {
+                                            cmd_batch.push(format!("focus-window {}\n", wid));
+                                            tree_chooser = false;
+                                        } else {
+                                            cmd_batch.push(format!("focus-pane {}\n", pid));
+                                            tree_chooser = false;
                                         }
+                                    } else {
+                                        // An empty list has nothing to activate; tmux's
+                                        // mode_tree_key returns finished for line_size == 0.
+                                        tree_chooser = false;
                                     }
                                 }
-                                KeyCode::Esc if tree_chooser => { tree_chooser = false; tree_num_buffer.clear(); }
-                                KeyCode::Backspace if tree_chooser => { tree_num_buffer.pop(); }
+                                KeyCode::Esc if tree_chooser => { tree_chooser = false; }
                                 // 'p' toggles the live preview pane in choose-tree
                                 KeyCode::Char('p') if tree_chooser => {
                                     preview_enabled = !preview_enabled;
                                 }
                                 // 'x' kills the highlighted window (mirrors the session
-                                // chooser's `x`). Scoped to a window row in the current
-                                // session: focus the window, then kill it. The digit-jump
-                                // buffer wins over the arrow cursor, same as Enter.
+                                // chooser's `x` and tmux's window_tree_key 'x'). Scoped to a
+                                // window row in the current session: focus the window, then
+                                // kill it.
                                 KeyCode::Char('x') if tree_chooser => {
-                                    let target_idx: Option<usize> = if tree_num_buffer.is_empty() {
-                                        Some(tree_selected)
-                                    } else {
-                                        match tree_num_buffer.parse::<usize>() {
-                                            Ok(n) if n >= 1 && n <= tree_entries.len() => Some(n - 1),
-                                            _ => None,
-                                        }
-                                    };
-                                    if let Some(sel_idx) = target_idx {
-                                        // Copy out the fields we need so the immutable borrow
-                                        // ends before we mutate tree_entries below.
-                                        if let Some((is_win, wid, sess_name)) = tree_entries
-                                            .get(sel_idx)
-                                            .map(|(iw, w, _p, _l, s)| (*iw, *w, s.clone()))
-                                        {
-                                            if is_win && wid != usize::MAX && sess_name == current_session {
-                                                cmd_batch.push(format!("focus-window {}\n", wid));
-                                                cmd_batch.push("kill-window\n".into());
-                                                // Drop the killed row and clamp the cursor so
-                                                // the picker stays open for further kills.
-                                                tree_entries.remove(sel_idx);
-                                                if tree_selected >= tree_entries.len() && tree_selected > 0 {
-                                                    tree_selected -= 1;
+                                    // Copy out the fields we need so the immutable borrow
+                                    // ends before we mutate the model below.
+                                    if let Some((is_win, wid, sess_name)) = tree_entries
+                                        .get(tree_selected)
+                                        .map(|(iw, w, _p, _l, s)| (*iw, *w, s.clone()))
+                                    {
+                                        if is_win && wid != usize::MAX && sess_name == current_session {
+                                            cmd_batch.push(format!("focus-window {}\n", wid));
+                                            cmd_batch.push("kill-window\n".into());
+                                            // Drop the killed window and the panes underneath
+                                            // it from the model, then rebuild the visible
+                                            // lines so the chooser stays open for more kills.
+                                            if let Some(model) = tree_vis_map.get(tree_selected).copied() {
+                                                let kinds = tree_row_kinds(&tree_all);
+                                                let mut end = model + 1;
+                                                while end < kinds.len()
+                                                    && crate::choose_tree::depth(kinds[end])
+                                                        > crate::choose_tree::depth(kinds[model])
+                                                {
+                                                    end += 1;
                                                 }
-                                                if tree_entries.is_empty() {
-                                                    tree_chooser = false;
-                                                }
-                                                tree_num_buffer.clear();
+                                                tree_all.drain(model..end);
+                                                let shift = end - model;
+                                                tree_collapsed = tree_collapsed
+                                                    .iter()
+                                                    .filter_map(|&i| {
+                                                        if i >= end { Some(i - shift) }
+                                                        else if i >= model { None }
+                                                        else { Some(i) }
+                                                    })
+                                                    .collect();
+                                                let (rows, map) = tree_rebuild_visible(&tree_all, &tree_collapsed);
+                                                tree_entries = rows;
+                                                tree_vis_map = map;
+                                            }
+                                            if tree_selected >= tree_entries.len() && tree_selected > 0 {
+                                                tree_selected -= 1;
+                                            }
+                                            if tree_entries.is_empty() {
+                                                tree_chooser = false;
                                             }
                                         }
                                     }
                                 }
-                                KeyCode::Char(c) if tree_chooser && c.is_ascii_digit() => {
-                                    // Append to the digit-jump buffer; Enter consumes it.
-                                    if tree_num_buffer.len() < 6 {
-                                        tree_num_buffer.push(c);
-                                    }
-                                }
                                 // Absorb any other char while the tree picker is open so
-                                // it cannot leak through to the focused pane's PTY.
+                                // it cannot leak through to the focused pane's PTY. Digits
+                                // and M-<letter> never reach here: mode_tree_key rewrote
+                                // them to Enter above.
                                 KeyCode::Char(_) if tree_chooser => {}
                                 // --- buffer chooser (C-b =) ---
                                 KeyCode::Up | KeyCode::Char('k') if buffer_chooser => {
@@ -6065,7 +6185,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // Popup size: when preview is OFF use the original
                 // pre-#257 dynamic sizing (compact, list-only). When preview
                 // is ON expand to 85x75% so the right-side preview has room.
-                let buffer_rows: u16 = if tree_num_buffer.is_empty() { 0 } else { 2 };
+                // No digit accumulator any more: a jump key acts on the keystroke,
+                // so the chooser never reserves rows for a pending "go to N".
+                let buffer_rows: u16 = 0;
                 let avail_w = content_chunk.width;
                 let avail_h = content_chunk.height;
                 let (popup_w, popup_h) = if preview_enabled {
@@ -6094,9 +6216,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 };
                 popup_rect_last = Some(oa);
                 let title = if preview_enabled {
-                    " choose-tree (digits+enter=jump  Enter=switch  p=preview  Esc=close  drag border to move) "
+                    " choose-tree (0-9=jump  Enter=switch  Left/Right=collapse/expand  p=preview  Esc=close  drag border to move) "
                 } else {
-                    " choose-tree (digits+enter=jump  Enter=switch  p=preview  Esc=close) "
+                    " choose-tree (0-9=jump  Enter=switch  Left/Right=collapse/expand  p=preview  Esc=close) "
                 };
                 let overlay = Block::default().borders(Borders::ALL).title(title).border_style(sel_style);
                 f.render_widget(Clear, oa);
@@ -6129,28 +6251,37 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 if tree_selected < tree_scroll {
                     tree_scroll = tree_selected;
                 }
-                let num_width = tree_entries.len().to_string().len();
+                // tmux prints the line's jump key beside the row through
+                // `#{mode_tree_key}`; the key is a zero based VISIBLE line index,
+                // so the label is "0".."9" then "M-a".."M-z" and finally blank.
+                let key_width = tree_entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| crate::choose_tree::line_key_label(i).len())
+                    .max()
+                    .unwrap_or(0);
+                let tree_kinds_now = tree_row_kinds(&tree_all);
                 let mut lines: Vec<Line> = Vec::new();
                 for (i, (is_win, wid, _pid, label, _sess)) in tree_entries.iter().enumerate().skip(tree_scroll).take(visible_h) {
-                    // Right-aligned 1-based row number so the digit-jump
-                    // mapping is visible without trial and error.
-                    let row = format!("{:>w$}. {}", i + 1, label, w = num_width);
+                    let key_label = crate::choose_tree::line_key_label(i);
+                    // tmux marks an expandable row with + when collapsed and -
+                    // when expanded (MODE_TREE_PREFIX_STYLE in mode-tree.c).
+                    let marker = match tree_vis_map.get(i) {
+                        Some(&m) if crate::choose_tree::has_children(&tree_kinds_now, m) => {
+                            if tree_collapsed.contains(&m) { "+" } else { "-" }
+                        }
+                        _ => " ",
+                    };
+                    let row = format!("{:>w$} {}{}", key_label, marker, label, w = key_width);
                     let line = if i == tree_selected {
                         Line::from(Span::styled(row, sel_style))
                     } else if *is_win && *wid == usize::MAX {
-                        // Session header — bold
+                        // Session header: bold
                         Line::from(Span::styled(row, Style::default().add_modifier(Modifier::BOLD)))
                     } else {
                         Line::from(row)
                     };
                     lines.push(line);
-                }
-                if !tree_num_buffer.is_empty() {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        format!("go to {}", tree_num_buffer),
-                        sel_style,
-                    )));
                 }
                 let para = Paragraph::new(Text::from(lines));
                 f.render_widget(para, list_area);
