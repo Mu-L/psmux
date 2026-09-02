@@ -167,7 +167,14 @@ finally {
         $ownedFiles | Remove-Item -Force -ErrorAction SilentlyContinue
     }
 
-    Remove-Item $artifactRoot -Recurse -Force -ErrorAction SilentlyContinue
+    # mouse_echo_child.exe can stay briefly locked after its process exits
+    # (Windows releases the image handle a moment after termination), so a
+    # single Remove-Item races the lock. Retry for up to ~2.5s before asserting.
+    for ($rm = 0; $rm -lt 10; $rm++) {
+        Remove-Item $artifactRoot -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $artifactRoot)) { break }
+        Start-Sleep -Milliseconds 250
+    }
     Test "Run-specific artifacts cleaned up" (-not (Test-Path $artifactRoot))
 
     if ($echoLogEnvExisted) {
