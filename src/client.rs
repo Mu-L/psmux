@@ -3508,6 +3508,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 if choose_tree_preview_default { preview_enabled = true; }
                                 // Query ALL sessions (like tmux choose-tree)
                                 let dir = crate::paths::psmux_dir();
+                                // A -L socket is a separate server in tmux; a client never
+                                // sees another socket's sessions. Same rule `ls` applies
+                                // and the same predicate the session picker uses (ed52715).
+                                let tree_ns = crate::session::session_namespace(&current_session);
                                 if let Ok(entries) = std::fs::read_dir(&dir) {
                                     let mut sessions: Vec<(String, Vec<(usize, String, bool, Vec<(usize, String)>, usize)>)> = Vec::new();
                                     for e in entries.flatten() {
@@ -3515,6 +3519,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                             if let Some((base, ext)) = fname.rsplit_once('.') {
                                                 if ext == "port" {
                                                     if crate::session::is_warm_session(base) { continue; }
+                                                    if !crate::session::session_visible_from(base, tree_ns) { continue; }
                                                     if let Ok(port_str) = std::fs::read_to_string(e.path()) {
                                                         if let Ok(p) = port_str.trim().parse::<u16>() {
                                                             let sess_addr = format!("127.0.0.1:{}", p);
