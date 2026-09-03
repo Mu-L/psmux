@@ -72,17 +72,26 @@ fn windows_profile_dir() -> Option<String> {
     }
 }
 
+/// Validate and normalize a PSMUX_DATA_DIR override value. Panics on a
+/// relative or empty value: silently resolving against the CWD would scatter
+/// the registry across working directories. Kept separate from the env read so
+/// the rejection can be tested without ever placing an invalid value in the
+/// process-global environment, which unlocked readers may observe mid-test.
+fn normalize_data_dir_override(raw: &std::ffi::OsStr) -> String {
+    let path = std::path::PathBuf::from(raw);
+    assert!(
+        path.is_absolute() && !path.as_os_str().is_empty(),
+        "PSMUX_DATA_DIR must be an absolute non-empty path"
+    );
+    path.to_string_lossy().trim_end_matches(['/', '\\']).to_string()
+}
+
 /// psmux data directory, without a trailing separator. Fallible variant for
 /// call sites that early-exit when home is missing (`.ok()?` /
 /// `Err(_) => return …`). `None` when no home directory is available.
 pub fn psmux_dir_opt() -> Option<String> {
     if let Some(raw) = std::env::var_os("PSMUX_DATA_DIR") {
-        let path = std::path::PathBuf::from(raw);
-        assert!(
-            path.is_absolute() && !path.as_os_str().is_empty(),
-            "PSMUX_DATA_DIR must be an absolute non-empty path"
-        );
-        return Some(path.to_string_lossy().trim_end_matches(['/', '\\']).to_string());
+        return Some(normalize_data_dir_override(&raw));
     }
     let home = home_dir();
     if home.is_empty() {

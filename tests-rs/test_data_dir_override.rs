@@ -107,12 +107,17 @@ fn data_dir_env_trims_trailing_separators() {
 
 /// A relative or empty PSMUX_DATA_DIR is a configuration error and must be
 /// rejected loudly, never silently resolved relative to the CWD.
+///
+/// Exercises the validator directly instead of writing the bad value into the
+/// process-global environment: an invalid PSMUX_DATA_DIR in the env, even
+/// briefly and under lock_test_env, panics any concurrently running test
+/// whose call chain reads psmux_dir_opt without that lock (observed as a
+/// one-off failure of resize_window tests in full parallel runs).
 #[test]
 fn relative_or_empty_data_dir_is_rejected() {
-    let _lock = crate::util::lock_test_env();
     for bad in ["", ".", "relative/path", "C:relative"] {
-        let _g = EnvGuard::set("PSMUX_DATA_DIR", bad);
-        let result = std::panic::catch_unwind(psmux_dir_opt);
+        let raw = std::ffi::OsString::from(bad);
+        let result = std::panic::catch_unwind(|| normalize_data_dir_override(&raw));
         assert!(
             result.is_err(),
             "PSMUX_DATA_DIR={bad:?} must panic instead of resolving"
