@@ -2766,12 +2766,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                                     let scan = crate::platform::mouse_inject::vk_to_scan(vk);
                                                     let u_char = (c.to_ascii_lowercase() as u16) & 0x1F;
                                                     const LEFT_CTRL_PRESSED: u32 = 0x0008;
-                                                    let seq = format!(
-                                                        "\x1b[{};{};{};1;{};1_\x1b[{};{};{};0;{};1_",
+                                                    let seq = crate::input::win32_input_key_seq(
                                                         vk, scan, u_char, LEFT_CTRL_PRESSED,
-                                                        vk, scan, u_char, LEFT_CTRL_PRESSED
                                                     );
                                                     send_text_to_active(&mut app, &seq)?;
+                                                    // Writing this LATCHES the receiving ConPTY into
+                                                    // win32 input mode for good: conhost stops
+                                                    // dispatching a dangling ESC as the Escape key,
+                                                    // so every later bare 0x1b would vanish (#588).
+                                                    // Remember it, so a lone Escape is written in
+                                                    // win32 form too from here on.
+                                                    crate::input::mark_win32_input_latched(&mut app);
                                                 }
                                             } else {
                                                 send_text_to_active(&mut app, &String::from(ctrl as char))?;

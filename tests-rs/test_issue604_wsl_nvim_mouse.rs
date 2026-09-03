@@ -85,7 +85,7 @@ fn make_pane(term: Arc<Mutex<vt100::Parser>>) -> crate::types::Pane {
         last_special_key: None,
         vt_bridge_cache: None,
         vti_mode_cache: None,
-        mouse_input_cache: None,
+        mouse_input_cache: None, win32_input_latched: false,
         scroll_fg_cache: None,
         mouse_proto_owner: None,
         wheel_auth: None,

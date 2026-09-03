@@ -2077,14 +2077,98 @@ pub(crate) fn csi_cursor_to_ss3(seq: &[u8], app_cursor: bool) -> Option<[u8; 3]>
 /// The transform no-ops on every other sequence, so all named keys route through
 /// this uniformly. Does not flush; callers flush once after the write.
 pub(crate) fn write_key_seq(p: &mut crate::types::Pane, seq: &[u8]) {
-    use std::io::Write as _;
     let app_cursor = p.term.lock()
         .map(|t| t.screen().application_cursor())
         .unwrap_or(false);
-    let _ = match csi_cursor_to_ss3(seq, app_cursor) {
-        Some(ss3) => p.writer.write_all(&ss3),
-        None => p.writer.write_all(seq),
-    };
+    match csi_cursor_to_ss3(seq, app_cursor) {
+        Some(ss3) => write_pane_input(p, &ss3),
+        None => write_pane_input(p, seq),
+    }
+}
+
+/// One key press + release in WIN32 INPUT MODE, the exact wire form Windows
+/// Terminal sends and conhost's input state machine parses:
+/// `ESC [ Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`, with `Kd` 1 for the press and 0 for
+/// the release.
+#[cfg(windows)]
+pub(crate) fn win32_input_key_seq(vk: u16, scan: u16, uchar: u16, ctrl_state: u32) -> String {
+    format!(
+        "\x1b[{};{};{};1;{};1_\x1b[{};{};{};0;{};1_",
+        vk, scan, uchar, ctrl_state,
+        vk, scan, uchar, ctrl_state,
+    )
+}
+
+/// Write key bytes into ONE pane's ConPTY input pipe.
+///
+/// Every key psmux delivers to a pane goes through here so the one byte that
+/// stopped being self-sufficient gets repaired: a LONE `ESC` on a pane whose
+/// ConPTY psmux has already switched into win32 input mode (`Pane::
+/// win32_input_latched`).
+///
+/// Issue #588. Writing a win32 input mode sequence — which `send-keys
+/// C-<letter>` must do for issue #305 — permanently changes how conhost's input
+/// parser treats the END of a write on that ConPTY: it concludes the terminal
+/// speaks win32 input mode and stops dispatching a dangling `ESC` as the Escape
+/// key, holding it as the possible start of a longer sequence instead.  So a
+/// bare `0x1b` written afterwards never arrives: measured under a bare
+/// pseudoconsole, three `1b` bytes after one win32 sequence produced no key at
+/// all, and the next typed `a` came out as Alt+A because the held ESC fused
+/// with it.  The same key written AS a win32 sequence arrives as `key=Escape`.
+///
+/// The substitution is deliberately limited to a payload that is EXACTLY one
+/// ESC byte: that is the only dangling-ESC write psmux makes.  Everything else
+/// it sends is either a complete escape sequence or plain text, and is passed
+/// through untouched — as is every byte on a pane that was never latched.
+pub(crate) fn write_pane_input(p: &mut crate::types::Pane, bytes: &[u8]) {
+    use std::io::Write as _;
+    #[cfg(windows)]
+    {
+        if bytes == b"\x1b" && p.win32_input_latched {
+            const VK_ESCAPE: u16 = 0x1B;
+            let scan = crate::platform::mouse_inject::vk_to_scan(VK_ESCAPE);
+            let seq = win32_input_key_seq(VK_ESCAPE, scan, VK_ESCAPE, 0);
+            let _ = p.writer.write_all(seq.as_bytes());
+            let _ = p.writer.flush();
+            return;
+        }
+    }
+    let _ = p.writer.write_all(bytes);
+    let _ = p.writer.flush();
+}
+
+/// Record that psmux has just written a win32 input mode sequence to the panes
+/// that `send_text_to_active` routes to, so `write_pane_input` knows their
+/// ConPTYs can no longer take a bare `ESC` (issue #588).
+///
+/// The routing is mirrored from `send_text_to_active` rather than reusing
+/// `for_each_receiving_pane`, because a focused FLOATING pane receives the key
+/// instead of the tiled active pane and it is that pane's ConPTY that gets
+/// latched.
+pub fn mark_win32_input_latched(app: &mut AppState) {
+    {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(fi) = win.floating_focus {
+            if let Some(fp) = win.floating.get_mut(fi) {
+                fp.pane.win32_input_latched = true;
+                return;
+            }
+        }
+    }
+    if app.sync_input {
+        fn mark_all(node: &mut Node) {
+            match node {
+                Node::Leaf(p) => p.win32_input_latched = true,
+                Node::Split { children, .. } => { for c in children { mark_all(c); } }
+            }
+        }
+        mark_all(&mut app.windows[app.active_idx].root);
+    } else {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+            p.win32_input_latched = true;
+        }
+    }
 }
 
 /// A printable text keystroke on the INTERACTIVE input route (drives
@@ -2690,8 +2774,7 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
         let win = &mut app.windows[app.active_idx];
         if let Some(fi) = win.floating_focus {
             if let Some(fp) = win.floating.get_mut(fi) {
-                let _ = fp.pane.writer.write_all(text.as_bytes());
-                let _ = fp.pane.writer.flush();
+                write_pane_input(&mut fp.pane, text.as_bytes());
                 return Ok(());
             }
         }
@@ -2702,7 +2785,7 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
         let win = &mut app.windows[app.active_idx];
         fn write_all_panes(node: &mut Node, text: &[u8]) {
             match node {
-                Node::Leaf(p) => { let _ = p.writer.write_all(text); let _ = p.writer.flush(); }
+                Node::Leaf(p) => write_pane_input(p, text),
                 Node::Split { children, .. } => { for c in children { write_all_panes(c, text); } }
             }
         }
@@ -2710,8 +2793,7 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
     } else {
         let win = &mut app.windows[app.active_idx];
         if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-            let _ = p.writer.write_all(text.as_bytes());
-            let _ = p.writer.flush();
+            write_pane_input(p, text.as_bytes());
         }
     }
     Ok(())

@@ -202,6 +202,28 @@ pub struct Pane {
     /// Windows default, so it does NOT mean the child asked), while the raw
     /// mode shape says the child deliberately configured itself to read them.
     pub mouse_input_cache: Option<(Instant, Option<u32>)>,
+    /// True once psmux has written a WIN32 INPUT MODE key sequence
+    /// (`ESC [ Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`) into this pane's ConPTY input
+    /// pipe — today only `send-keys C-<letter>`, which needs that form so the
+    /// child sees a real `VK + LEFT_CTRL_PRESSED` record (issue #305).
+    ///
+    /// It has to be remembered because writing one is a ONE-WAY latch on the
+    /// other side: conhost's input state machine concludes the terminal speaks
+    /// win32 input mode and, from then on, stops dispatching a DANGLING `ESC`
+    /// at the end of a write as the Escape key — it holds it as the possible
+    /// start of a longer sequence instead.  A bare `0x1b` therefore never
+    /// reaches the pane application again (issue #588: one `send-keys ... C-m`
+    /// and Escape stopped working in bash, in nvim, in WSL).  Measured under a
+    /// bare pseudoconsole: `1b` alone arrives as `key=Escape` before the win32
+    /// sequence and is swallowed after it, while the same key written AS a
+    /// win32 sequence arrives correctly either way.
+    ///
+    /// So once this is set, `input::write_pane_input` encodes a lone Escape in
+    /// win32 form too, which is the only thing conhost still accepts.  It
+    /// belongs to the pane because the latch belongs to that one ConPTY: a new
+    /// window is unaffected, and `respawn_active_pane` clears it with the rest
+    /// of the per-ConPTY caches.
+    pub win32_input_latched: bool,
     /// Cached foreground-process classification for the scroll-wheel
     /// alternate-scroll decision (issue #277): `(timestamp, is_shell,
     /// foreground_exe_name)`. `is_shell` mirrors
