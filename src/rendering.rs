@@ -164,8 +164,17 @@ pub fn apply_cursor_style<W: Write>(out: &mut W) -> io::Result<()> {
 
 pub fn render_window(f: &mut Frame, app: &mut AppState, area: Rect) {
     let dim_preds = app.prediction_dimming;
-    let border_style = parse_tmux_style(&app.pane_border_style);
-    let active_border_style = parse_tmux_style(&app.pane_active_border_style);
+    // Same resolver and same unset fallback as the live client renderer, so an
+    // unset pane-border-style draws the built in grey here too instead of the
+    // terminal default foreground (#626).
+    let border_style = crate::client::parse_pane_border_colors(
+        Some(app.pane_border_style.as_str()),
+        crate::client::pane_border_default_style(false),
+    );
+    let active_border_style = crate::client::parse_pane_border_colors(
+        Some(app.pane_active_border_style.as_str()),
+        crate::client::pane_border_default_style(true),
+    );
     let copy_cursor = if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) { app.copy_pos } else { None };
     // Same resolver as the live client renderer (src/client.rs), so the two
     // paths agree on the tmux `tty_default_colours` fallback (#619).
