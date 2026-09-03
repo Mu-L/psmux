@@ -2694,6 +2694,9 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     pane.vti_mode_cache = None;
     pane.mouse_input_cache = None;
     pane.scroll_fg_cache = None;
+    // Fresh ConPTY, fresh input state machine: the win32-input-mode latch that
+    // eats a bare ESC (#588) does not carry over to the respawned child.
+    pane.win32_input_latched = false;
     pane.dead = false;
     pane.spawned_at = Some(std::time::Instant::now());
 
@@ -2770,6 +2773,9 @@ pub fn heal_respawn_pane(
     pane.vti_mode_cache = None;
     pane.mouse_input_cache = None;
     pane.scroll_fg_cache = None;
+    // Fresh ConPTY, fresh input state machine: the win32-input-mode latch that
+    // eats a bare ESC (#588) does not carry over to the respawned child.
+    pane.win32_input_latched = false;
     pane.dead = false;
     pane.spawned_at = Some(std::time::Instant::now());
     Ok(())
