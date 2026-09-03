@@ -1596,13 +1596,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let prev_idx = app.active_idx;
                     // Expand format variables like #{pane_current_path} (#111)
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
-                    let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
-                    if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
+                    // Issue #630: do NOT chdir the server process into the start
+                    // directory. CreatePseudoConsole() spawns the pane's conhost.exe
+                    // from THIS process, so the host inherits the server's Win32
+                    // current directory and then holds an open handle on it for the
+                    // pane's entire life. That blocks deletion of the directory with
+                    // Win32 error 32 ("used by another process") long after the pane's
+                    // shell has cd'd away, and no `cd` can ever move the host.
+                    //
+                    // The start directory reaches the pane's SHELL explicitly instead,
+                    // which is the only process that should hold it: a cold spawn gets
+                    // it as lpCurrentDirectory through CommandBuilder::cwd() (see
+                    // pane.rs, usable_start_dir), and a warm transplant gets it through
+                    // pane::silent_rehome(). A shell releases the directory as soon as
+                    // it cd's elsewhere, which is the tmux behaviour.
                     if let Err(e) = create_window_with_env(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref(), empty, &env_sets) {
                         eprintln!("psmux: new-window error: {e}");
                     }
                     crate::resize_window::refresh_dynamic_window_sizes(&mut app);
-                    if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     if let Some(n) = name { app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
                     // -T: set the new pane's title at creation (tmux new-window -T).
                     if let Some(t) = title {
@@ -1625,13 +1636,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     let prev_idx = app.active_idx;
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
-                    let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
-                    if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
+                    // No server chdir here: the pane's start directory is handed to the
+                    // shell alone, never to the ConPTY host. See the #630 note on
+                    // CtrlReq::NewWindow above.
                     if let Err(e) = create_window_with_env(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref(), empty, &env_sets) {
                         eprintln!("psmux: new-window error: {e}");
                     }
                     crate::resize_window::refresh_dynamic_window_sizes(&mut app);
-                    if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     if let Some(n) = name { app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; }); }
                     if let Some(t) = title {
                         if let Some(win) = app.windows.last_mut() {
@@ -1688,8 +1699,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = resp.send(String::new());
                     } else {
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
-                    let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
-                    if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
+                    // No server chdir here: the pane's start directory is handed to the
+                    // shell alone, never to the ConPTY host. See the #630 note on
+                    // CtrlReq::NewWindow above.
                     let prev_path = app.windows[app.active_idx].active_path.clone();
                     let split_succeeded = match split_active_with_env(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets) {
                         Err(e) => {
@@ -1757,7 +1769,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if zoom_after_split && split_succeeded {
                         toggle_zoom(&mut app);
                     }
-                    if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     // Replenish warm pane for the next new-window/split
                     // Warm-pane replenish is deferred OFF the command path — it
                     // runs at the loop top during an idle gap (Tier 3), so a burst
@@ -1770,8 +1781,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     unzoom_if_zoomed(&mut app);
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
-                    let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
-                    if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
+                    // No server chdir here: the pane's start directory is handed to the
+                    // shell alone, never to the ConPTY host. See the #630 note on
+                    // CtrlReq::NewWindow above.
                     let prev_path = app.windows[app.active_idx].active_path.clone();
                     let split_succeeded = match split_active_with_env(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref(), &env_sets) {
                         Err(e) => {
@@ -1829,7 +1841,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         toggle_zoom(&mut app);
                     }
                     let _ = resp.send(pane_info);
-                    if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
                     // Replenish warm pane
                     // Warm-pane replenish is deferred OFF the command path — it
                     // runs at the loop top during an idle gap (Tier 3), so a burst
@@ -5521,8 +5532,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let height = parse_popup_dim(&height_spec, term_h, 24);
                     // Expand format variables in start_dir (e.g. #{pane_current_path})
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
-                    let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
-                    if let Some(dir) = &start_dir { let _ = env::set_current_dir(dir); }
+                    // No server chdir here: the pane's start directory is handed to the
+                    // shell alone, never to the ConPTY host. See the #630 note on
+                    // CtrlReq::NewWindow above.
                     // Spawn the popup as a real PTY-backed Pane. An EMPTY command
                     // means "run an interactive shell" (tmux parity, issue #351):
                     // create_popup_pane() launches the shell as a REPL in that case.
@@ -5538,7 +5550,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         &app.environment,
                         app.host_colors.as_ref(),
                     );
-                    if let Some(prev) = saved_dir { let _ = env::set_current_dir(prev); }
 
                     if pane_result.is_some() {
                         app.mode = Mode::PopupMode {
