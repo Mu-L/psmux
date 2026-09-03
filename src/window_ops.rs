@@ -1416,7 +1416,16 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
         (alt, target_area, sgr_btn, bs)
     };
 
-    mouse_log(&format!("  -> alt_screen={}", child_in_alt_screen));
+    {
+        let win = &app.windows[app.active_idx];
+        let p = active_pane(&win.root, &win.active_path);
+        mouse_log(&format!(
+            "  -> wheel gate: forward={} alt_screen={} proto_owner={:?}",
+            child_in_alt_screen,
+            p.map_or(false, pane_in_alt_screen),
+            p.and_then(|p| p.mouse_proto_owner),
+        ));
+    }
 
     if child_in_alt_screen {
         // Forward scroll to child TUI app (alternate screen = real TUI)
@@ -1671,17 +1680,43 @@ pub fn copy_drag_begin(app: &mut AppState, pane_id: usize, anchor_col: i16, anch
 /// when the request came from a client too old to send it, in which case the
 /// pane centre is used as before.
 pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Option<(i16, i16)>) {
+    // Every exit from this function is logged under PSMUX_MOUSE_DEBUG=1.  The
+    // wheel has many ways to end up doing nothing (mouse off, popup open, a
+    // pane the gate hands to its child, wheel-down at a live prompt), and with
+    // no trace here a silent notch was indistinguishable from a lost event —
+    // exactly what made #629 unfalsifiable from a user's log.  `pane-scroll`
+    // is the verb the client sends whenever the pointer is inside a pane, so
+    // this is the branch users actually hit; `remote_scroll_wheel` (the
+    // pointer-outside-any-pane fallback) has had the same tracing all along.
+    mouse_log(&format!(
+        "handle_pane_scroll: pane={} up={} at={:?} mode={} mouse_enabled={}",
+        pane_id, up, at,
+        match &app.mode {
+            Mode::Passthrough => "Passthrough",
+            Mode::CopyMode => "CopyMode",
+            Mode::CopySearch { .. } => "CopySearch",
+            Mode::PopupMode { .. } => "PopupMode",
+            _ => "Other",
+        },
+        app.mouse_enabled,
+    ));
+
     // Server request dispatch already applies this gate. Keep it here too so
     // alternate/direct callers cannot scroll or enter copy mode with mouse off.
     if !app.mouse_enabled {
+        mouse_log("  -> mouse off, ignoring scroll");
         return;
     }
 
     // Ignore scroll in popup mode (#110)
-    if matches!(app.mode, Mode::PopupMode { .. }) { return; }
+    if matches!(app.mode, Mode::PopupMode { .. }) {
+        mouse_log("  -> popup mode, ignoring scroll");
+        return;
+    }
 
     // Handle scroll while already in copy mode (coordinates irrelevant)
     if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        mouse_log("  -> already in copy mode, scrolling within");
         if up {
             scroll_copy_up(app, 3);
         } else {
@@ -1712,9 +1747,19 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
     // see pane_in_alt_screen for the full rationale.
     let alt = active_pane(&win.root, &win.active_path)
         .map_or(false, |p| pane_wheel_forward(p));
+    {
+        let p = active_pane(&win.root, &win.active_path);
+        mouse_log(&format!(
+            "  -> wheel gate: forward={} alt_screen={} proto_owner={:?}",
+            alt,
+            p.map_or(false, pane_in_alt_screen),
+            p.and_then(|p| p.mouse_proto_owner),
+        ));
+    }
 
     if alt {
         // Forward scroll to TUI app
+        mouse_log("  -> forwarding scroll to child TUI (pane owns the mouse)");
         let win = &mut app.windows[app.active_idx];
         let win_name = win.name.clone();
         let sgr_btn: u8 = if up { 64 } else { 65 };
@@ -1791,6 +1836,7 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
 
     if is_legacy_pager && !up {
         // `more.com`: Enter is its "advance one line" key.
+        mouse_log("  -> legacy pager (more.com), sending Enter x3");
         if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
             for _ in 0..3 {
                 crate::input::write_key_seq(pane, b"\r");
@@ -1801,11 +1847,15 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool, at: Opti
         // Everything else (shell prompt, inline TUI like pi, `more.com`
         // wheel-up, or a probe failure) — enter copy mode and scroll
         // psmux's own buffer, exactly like tmux.
+        mouse_log("  -> entering copy mode (shell scroll-up)");
         enter_copy_mode(app);
         scroll_copy_up(app, 3);
     } else if !app.scroll_enter_copy_mode {
         // scroll-enter-copy-mode off: scroll scrollback directly (#193)
+        mouse_log("  -> direct scrollback (scroll-enter-copy-mode off)");
         scroll_pane_scrollback(app, 3, up);
+    } else {
+        mouse_log("  -> scroll-down at live prompt (no-op, tmux parity)");
     }
 }
 
@@ -2837,3 +2887,7 @@ mod test_issue621_wheel_stdin_block;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue623_record_reader_gate.rs"]
 mod test_issue623_record_reader_gate;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue629_ssh_vt_wheel.rs"]
+mod test_issue629_ssh_vt_wheel;
