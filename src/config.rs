@@ -705,11 +705,10 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
     };
     
     if l.starts_with("set-option ") || l.starts_with("set ") {
-        parse_set_option(app, l);
+        parse_set_option(app, l, false);
     }
     else if l.starts_with("setw ") || l.starts_with("set-window-option ") {
-        // setw maps to the same option parser (tmux window options overlap)
-        parse_set_option(app, l);
+        parse_set_option(app, l, true);
     }
     else if l.starts_with("bind-key ") || l.starts_with("bind ") {
         parse_bind_key(app, l);
@@ -915,7 +914,7 @@ fn extract_option_value(rest: &str) -> String {
     strip_wrapping_quotes(rest).to_string()
 }
 
-fn parse_set_option(app: &mut AppState, line: &str) {
+fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
     let toks = tokens_with_offsets(line);
     if toks.len() < 2 { warn_config(app, "set-option requires an option name"); return; }
 
@@ -926,6 +925,7 @@ fn parse_set_option(app: &mut AppState, line: &str) {
     let mut append_mode = false;    // -a: append to current value
     let mut unset_mode = false;     // -u: unset (reset to default)
     let mut quiet = false;          // -q: suppress the "already set" error
+    let mut window_scope = window_command;
 
     while i < toks.len() {
         let p = toks[i].1.as_str();
@@ -940,6 +940,7 @@ fn parse_set_option(app: &mut AppState, line: &str) {
             if p.contains('F') { format_expand = true; }
             if p.contains('o') { only_if_unset = true; }
             if p.contains('a') { append_mode = true; }
+            if p.contains('w') { window_scope = true; }
             // -U is an unset alias of -u (tmux parity, #553); the contains
             // check is case-sensitive so both must be tested.
             if p.contains('u') || p.contains('U') { unset_mode = true; }
@@ -948,7 +949,6 @@ fn parse_set_option(app: &mut AppState, line: &str) {
             // exit 0 (`if (args_has(args, 'q')) goto out;`). Unknown options
             // are still reported.
             if p.contains('q') { quiet = true; }
-            // -w: window option — treat same as global for our single-server model
             i += 1;
             if p.contains('t') && i < toks.len() { i += 1; }
         } else {
@@ -966,6 +966,15 @@ fn parse_set_option(app: &mut AppState, line: &str) {
         Some((off, _)) => extract_option_value(&line[*off..]),
         None => String::new(),
     };
+    if let Err(error) =
+        crate::server::option_catalog::validate_local_window_override(
+            key,
+            window_scope && !is_global,
+        )
+    {
+        warn_config(app, error);
+        return;
+    }
 
     // Handle -u (unset): restore the option's table default.
     //
@@ -1019,16 +1028,44 @@ fn parse_set_option(app: &mut AppState, line: &str) {
     // it reaches ~/.psmux/config-warnings.log and the attach-time summary; the
     // in-TUI command prompt runs through this same parser, so it also gets a
     // status message the way a failed command should.
+    // Expand format strings in the value if -F flag is set. No quote trimming
+    // here any more: extract_option_value already resolved the quoting, so a
+    // value whose content legitimately begins and ends with a quote keeps it.
+    let value = if format_expand && !raw_value.is_empty() {
+        crate::format::expand_format(&raw_value, app)
+    } else {
+        raw_value
+    };
+
+    if append_mode {
+        if let Err(error) = crate::server::option_catalog::validate_option_append(key) {
+            warn_config(app, error);
+            return;
+        }
+    }
+
+    // Handle -a (append to current value)
+    let final_value = if append_mode {
+        let current = crate::format::lookup_option_pub(key, app).unwrap_or_default();
+        format!("{}{}", current, value)
+    } else {
+        value
+    };
+
+    // -o still validates the requested assignment before deciding that the
+    // existing value wins.
     if only_if_unset {
-        // For @-prefixed user options, check if key exists
-        // For built-in options, check the user_set_options tracker
         let already_set = if key.starts_with('@') {
             app.user_options.contains_key(key)
         } else {
             app.user_set_options.contains(key)
         };
         if already_set {
-            if !quiet {
+            if let Err(error) =
+                crate::server::option_catalog::validate_option_value(key, &final_value)
+            {
+                warn_config(app, error);
+            } else if !quiet {
                 warn_config(app, format!("already set: {}", key));
                 if !in_startup_load() {
                     app.status_message = Some((
@@ -1042,29 +1079,13 @@ fn parse_set_option(app: &mut AppState, line: &str) {
         }
     }
 
-    // Expand format strings in the value if -F flag is set. No quote trimming
-    // here any more: extract_option_value already resolved the quoting, so a
-    // value whose content legitimately begins and ends with a quote keeps it.
-    let value = if format_expand && !raw_value.is_empty() {
-        crate::format::expand_format(&raw_value, app)
-    } else {
-        raw_value
-    };
-
-    // Handle -a (append to current value)
-    let final_value = if append_mode {
-        let current = crate::format::lookup_option_pub(key, app).unwrap_or_default();
-        format!("{}{}", current, value)
-    } else {
-        value
-    };
-
     // Pass key and value separately. Rejoining them into one string could not
     // represent a value with leading or trailing spaces, which the receiver
     // then trimmed back off (#536).
-    parse_option_value(app, key, &final_value, is_global);
-    // Track that this option was explicitly set (for -o only-if-unset checks)
-    app.user_set_options.insert(key.to_string());
+    if parse_option_value(app, key, &final_value, is_global) {
+        // Track that this option was explicitly set (for -o only-if-unset checks)
+        app.user_set_options.insert(key.to_string());
+    }
 }
 
 /// Apply one option, given its name and its **exact** value.
@@ -1074,12 +1095,17 @@ fn parse_set_option(app: &mut AppState, line: &str) {
 /// config value, survives to here. This used to take a single `"key value"`
 /// string and re-split it, which could not represent those runs at all and
 /// trimmed the ends back off (#536).
-pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global: bool) {
+///
+/// Returns false when validation rejects the value.
+pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global: bool) -> bool {
     let key = key.trim();
+    if let Err(error) = crate::server::option_catalog::validate_option_value(key, value) {
+        warn_config(app, error);
+        return false;
+    }
 
-    // Validate the value against the option's declared type from the catalog
-    // (issue #370 follow-up). Only options that exist in the catalog are
-    // checked, so unmodeled/user options never produce a false warning.
+    // Keep the existing boolean diagnostics. Numeric assignments are validated
+    // once above against the destination type declared by the option catalog.
     if !value.is_empty() {
         if let Some(def) = crate::server::option_catalog::OPTION_CATALOG
             .iter()
@@ -1087,13 +1113,7 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         {
             let v = value.trim();
             match def.option_type {
-                "number" => {
-                    if v.parse::<i64>().is_err() {
-                        warn_config(app, format!(
-                            "invalid value '{}' for option '{}' (expected a number)", v, key));
-                    }
-                }
-                "boolean" => {
+                crate::server::option_catalog::OptionType::Boolean => {
                     // Accept the usual boolean tokens, and also any integer:
                     // a few "boolean" options (e.g. `status`) also take counts.
                     let lv = v.to_ascii_lowercase();
@@ -1326,7 +1346,7 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         "status-left-style" => { app.status_left_style = value.to_string(); }
         "status-right-style" => { app.status_right_style = value.to_string(); }
         "clock-mode-colour" | "clock-mode-style" => { app.user_options.insert(key.to_string(), value.to_string()); }
-        "pane-border-format" | "pane-border-status" => { app.user_options.insert(key.to_string(), value.to_string()); }
+        "pane-border-format" | "pane-border-status" | "pane-border-indicators" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "popup-style" | "popup-border-style" | "popup-border-lines" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "window-style" | "window-active-style" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "wrap-search" => { app.user_options.insert(key.to_string(), value.to_string()); }
@@ -1382,7 +1402,7 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
                         app.status_format.push(String::new());
                     }
                     app.status_format[idx] = value.to_string();
-                    return;
+                    return true;
                 }
             }
             // Store @-prefixed user/plugin options separately from environment
@@ -1487,6 +1507,7 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
             }
         }
     }
+    true
 }
 
 /// Split a string into tokens respecting single and double quotes.

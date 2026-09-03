@@ -471,6 +471,7 @@ SET OPTIONS (use with: set -g <option> <value>):
     pane-border-style   Str  Inactive pane border style
     pane-active-border-style Str Active pane border style
     pane-border-hover-style Str Border hover highlight style
+    pane-border-indicators Str Active pane indicator (off/colour/arrows/both)
     window-status-format        Str  Inactive window tab format
     window-status-current-format Str  Active window tab format
     window-status-separator     Str  Separator between tabs
@@ -840,6 +841,119 @@ pub fn parse_target(target: &str) -> ParsedTarget {
 pub fn extract_session_from_target(target: &str) -> String {
     let parsed = parse_target(target);
     parsed.session.unwrap_or_else(|| "default".to_string())
+}
+
+/// Split set-option flags from operands. Ordinary flags end at the option
+/// name; `-t <target>` remains recognized until `--`.
+pub(crate) struct ParsedSetOptionArgs<'a> {
+    pub flag_chars: String,
+    pub target: Option<&'a str>,
+    pub missing_target: bool,
+    pub positionals: Vec<&'a str>,
+}
+
+impl ParsedSetOptionArgs<'_> {
+    pub fn validate(&self, window_command: bool) -> Result<(), String> {
+        if let Some(flag) = invalid_set_option_flag(&self.flag_chars) {
+            return Err(format!("unknown flag -{}", flag));
+        }
+        if self.missing_target {
+            return Err("target required after -t".to_string());
+        }
+        let unset = self.flag_chars.contains('u') || self.flag_chars.contains('U');
+        let append = self.flag_chars.contains('a');
+        let pane_scope = self.flag_chars.contains('p');
+        let local_window = (window_command || self.flag_chars.contains('w'))
+            && !self.flag_chars.contains('g')
+            && !self.flag_chars.contains('s');
+        let Some(option) = self.positionals.first().copied() else {
+            return Err("too few arguments (need at least 1)".to_string());
+        };
+        crate::server::option_catalog::validate_local_window_override(option, local_window)?;
+        if pane_scope {
+            if unset || self.positionals.len() >= 2 {
+                return Ok(());
+            }
+            return Err("set-option -p: option and value required".to_string());
+        }
+        if unset {
+            return Ok(());
+        }
+        if self.positionals.get(1).is_none() {
+            if !append && crate::server::options::missing_value_toggles(option) {
+                return Ok(());
+            }
+            return Err(format!("empty value for '{}'", option));
+        }
+        if append {
+            crate::server::option_catalog::validate_option_append(option)?;
+        }
+        crate::server::option_catalog::validate_option_value(
+            option,
+            &self.positionals[1..].join(" "),
+        )
+    }
+}
+
+pub(crate) fn parse_set_option_args<'a>(args: &[&'a str]) -> ParsedSetOptionArgs<'a> {
+    let mut flag_chars = String::new();
+    let mut target = None;
+    let mut missing_target = false;
+    let mut positionals = Vec::new();
+    let mut i = 0;
+    let mut parsing_flags = true;
+    let mut literal_values = false;
+    while i < args.len() {
+        let arg = args[i];
+        if parsing_flags {
+            if arg == "--" {
+                parsing_flags = false;
+                literal_values = true;
+                i += 1;
+                continue;
+            }
+            if arg.starts_with('-') && arg.len() > 1 {
+                flag_chars.push_str(&arg[1..]);
+                if arg.contains('t') {
+                    match args.get(i + 1).copied() {
+                        Some(value) => target = Some(value),
+                        None => missing_target = true,
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            parsing_flags = false;
+        } else if !literal_values && arg == "--" {
+            literal_values = true;
+            i += 1;
+            continue;
+        } else if !literal_values && arg == "-t" {
+            flag_chars.push('t');
+            match args.get(i + 1).copied() {
+                Some(value) => target = Some(value),
+                None => missing_target = true,
+            }
+            i += 2;
+            continue;
+        }
+        positionals.push(arg);
+        i += 1;
+    }
+    ParsedSetOptionArgs {
+        flag_chars,
+        target,
+        missing_target,
+        positionals,
+    }
+}
+
+fn invalid_set_option_flag(flag_chars: &str) -> Option<char> {
+    flag_chars
+        .chars()
+        .find(|flag| !crate::SET_OPTION_CLI_FLAGS.contains(*flag))
 }
 
 /// Extract a flag value from args, supporting tmux short-flag CLI forms:

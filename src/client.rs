@@ -21,6 +21,7 @@ use crate::clipboard::{copy_to_system_clipboard, read_from_system_clipboard};
 use crate::debug_log::{client_log, client_log_enabled, input_log, input_log_enabled};
 use crate::layout::RowRunsJson;
 use crate::tree::split_with_gaps;
+use crate::pane_border::PaneBorderIndicators;
 
 /// A floating pane (tmux new-pane) as shipped from the server: position, size,
 /// border style, focus, title, and the pane's rendered rows.
@@ -949,6 +950,7 @@ pub(crate) fn render_float_overlays(
     window_styles: WindowContentStyles,
     border_style: Style,
     active_border_style: Style,
+    indicators: PaneBorderIndicators,
 ) {
     let border_style = complete_pane_border_colors(border_style);
     let active_border_style = complete_pane_border_colors(active_border_style);
@@ -1026,6 +1028,37 @@ pub(crate) fn render_float_overlays(
                     .title(fl.title.clone());
                 let inner = block.inner(area);
                 f.render_widget(block, area);
+                if fl.focused && indicators.uses_arrows() && area.width >= 3 && area.height >= 3 {
+                    let buffer = f.buffer_mut();
+                    let title_width =
+                        unicode_width::UnicodeWidthStr::width(fl.title.as_str());
+                    let midpoint_x = area.x + area.width / 2;
+                    let midpoint_y = area.y + area.height / 2;
+                    let mut arrows = vec![
+                        (midpoint_x, area.y + area.height - 1, "↑"),
+                        (area.x, midpoint_y, "→"),
+                        (area.x + area.width - 1, midpoint_y, "←"),
+                    ];
+                    let top_x = if title_width == 0 {
+                        Some(midpoint_x)
+                    } else {
+                        let offset = title_width.saturating_add(2);
+                        (offset < area.width.saturating_sub(1) as usize)
+                            .then(|| area.x + offset as u16)
+                    };
+                    if let Some(top_x) = top_x {
+                        arrows.push((top_x, area.y, "↓"));
+                    }
+                    for (x, y, symbol) in arrows {
+                        if x >= buffer.area.x
+                            && x < buffer.area.x + buffer.area.width
+                            && y >= buffer.area.y
+                            && y < buffer.area.y + buffer.area.height
+                        {
+                            buffer[(x, y)].set_symbol(symbol);
+                        }
+                    }
+                }
                 f.render_widget(
                     Paragraph::new(Text::from(lines))
                         .style(window_content_fill_style(window_fill)),
@@ -1229,6 +1262,20 @@ fn parse_pane_border_hover_style(raw: Option<&str>) -> Style {
         .unwrap_or_else(|| Style::default().fg(Color::Yellow))
 }
 
+/// A focused floating pane owns the active cue, so the tiled layout draws none.
+pub(crate) fn tiled_border_focus(
+    active_rect: Option<Rect>,
+    border_style: Style,
+    active_border_style: Style,
+    floating_pane_focused: bool,
+) -> (Option<Rect>, Style) {
+    if floating_pane_focused {
+        (None, border_style)
+    } else {
+        (active_rect, active_border_style)
+    }
+}
+
 /// Recolor only junctions so straight separators keep their per-cell styles.
 pub(crate) fn recolor_border_junctions(
     buffer: &mut ratatui::buffer::Buffer,
@@ -1275,6 +1322,48 @@ fn border_cell_touches_rect(x: u16, y: u16, rect: Rect) -> bool {
     touches_vertical || touches_horizontal || touches_corner
 }
 
+pub(crate) fn draw_pane_border_arrows(
+    buffer: &mut ratatui::buffer::Buffer,
+    borders: &crate::rendering::BorderGeometry,
+    border_chars: Option<crate::border_lines::BorderChars>,
+    active_rect: Option<Rect>,
+    indicators: PaneBorderIndicators,
+) {
+    if border_chars.is_none() || !indicators.uses_arrows() { return; }
+    let Some(active_rect) = active_rect else { return; };
+    if active_rect.width == 0 || active_rect.height == 0 { return; }
+    let width = buffer.area.width as usize;
+    let mut draw = |x: i32, y: i32, symbol: &str, vertical: bool| {
+        let rel_x = x - buffer.area.x as i32;
+        let rel_y = y - buffer.area.y as i32;
+        if rel_x < 0 || rel_y < 0
+            || rel_x >= buffer.area.width as i32
+            || rel_y >= buffer.area.height as i32
+        {
+            return;
+        }
+        let idx = rel_y as usize * width + rel_x as usize;
+        let matches_orientation = if vertical {
+            borders.contains_vertical(idx)
+        } else {
+            borders.contains_horizontal(idx)
+        };
+        if !matches_orientation { return; }
+        buffer.content[idx].set_symbol(symbol);
+    };
+
+    let x = active_rect.x as i32;
+    let y = active_rect.y as i32;
+    let right = (active_rect.x + active_rect.width) as i32;
+    let bottom = (active_rect.y + active_rect.height) as i32;
+    let side_y = y + i32::from(active_rect.height.saturating_sub(1).min(1));
+    let side_x = x + i32::from(active_rect.width.saturating_sub(1).min(1));
+    draw(x - 1, side_y, "→", true);
+    draw(right, side_y, "←", true);
+    draw(side_x, y - 1, "↓", false);
+    draw(side_x, bottom, "↑", false);
+}
+
 pub fn render_layout_json(
     f: &mut Frame,
     node: &LayoutJson,
@@ -1293,6 +1382,7 @@ pub fn render_layout_json(
     bchars: Option<crate::border_lines::BorderChars>,
     copy_ln: Option<CopyLnRender>,
     window_styles: WindowContentStyles,
+    border_indicators: PaneBorderIndicators,
 ) {
     let border_style = complete_pane_border_colors(border_style);
     let active_border_style = complete_pane_border_colors(active_border_style);
@@ -1618,7 +1708,7 @@ pub fn render_layout_json(
             if zoomed {
                 if let Some(i) = effective_sizes.iter().position(|&s| s != 0) {
                     if let Some(child) = children.get(i) {
-                        render_layout_json(f, child, area, dim_preds, border_style, active_border_style, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars, copy_ln, window_styles);
+                        render_layout_json(f, child, area, dim_preds, border_style, active_border_style, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars, copy_ln, window_styles, border_indicators);
                     }
                 }
                 return;
@@ -1628,7 +1718,7 @@ pub fn render_layout_json(
 
             for (i, child) in children.iter().enumerate() {
                 if i < rects.len() {
-                    render_layout_json(f, child, rects[i], dim_preds, border_style, active_border_style, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars, copy_ln, window_styles);
+                    render_layout_json(f, child, rects[i], dim_preds, border_style, active_border_style, clock_mode, clock_colour, active_rect, mode_style_str, zoomed, border_status, border_format, total_panes, bchars, copy_ln, window_styles, border_indicators);
                 }
             }
             // pane-border-lines none: children are drawn, but no separators.
@@ -1644,7 +1734,7 @@ pub fn render_layout_json(
                 if is_horizontal {
                     let sep_x = rects[i].x + rects[i].width;
                     if sep_x < buf.area.x + buf.area.width {
-                        if both_leaves && total_panes == 2 {
+                        if both_leaves && total_panes == 2 && border_indicators.uses_colour() {
                             let left_active = matches!(&children[i], LayoutJson::Leaf { active, .. } if *active);
                             let right_active = matches!(children.get(i + 1), Some(LayoutJson::Leaf { active, .. }) if *active);
                             let left_sty = if left_active { active_border_style } else { border_style };
@@ -1678,7 +1768,7 @@ pub fn render_layout_json(
                 } else {
                     let sep_y = rects[i].y + rects[i].height;
                     if sep_y < buf.area.y + buf.area.height {
-                        if both_leaves && total_panes == 2 {
+                        if both_leaves && total_panes == 2 && border_indicators.uses_colour() {
                             let top_active = matches!(&children[i], LayoutJson::Leaf { active, .. } if *active);
                             let bot_active = matches!(children.get(i + 1), Some(LayoutJson::Leaf { active, .. }) if *active);
                             let top_sty = if top_active { active_border_style } else { border_style };
@@ -2015,12 +2105,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Live preview cache for choose-tree / choose-session pickers (issue #257).
     // Keyed by "session\twin_id\tpane_id"; pane_id == usize::MAX => active pane.
     let mut preview_cache: crate::preview::PreviewCache = std::collections::HashMap::new();
-    // Full-styled dump cache: every pane in a window with its own
-    // `rows_v2` content, fetched in one round trip via `window-dump`.
-    // This is the primary preview source — it sidesteps the per-pane
-    // `capture-pane -t` round trips that mis-targeted the active pane,
-    // and lets the client reuse the same renderer the main view uses.
-    let mut dump_cache: crate::preview::DumpCache = std::collections::HashMap::new();
+    // Target-window preview state keyed by session and window.
+    let mut preview_state_cache: crate::preview::PreviewWindowStateCache =
+        std::collections::HashMap::new();
     // Whether the right-side preview pane is shown. Toggled by `p`
     // while a chooser is open. Persisted across reopens.
     let mut preview_enabled: bool = false;
@@ -2253,6 +2340,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         pane_active_border_style: Option<String>,
         #[serde(default)]
         pane_border_hover_style: Option<String>,
+        #[serde(default)]
+        pane_border_indicators: Option<PaneBorderIndicators>,
         #[serde(default)]
         window_style: Option<String>,
         #[serde(default)]
@@ -5960,12 +6049,21 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             };
             let floating_pane_focused =
                 srv_floats.iter().any(|float| float.focused);
+            let border_indicators = state.pane_border_indicators.unwrap_or_default();
+            let (tiled_active_rect, tiled_active_border_style) =
+                tiled_border_focus(
+                    active_rect,
+                    pane_border_style,
+                    pane_active_border_style,
+                    floating_pane_focused,
+                );
             render_layout_json(
                 f, &root, content_chunk, dim_preds, pane_border_style,
-                pane_active_border_style, clock_active, clock_col, active_rect,
+                tiled_active_border_style, clock_active, clock_col, tiled_active_rect,
                 &mode_style_str, state.zoomed, border_status, border_format,
                 total_panes, bchars, copy_ln,
                 window_styles.for_tiled_panes(floating_pane_focused),
+                border_indicators,
             );
             let borders = border_geometry_from_layout(
                 &root,
@@ -5978,9 +6076,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             recolor_border_junctions(
                 f.buffer_mut(),
                 &junctions,
-                active_rect,
+                tiled_active_rect,
                 pane_border_style,
-                pane_active_border_style,
+                tiled_active_border_style,
+            );
+            draw_pane_border_arrows(
+                f.buffer_mut(),
+                &borders,
+                bchars,
+                tiled_active_rect,
+                border_indicators,
             );
 
             // Highlight the border under the cursor to preview what a drag would move.
@@ -6206,16 +6311,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         });
 
                         if let Some(wid) = win_id {
-                            if let Some(layout) = crate::preview::get_or_fetch_dump(
-                                &mut dump_cache, sname, wid,
+                            if let Some(preview_state) = crate::preview::get_or_fetch_preview_window_state(
+                                &mut preview_state_cache, sname, wid,
                             ) {
-                                crate::preview::render_dump_tree(
+                                let (preview_border_style, preview_active_border_style) =
+                                    preview_state.pane_border_styles(
+                                        pane_border_style,
+                                        pane_active_border_style,
+                                    );
+                                crate::preview::render_preview_layout(
                                     f,
-                                    &layout,
+                                    &preview_state.layout,
                                     parea,
-                                    pane_border_style,
-                                    pane_active_border_style,
-                                    None,
+                                    preview_border_style,
+                                    preview_active_border_style,
+                                    crate::border_lines::border_chars(&preview_state.border_lines),
+                                    preview_state.border_indicators,
+                                    preview_state.floating_pane_focused,
                                 );
                                 rendered = true;
                             }
@@ -6404,20 +6516,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         };
 
                         if let Some(twid) = target_win {
-                            if let Some(layout) = crate::preview::get_or_fetch_dump(
-                                &mut dump_cache, &sess, twid,
+                            if let Some(preview_state) = crate::preview::get_or_fetch_preview_window_state(
+                                &mut preview_state_cache, &sess, twid,
                             ) {
-                                // Highlight which pane the user is hovering on
-                                // (for pane-level entries). Active pane gets a
-                                // brighter separator anyway.
-                                let highlight_pid = if !is_win { Some(pid) } else { None };
-                                crate::preview::render_dump_tree(
+                                let (preview_border_style, preview_active_border_style) =
+                                    preview_state.pane_border_styles(
+                                        pane_border_style,
+                                        pane_active_border_style,
+                                    );
+                                crate::preview::render_preview_layout(
                                     f,
-                                    &layout,
+                                    &preview_state.layout,
                                     parea,
-                                    pane_border_style,
-                                    pane_active_border_style,
-                                    highlight_pid,
+                                    preview_border_style,
+                                    preview_active_border_style,
+                                    crate::border_lines::border_chars(&preview_state.border_lines),
+                                    preview_state.border_indicators,
+                                    preview_state.floating_pane_focused,
                                 );
                                 rendered = true;
                             }
@@ -6912,6 +7027,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     window_styles,
                     pane_border_style,
                     pane_active_border_style,
+                    border_indicators,
                 );
             }
             if srv_popup_active {
@@ -7570,3 +7686,7 @@ mod test_pane_border_backgrounds;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue626_border_attrs_default.rs"]
 mod test_issue626_border_attrs_default;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_border_indicators.rs"]
+mod test_pane_border_indicators;

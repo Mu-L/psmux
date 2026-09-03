@@ -72,6 +72,7 @@ fn render_counts(kind: &str, style: &str, w: u16, h: u16) -> std::collections::H
             bchars,
             None,
             crate::client::WindowContentStyles::default(),
+            crate::pane_border::PaneBorderIndicators::Colour,
         );
         let borders = crate::client::border_geometry_from_layout(
             &layout,
@@ -169,6 +170,7 @@ fn nested_split_produces_double_junction() {
             false, Color::Reset, active_rect, "", false, "off", "", total, bchars,
             None,
             crate::client::WindowContentStyles::default(),
+            crate::pane_border::PaneBorderIndicators::Colour,
         );
         let borders = crate::client::border_geometry_from_layout(
             &layout,

@@ -258,14 +258,19 @@ fn audit_exempt(name: &str) -> Option<&'static str> {
 /// the option before the unset is asked to move it back.
 fn probe_value(def: &crate::server::option_catalog::OptionDef) -> String {
     match def.option_type {
-        "number" => {
+        crate::server::option_catalog::OptionType::Number(_) => {
             let cur: i64 = def.default.trim().parse().unwrap_or(0);
             // Stay inside every bound psmux enforces (repeat-time caps at
             // 2000000) while still differing from the default.
             (cur + 7).to_string()
         }
-        "boolean" => {
+        crate::server::option_catalog::OptionType::Boolean => {
             if def.default == "on" { "off".to_string() } else { "on".to_string() }
+        }
+        crate::server::option_catalog::OptionType::Choice(
+            crate::server::option_catalog::ChoiceKind::PaneBorderIndicators,
+        ) => {
+            if def.default == "colour" { "arrows".to_string() } else { "colour".to_string() }
         }
         _ => {
             if def.default == "i619probe" {

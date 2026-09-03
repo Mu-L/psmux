@@ -140,6 +140,7 @@ fn render_three_panes_does_not_color_unrelated_separator_active() {
             crate::border_lines::border_chars("single"),
             None,
             crate::client::WindowContentStyles::default(),
+            crate::pane_border::PaneBorderIndicators::Colour,
         );
         let borders = crate::client::border_geometry_from_layout(
             &layout,
@@ -219,6 +220,7 @@ fn render_two_panes_keeps_half_highlight_path() {
             crate::border_lines::border_chars("single"),
             None,
             crate::client::WindowContentStyles::default(),
+            crate::pane_border::PaneBorderIndicators::Colour,
         );
         let borders = crate::client::border_geometry_from_layout(
             &layout,

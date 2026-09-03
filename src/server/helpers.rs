@@ -207,6 +207,10 @@ pub(crate) fn append_extra_style_json(buf: &mut String, app: &AppState) {
         .get("window-active-style")
         .map(String::as_str)
         .unwrap_or("");
+    let pane_border_indicators = app.user_options
+        .get("pane-border-indicators")
+        .map(String::as_str)
+        .unwrap_or(crate::pane_border::INDICATORS_DEFAULT);
     for (key, raw) in [
         ("status_left_style", app.status_left_style.as_str()),
         ("status_right_style", app.status_right_style.as_str()),
@@ -215,6 +219,7 @@ pub(crate) fn append_extra_style_json(buf: &mut String, app: &AppState) {
         ("wsl_style", app.window_status_last_style.as_str()),
         ("window_style", window_style),
         ("window_active_style", window_active_style),
+        ("pane_border_indicators", pane_border_indicators),
     ] {
         buf.push_str(",\"");
         buf.push_str(key);

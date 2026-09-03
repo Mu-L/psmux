@@ -1,5 +1,6 @@
 use crate::types::AppState;
 use crate::config::{format_key_binding, parse_key_string};
+use crate::server::option_catalog::WINDOW_OPTION_NAMES;
 
 /// Upper bound for `repeat-time`, in milliseconds. tmux declares the option as
 /// a number with minimum 0 and maximum 2000000 in options-table.c, so psmux
@@ -7,27 +8,7 @@ use crate::config::{format_key_binding, parse_key_string};
 pub(crate) const REPEAT_TIME_MAX_MS: i64 = 2_000_000;
 
 fn is_window_option(name: &str) -> bool {
-    matches!(
-        name,
-        "automatic-rename"
-            | "monitor-activity"
-            // #559: tmux classifies monitor-silence as a window option; without
-            // this entry `show-options -w monitor-silence` returned an empty
-            // value even after a successful `set -w monitor-silence N`.
-            | "monitor-silence"
-            | "remain-on-exit"
-            | "window-status-format"
-            | "window-status-current-format"
-            | "window-status-separator"
-            | "window-status-style"
-            | "window-status-current-style"
-            | "window-status-activity-style"
-            | "window-status-bell-style"
-            | "window-status-last-style"
-            | "main-pane-width"
-            | "main-pane-height"
-            | "window-size"
-    )
+    WINDOW_OPTION_NAMES.contains(&name)
 }
 
 /// Effective value of an option that is stored empty or not stored at all.
@@ -41,6 +22,7 @@ fn effective_when_unset(name: &str) -> Option<&'static str> {
     Some(match name {
         // Consumed at src/rendering.rs, missing entry means border_lines::DEFAULT.
         "pane-border-lines" => crate::border_lines::DEFAULT,
+        "pane-border-indicators" => crate::pane_border::INDICATORS_DEFAULT,
         // Consumed at src/server/helpers.rs, a missing entry disables the gutter.
         "copy-mode-line-numbers" => "off",
         "copy-mode-line-number-style" => "fg=brightblack",
@@ -246,27 +228,13 @@ pub(crate) fn get_window_option_value_for(
 }
 
 pub(crate) fn render_window_options(app: &AppState) -> String {
-    let names = [
-        "automatic-rename",
-        "monitor-activity",
-        "monitor-silence",
-        "remain-on-exit",
-        "window-status-format",
-        "window-status-current-format",
-        "window-status-separator",
-        "window-status-style",
-        "window-status-current-style",
-        "window-status-activity-style",
-        "window-status-bell-style",
-        "window-status-last-style",
-        "main-pane-width",
-        "main-pane-height",
-        "window-size",
-    ];
-
     let mut output = String::new();
-    for name in names {
-        output.push_str(&format!("{} {}\n", name, get_window_option_value(app, name)));
+    for name in WINDOW_OPTION_NAMES {
+        output.push_str(&format!(
+            "{} {}\n",
+            name,
+            get_window_option_value(app, name),
+        ));
     }
     output
 }
@@ -334,8 +302,7 @@ pub(crate) fn toggle_option(app: &mut AppState, option: &str) -> bool {
     }
     let current = get_option_value(app, option);
     let new_value = if current == "on" { "off" } else { "on" };
-    apply_set_option(app, option, new_value, false);
-    true
+    apply_set_option(app, option, new_value, false).is_ok()
 }
 
 /// Restore one option to the value a freshly started server reports for it,
@@ -395,19 +362,30 @@ pub(crate) fn reset_option_to_default(app: &mut AppState, option: &str) {
         return;
     }
 
-    // Drop any stored override first. Options that live ONLY in `user_options`
-    // (window-style and window-active-style, terminal-overrides) have no typed
-    // field to restore and `get_option_value` already answers with the built in
-    // for a missing entry, so removal is the whole restore for them.
+    // Drop any stored override first. Options whose default is represented by
+    // a missing entry are fully restored by removal; applying their catalog
+    // default would turn an unset option back into an explicit override.
     app.user_options.remove(key);
+    if matches!(
+        key,
+        "window-style" | "window-active-style" | "pane-border-indicators"
+    ) {
+        return;
+    }
 
     if let Some(default) = crate::server::option_catalog::default_for(key) {
-        apply_set_option(app, key, default, true);
+        let _ = apply_set_option(app, key, default, true);
     }
 }
 
 /// Apply a set-option command. If `quiet` is true, unknown options are silently ignored.
-pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _quiet: bool) {
+pub(crate) fn apply_set_option(
+    app: &mut AppState,
+    option: &str,
+    value: &str,
+    _quiet: bool,
+) -> Result<(), String> {
+    crate::server::option_catalog::validate_option_value(option, value)?;
     match option {
         "status-left" => { app.status_left = value.to_string(); }
         "status-right" => { app.status_right = value.to_string(); }
@@ -699,7 +677,7 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
                         app.status_format.push(String::new());
                     }
                     app.status_format[idx] = value.to_string();
-                    return;
+                    return Ok(());
                 }
             }
             // Store @user-options in dedicated map (NOT environment) to avoid
@@ -722,6 +700,7 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

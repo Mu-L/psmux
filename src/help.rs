@@ -425,6 +425,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("pane-border-style",          "\"\""),
     ("pane-active-border-style",   "fg=green"),
     ("pane-border-hover-style",     "fg=yellow"),
+    ("pane-border-indicators",     crate::pane_border::INDICATORS_DEFAULT),
     // Messages / Modes
     ("message-style",              "bg=yellow,fg=black"),
     ("message-command-style",      "bg=black,fg=yellow"),
