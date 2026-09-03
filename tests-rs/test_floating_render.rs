@@ -26,6 +26,7 @@ fn render_with_styles(
     styles: WindowContentStyles,
     border_style: ratatui::style::Style,
     active_border_style: ratatui::style::Style,
+    indicators: crate::pane_border::PaneBorderIndicators,
 ) -> ratatui::buffer::Buffer {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -40,6 +41,7 @@ fn render_with_styles(
             styles,
             border_style,
             active_border_style,
+            indicators,
         );
     }).unwrap();
     term.backend().buffer().clone()
@@ -53,6 +55,7 @@ fn render(fl: &FloatJson, cw: u16, ch: u16) -> ratatui::buffer::Buffer {
         WindowContentStyles::default(),
         ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
         ratatui::style::Style::default().fg(ratatui::style::Color::Green),
+        crate::pane_border::PaneBorderIndicators::Colour,
     )
 }
 
@@ -136,6 +139,7 @@ fn floating_panes_apply_active_and_inactive_window_colors() {
         window_styles,
         Style::default().fg(Color::DarkGray),
         Style::default().fg(Color::Green),
+        crate::pane_border::PaneBorderIndicators::Colour,
     );
     assert_eq!(
         active_buffer[(2, 2)].style().fg,
@@ -156,6 +160,7 @@ fn floating_panes_apply_active_and_inactive_window_colors() {
         window_styles,
         Style::default().fg(Color::DarkGray),
         Style::default().fg(Color::Green),
+        crate::pane_border::PaneBorderIndicators::Colour,
     );
     assert_eq!(
         inactive_buffer[(2, 2)].style().bg,
@@ -236,6 +241,7 @@ fn focused_float_leaves_tiled_content_with_inactive_window_style() {
                 crate::border_lines::border_chars("single"),
                 None,
                 window_styles.for_tiled_panes(true),
+                crate::pane_border::PaneBorderIndicators::Colour,
             );
             render_float_overlays(
                 frame,
@@ -244,6 +250,7 @@ fn focused_float_leaves_tiled_content_with_inactive_window_style() {
                 window_styles,
                 Style::default().fg(Color::DarkGray),
                 Style::default().fg(Color::Green),
+                crate::pane_border::PaneBorderIndicators::Colour,
             );
         })
         .unwrap();
@@ -267,6 +274,7 @@ fn floating_panes_preserve_active_and_inactive_border_backgrounds() {
         WindowContentStyles::default(),
         inactive_style,
         active_style,
+        crate::pane_border::PaneBorderIndicators::Colour,
     );
     assert_eq!(active_buffer[(1, 1)].style().bg, Some(Color::Red));
 
@@ -279,6 +287,7 @@ fn floating_panes_preserve_active_and_inactive_border_backgrounds() {
         WindowContentStyles::default(),
         inactive_style,
         active_style,
+        crate::pane_border::PaneBorderIndicators::Colour,
     );
     assert_eq!(inactive_buffer[(1, 1)].style().bg, Some(Color::Blue));
 }

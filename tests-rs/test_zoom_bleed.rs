@@ -78,6 +78,7 @@ fn zoomed_left_active_hidden_pane_label_never_rendered() {
             crate::border_lines::border_chars("single"),
             None,
             crate::client::WindowContentStyles::default(),
+            crate::pane_border::PaneBorderIndicators::Colour,
         );
     }).unwrap();
 
@@ -136,6 +137,7 @@ fn zoomed_right_active_hidden_pane_label_never_rendered() {
             crate::border_lines::border_chars("single"),
             None,
             crate::client::WindowContentStyles::default(),
+            crate::pane_border::PaneBorderIndicators::Colour,
         );
     }).unwrap();
 
@@ -194,6 +196,7 @@ fn zoomed_top_active_hidden_pane_label_never_rendered() {
             crate::border_lines::border_chars("single"),
             None,
             crate::client::WindowContentStyles::default(),
+            crate::pane_border::PaneBorderIndicators::Colour,
         );
     }).unwrap();
 
@@ -252,6 +255,7 @@ fn zoomed_bottom_active_hidden_pane_label_never_rendered() {
             crate::border_lines::border_chars("single"),
             None,
             crate::client::WindowContentStyles::default(),
+            crate::pane_border::PaneBorderIndicators::Colour,
         );
     }).unwrap();
 

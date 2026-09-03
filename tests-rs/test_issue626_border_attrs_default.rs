@@ -164,6 +164,7 @@ fn bold_border_style_paints_bold_border_cells() {
                 crate::border_lines::border_chars("single"),
                 None,
                 WindowContentStyles::default(),
+                crate::pane_border::PaneBorderIndicators::default(),
             );
         })
         .unwrap();

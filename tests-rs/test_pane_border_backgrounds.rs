@@ -1,4 +1,5 @@
 use super::*;
+use crate::pane_border::PaneBorderIndicators;
 use crate::layout::LayoutJson;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -114,6 +115,7 @@ fn two_pane_separator_and_labels_preserve_active_and_inactive_backgrounds() {
                 crate::border_lines::border_chars("single"),
                 None,
                 WindowContentStyles::default(),
+                PaneBorderIndicators::Colour,
             );
         })
         .unwrap();
@@ -158,13 +160,15 @@ fn preview_preserves_active_and_inactive_border_backgrounds() {
 
     terminal
         .draw(|frame| {
-            crate::preview::render_dump_tree(
+            crate::preview::render_preview_layout(
                 frame,
                 &layout,
                 Rect::new(0, 0, 10, 6),
                 inactive_style,
                 active_style,
-                None,
+                crate::border_lines::border_chars("single"),
+                PaneBorderIndicators::Colour,
+                false,
             );
         })
         .unwrap();
@@ -239,6 +243,7 @@ fn render_border_layout(
                 chars,
                 None,
                 WindowContentStyles::default(),
+                PaneBorderIndicators::Colour,
             );
             borders = border_geometry_from_layout(
                 layout,
@@ -387,13 +392,15 @@ fn nested_preview_junction_background_tracks_active_pane() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| {
-            crate::preview::render_dump_tree(
+            crate::preview::render_preview_layout(
                 frame,
                 &layout,
                 Rect::new(0, 0, 12, 8),
                 inactive_style,
                 active_style,
-                None,
+                crate::border_lines::border_chars("single"),
+                PaneBorderIndicators::Colour,
+                false,
             );
         })
         .unwrap();

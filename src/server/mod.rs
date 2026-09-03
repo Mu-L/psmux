@@ -413,34 +413,36 @@ fn drain_plugin_req(
 ) {
     match req {
         CtrlReq::SetOption(option, value) => {
-            apply_set_option(app, &option, &value, false);
-            app.user_set_options.insert(option.clone());
-            if option == "command-alias" {
-                if let Ok(mut map) = shared_aliases.write() {
-                    *map = app.command_aliases.clone();
+            if apply_set_option(app, &option, &value, false).is_ok() {
+                app.user_set_options.insert(option.clone());
+                if option == "command-alias" {
+                    if let Ok(mut map) = shared_aliases.write() {
+                        *map = app.command_aliases.clone();
+                    }
                 }
-            }
-            // pane-border-status changes the effective content height (#288)
-            if option == "pane-border-status" {
-                resize_all_panes(app);
-            }
-            if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(app) {
-                resize_all_panes(app);
+                // pane-border-status changes the effective content height (#288)
+                if option == "pane-border-status" {
+                    resize_all_panes(app);
+                }
+                if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(app) {
+                    resize_all_panes(app);
+                }
             }
         }
         CtrlReq::SetOptionQuiet(option, value, quiet) => {
-            apply_set_option(app, &option, &value, quiet);
-            app.user_set_options.insert(option.clone());
-            if option == "command-alias" {
-                if let Ok(mut map) = shared_aliases.write() {
-                    *map = app.command_aliases.clone();
+            if apply_set_option(app, &option, &value, quiet).is_ok() {
+                app.user_set_options.insert(option.clone());
+                if option == "command-alias" {
+                    if let Ok(mut map) = shared_aliases.write() {
+                        *map = app.command_aliases.clone();
+                    }
                 }
-            }
-            if option == "pane-border-status" {
-                resize_all_panes(app);
-            }
-            if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(app) {
-                resize_all_panes(app);
+                if option == "pane-border-status" {
+                    resize_all_panes(app);
+                }
+                if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(app) {
+                    resize_all_panes(app);
+                }
             }
         }
         CtrlReq::SetOptionAppend(option, value) => {
@@ -495,15 +497,16 @@ fn drain_plugin_req(
                     let _ = r.send(format!("ERROR: already set: {}", option));
                 }
             } else {
-                apply_set_option(app, &option, &value, false);
-                app.user_set_options.insert(option.clone());
-                if option == "command-alias" {
-                    if let Ok(mut map) = shared_aliases.write() {
-                        *map = app.command_aliases.clone();
+                if apply_set_option(app, &option, &value, false).is_ok() {
+                    app.user_set_options.insert(option.clone());
+                    if option == "command-alias" {
+                        if let Ok(mut map) = shared_aliases.write() {
+                            *map = app.command_aliases.clone();
+                        }
                     }
-                }
-                if let Some(r) = resp {
-                    let _ = r.send(String::new());
+                    if let Some(r) = resp {
+                        let _ = r.send(String::new());
+                    }
                 }
             }
         }
@@ -2574,9 +2577,60 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         .unwrap_or_else(|_| "{}".to_string());
                     let _ = resp.send(json);
                 }
-                CtrlReq::WindowDump(wid, resp) => {
-                    let json = crate::layout::dump_window_layout_json(&mut app, wid)
-                        .unwrap_or_else(|_| "{}".to_string());
+                CtrlReq::WindowDump(wid, format, resp) => {
+                    let result = if format == crate::types::WindowDumpFormat::Layout {
+                        crate::layout::dump_window_layout_json(&mut app, wid)
+                    } else {
+                        crate::layout::dump_window_layout(&mut app, wid)
+                            .and_then(|layout| {
+                                let border_lines =
+                                    options::get_option_value(&app, "pane-border-lines");
+                                let border_indicators =
+                                    crate::pane_border::PaneBorderIndicators::parse(
+                                        &options::get_option_value(
+                                            &app,
+                                            "pane-border-indicators",
+                                        ),
+                                    )
+                                    .map_err(std::io::Error::other)?;
+                                let window_index = app.windows
+                                    .iter()
+                                    .position(|window| window.id == wid)
+                                    .ok_or_else(|| std::io::Error::other("window not found"))?;
+                                let _async_fmt = crate::format::AsyncFormatGuard::new();
+                                let pane_border_style = if app.pane_border_style.is_empty() {
+                                    String::new()
+                                } else {
+                                    crate::format::expand_format_for_window(
+                                        &app.pane_border_style,
+                                        &app,
+                                        window_index,
+                                    )
+                                };
+                                let pane_active_border_style =
+                                    if app.pane_active_border_style.is_empty() {
+                                        String::new()
+                                    } else {
+                                        crate::format::expand_format_for_window(
+                                            &app.pane_active_border_style,
+                                            &app,
+                                            window_index,
+                                        )
+                                    };
+                                let floating_pane_focused =
+                                    app.windows[window_index].floating_focus.is_some();
+                                serde_json::to_string(&crate::types::PreviewWindowState {
+                                    layout,
+                                    border_lines,
+                                    border_indicators,
+                                    pane_border_style: Some(pane_border_style),
+                                    pane_active_border_style: Some(pane_active_border_style),
+                                    floating_pane_focused,
+                                })
+                                .map_err(std::io::Error::other)
+                            })
+                    };
+                    let json = result.unwrap_or_else(|_| "{}".to_string());
                     let _ = resp.send(json);
                 }
                 CtrlReq::ToggleSync => { app.sync_input = !app.sync_input; }
@@ -4142,28 +4196,29 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(output);
                 }
                 CtrlReq::SetOption(option, value) => {
-                    apply_set_option(&mut app, &option, &value, false);
-                    app.user_set_options.insert(option.clone());
-                    // Reconcile the warm pane with the new option value.
-                    // All option-driven warm-pane lifecycle decisions
-                    // route through this single module — see #271.
-                    let sync = crate::warm_pane_sync::for_option_change(&option, &app);
-                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
-                    // Update shared aliases if command-alias changed
-                    if option == "command-alias" {
-                        if let Ok(mut map) = shared_aliases_main.write() {
-                            *map = app.command_aliases.clone();
+                    if apply_set_option(&mut app, &option, &value, false).is_ok() {
+                        app.user_set_options.insert(option.clone());
+                        // Reconcile the warm pane with the new option value.
+                        // All option-driven warm-pane lifecycle decisions
+                        // route through this single module, see #271.
+                        let sync = crate::warm_pane_sync::for_option_change(&option, &app);
+                        crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+                        // Update shared aliases if command-alias changed
+                        if option == "command-alias" {
+                            if let Ok(mut map) = shared_aliases_main.write() {
+                                *map = app.command_aliases.clone();
+                            }
                         }
+                        // pane-border-status changes the effective content height (#288)
+                        if option == "pane-border-status" {
+                            resize_all_panes(&mut app);
+                        }
+                        if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
+                            resize_all_panes(&mut app);
+                        }
+                        meta_dirty = true;
+                        state_dirty = true;
                     }
-                    // pane-border-status changes the effective content height (#288)
-                    if option == "pane-border-status" {
-                        resize_all_panes(&mut app);
-                    }
-                    if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
-                        resize_all_panes(&mut app);
-                    }
-                    meta_dirty = true;
-                    state_dirty = true;
                 }
                 CtrlReq::SetWindowSize(value) => {
                     match crate::resize_window::set_active_window_size_mode(&mut app, value) {
@@ -4177,30 +4232,31 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::SetOptionQuiet(option, value, quiet) => {
-                    apply_set_option(&mut app, &option, &value, quiet);
-                    app.user_set_options.insert(option.clone());
-                    // Reconcile the warm pane with the new option value.
-                    // Replaces the prior inline default-shell-only kill
-                    // (#99) with a uniform table-driven policy that
-                    // also covers history-limit (#271), allow-predictions,
-                    // default-terminal, and claude-code-* options.
-                    let sync = crate::warm_pane_sync::for_option_change(&option, &app);
-                    crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
-                    // Update shared aliases if command-alias changed
-                    if option == "command-alias" {
-                        if let Ok(mut map) = shared_aliases_main.write() {
-                            *map = app.command_aliases.clone();
+                    if apply_set_option(&mut app, &option, &value, quiet).is_ok() {
+                        app.user_set_options.insert(option.clone());
+                        // Reconcile the warm pane with the new option value.
+                        // Replaces the prior inline default-shell-only kill
+                        // (#99) with a uniform table-driven policy that
+                        // also covers history-limit (#271), allow-predictions,
+                        // default-terminal, and claude-code-* options.
+                        let sync = crate::warm_pane_sync::for_option_change(&option, &app);
+                        crate::warm_pane_sync::apply(&mut app, &*pty_system, sync);
+                        // Update shared aliases if command-alias changed
+                        if option == "command-alias" {
+                            if let Ok(mut map) = shared_aliases_main.write() {
+                                *map = app.command_aliases.clone();
+                            }
                         }
+                        // pane-border-status changes the effective content height (#288)
+                        if option == "pane-border-status" {
+                            resize_all_panes(&mut app);
+                        }
+                        if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
+                            resize_all_panes(&mut app);
+                        }
+                        meta_dirty = true;
+                        state_dirty = true;
                     }
-                    // pane-border-status changes the effective content height (#288)
-                    if option == "pane-border-status" {
-                        resize_all_panes(&mut app);
-                    }
-                    if option == "window-size" && crate::resize_window::refresh_dynamic_window_sizes(&mut app) {
-                        resize_all_panes(&mut app);
-                    }
-                    meta_dirty = true;
-                    state_dirty = true;
                 }
                 CtrlReq::SetOptionUnset(option) => {
                     // Restore the table default, or remove an @user-option.
@@ -4286,17 +4342,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             let _ = r.send(format!("ERROR: already set: {}", option));
                         }
                     } else {
-                        apply_set_option(&mut app, &option, &value, false);
-                        app.user_set_options.insert(option.clone());
-                        if option == "command-alias" {
-                            if let Ok(mut map) = shared_aliases_main.write() {
-                                *map = app.command_aliases.clone();
+                        if apply_set_option(&mut app, &option, &value, false).is_ok() {
+                            app.user_set_options.insert(option.clone());
+                            if option == "command-alias" {
+                                if let Ok(mut map) = shared_aliases_main.write() {
+                                    *map = app.command_aliases.clone();
+                                }
                             }
-                        }
-                        meta_dirty = true;
-                        state_dirty = true;
-                        if let Some(r) = resp {
-                            let _ = r.send(String::new());
+                            meta_dirty = true;
+                            state_dirty = true;
+                            if let Some(r) = resp {
+                                let _ = r.send(String::new());
+                            }
                         }
                     }
                 }
@@ -6145,15 +6202,40 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::CustomizeEditConfirm => {
-                    if let Mode::CustomizeMode { ref mut options, selected, ref mut editing, ref edit_buffer, .. } = app.mode {
-                        if *editing {
-                            let name = options[selected].0.clone();
-                            let value = edit_buffer.clone();
-                            options[selected].1 = value.clone();
-                            *editing = false;
-                            options::apply_set_option(&mut app, &name, &value, true);
-                            state_dirty = true;
+                    let pending = match &app.mode {
+                        Mode::CustomizeMode {
+                            options,
+                            selected,
+                            editing: true,
+                            edit_buffer,
+                            ..
+                        } => Some((options[*selected].0.clone(), edit_buffer.clone())),
+                        _ => None,
+                    };
+                    if let Some((name, value)) = pending {
+                        match options::apply_set_option(&mut app, &name, &value, true) {
+                            Ok(()) => {
+                                app.user_set_options.insert(name.clone());
+                                if let Mode::CustomizeMode {
+                                    ref mut options,
+                                    selected,
+                                    ref mut editing,
+                                    ..
+                                } = app.mode
+                                {
+                                    options[selected].1 = value;
+                                    *editing = false;
+                                }
+                            }
+                            Err(error) => {
+                                app.status_message = Some((
+                                    format!("set-option: {}", error),
+                                    Instant::now(),
+                                    None,
+                                ));
+                            }
                         }
+                        state_dirty = true;
                     }
                 }
                 CtrlReq::CustomizeEditCancel => {
@@ -6166,16 +6248,28 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::CustomizeResetDefault => {
-                    if let Mode::CustomizeMode { ref mut options, selected, editing, .. } = app.mode {
-                        if !editing {
-                            if let Some(def) = option_catalog::default_for(&options[selected].0) {
-                                let name = options[selected].0.clone();
-                                let value = def.to_string();
-                                options[selected].1 = value.clone();
-                                options::apply_set_option(&mut app, &name, &value, true);
-                                state_dirty = true;
-                            }
+                    let pending = match &app.mode {
+                        Mode::CustomizeMode {
+                            options,
+                            selected,
+                            editing: false,
+                            ..
+                        } => option_catalog::default_for(&options[*selected].0)
+                            .map(|_| options[*selected].0.clone()),
+                        _ => None,
+                    };
+                    if let Some(name) = pending {
+                        options::reset_option_to_default(&mut app, &name);
+                        let value = options::get_option_value(&app, &name);
+                        if let Mode::CustomizeMode {
+                            ref mut options,
+                            selected,
+                            ..
+                        } = app.mode
+                        {
+                            options[selected].1 = value;
                         }
+                        state_dirty = true;
                     }
                 }
                 CtrlReq::CustomizeFilter(text) => {

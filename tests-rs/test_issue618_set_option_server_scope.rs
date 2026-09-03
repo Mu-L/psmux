@@ -120,17 +120,17 @@ fn command_set_sq_combined_applies() {
 }
 
 // ---------------------------------------------------------------------------
-// The CLI guard (src/main.rs). The guard runs inside run_main and cannot be
-// called from a test, so the accepted-flag set it consults is a named const
-// and that is what gets pinned here.
+// The CLI guard and shared parser consult the same accepted-flag set.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn cli_flag_set_accepts_s() {
-    assert!(
-        crate::SET_OPTION_CLI_FLAGS.contains('s'),
-        "the set-option CLI guard must accept -s (#618)"
-    );
+    let parsed = crate::cli::parse_set_option_args(&[
+        "-s",
+        "default-terminal",
+        "xterm-256color",
+    ]);
+    assert_eq!(parsed.validate(false), Ok(()));
 }
 
 #[test]

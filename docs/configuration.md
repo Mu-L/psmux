@@ -207,6 +207,7 @@ Details worth knowing:
 | `pane-border-style` | Str | | Inactive border style |
 | `pane-active-border-style` | Str | `fg=green` | Active border style |
 | `pane-border-hover-style` | Str | `fg=yellow` | Border style while the mouse hovers a draggable pane border |
+| `pane-border-indicators` | Str | `colour` | How the active pane is marked on its borders: `off` (no cue), `colour`, `arrows`, `both`. See [Pane Border Indicators](#pane-border-indicators) |
 | `pane-border-lines` | Str | `single` | Border glyph set: `single`, `double`, `heavy`, `simple`, `number`, `spaces`, `none`. See [Pane Border Lines](#pane-border-lines) |
 | `pane-border-format` | Str | | Pane border format string (e.g. `#{pane_index}: #{pane_title}`) |
 | `pane-border-status` | Str | | Pane border status position (`top`/`bottom`/`off`) |
@@ -289,6 +290,28 @@ set -g pane-border-lines none
 ```
 
 `number` is accepted for tmux compatibility and renders the same as `single`. Any unrecognised value also falls back to `single`.
+
+### Pane Border Indicators
+
+`pane-border-indicators` controls how the focused pane is marked on its borders.
+
+| Value | What the borders next to the active pane look like |
+| --- | --- |
+| `off` | No active-pane cue at all. Every separator keeps `pane-border-style`, and no arrows are drawn. |
+| `colour` (default) | A two-pane divider is split between `pane-border-style` and `pane-active-border-style`. With more than two panes the separators adjacent to the active pane use `pane-active-border-style`. |
+| `arrows` | The separators adjacent to the active pane use `pane-active-border-style`, plus inward-pointing markers on those separators and on the focused floating pane's border. No colour split. |
+| `both` | The `colour` split plus the `arrows` markers. |
+
+`pane-active-border-style` therefore applies in every mode except `off`, which is
+a genuine no-cue mode. When a floating pane owns focus, the tiled active cues are
+suppressed so the highlight follows the pane that actually has focus.
+
+```tmux
+set -g pane-border-indicators arrows
+```
+
+`pane-border-indicators` is a global/default setting; per-window values are
+unsupported.
 
 ### Copy Mode Line Numbers
 

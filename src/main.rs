@@ -18,6 +18,7 @@ mod commands;
 mod pane;
 mod warm_pane_sync;
 mod popup;
+mod pane_border;
 mod clipboard;
 mod copy_mode;
 mod input;
@@ -71,7 +72,7 @@ use crate::client::run_remote;
 /// across all four spellings, and refusing -s on just the setw alias would be a
 /// second, differently shaped hard failure for the tools this change exists to
 /// unbreak (#618).
-pub(crate) const SET_OPTION_CLI_FLAGS: &str = "agopqstuUw";
+pub(crate) const SET_OPTION_CLI_FLAGS: &str = "aFgopqstuUw";
 
 /// Boolean flags the CLI accepts for show-options and friends. tmux 3.4 uses
 /// "AgHpqst:vw" (cmd-show-options.c); psmux has no -H (hooks-only listing).
@@ -773,6 +774,7 @@ fn run_main() -> io::Result<()> {
     // This avoids conflict with subcommand flags (e.g. select-pane -L, resize-pane -L).
     let mut l_socket_name: Option<String> = None;
     let mut f_config_file: Option<String> = None;
+    let mut precommand_target: Option<String> = None;
     let mut control_mode: u8 = 0; // 0=off, 1=-C (echo), 2=-CC (no echo)
     {
         let mut i = 1; // skip binary name
@@ -790,7 +792,10 @@ fn run_main() -> io::Result<()> {
             } else if arg == "-f" && i + 1 < args.len() {
                 f_config_file = Some(args[i + 1].clone());
                 i += 2;
-            } else if (arg == "-S" || arg == "-t") && i + 1 < args.len() {
+            } else if arg == "-t" && i + 1 < args.len() {
+                precommand_target = Some(args[i + 1].clone());
+                i += 2;
+            } else if arg == "-S" && i + 1 < args.len() {
                 i += 2; // skip other global flag-value pairs
             } else if arg.starts_with('-') {
                 i += 1; // skip single global flags (e.g. -v, -V)
@@ -821,9 +826,33 @@ fn run_main() -> io::Result<()> {
     let strip_target_position = command_index
         .filter(|index| !matches!(args[*index].as_str(), "detach-client" | "detach"))
         .and(target_position);
+    let is_set_option_command = command_index
+        .and_then(|index| args.get(index))
+        .is_some_and(|command| {
+            matches!(
+                command.as_str(),
+                "set-option" | "set" | "set-window-option" | "setw"
+            )
+        });
+    let set_option_target = if is_set_option_command {
+        let index = command_index.expect("set-option command has an index");
+        let command_args: Vec<&str> = args[index + 1..]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        crate::cli::parse_set_option_args(&command_args)
+            .target
+            .map(str::to_string)
+    } else {
+        None
+    };
+    let explicit_target = if is_set_option_command {
+        set_option_target.as_ref().or(precommand_target.as_ref())
+    } else {
+        target_position.and_then(|position| args.get(position + 1))
+    };
     let mut explicit_session_target = false;
-    if let Some(pos) = target_position {
-        if let Some(target) = args.get(pos + 1) {
+    if let Some(target) = explicit_target {
             // move-window/swap-window: a bare -t that names a WINDOW (tmux
             // target-window semantics), not a session. Coerce "N" -> ":N" so the
             // generic parser treats it as a window and routing stays on the current
@@ -897,7 +926,6 @@ fn run_main() -> io::Result<()> {
                 env::set_var("PSMUX_TARGET_SESSION", &port_file_base);
                 explicit_session_target = true;
             }
-        }
     }
     if !explicit_session_target {
         // No explicit `-t session` on this command line: `$TMUX` (set inside
@@ -929,7 +957,7 @@ fn run_main() -> io::Result<()> {
                 .enumerate()
                 .filter(|(offset, _)| {
                     let absolute = index + *offset;
-                    strip_target_position
+                    is_set_option_command || strip_target_position
                         .map_or(true, |target| absolute != target && absolute != target + 1)
                 })
                 .map(|(_, arg)| arg)
@@ -989,10 +1017,22 @@ fn run_main() -> io::Result<()> {
             let win_id: usize = cmd_args[2].parse().expect("win_id must be a number");
             let w: u16 = cmd_args[3].parse().expect("width must be a number");
             let h: u16 = cmd_args[4].parse().expect("height must be a number");
-            let layout = match crate::preview::fetch_window_dump(&sess, win_id) {
-                Some(l) => l,
+            let preview_state = match crate::preview::fetch_preview_window_state(&sess, win_id) {
+                Some(state) => state,
                 None => { eprintln!("failed to fetch window-dump for {}:@{}", sess, win_id); std::process::exit(3); }
             };
+            let (border_style, active_border_style) = preview_state.pane_border_styles(
+                crate::client::pane_border_default_style(false),
+                crate::client::pane_border_default_style(true),
+            );
+            let crate::types::PreviewWindowState {
+                layout,
+                border_lines,
+                border_indicators,
+                pane_border_style: _,
+                pane_active_border_style: _,
+                floating_pane_focused,
+            } = preview_state;
             use ratatui::Terminal;
             use ratatui::backend::TestBackend;
             use ratatui::layout::Rect;
@@ -1001,41 +1041,15 @@ fn run_main() -> io::Result<()> {
             let mut term = Terminal::new(backend).unwrap();
             term.draw(|f| {
                 let area = Rect::new(0, 0, w, h);
-                let active_rect = crate::client::compute_active_rect_json(&layout, area);
-                let total_panes = layout.count_leaves();
-                let border_style = ratatui::style::Style::default().fg(Color::DarkGray);
-                let active_border_style = ratatui::style::Style::default().fg(Color::Green);
-                let border_chars = crate::border_lines::border_chars(crate::border_lines::DEFAULT);
-                crate::client::render_layout_json(
-                    f, &layout, area,
-                    false,
-                    border_style,
-                    active_border_style,
-                    false, Color::Reset,
-                    active_rect,
-                    "", false, "off", "",
-                    total_panes,
-                    border_chars,
-                    None,
-                    crate::client::WindowContentStyles::default(),
-                );
-                let borders = crate::client::border_geometry_from_layout(
+                crate::preview::render_preview_layout(
+                    f,
                     &layout,
                     area,
-                    f.buffer_mut().area,
-                    false,
-                );
-                let junctions = crate::rendering::fix_border_intersections(
-                    f.buffer_mut(),
-                    border_chars,
-                    &borders,
-                );
-                crate::client::recolor_border_junctions(
-                    f.buffer_mut(),
-                    &junctions,
-                    active_rect,
                     border_style,
                     active_border_style,
+                    crate::border_lines::border_chars(&border_lines),
+                    border_indicators,
+                    floating_pane_focused,
                 );
             }).unwrap();
             // Dump the buffer as ANSI escape sequences so colors are visible.
@@ -3737,156 +3751,20 @@ fn run_main() -> io::Result<()> {
             }
             // set-option / set / set-window-option / setw - Set an option
             "set-option" | "set" | "set-window-option" | "setw" => {
-                // Validate that known integer-valued options receive a numeric value,
-                // erroring (nonzero exit) like tmux instead of silently accepting junk.
-                let (cli_pane_scope, cli_only_if_unset) = {
-                    // NOTE: "lock-after-time" is intentionally excluded. Unlike the
-                    // options below, psmux has no real numeric business logic for it
-                    // anywhere server-side -- config.rs stores it as an opaque
-                    // user_options passthrough (locking isn't implemented), so gating
-                    // it here just made the CLI reject values the server itself
-                    // accepts unchecked, breaking round-trip (task #7 batch A bug 1).
-                    const INT_OPTS: &[&str] = &[
-                        "history-limit", "escape-time", "display-time", "display-panes-time",
-                        "repeat-time", "message-limit", "status-interval", "base-index",
-                        "pane-base-index", "status-left-length", "status-right-length",
-                        "history-file-limit",
-                    ];
-                    // Collect positional (non-flag) args, skipping -t/-p values.
-                    // `@user-options` start with '@', not '-', so they are
-                    // positionals; an explicit empty string ("") is a real
-                    // value and must stay in the list (tmux accepts
-                    // `set -g @foo ""`).
-                    let mut positionals: Vec<&str> = Vec::new();
-                    let mut flags = String::new();
-                    let mut j = 1;
-                    while j < cmd_args.len() {
-                        let a = cmd_args[j].as_str();
-                        // Flags parse only BEFORE the first positional, and
-                        // `--` ends option parsing entirely (#583, the
-                        // set-option sibling of the #562 send-keys fix). tmux
-                        // (getopt) stops scanning at the option name, so a
-                        // dash-leading VALUE is data, never a flag: `set @k
-                        // -u` stores the literal "-u" instead of consuming it
-                        // as the unset flag and deleting the key at rc 0.
-                        if positionals.is_empty() {
-                            if a == "--" {
-                                positionals.extend(cmd_args[j + 1..].iter().map(|s| s.as_str()));
-                                break;
-                            }
-                            // Only -t consumes a value. `-p` is a bare pane-scope
-                            // flag (tmux parity, #580); treating it as a target
-                            // flag ate the option name, so `set -p -t %3
-                            // remain-on-exit failed` misparsed as an empty-value
-                            // set of 'failed'.
-                            if a == "-t" { j += 2; continue; }
-                            if a.starts_with('-') && a.len() > 1 {
-                                flags.push_str(&a[1..]);
-                                j += 1;
-                                continue;
-                            }
-                        }
-                        positionals.push(a);
-                        j += 1;
-                    }
-                    // Issue #553: reject flags psmux does not implement
-                    // instead of silently accepting them and letting the
-                    // write land under different semantics than requested
-                    // (tmux: "unknown flag -Z", rc 1, nothing written). Same
-                    // principle as dd84b97 for refresh-client. -t/-p never
-                    // reach `flags` (skipped with their values above); -U is
-                    // the unset alias, -w a scope flag.
-                    //
-                    // Issue #618: -s is the SERVER scope flag. tmux 3.2 moved
-                    // default-terminal, extended-keys and friends onto the
-                    // server option table and tools write them the documented
-                    // way (`set-option -s default-terminal xterm-256color`).
-                    // Rejecting it turned every such bootstrap into a hard
-                    // failure. psmux runs one server per session and keeps a
-                    // single option store, so -s selects the same store as -g
-                    // rather than a genuinely cross-session one; the write
-                    // lands where the caller expects it, but it is not true
-                    // cross-session server-option storage.
-                    for ch in flags.chars() {
-                        if !SET_OPTION_CLI_FLAGS.contains(ch) {
-                            eprintln!("psmux: set-option: unknown flag -{}", ch);
-                            std::process::exit(1);
-                        }
-                    }
-                    let has_unset = flags.contains('u') || flags.contains('U');
-                    let has_append = flags.contains('a');
-                    // Issue #535: a set-option carrying no value used to be
-                    // dropped in silence: nothing set, empty stderr, exit 0.
-                    // That turned a one-character mistake (PowerShell eats a
-                    // bare `@name` as the splatting operator, so `set -g
-                    // @pill $undefined` arrives as `set -g <text>`) into an
-                    // undebuggable no-op. tmux fails these loudly, so we do
-                    // too. `-q` is NOT consulted: both tmux's manual and our
-                    // own -q help text scope it to unknown/ambiguous options,
-                    // and tmux 3.4 still errors on `set -gq @foo`.
-                    if positionals.is_empty() {
-                        eprintln!("psmux: set-option: too few arguments (need at least 1)");
-                        std::process::exit(1);
-                    }
-                    if positionals.len() == 1 && !has_unset {
-                        let name = positionals[0];
-                        // Boolean flags legitimately take no value: they
-                        // toggle (tmux parity, #278). Everything else is an
-                        // error. `-a` appends, so it always needs a value.
-                        if has_append || !crate::server::options::missing_value_toggles(name) {
-                            eprintln!("psmux: set-option: empty value for '{}'", name);
-                            std::process::exit(1);
-                        }
-                    }
-                    if let (Some(name), Some(val)) = (positionals.first(), positionals.get(1)) {
-                        if INT_OPTS.contains(name) && val.parse::<i64>().is_err() {
-                            eprintln!("psmux: set-option: value for '{}' must be a number, got '{}'", name, val);
-                            std::process::exit(1);
-                        }
-                        // Issue #606: repeat-time is bounded in tmux
-                        // (options-table.c: 0..=2000000 ms). Without this the
-                        // number check above waved through 2000001 and -5
-                        // alike: the first installed a 33 minute repeat
-                        // window, the second was dropped server-side at exit
-                        // 0 so a typo looked like it had been applied.
-                        // #608: `priority` takes a fixed set of three values.
-                        // The generic catalog check only validates numbers and
-                        // booleans, so without this a typo returned 0 and was
-                        // dropped server-side, leaving the class unchanged and
-                        // the mistake invisible.
-                        if *name == "priority"
-                            && crate::platform::normalize_priority(val).is_none()
-                        {
-                            eprintln!(
-                                "psmux: set-option: value for 'priority' must be one of {}, got '{}'",
-                                crate::platform::PRIORITY_VALUES.join(", "),
-                                val
-                            );
-                            std::process::exit(1);
-                        }
-                        if *name == "repeat-time" {
-                            if let Ok(ms) = val.parse::<i64>() {
-                                if ms < 0 {
-                                    eprintln!("psmux: set-option: value is too small: {}", val);
-                                    std::process::exit(1);
-                                }
-                                if ms > crate::server::options::REPEAT_TIME_MAX_MS {
-                                    eprintln!("psmux: set-option: value is too large: {}", val);
-                                    std::process::exit(1);
-                                }
-                            }
-                        }
-                    }
-                    // `-o` on an option that is already set is an error in tmux
-                    // (`already set: <name>`, exit 1) and silent at exit 0 only
-                    // under `-q`, so the no-q case has to read the server's
-                    // answer instead of firing and forgetting (#619 follow up).
-                    // `-u` disarms the guard entirely: tmux skips it whenever
-                    // `-u` is present, so that stays a plain unset.
-                    let only_if_unset =
-                        flags.contains('o') && !has_unset && !flags.contains('q');
-                    (flags.contains('p'), only_if_unset)
-                };
+                let set_args: Vec<&str> =
+                    cmd_args[1..].iter().map(|arg| arg.as_str()).collect();
+                let parsed_set = crate::cli::parse_set_option_args(&set_args);
+                let window_command = matches!(cmd, "set-window-option" | "setw");
+                if let Err(error) = parsed_set.validate(window_command) {
+                    eprintln!("psmux: set-option: {}", error);
+                    std::process::exit(1);
+                }
+                let unset =
+                    parsed_set.flag_chars.contains('u') || parsed_set.flag_chars.contains('U');
+                let cli_pane_scope = parsed_set.flag_chars.contains('p');
+                let cli_only_if_unset = parsed_set.flag_chars.contains('o')
+                    && !unset
+                    && !parsed_set.flag_chars.contains('q');
                 let cmd_str: String = cmd_args.iter().map(|s| {
                     let s = s.as_str();
                     // An explicitly empty argument must be re-quoted, or it
@@ -3954,11 +3832,22 @@ fn run_main() -> io::Result<()> {
                     }
                     return Ok(());
                 }
-                match send_control(format!("{}\n", cmd_str)) {
-                    Ok(()) => {},
-                    Err(e) if e.to_string().contains("no session") => {
+                // `session-info` is an event-loop barrier: its response proves
+                // the preceding mutation has been applied before this CLI exits.
+                match send_control_with_response(format!("{}\nsession-info\n", cmd_str)) {
+                    Ok(resp) => {
+                        if resp.trim_start().starts_with("ERROR") {
+                            eprintln!(
+                                "psmux: {}",
+                                resp.trim_start().trim_start_matches("ERROR:").trim(),
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    Err(e) if e.to_string().contains("no session")
+                        || e.to_string().contains("no server running") => {
                         eprintln!("warning: no active session; option will take effect when set inside a session or via config file");
-                    },
+                    }
                     Err(e) => return Err(e),
                 }
                 return Ok(());

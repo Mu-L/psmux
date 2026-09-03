@@ -3,7 +3,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::net::TcpStream;
 
-use crate::types::{CtrlReq, LayoutKind, WaitForOp, ControlNotification};
+use crate::types::{
+    ControlNotification, CtrlReq, LayoutKind, WaitForOp, WindowDumpFormat,
+};
 
 /// Clear HANDLE_FLAG_INHERIT on a connection socket (see the comment at the
 /// clone sites in `handle_connection`). No-op off Windows.
@@ -21,7 +23,33 @@ fn clear_inherit(s: &TcpStream) {
 }
 #[cfg(not(windows))]
 fn clear_inherit(_s: &TcpStream) {}
-use crate::cli::{parse_target, extract_flag_value};
+
+/// Expand a `set-option -F` value as a format before it is stored.
+///
+/// tmux's set-option takes `-F` and runs the value through format_expand before
+/// writing it, and psmux's config-file parser has always done the same. The
+/// CLI and TCP paths could not, because format expansion needs the AppState
+/// that lives on the server thread, so `-F` was rejected outright. Both
+/// set-option handlers now route their value through here, which asks the
+/// server thread to expand it with the same CtrlReq the bind-key path uses.
+/// Without `-F`, or for an empty value, this is the identity.
+fn expand_set_option_value(
+    tx: &mpsc::Sender<CtrlReq>,
+    format_expand: bool,
+    value: String,
+) -> String {
+    if !format_expand || value.is_empty() {
+        return value;
+    }
+    let (rtx, rrx) = mpsc::channel::<String>();
+    if tx.send(CtrlReq::ExpandFormat(value.clone(), rtx)).is_err() {
+        return value;
+    }
+    // On timeout keep the unexpanded text: storing the literal format is no
+    // worse than dropping the assignment.
+    rrx.recv_timeout(Duration::from_secs(5)).unwrap_or(value)
+}
+use crate::cli::{extract_flag_value, parse_set_option_args, parse_target};
 use crate::util::base64_decode;
 use crate::control;
 
@@ -748,7 +776,34 @@ if control_echo || control_noecho {
         let mut ctrl_target_pane: Option<usize> = None;
         let mut ctrl_pane_is_id = false;
         let mut ctrl_raw_target: Option<String> = None;
-        {
+        let ctrl_set_option = matches!(
+            cmd_name,
+            "set-option" | "set" | "set-window-option" | "setw"
+        );
+        let ctrl_set_window_option =
+            matches!(cmd_name, "set-window-option" | "setw");
+        let ctrl_set_args = ctrl_set_option
+            .then(|| parse_set_option_args(&cmd_args));
+        if let Some(parsed_set) = ctrl_set_args.as_ref() {
+            if let Some(value) = parsed_set.target {
+                ctrl_raw_target =
+                    Some(crate::cli::strip_exact_match_prefix(value).to_string());
+                let parsed_target = parse_target(value);
+                if parsed_target.window.is_some() {
+                    ctrl_target_win = parsed_target.window;
+                    ctrl_target_win_is_id = parsed_target.window_is_id;
+                    ctrl_target_win_name = None;
+                } else if parsed_target.window_name.is_some() {
+                    ctrl_target_win_name = parsed_target.window_name;
+                    ctrl_target_win = None;
+                    ctrl_target_win_is_id = false;
+                }
+                if parsed_target.pane.is_some() {
+                    ctrl_target_pane = parsed_target.pane;
+                    ctrl_pane_is_id = parsed_target.pane_is_id;
+                }
+            }
+        } else {
             let target_scan_end = crate::cli::outer_target_scan_end(cmd_name, &cmd_args);
             let mut i = 0;
             while i < target_scan_end {
@@ -770,7 +825,11 @@ if control_echo || control_noecho {
             }
         }
 
-        let filtered_args = without_outer_target(cmd_name, &cmd_args);
+        let filtered_args = if ctrl_set_option {
+            cmd_args.clone()
+        } else {
+            without_outer_target(cmd_name, &cmd_args)
+        };
 
         // Apply target focus
         // tmux parity (#592): select-pane -T/-P is title/style-only (see the
@@ -796,42 +855,48 @@ if control_echo || control_noecho {
         // and turn the swap into a no-op).
         let ctrl_capture_by_id = matches!(cmd_name, "capture-pane" | "capturep") && ctrl_pane_is_id && ctrl_target_pane.is_some();
         let skip_pane_focus = matches!(cmd_name, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || ctrl_capture_by_id;
-        let mut focus_err: Option<String> = None;
-        if is_focus_cmd {
-            if let Some(wid) = ctrl_target_win {
-                if ctrl_target_win_is_id {
-                    let _ = tx_ctrl.send(CtrlReq::FocusWindowById(wid));
-                } else {
-                    let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
+        let mut focus_err = ctrl_set_args.as_ref().and_then(|parsed_set| {
+            parsed_set.validate(ctrl_set_window_option).err()
+        });
+        if focus_err.is_none() {
+            if is_focus_cmd {
+                if let Some(wid) = ctrl_target_win {
+                    if ctrl_target_win_is_id {
+                        let _ = tx_ctrl.send(CtrlReq::FocusWindowById(wid));
+                    } else {
+                        let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
+                    }
+                } else if let Some(ref wname) = ctrl_target_win_name {
+                    let _ = tx_ctrl.send(CtrlReq::FocusWindowByName(wname.clone()));
                 }
-            } else if let Some(ref wname) = ctrl_target_win_name {
-                let _ = tx_ctrl.send(CtrlReq::FocusWindowByName(wname.clone()));
-            }
-            if let Some(pid) = ctrl_target_pane {
-                if ctrl_pane_is_id {
-                    let _ = tx_ctrl.send(CtrlReq::FocusPane(pid));
-                } else {
-                    let _ = tx_ctrl.send(CtrlReq::FocusPaneByIndex(pid));
+                if let Some(pid) = ctrl_target_pane {
+                    if ctrl_pane_is_id {
+                        let _ = tx_ctrl.send(CtrlReq::FocusPane(pid));
+                    } else {
+                        let _ = tx_ctrl.send(CtrlReq::FocusPaneByIndex(pid));
+                    }
                 }
-            }
-        } else {
-            // Validated temporary focus (issue #545): on an unresolvable
-            // window/pane target the command must not run — reply %error
-            // instead of silently executing against the active window.
-            let want_win = (ctrl_target_win.is_some() || ctrl_target_win_name.is_some()) && !skip_target_focus;
-            let want_pane = ctrl_target_pane.is_some() && !skip_pane_focus;
-            if want_win || want_pane {
-                let (focus_s, focus_r) = mpsc::channel::<Result<(), String>>();
-                let _ = tx_ctrl.send(CtrlReq::FocusTargetTemp {
-                    win: if want_win { ctrl_target_win } else { None },
-                    win_is_id: ctrl_target_win_is_id,
-                    win_name: if want_win { ctrl_target_win_name.clone() } else { None },
-                    pane: if want_pane { ctrl_target_pane } else { None },
-                    pane_is_id: ctrl_pane_is_id,
-                    resp: focus_s,
-                });
-                if let Ok(Err(e)) = focus_r.recv_timeout(Duration::from_secs(5)) {
-                    focus_err = Some(e);
+            } else {
+                // Validated temporary focus (issue #545): on an unresolvable
+                // window/pane target the command must not run — reply %error
+                // instead of silently executing against the active window.
+                let want_win = (ctrl_target_win.is_some()
+                    || ctrl_target_win_name.is_some())
+                    && !skip_target_focus;
+                let want_pane = ctrl_target_pane.is_some() && !skip_pane_focus;
+                if want_win || want_pane {
+                    let (focus_s, focus_r) = mpsc::channel::<Result<(), String>>();
+                    let _ = tx_ctrl.send(CtrlReq::FocusTargetTemp {
+                        win: if want_win { ctrl_target_win } else { None },
+                        win_is_id: ctrl_target_win_is_id,
+                        win_name: if want_win { ctrl_target_win_name.clone() } else { None },
+                        pane: if want_pane { ctrl_target_pane } else { None },
+                        pane_is_id: ctrl_pane_is_id,
+                        resp: focus_s,
+                    });
+                    if let Ok(Err(e)) = focus_r.recv_timeout(Duration::from_secs(5)) {
+                        focus_err = Some(e);
+                    }
                 }
             }
         }
@@ -1009,28 +1074,66 @@ let mut pane_is_id = global_pane_is_id;
 // Save raw -t value for relative pane targets like :.+ or :.-
 // Falls back to global_raw_target from TARGET protocol line
 let mut raw_target: Option<String> = global_raw_target.clone();
-let target_scan_end = crate::cli::outer_target_scan_end(cmd, &args);
-let mut i = 0;
-while i < target_scan_end {
-    if args[i] == "-t" {
-        if let Some(v) = args.get(i+1) {
-            // Issue #558: drop the '=' exact-match marker (see TARGET capture).
-            raw_target = Some(crate::cli::strip_exact_match_prefix(v).to_string());
-            // Parse the -t value using parse_target for consistent handling
-            let pt = parse_target(v);
-            if pt.window.is_some() { target_win = pt.window; target_win_is_id = pt.window_is_id; target_win_name = None; }
-            else if pt.window_name.is_some() { target_win_name = pt.window_name; target_win = None; target_win_is_id = false; }
-            if pt.pane.is_some() {
-                target_pane = pt.pane;
-                pane_is_id = pt.pane_is_id;
-            }
+let set_option_command = matches!(
+    cmd,
+    "set-option" | "set" | "set-window-option" | "setw"
+);
+if set_option_command {
+    if let Some(value) = parse_set_option_args(&args).target {
+        raw_target = Some(crate::cli::strip_exact_match_prefix(value).to_string());
+        let parsed_target = parse_target(value);
+        if parsed_target.window.is_some() {
+            target_win = parsed_target.window;
+            target_win_is_id = parsed_target.window_is_id;
+            target_win_name = None;
+        } else if parsed_target.window_name.is_some() {
+            target_win_name = parsed_target.window_name;
+            target_win = None;
+            target_win_is_id = false;
         }
-        i += 2; continue;
+        if parsed_target.pane.is_some() {
+            target_pane = parsed_target.pane;
+            pane_is_id = parsed_target.pane_is_id;
+        }
     }
-    i += 1;
+} else {
+    let target_scan_end = crate::cli::outer_target_scan_end(cmd, &args);
+    let mut i = 0;
+    while i < target_scan_end {
+        if args[i] == "-t" {
+            if let Some(v) = args.get(i+1) {
+            // Issue #558: drop the '=' exact-match marker (see TARGET capture).
+                raw_target = Some(crate::cli::strip_exact_match_prefix(v).to_string());
+                // Parse the -t value using parse_target for consistent handling
+                let pt = parse_target(v);
+                if pt.window.is_some() { target_win = pt.window; target_win_is_id = pt.window_is_id; target_win_name = None; }
+                else if pt.window_name.is_some() { target_win_name = pt.window_name; target_win = None; target_win_is_id = false; }
+                if pt.pane.is_some() {
+                    target_pane = pt.pane;
+                    pane_is_id = pt.pane_is_id;
+                }
+            }
+            i += 2; continue;
+        }
+        i += 1;
+    }
 }
-// Remove this command's target while retaining targets in deferred commands.
-let args = without_outer_target(cmd, &args);
+let args = if set_option_command {
+    args
+} else {
+    without_outer_target(cmd, &args)
+};
+if set_option_command {
+    let parsed_set = parse_set_option_args(&args);
+    let window_command = matches!(cmd, "set-window-option" | "setw");
+    if let Err(error) = parsed_set.validate(window_command) {
+        let _ = writeln!(write_stream, "ERROR: {}", error);
+        let _ = write_stream.flush();
+        if !persistent { break; }
+        line.clear();
+        continue;
+    }
+}
 // tmux parity (#592): `select-pane -T`/`-P` is a title/style-only
 // operation — tmux's cmd-select-pane.c sets the title and returns
 // before any activation. Classify it as a NON-focus command so it takes
@@ -1494,15 +1597,18 @@ match cmd {
         if !persistent { break; }
     }
     "window-dump" => {
-        // Issue #257: return full styled `LayoutJson` (with rows_v2 cell
-        // runs, titles, sizes) for a specific window id. The client uses
-        // this for cross-session previews so every pane is rendered with
-        // its own content via the same code path as the main viewport.
-        // Usage: window-dump <window_id>
+        // Return a fully styled LayoutJson, or the layout plus preview styles
+        // and focus metadata when `state` is requested.
+        // Usage: window-dump <window_id> [state]
         let wid: Option<usize> = args.get(0).and_then(|a| a.trim_start_matches('@').parse::<usize>().ok());
         if let Some(wid) = wid {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::WindowDump(wid, rtx));
+            let format = if args.get(1) == Some(&"state") {
+                WindowDumpFormat::PreviewState
+            } else {
+                WindowDumpFormat::Layout
+            };
+            let _ = tx.send(CtrlReq::WindowDump(wid, format, rtx));
             if let Ok(text) = rrx.recv() {
                 let _ = write!(write_stream, "{}\n", text);
                 let _ = write_stream.flush();
@@ -2476,40 +2582,24 @@ match cmd {
         // so a dash-leading VALUE is data, never a flag: `set @k -u` must
         // store the literal "-u", not route the command to the unset path
         // (that was a silent rc-0 key deletion). Combined tokens like -ga,
-        // -gu, -gq still work in the flag region. -t and its value never
-        // reach this match (stripped by the generic -t filter above).
+        // -gu, and -gt still work; the shared parser separates any -t target
+        // from the option operands.
         //
         // -U is an unset alias (tmux parity, #553). It was only recognized
         // CLIENT-side, so `set -U @x V` cleared the CLI's empty-value guard,
         // arrived here unrecognized, and fell through to the plain SET path:
         // the option was written where the caller asked for an unset, rc 0.
-        let mut flag_chars = String::new();
-        let mut non_flag_args: Vec<&str> = Vec::new();
-        {
-            let mut i = 0;
-            while i < args.len() {
-                let a = args[i];
-                if non_flag_args.is_empty() {
-                    if a == "--" {
-                        non_flag_args.extend(args[i + 1..].iter().copied());
-                        break;
-                    }
-                    if a.starts_with('-') && a.len() > 1
-                        && a.chars().skip(1).all(|c| c.is_ascii_alphabetic())
-                    {
-                        flag_chars.push_str(&a[1..]);
-                        i += 1;
-                        continue;
-                    }
-                }
-                non_flag_args.push(a);
-                i += 1;
-            }
-        }
+        let crate::cli::ParsedSetOptionArgs {
+            flag_chars,
+            positionals: non_flag_args,
+            ..
+        } = parse_set_option_args(&args);
         let has_u = flag_chars.contains('u') || flag_chars.contains('U');
         let has_a = flag_chars.contains('a');
         let has_q = flag_chars.contains('q');
         let has_o = flag_chars.contains('o');
+        // `-F` expands the value as a format before it is stored (tmux parity).
+        let has_f = flag_chars.contains('F');
         // -s is the server scope flag (#618). psmux runs one server per session
         // and keeps a single option store, so -s selects the same store as -g;
         // it is NOT genuine cross-session server-option storage, it just puts
@@ -2523,22 +2613,22 @@ match cmd {
                 .map(|s| s.trim_matches('"').to_string())
                 .unwrap_or_default();
             let reply = if has_u {
-                match non_flag_args.first() {
-                    Some(option) => {
-                        let (rtx, rrx) = mpsc::channel::<String>();
-                        let _ = tx.send(CtrlReq::SetPaneOption(raw_target, option.to_string(), String::new(), rtx));
-                        rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default()
-                    }
-                    None => "ERROR: set-option -pu: option name required".to_string(),
-                }
-            } else if non_flag_args.len() >= 2 {
+                let option = non_flag_args[0];
+                let (rtx, rrx) = mpsc::channel::<String>();
+                let _ = tx.send(CtrlReq::SetPaneOption(
+                    raw_target,
+                    option.to_string(),
+                    String::new(),
+                    rtx,
+                ));
+                rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default()
+            } else {
                 let option = non_flag_args[0].to_string();
                 let value = non_flag_args[1..].join(" ").trim_matches('"').to_string();
+                let value = expand_set_option_value(&tx, has_f, value);
                 let (rtx, rrx) = mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::SetPaneOption(raw_target, option, value, rtx));
                 rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default()
-            } else {
-                "ERROR: set-option -p: option and value required".to_string()
             };
             if !reply.is_empty() {
                 let _ = write!(write_stream, "{}\n", reply);
@@ -2555,6 +2645,7 @@ match cmd {
         } else if non_flag_args.len() >= 2 {
             let option = non_flag_args[0].to_string();
             let value = non_flag_args[1..].join(" ");
+            let value = expand_set_option_value(&tx, has_f, value);
             if option == "window-size" && !global {
                 let _ = tx.send(CtrlReq::SetWindowSize(Some(value)));
             } else if has_a {
@@ -4250,32 +4341,31 @@ fn dispatch_control_command(
             true
         }
         "set-option" | "set" | "set-window-option" | "setw" => {
-            // Support combined flag tokens like -ga, -gu, -gq (tmux compat)
-            let combined_has_set2 = |ch: char| -> bool {
-                args.iter().any(|a| {
-                    if *a == format!("-{}", ch) { return true; }
-                    a.starts_with('-') && a.len() > 2 && a.chars().skip(1).all(|c| c.is_ascii_alphabetic()) && a.contains(ch)
-                })
-            };
-            let quiet = combined_has_set2('q');
+            let parsed_set = parse_set_option_args(args);
+            let window_command = matches!(cmd, "set-window-option" | "setw");
+            if let Err(error) = parsed_set.validate(window_command) {
+                let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", error));
+                return true;
+            }
+            let crate::cli::ParsedSetOptionArgs {
+                flag_chars,
+                positionals: positional,
+                ..
+            } = parsed_set;
+            let quiet = flag_chars.contains('q');
             // -U is an unset alias (tmux parity, #553) — same fix as the
             // one-shot handler above.
-            let unset = combined_has_set2('u') || combined_has_set2('U');
-            let append = combined_has_set2('a');
-            // -s (server scope, #618) resolves to the same single option store
-            // as -g here; see the one-shot handler above.
-            let global = combined_has_set2('g') || combined_has_set2('s');
-            let only_if_unset = combined_has_set2('o');
+            let unset = flag_chars.contains('u') || flag_chars.contains('U');
+            let append = flag_chars.contains('a');
+            // -s resolves to the same single option store as -g.
+            let global = flag_chars.contains('g') || flag_chars.contains('s');
+            let only_if_unset = flag_chars.contains('o');
             // `-p` is a bare pane-scope flag (#580), like `-w`: it never
             // consumes the next argument. Only -t carries a value here.
-            let pane_scope2 = combined_has_set2('p');
-            let t_vals2: std::collections::HashSet<&str> = args.windows(2)
-                .filter(|w| w[0] == "-t")
-                .map(|w| w[1]).collect();
-            let positional: Vec<&str> = args.iter()
-                .filter(|a| (!a.starts_with('-') || a.starts_with('@')) && !t_vals2.contains(*a))
-                .copied().collect();
-            if pane_scope2 {
+            let pane_scope = flag_chars.contains('p');
+            // `-F` expands the value as a format before it is stored.
+            let format_expand = flag_chars.contains('F');
+            if pane_scope {
                 let raw = extract_flag_value(&args, "-t")
                     .map(|s| s.trim_matches('"').to_string())
                     .unwrap_or_default();
@@ -4284,6 +4374,7 @@ fn dispatch_control_command(
                     let _ = tx.send(CtrlReq::SetPaneOption(raw, positional[0].to_string(), String::new(), rtx));
                 } else if positional.len() >= 2 {
                     let value = positional[1..].join(" ").trim_matches('"').to_string();
+                    let value = expand_set_option_value(tx, format_expand, value);
                     let _ = tx.send(CtrlReq::SetPaneOption(raw, positional[0].to_string(), value, rtx));
                 } else {
                     let _ = resp_tx.send("ERROR: set-option -p: option and value required".to_string());
@@ -4301,7 +4392,8 @@ fn dispatch_control_command(
                 }
             } else if positional.len() >= 2 {
                 let key = positional[0].to_string();
-                let val = positional[1].trim_matches('"').to_string();
+                let val = positional[1..].join(" ").trim_matches('"').to_string();
+                let val = expand_set_option_value(tx, format_expand, val);
                 if key == "window-size" && !global {
                     let _ = tx.send(CtrlReq::SetWindowSize(Some(val)));
                 } else if append {
@@ -4992,3 +5084,11 @@ mod tests_send_keys_literal_byte;
 #[cfg(test)]
 #[path = "../../tests-rs/test_refresh_client_flags.rs"]
 mod tests_refresh_client_flags;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_set_option_control.rs"]
+mod tests_set_option_control;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_pane_border_indicator_control.rs"]
+mod tests_pane_border_indicator_control;

@@ -1278,13 +1278,36 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                         }
                     }
                     KeyCode::Enter => {
-                        if let Mode::CustomizeMode { ref mut editing, ref options, selected, ref edit_buffer, .. } = app.mode {
-                            let name = options[selected].0.clone();
-                            let value = edit_buffer.clone();
-                            *editing = false;
-                            crate::server::options::apply_set_option(app, &name, &value, true);
-                            if let Mode::CustomizeMode { ref mut options, selected, .. } = app.mode {
-                                options[selected].1 = value;
+                        let pending = match &app.mode {
+                            Mode::CustomizeMode { options, selected, edit_buffer, .. } => {
+                                Some((options[*selected].0.clone(), edit_buffer.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some((name, value)) = pending {
+                            match crate::server::options::apply_set_option(
+                                app, &name, &value, true,
+                            ) {
+                                Ok(()) => {
+                                    app.user_set_options.insert(name.clone());
+                                    if let Mode::CustomizeMode {
+                                        ref mut options,
+                                        selected,
+                                        ref mut editing,
+                                        ..
+                                    } = app.mode
+                                    {
+                                        options[selected].1 = value;
+                                        *editing = false;
+                                    }
+                                }
+                                Err(error) => {
+                                    app.status_message = Some((
+                                        format!("set-option: {}", error),
+                                        Instant::now(),
+                                        None,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1362,12 +1385,25 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                         }
                     }
                     KeyCode::Char('d') => {
-                        if let Mode::CustomizeMode { ref mut options, selected, .. } = app.mode {
-                            if let Some(def) = crate::server::option_catalog::default_for(&options[selected].0) {
-                                let name = options[selected].0.clone();
-                                let value = def.to_string();
-                                options[selected].1 = value.clone();
-                                crate::server::options::apply_set_option(app, &name, &value, true);
+                        let pending = match &app.mode {
+                            Mode::CustomizeMode { options, selected, .. } => {
+                                crate::server::option_catalog::default_for(
+                                    &options[*selected].0,
+                                )
+                                .map(|_| options[*selected].0.clone())
+                            }
+                            _ => None,
+                        };
+                        if let Some(name) = pending {
+                            crate::server::options::reset_option_to_default(app, &name);
+                            let value = crate::server::options::get_option_value(app, &name);
+                            if let Mode::CustomizeMode {
+                                ref mut options,
+                                selected,
+                                ..
+                            } = app.mode
+                            {
+                                options[selected].1 = value;
                             }
                         }
                     }
