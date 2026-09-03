@@ -3490,3 +3490,7 @@ mod tests_issue596_copy_scroll_keys;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue610_ctrl_backspace.rs"]
 mod tests_issue610_ctrl_backspace;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_issue588_win32_input_escape.rs"]
+mod tests_issue588_win32_input_escape;
