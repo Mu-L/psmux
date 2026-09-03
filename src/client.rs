@@ -7566,3 +7566,7 @@ mod test_issue619_window_style_fallback;
 #[cfg(test)]
 #[path = "../tests-rs/test_pane_border_backgrounds.rs"]
 mod test_pane_border_backgrounds;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue626_border_attrs_default.rs"]
+mod test_issue626_border_attrs_default;

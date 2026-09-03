@@ -33,15 +33,23 @@ fn leaf(id: usize, active: bool) -> LayoutJson {
     }
 }
 
+// Renamed and retargeted for #626. The original assertion (attributes are
+// dropped) enshrined the divergence this test file introduced in #624: the
+// colour completion was rebuilding the style from scratch, which happened to
+// erase `bold`, the underline modifiers and `us=` along with the unset
+// colours. tmux merges the attribute half of a border style instead of
+// replacing it (style.c:459, `gc->attr |= sy->gc.attr;`), so only the colour
+// half stays absolute here.
 #[test]
-fn pane_border_colors_keep_colors_and_ignore_attributes() {
+fn pane_border_colors_keep_colors_and_attributes() {
     let style = parse_pane_border_colors(
         Some("fg=yellow,bg=blue,bold,underscore"),
         Style::default().fg(Color::Green),
     );
     assert_eq!(style.fg, Some(Color::Yellow));
     assert_eq!(style.bg, Some(Color::Blue));
-    assert!(style.add_modifier.is_empty());
+    assert!(style.add_modifier.contains(Modifier::BOLD));
+    assert!(style.add_modifier.contains(Modifier::UNDERLINED));
     assert!(style.sub_modifier.is_empty());
 
     let bg_only = parse_pane_border_colors(

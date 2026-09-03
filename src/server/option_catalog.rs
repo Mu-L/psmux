@@ -98,16 +98,17 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "window-status-bell-style", scope: "window", option_type: "string", default: "reverse", description: "Window style on bell alert" },
     OptionDef { name: "window-status-last-style", scope: "window", option_type: "string", default: "default", description: "Previously active window style" },
     // ── Pane options ──
-    // The default here is the value `set -u` restores, so it has to be the
-    // value a freshly started server holds, not the word tmux prints for a
-    // style nobody overrode. tmux keeps a real style in options-table.c:1605
-    // (`fg=themelightgrey`) so unset and startup always agree; psmux stores the
-    // inactive border unset and lets the renderer supply its built in grey, so
-    // the restore target is the empty string. Storing the literal "default"
-    // parsed to an empty style and pinned the border to the terminal default
-    // foreground, which is not what a fresh session draws (#626).
-    OptionDef { name: "pane-border-style", scope: "pane", option_type: "string", default: "", description: "Inactive pane border style" },
-    // Matches AppState::default(), the same startup/unset agreement as above.
+    // The default here is what `set -u` and customize-mode restore, so it has
+    // to be a style that renders like a fresh server, not the word tmux prints
+    // for a style nobody overrode. tmux gives the option a real default style
+    // (options-table.c:1605, `fg=themelightgrey`) precisely so unset and
+    // startup always agree; `fg=brightblack` is the psmux spelling of the
+    // built in grey the client falls back to (client::pane_border_default_style).
+    // The old literal "default" parsed to an EMPTY style, which the renderer
+    // pins to the terminal default foreground, so unsetting the option left the
+    // inactive border colourless while a fresh session drew it grey (#626).
+    OptionDef { name: "pane-border-style", scope: "pane", option_type: "string", default: "fg=brightblack", description: "Inactive pane border style" },
+    // Already agreed with AppState::default() and with the renderer fallback.
     OptionDef { name: "pane-active-border-style", scope: "pane", option_type: "string", default: "fg=green", description: "Active pane border style" },
     OptionDef { name: "pane-border-lines", scope: "pane", option_type: "choice", default: "single", description: "Pane border line style (single/double/heavy/simple/number/spaces/none)" },
     // See the choose-tree-preview note above (#619).
