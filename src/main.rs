@@ -72,7 +72,7 @@ use crate::client::run_remote;
 /// across all four spellings, and refusing -s on just the setw alias would be a
 /// second, differently shaped hard failure for the tools this change exists to
 /// unbreak (#618).
-pub(crate) const SET_OPTION_CLI_FLAGS: &str = "agopqstuUw";
+pub(crate) const SET_OPTION_CLI_FLAGS: &str = "aFgopqstuUw";
 
 /// Boolean flags the CLI accepts for show-options and friends. tmux 3.4 uses
 /// "AgHpqst:vw" (cmd-show-options.c); psmux has no -H (hooks-only listing).

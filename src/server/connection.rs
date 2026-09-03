@@ -23,6 +23,32 @@ fn clear_inherit(s: &TcpStream) {
 }
 #[cfg(not(windows))]
 fn clear_inherit(_s: &TcpStream) {}
+
+/// Expand a `set-option -F` value as a format before it is stored.
+///
+/// tmux's set-option takes `-F` and runs the value through format_expand before
+/// writing it, and psmux's config-file parser has always done the same. The
+/// CLI and TCP paths could not, because format expansion needs the AppState
+/// that lives on the server thread, so `-F` was rejected outright. Both
+/// set-option handlers now route their value through here, which asks the
+/// server thread to expand it with the same CtrlReq the bind-key path uses.
+/// Without `-F`, or for an empty value, this is the identity.
+fn expand_set_option_value(
+    tx: &mpsc::Sender<CtrlReq>,
+    format_expand: bool,
+    value: String,
+) -> String {
+    if !format_expand || value.is_empty() {
+        return value;
+    }
+    let (rtx, rrx) = mpsc::channel::<String>();
+    if tx.send(CtrlReq::ExpandFormat(value.clone(), rtx)).is_err() {
+        return value;
+    }
+    // On timeout keep the unexpanded text: storing the literal format is no
+    // worse than dropping the assignment.
+    rrx.recv_timeout(Duration::from_secs(5)).unwrap_or(value)
+}
 use crate::cli::{extract_flag_value, parse_set_option_args, parse_target};
 use crate::util::base64_decode;
 use crate::control;
@@ -2572,6 +2598,8 @@ match cmd {
         let has_a = flag_chars.contains('a');
         let has_q = flag_chars.contains('q');
         let has_o = flag_chars.contains('o');
+        // `-F` expands the value as a format before it is stored (tmux parity).
+        let has_f = flag_chars.contains('F');
         // -s is the server scope flag (#618). psmux runs one server per session
         // and keeps a single option store, so -s selects the same store as -g;
         // it is NOT genuine cross-session server-option storage, it just puts
@@ -2597,6 +2625,7 @@ match cmd {
             } else {
                 let option = non_flag_args[0].to_string();
                 let value = non_flag_args[1..].join(" ").trim_matches('"').to_string();
+                let value = expand_set_option_value(&tx, has_f, value);
                 let (rtx, rrx) = mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::SetPaneOption(raw_target, option, value, rtx));
                 rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default()
@@ -2616,6 +2645,7 @@ match cmd {
         } else if non_flag_args.len() >= 2 {
             let option = non_flag_args[0].to_string();
             let value = non_flag_args[1..].join(" ");
+            let value = expand_set_option_value(&tx, has_f, value);
             if option == "window-size" && !global {
                 let _ = tx.send(CtrlReq::SetWindowSize(Some(value)));
             } else if has_a {
@@ -4333,6 +4363,8 @@ fn dispatch_control_command(
             // `-p` is a bare pane-scope flag (#580), like `-w`: it never
             // consumes the next argument. Only -t carries a value here.
             let pane_scope = flag_chars.contains('p');
+            // `-F` expands the value as a format before it is stored.
+            let format_expand = flag_chars.contains('F');
             if pane_scope {
                 let raw = extract_flag_value(&args, "-t")
                     .map(|s| s.trim_matches('"').to_string())
@@ -4342,6 +4374,7 @@ fn dispatch_control_command(
                     let _ = tx.send(CtrlReq::SetPaneOption(raw, positional[0].to_string(), String::new(), rtx));
                 } else if positional.len() >= 2 {
                     let value = positional[1..].join(" ").trim_matches('"').to_string();
+                    let value = expand_set_option_value(tx, format_expand, value);
                     let _ = tx.send(CtrlReq::SetPaneOption(raw, positional[0].to_string(), value, rtx));
                 } else {
                     let _ = resp_tx.send("ERROR: set-option -p: option and value required".to_string());
@@ -4360,6 +4393,7 @@ fn dispatch_control_command(
             } else if positional.len() >= 2 {
                 let key = positional[0].to_string();
                 let val = positional[1..].join(" ").trim_matches('"').to_string();
+                let val = expand_set_option_value(tx, format_expand, val);
                 if key == "window-size" && !global {
                     let _ = tx.send(CtrlReq::SetWindowSize(Some(val)));
                 } else if append {

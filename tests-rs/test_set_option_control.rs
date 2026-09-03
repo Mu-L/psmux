@@ -1,5 +1,44 @@
 use super::*;
 
+/// Run a set-option through the control-mode dispatcher with a stand-in for the
+/// server thread, answering `ExpandFormat` the way `run_server` does so `-F`
+/// can be exercised end to end. Returns the option name and the value that
+/// actually reached the option store.
+fn dispatched_assignment(args: &[&str], expansion: &str) -> (String, String) {
+    let (request_tx, request_rx) = mpsc::channel();
+    let (response_tx, _response_rx) = mpsc::channel();
+    let expansion = expansion.to_string();
+    let server = std::thread::spawn(move || {
+        let mut assignment = None;
+        while let Ok(request) = request_rx.recv_timeout(Duration::from_secs(10)) {
+            match request {
+                CtrlReq::ExpandFormat(_, resp) => {
+                    let _ = resp.send(expansion.clone());
+                }
+                CtrlReq::SetOptionQuiet(name, value, _)
+                | CtrlReq::SetOption(name, value) => {
+                    assignment = Some((name, value));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assignment
+    });
+    assert!(dispatch_control_command(
+        "set-option",
+        args,
+        &request_tx,
+        response_tx,
+        None,
+        false,
+        None,
+        0,
+    ));
+    drop(request_tx);
+    server.join().unwrap().expect("an option assignment must reach the store")
+}
+
 fn rejected_control_command(command: &str, args: &[&str]) -> String {
     let (request_tx, request_rx) = mpsc::channel();
     let (response_tx, response_rx) = mpsc::channel();
@@ -269,4 +308,71 @@ fn validation_only_numeric_options_preserve_cli_compatibility() {
             "{name} should reject malformed integers",
         );
     }
+}
+
+/// tmux's set-option accepts `-F` (its flag table is "aFgoqst:uUw") and expands
+/// the value as a format before storing it. psmux's config-file parser always
+/// did this; the CLI and TCP paths rejected the flag outright because format
+/// expansion needs the server's AppState. The value is now expanded on the
+/// server thread, so `-F` works on every route.
+#[test]
+fn dash_f_is_an_accepted_flag_on_every_route() {
+    assert!(
+        crate::SET_OPTION_CLI_FLAGS.contains('F'),
+        "set-option must accept tmux's -F",
+    );
+    assert_eq!(
+        parse_set_option_args(&["-gF", "status-right", "#{session_name}"]).validate(false),
+        Ok(()),
+    );
+}
+
+/// A `-F` value is a FORMAT, so it is validated after expansion, not before.
+/// Validating the raw `#{...}` would refuse a legitimate assignment to a
+/// choice option whose expansion is perfectly valid.
+#[test]
+fn dash_f_defers_value_validation_to_the_expansion() {
+    assert_eq!(
+        parse_set_option_args(&["-gF", "pane-border-indicators", "#{@wanted}"])
+            .validate(false),
+        Ok(()),
+    );
+    assert!(
+        parse_set_option_args(&["-g", "pane-border-indicators", "#{@wanted}"])
+            .validate(false)
+            .is_err(),
+        "without -F the literal text is the value and must still be validated",
+    );
+}
+
+#[test]
+fn dash_f_stores_the_expanded_value() {
+    let (name, value) = dispatched_assignment(
+        &["-gF", "status-right", "#{session_name}"],
+        "expanded-session",
+    );
+    assert_eq!(name, "status-right");
+    assert_eq!(value, "expanded-session");
+}
+
+#[test]
+fn without_dash_f_the_value_is_stored_verbatim() {
+    let (name, value) = dispatched_assignment(
+        &["-g", "status-right", "#{session_name}"],
+        "expanded-session",
+    );
+    assert_eq!(name, "status-right");
+    assert_eq!(
+        value, "#{session_name}",
+        "no -F means no expansion: the literal format text is the value",
+    );
+}
+
+/// `-F` on text that contains no format is the identity, and it must not turn
+/// into an empty or mangled value.
+#[test]
+fn dash_f_without_format_text_is_the_identity() {
+    let (name, value) = dispatched_assignment(&["-gF", "status-right", "plain"], "plain");
+    assert_eq!(name, "status-right");
+    assert_eq!(value, "plain");
 }

@@ -888,6 +888,14 @@ impl ParsedSetOptionArgs<'_> {
         if append {
             crate::server::option_catalog::validate_option_append(option)?;
         }
+        // `-F` means the value is a FORMAT, so what lands in the option store is
+        // the expansion, not the text typed here. tmux expands first and
+        // validates the result (cmd-set-option.c), so validating the raw
+        // `#{...}` would refuse a legitimate assignment. The server validates
+        // the expanded value in options::apply_set_option.
+        if self.flag_chars.contains('F') {
+            return Ok(());
+        }
         crate::server::option_catalog::validate_option_value(
             option,
             &self.positionals[1..].join(" "),
