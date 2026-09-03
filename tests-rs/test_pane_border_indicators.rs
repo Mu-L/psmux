@@ -85,7 +85,7 @@ fn render_layout(
             recolor_border_junctions(
                 frame.buffer_mut(),
                 &junctions,
-                active_rect,
+                indicators.highlights_active().then_some(active_rect).flatten(),
                 inactive,
                 active,
             );
@@ -183,16 +183,37 @@ fn render_float(
     terminal.backend().buffer().clone()
 }
 
+/// `off` is a genuine no-cue mode: the divider next to the active pane keeps
+/// pane-border-style, exactly like a divider that touches no active pane, and
+/// no arrows are drawn. Before this it kept pane-active-border-style across the
+/// whole divider, so turning the indicators off produced a LOUDER cue than the
+/// default colour split.
 #[test]
-fn off_mode_keeps_the_active_style_across_the_divider() {
+fn off_mode_draws_no_active_cue_across_the_divider() {
     let buffer = render("Horizontal", PaneBorderIndicators::Off, "single", 0);
     let x = 4;
     assert!(!contains_arrow(&buffer), "off mode must not draw arrows");
     for y in 0..6 {
         assert_eq!(
             buffer[(x, y)].style().bg,
+            Some(Color::Blue),
+            "off mode must keep the inactive border style at divider row {y}",
+        );
+    }
+}
+
+/// `arrows` keeps the active border style on the adjacent divider and adds the
+/// markers, so only the colour SPLIT is what `colour` and `both` add.
+#[test]
+fn arrows_mode_keeps_the_active_style_across_the_divider() {
+    let buffer = render("Horizontal", PaneBorderIndicators::Arrows, "single", 0);
+    let x = 4;
+    assert!(contains_arrow(&buffer), "arrows mode must draw arrows");
+    for y in 0..6 {
+        assert_eq!(
+            buffer[(x, y)].style().bg,
             Some(Color::Red),
-            "off mode must keep the active border style at divider row {y}",
+            "arrows mode must keep the active border style at divider row {y}",
         );
     }
 }

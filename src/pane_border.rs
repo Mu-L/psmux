@@ -43,6 +43,17 @@ impl PaneBorderIndicators {
     pub(crate) fn uses_arrows(self) -> bool {
         matches!(self, Self::Arrows | Self::Both)
     }
+
+    /// Whether the active pane is marked on its borders at all.
+    ///
+    /// `off` is a genuine no-cue mode: the separators next to the active pane
+    /// keep `pane-border-style` like every other separator, and no arrows are
+    /// drawn. `arrows` still paints the adjacent separator with
+    /// `pane-active-border-style` and adds the markers on top; `colour` and
+    /// `both` additionally split a two-pane divider between the two styles.
+    pub(crate) fn highlights_active(self) -> bool {
+        !matches!(self, Self::Off)
+    }
 }
 
 pub const INDICATORS_DEFAULT: &str = PaneBorderIndicators::Colour.as_str();

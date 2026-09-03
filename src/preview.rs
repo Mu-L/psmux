@@ -749,7 +749,10 @@ pub fn render_preview_layout(
     crate::client::recolor_border_junctions(
         f.buffer_mut(),
         &junctions,
-        active_rect,
+        border_indicators
+            .highlights_active()
+            .then_some(active_rect)
+            .flatten(),
         border_style,
         active_border_style,
     );

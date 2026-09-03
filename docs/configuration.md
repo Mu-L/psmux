@@ -207,7 +207,7 @@ Details worth knowing:
 | `pane-border-style` | Str | | Inactive border style |
 | `pane-active-border-style` | Str | `fg=green` | Active border style |
 | `pane-border-hover-style` | Str | `fg=yellow` | Border style while the mouse hovers a draggable pane border |
-| `pane-border-indicators` | Str | `colour` | Active pane cues: `off`, `colour`, `arrows`, `both`. See [Pane Border Indicators](#pane-border-indicators) |
+| `pane-border-indicators` | Str | `colour` | How the active pane is marked on its borders: `off` (no cue), `colour`, `arrows`, `both`. See [Pane Border Indicators](#pane-border-indicators) |
 | `pane-border-lines` | Str | `single` | Border glyph set: `single`, `double`, `heavy`, `simple`, `number`, `spaces`, `none`. See [Pane Border Lines](#pane-border-lines) |
 | `pane-border-format` | Str | | Pane border format string (e.g. `#{pane_index}: #{pane_title}`) |
 | `pane-border-status` | Str | | Pane border status position (`top`/`bottom`/`off`) |
@@ -293,13 +293,18 @@ set -g pane-border-lines none
 
 ### Pane Border Indicators
 
-`pane-border-indicators` controls the extra cues that identify the focused pane.
-The default `colour` mode splits a two-pane divider between the active and
-inactive border colours. `arrows` places inward-pointing markers on internal
-dividers adjacent to the active tiled pane and on the focused floating pane's
-border. `both` combines the colour and arrow cues. `off` disables both extra
-cues. `pane-active-border-style` applies to the focused pane's border in every
-mode. When a floating pane owns focus, tiled active cues are suppressed.
+`pane-border-indicators` controls how the focused pane is marked on its borders.
+
+| Value | What the borders next to the active pane look like |
+| --- | --- |
+| `off` | No active-pane cue at all. Every separator keeps `pane-border-style`, and no arrows are drawn. |
+| `colour` (default) | A two-pane divider is split between `pane-border-style` and `pane-active-border-style`. With more than two panes the separators adjacent to the active pane use `pane-active-border-style`. |
+| `arrows` | The separators adjacent to the active pane use `pane-active-border-style`, plus inward-pointing markers on those separators and on the focused floating pane's border. No colour split. |
+| `both` | The `colour` split plus the `arrows` markers. |
+
+`pane-active-border-style` therefore applies in every mode except `off`, which is
+a genuine no-cue mode. When a floating pane owns focus, the tiled active cues are
+suppressed so the highlight follows the pane that actually has focus.
 
 ```tmux
 set -g pane-border-indicators arrows

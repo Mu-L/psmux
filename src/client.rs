@@ -1751,7 +1751,8 @@ pub fn render_layout_json(
                             }
                         } else {
                             for y in area.y..area.y + area.height {
-                                let active = active_rect.map_or(false, |ar| {
+                                let active = border_indicators.highlights_active()
+                                    && active_rect.map_or(false, |ar| {
                                     y >= ar.y && y < ar.y + ar.height
                                     && (sep_x == ar.x + ar.width || sep_x + 1 == ar.x)
                                 });
@@ -1785,7 +1786,8 @@ pub fn render_layout_json(
                             }
                         } else {
                             for x in area.x..area.x + area.width {
-                                let active = active_rect.map_or(false, |ar| {
+                                let active = border_indicators.highlights_active()
+                                    && active_rect.map_or(false, |ar| {
                                     x >= ar.x && x < ar.x + ar.width
                                     && (sep_y == ar.y + ar.height || sep_y + 1 == ar.y)
                                 });
@@ -6076,7 +6078,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             recolor_border_junctions(
                 f.buffer_mut(),
                 &junctions,
-                tiled_active_rect,
+                border_indicators
+                    .highlights_active()
+                    .then_some(tiled_active_rect)
+                    .flatten(),
                 pane_border_style,
                 tiled_active_border_style,
             );
