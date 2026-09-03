@@ -62,6 +62,11 @@ $env:PSMUX_SESSION      = $null
 $env:PSMUX_PANE         = $null
 $env:TMUX               = $null
 $env:TMUX_PANE          = $null
+# Every new-session in a fresh namespace spawns a warm standby that outlives
+# kill-session, so a suite that creates namespaces per run leaks one server per
+# namespace. Nothing here depends on the warm pool (list_session_names_ns skips
+# warm bases, so they can never be counted as owners of an id).
+$env:PSMUX_NO_WARM      = '1'
 
 $rig  = Join-Path $env:TEMP ("psmux627-" + [guid]::NewGuid().ToString('N').Substring(0,8))
 $root = Join-Path $rig 'data'
@@ -299,6 +304,7 @@ try {
         'set "PSMUX_PANE="'
         'set "TMUX="'
         "set `"PSMUX_DATA_DIR=$root`""
+        'set "PSMUX_NO_WARM=1"'
         "`"$PSMUX`" -L $tuiNs -f `"$conf`" new-session -s $tuiSess -n tuiw"
     ) | Set-Content -Path $bat -Encoding ascii
     $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$bat`"" -PassThru
