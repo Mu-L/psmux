@@ -1776,16 +1776,36 @@ pub mod mouse_inject {
         // (measured: at-inject two live wsl.exe, console = {server, shell}
         // only, fg_is_shell=true, after = zero).  When the resolution came
         // from that childless fallback — exactly the attribution-blind state
-        // — treat any bridge alive anywhere on the system as potentially
+        // — treat a bridge that STARTED INSIDE THAT WINDOW as potentially
         // ours and skip the broadcast.  Cost when it misfires: a legacy
         // cooked prompt loses the explicit line-cancel signal while some
         // unrelated WSL runs elsewhere; the raw 0x03 still reaches the pane.
-        if crate::platform::process_info::foreground_fell_back_to_root(child_pid)
-            && crate::platform::process_info::any_vt_bridge_running()
-        {
-            log(&format!("childless foreground fallback with a live system bridge (pid={}): deliver raw 0x03 only, skip CTRL_C_EVENT", child_pid));
-            strip_processed_input(child_pid, &log);
-            return false;
+        //
+        // The age bound is load-bearing, not an optimization.  Unbounded
+        // ("any bridge alive anywhere on the system"), this guard also fired
+        // for a `wsl.exe` the user had left running in an unrelated window
+        // for days: an ordinary idle pane is childless too — a pwsh blocked
+        // in a builtin such as `Start-Sleep` has no child process — so
+        // `foreground_fell_back_to_root` is true for it, and the guard then
+        // stripped ENABLE_PROCESSED_INPUT (measured mode 0x01F7) and
+        // delivered only the raw 0x03, which pwsh ignores mid-cmdlet, while
+        // skipping the CTRL_C_EVENT that would have cancelled it.  Ctrl+C
+        // silently stopped working in every shell pane on any machine with
+        // WSL open.  The blindness this guard compensates for lasts only as
+        // long as the cold boot: once the bridge is a real child on a real
+        // console the descendant BFS and the console-membership check see it,
+        // so bounding by age loses no protection.
+        if crate::platform::process_info::foreground_fell_back_to_root(child_pid) {
+            if let Some((bridge_pid, age)) =
+                crate::platform::process_info::recently_started_vt_bridge(
+                    crate::platform::process_info::BRIDGE_BOOT_WINDOW,
+                )
+            {
+                log(&format!("childless foreground fallback with a just-started system bridge (pid={} bridge={} age={}ms): deliver raw 0x03 only, skip CTRL_C_EVENT", child_pid, bridge_pid, age.as_millis()));
+                strip_processed_input(child_pid, &log);
+                return false;
+            }
+            log(&format!("childless foreground fallback, no bridge started within {}s: CTRL_C_EVENT broadcast allowed (pid={})", crate::platform::process_info::BRIDGE_BOOT_WINDOW.as_secs(), child_pid));
         }
 
         let _console_guard = portable_pty::console_state_lock();
@@ -3711,15 +3731,143 @@ pub mod process_info {
     /// fire on every bare-prompt Ctrl+C and (with the PROCESSED_INPUT strip)
     /// broke cancelling an in-process cmdlet like `Start-Sleep`
     /// (measured: test_issue231's inter-test C-c stopped working).
+    ///
+    /// Excluding the service is NOT sufficient on its own — see
+    /// `recently_started_vt_bridge`.  A real `wsl.exe`/`ssh.exe` the user
+    /// left running in some other window is also alive "anywhere on the
+    /// system", and counting it broke exactly the same `Start-Sleep` cancel
+    /// for every pane on the machine.  The Ctrl+C boot-window guard therefore
+    /// uses the age-bounded variant; this unbounded one is kept for tests and
+    /// for callers that genuinely want "is any bridge alive at all".
     pub fn any_vt_bridge_running() -> bool {
         let entries = match process_table(std::time::Duration::ZERO) {
             Some(t) => t,
             None => return false,
         };
-        entries.iter().any(|(_, _, name)| {
-            let stem = name.strip_suffix(".exe").unwrap_or(name.as_str());
-            stem != "wslservice" && is_vt_bridge_exe(name)
+        entries.iter().any(|(_, _, name)| is_system_wide_bridge_candidate(name))
+    }
+
+    /// Name test shared by the system-wide bridge checks: a VT bridge CLIENT,
+    /// excluding the resident `wslservice.exe` (see `any_vt_bridge_running`).
+    fn is_system_wide_bridge_candidate(name: &str) -> bool {
+        let stem = name.strip_suffix(".exe").unwrap_or(name);
+        stem != "wslservice" && is_vt_bridge_exe(name)
+    }
+
+    /// How recently a bridge must have started to be treated as "possibly the
+    /// one this pane is booting" by the Ctrl+C boot-window guard.
+    ///
+    /// The reproduced #579 window is ~1-2s of cold WSL boot (the injected
+    /// Ctrl+C in the regression test lands 900ms after the launch).  10s is a
+    /// deliberately generous multiple of that so a slow cold boot on a loaded
+    /// machine is still covered, while being far below the lifetime of the
+    /// long-lived bridges that caused the false positive (a `wsl.exe` a user
+    /// left open is minutes to days old).
+    pub const BRIDGE_BOOT_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Current system time in FILETIME ticks (100ns since 1601).
+    fn now_filetime_ticks() -> u64 {
+        #[allow(non_snake_case)]
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct FILETIME { dwLowDateTime: u32, dwHighDateTime: u32 }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetSystemTimeAsFileTime(lp: *mut FILETIME);
+        }
+        unsafe {
+            let mut ft = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            GetSystemTimeAsFileTime(&mut ft);
+            ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64)
+        }
+    }
+
+    /// Wall-clock age of a live process, or `None` when its creation time
+    /// cannot be read (already gone, or a security context we cannot open
+    /// even with `PROCESS_QUERY_LIMITED_INFORMATION`).
+    pub fn process_age(pid: u32) -> Option<std::time::Duration> {
+        #[allow(non_snake_case)]
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct FILETIME { dwLowDateTime: u32, dwHighDateTime: u32 }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetProcessTimes(
+                h_process: isize,
+                lp_creation: *mut FILETIME,
+                lp_exit: *mut FILETIME,
+                lp_kernel: *mut FILETIME,
+                lp_user: *mut FILETIME,
+            ) -> i32;
+        }
+        let created = unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h == 0 || h == INVALID_HANDLE {
+                return None;
+            }
+            let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let mut exit = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let ok = GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user);
+            CloseHandle(h);
+            if ok == 0 {
+                return None;
+            }
+            ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64)
+        };
+        // A clock step backwards (NTP correction) can make `now` precede the
+        // creation stamp; saturate to zero rather than wrap to ~584 years.
+        let ticks = now_filetime_ticks().saturating_sub(created);
+        Some(std::time::Duration::from_nanos(ticks.saturating_mul(100)))
+    }
+
+    /// The PID of a VT bridge CLIENT (`wsl.exe`, `ssh.exe`, `wslhost.exe`,
+    /// ...) that started within `max_age`, if one is alive anywhere on the
+    /// system.  The age-bounded replacement for `any_vt_bridge_running` on
+    /// the Ctrl+C boot-window guard (issue #579).
+    ///
+    /// Why the bound is the right discriminator: the guard exists ONLY for
+    /// the ~1-2s cold-boot window in which a bridge the pane just launched is
+    /// parented by `wslservice` and attached to no console, so every
+    /// pane-scoped attribution (leaf walk, descendant BFS, console
+    /// membership) is structurally blind to it.  A bridge that has been alive
+    /// for longer than that is either already visible to those precise checks
+    /// or is nothing to do with this pane at all — and treating it as ours
+    /// suppressed the CTRL_C_EVENT broadcast for every ordinary shell pane on
+    /// the machine, which is what broke `send-keys C-c` against an in-process
+    /// cmdlet such as `Start-Sleep` whenever ANY unrelated `wsl.exe` was
+    /// alive (measured: mode 0x01F7 stripped, raw 0x03 ignored by pwsh).
+    ///
+    /// A candidate whose creation time cannot be read is NOT counted: the
+    /// boot-window bridge the guard defends was launched by the pane's own
+    /// shell and therefore runs under our token, where
+    /// `PROCESS_QUERY_LIMITED_INFORMATION` always succeeds.  An unopenable
+    /// process (another user, higher integrity) is by construction not ours.
+    pub fn recently_started_vt_bridge(max_age: std::time::Duration) -> Option<(u32, std::time::Duration)> {
+        let entries = process_table(std::time::Duration::ZERO)?;
+        entries.iter().find_map(|(pid, _, name)| {
+            let age = process_age(*pid);
+            if bridge_is_within_boot_window(name, age, max_age) {
+                Some((*pid, age.unwrap_or_default()))
+            } else {
+                None
+            }
         })
+    }
+
+    /// The pure decision `recently_started_vt_bridge` applies per candidate,
+    /// split out so the fresh-vs-stale discrimination is unit testable
+    /// without needing a real `wsl.exe` on the machine running the suite.
+    ///
+    /// `age == None` means the creation time could not be read, which is NOT
+    /// counted — see `recently_started_vt_bridge`.
+    fn bridge_is_within_boot_window(
+        name: &str,
+        age: Option<std::time::Duration>,
+        max_age: std::time::Duration,
+    ) -> bool {
+        is_system_wide_bridge_candidate(name) && matches!(age, Some(a) if a <= max_age)
     }
 
     /// True when the console holding `console_pids` contains a plain native
@@ -3870,6 +4018,10 @@ pub mod process_info {
     #[cfg(test)]
     #[path = "../../../tests-rs/test_issue579_any_vt_bridge.rs"]
     mod tests_issue579_any_vt_bridge;
+
+    #[cfg(test)]
+    #[path = "../../../tests-rs/test_ctrlc_bridge_recency.rs"]
+    mod tests_ctrlc_bridge_recency;
 }
 
 #[cfg(not(windows))]
