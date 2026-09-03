@@ -295,5 +295,8 @@ pub fn create_proxy_pane(
         // Proxy panes mirror a remote pane's ConPTY; respawning a local shell
         // here would be wrong, so they are never auto-healed.
         spawned_at: None,
+        // The command lives on the owning server's pane; a proxy reports no
+        // `#{pane_start_command}` of its own (#580).
+        start_command: String::new(),
     })
 }

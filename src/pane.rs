@@ -205,6 +205,90 @@ fn command_text_for_naming(cmd: &str) -> Option<&str> {
     }
 }
 
+/// Quote one command word the way tmux's `args_escape` (arguments.c) picks
+/// quotes, so `#{pane_start_command}` reads like tmux's: a word carrying a
+/// space or a shell metacharacter comes back quoted, a plain one bare.
+///
+/// tmux also runs the word through `utf8_stravis(VIS_OCTAL|VIS_CSTYLE|...)`,
+/// which turns every `\` into `\\`. That is deliberate on Unix and actively
+/// wrong here — a Windows command is full of literal backslashes
+/// (`C:\tools\hud.ps1`), and doubling them would corrupt the very string a
+/// tool matches on. So psmux keeps the quote SELECTION and drops the
+/// backslash escaping.
+fn quote_start_command_word(word: &str) -> String {
+    // tmux: `static const char dquoted[] = " #';${}%";` then
+    // `static const char squoted[] = " \"";`
+    const DQUOTED: &[char] = &[' ', '\t', '#', '\'', ';', '$', '{', '}', '%'];
+    const SQUOTED: &[char] = &[' ', '\t', '"'];
+    if word.is_empty() {
+        return "''".to_string();
+    }
+    if word.contains(DQUOTED) {
+        format!("\"{}\"", word)
+    } else if word.contains(SQUOTED) {
+        format!("'{}'", word)
+    } else {
+        word.to_string()
+    }
+}
+
+/// What to STORE in `Pane::start_command` for a pane about to be spawned with
+/// `command` (issue #580).
+///
+/// tmux stores the spawn argv on the pane (`window_pane.argc/argv`) and
+/// stringifies it only on demand (format.c `format_cb_start_command` ->
+/// `cmd_stringify_argv`); the stored copy is the one a later bare respawn
+/// re-executes. psmux mirrors that by storing the operand VERBATIM, exactly as
+/// `build_command` would receive it (the `-- prog args` argv form keeps its
+/// `--` marker), so the value round-trips back through `build_command` on a
+/// respawn. Rendering for `#{pane_start_command}` happens in
+/// `start_command_display`.
+///
+/// It is captured BEFORE `build_command` rewrites anything, so none of psmux's
+/// spawn machinery (the `cat` blocker substitution, the shell wrapper, the
+/// warm pool's `powershell-pane.cmd`) can leak into the variable.
+pub fn start_command_raw(command: Option<&str>) -> String {
+    let Some(cmd) = command else { return String::new() };
+    let trimmed = cmd.trim();
+    if trimmed == "--" { String::new() } else { trimmed.to_string() }
+}
+
+/// `start_command_raw` for the raw-argv window path (`create_window_raw`),
+/// where the tokens arrive already split. Stored in the `--` form so a later
+/// respawn re-execs the same argv rather than re-parsing it as a shell string.
+pub fn start_command_raw_argv(raw_args: &[String]) -> String {
+    if raw_args.is_empty() {
+        return String::new();
+    }
+    let quoted: Vec<String> = raw_args.iter().map(|a| quote_start_command_word(a)).collect();
+    format!("-- {}", quoted.join(" "))
+}
+
+/// Render a stored `Pane::start_command` for `#{pane_start_command}`.
+///
+/// tmux's `cmd_stringify_argv` returns `""` for an empty argv (so a
+/// default-shell pane reports EMPTY, never the shell path) and otherwise joins
+/// the escaped argv words. Matching that here:
+///
+/// * `""` (default shell, warm-pool claim included) -> `""`
+/// * `-- prog args` -> `prog args` (the token list, already per-token quoted)
+/// * any other string -> that string as ONE word, quoted if it needs it
+pub fn start_command_display(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(rest) = trimmed.strip_prefix("--") {
+        if rest.is_empty() {
+            return String::new();
+        }
+        if rest.starts_with(char::is_whitespace) {
+            return rest.trim().to_string();
+        }
+    }
+    quote_start_command_word(trimmed)
+}
+
 /// Determine the default shell name for window naming (like tmux shows "bash", "zsh").
 fn default_shell_name(command: Option<&str>, configured_shell: Option<&str>) -> String {
     let command = command.and_then(command_text_for_naming);
@@ -458,7 +542,12 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
             }
             let epoch = std::time::Instant::now() - Duration::from_secs(2);
             let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
-            let mut pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
+            let mut pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()), start_command: String::new() };
+            // A warm-pool spare is only claimed for a DEFAULT-SHELL pane
+            // (`command.is_none()` gates this whole branch), so its
+            // `#{pane_start_command}` is the empty string — the wrapper the
+            // pool actually spawned (`powershell-pane.cmd`) is an
+            // implementation detail and must never surface (#580).
             // Honour `-c <dir>`: silently re-home the transplanted warm shell.
             // The snippet has to be written in the dialect of the shell the
             // warm pane is actually running, which is whatever `default-shell`
@@ -554,7 +643,7 @@ pub fn create_window_with_env(pty_system: &dyn portable_pty::PtySystem, app: &mu
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let pane_id = app.next_pane_id;
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command) };
     app.next_pane_id += 1;
     let win_name = command.map(|c| default_shell_name(Some(c), None)).unwrap_or_else(|| default_shell_name(None, configured_shell));
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
@@ -690,7 +779,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let raw_pane_id = app.next_pane_id;
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) };
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: raw_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw_argv(raw_args) };
     app.next_pane_id += 1;
     let win_name = std::path::Path::new(&raw_args[0]).file_stem().and_then(|s| s.to_str()).unwrap_or(&raw_args[0]).to_string();
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, area: app.client_area, window_size: None, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0, pane_mru: vec![raw_pane_id], zoom_saved: None, linked_from: None, floating: Vec::new(), floating_focus: None });
@@ -819,7 +908,7 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
             }
             let epoch = std::time::Instant::now() - Duration::from_secs(2);
             let new_pane_id = wp.pane_id;
-            let mut new_pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()) };
+            let mut new_pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: new_pane_id, title: hostname_cached(), title_locked: false, child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape: wp.cursor_shape, bell_pending: wp.bell_pending, cpr_pending: wp.cpr_pending, color_query_pending: wp.color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring: wp.output_ring, spawned_at: Some(std::time::Instant::now()), start_command: String::new() };
             // Honour `-c <dir>`: silently re-home the transplanted warm shell,
             // in the dialect that shell speaks (#600).
             if let Some(dir) = start_dir {
@@ -894,7 +983,7 @@ pub fn split_active_with_env(app: &mut AppState, kind: LayoutKind, command: Opti
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let split_pane_id = app.next_pane_id;
-    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()) });
+    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: hostname_cached(), title_locked: false, child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, last_text_input: None, last_special_key: None, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, scroll_fg_cache: None, mouse_proto_owner: None, wheel_auth: None, cursor_shape, bell_pending, cpr_pending, color_query_pending, copy_state: None, pane_style: None, pane_options: Default::default(), squelch_until: None, output_ring, spawned_at: Some(std::time::Instant::now()), start_command: start_command_raw(command) });
     app.next_pane_id += 1;
     let win = &mut app.windows[app.active_idx];
     replace_leaf_with_split(&mut win.root, &win.active_path, kind, new_leaf);

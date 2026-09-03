@@ -198,6 +198,9 @@ pub fn create_popup_pane(
         output_ring,
         // Popup shells are overlays, never tiled panes; never auto-heal them.
         spawned_at: None,
+        // A popup is not a window pane, so it has no `#{pane_start_command}`
+        // of its own (#580).
+        start_command: String::new(),
     })
 }
 
@@ -267,6 +270,9 @@ pub fn create_empty_pane(rows: u16, cols: u16, pane_id: usize) -> Option<Pane> {
         output_ring: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         // Empty (`-E`) panes have a NullChild that never "exits"; not healable.
         spawned_at: None,
+        // Nothing was ever started here, so `#{pane_start_command}` is empty
+        // until a respawn gives the pane a command (#580).
+        start_command: String::new(),
     })
 }
 
