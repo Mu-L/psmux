@@ -1586,7 +1586,16 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
             } else { "1".into() }
         }
         "pane_search_string" => app.copy_search_query.clone(),
-        "pane_start_command" => app.default_shell.clone(),
+        // The command THIS pane was started with (issue #580). tmux reports
+        // the pane's own spawn argv and the empty string for a pane running
+        // the plain default shell (format.c format_cb_start_command ->
+        // cmd_stringify_argv, which returns "" for argc == 0). Reporting
+        // `app.default_shell` here made every pane in the server answer with
+        // the same string, so ownership predicates like
+        // `#{m:*MARKER*,#{pane_start_command}}` could never match.
+        "pane_start_command" => target_pane()
+            .map(|p| crate::pane::start_command_display(&p.start_command))
+            .unwrap_or_default(),
         "pane_start_path" | "pane_tabs" => String::new(),
         "pane_fg" => {
             if let Some(p) = target_pane() {
@@ -2138,3 +2147,7 @@ mod tests_issue272_format_shell_cache;
 #[cfg(test)]
 #[path = "../tests-rs/test_modifier_over_empty_var.rs"]
 mod tests_modifier_over_empty_var;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue580_pane_start_command.rs"]
+mod tests_issue580_pane_start_command;

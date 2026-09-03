@@ -393,7 +393,7 @@ not part of it. Capture again after any split you want to keep.
 | `#{pane_current_command}` | Foreground process name |
 | `#{pane_current_path}` | Current working directory of the pane. Under `wsl` or `ssh` this needs shell integration, see [the FAQ](faq.md) |
 | `#{pane_path}` | Path the pane announced over `OSC 7` or `OSC 9;9`, untranslated, empty if none |
-| `#{pane_start_command}` | Command the pane was started with |
+| `#{pane_start_command}` | Command the pane was started with, **empty** when it was started with the default shell. A `--` argv is reported as its token list, a single command string is quoted when it contains spaces (tmux `args_escape`). A respawn replaces it only when the respawn carried a command of its own |
 | `#{pane_pid}` | PID of the pane's shell |
 | `#{pane_tty}` | Pseudo terminal name, for example `/dev/pty1` |
 | `#{pane_in_mode}` | `1` if the pane is in copy mode or another mode |

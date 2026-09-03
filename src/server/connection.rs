@@ -210,6 +210,28 @@ fn requote_command_tail(args: &[&str]) -> String {
     }).collect::<Vec<String>>().join(" ")
 }
 
+/// The positional `shell-command` operand of `respawn-pane` / `respawn-window`
+/// (tmux takes it plain, not behind `--`). Everything that is a flag, or the
+/// value of the one value-taking flag left in `args` (`-c`; `-t` is stripped
+/// upstream by `without_outer_target`), is skipped.
+fn respawn_positional_command(args: &[&str]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        if a == "-c" || a == "-e" || a == "-t" {
+            i += 2;
+            continue;
+        }
+        if a.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        let s = a.trim_matches('"').trim().to_string();
+        return if s.is_empty() { None } else { Some(s) };
+    }
+    None
+}
+
 fn without_outer_target<'a>(cmd: &str, args: &[&'a str]) -> Vec<&'a str> {
     let scan_end = crate::cli::outer_target_scan_end(cmd, args);
     let mut filtered = Vec::with_capacity(args.len());
@@ -2189,7 +2211,15 @@ match cmd {
                 }
             })
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            // tmux documents the command as a plain positional operand
+            // (`respawn-pane [-k] [-c dir] [-t target] [shell-command]`), not
+            // as a `--` tail. Without this the positional form was silently
+            // dropped and the pane came back as the default shell, which also
+            // left `#{pane_start_command}` unable to follow a respawn (#580).
+            // `-t` is already stripped by `without_outer_target`; `-c` is the
+            // only other flag here that takes a value.
+            .or_else(|| respawn_positional_command(&args));
         let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command, empty));
     }
     // ── Cross-session pane forwarding commands ──────────────────────
@@ -3786,7 +3816,24 @@ match cmd {
         }
     }
     "respawn-window" | "respawnw" => {
-        let _ = tx.send(CtrlReq::RespawnWindow);
+        // tmux: `respawn-window [-k] [-c dir] [-t target] [shell-command]`.
+        // The command operand follows the same rule as respawn-pane, so a
+        // respawn-window that carries one also replaces the pane's recorded
+        // `#{pane_start_command}` (#580).
+        let command = args.iter().position(|a| *a == "--")
+            .map(|i| {
+                let tail = &args[i + 1..];
+                if tail.len() > 1 {
+                    format!("-- {}", requote_command_tail(tail))
+                } else {
+                    tail.join(" ")
+                }
+            })
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| respawn_positional_command(&args));
+        let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
+        let _ = tx.send(CtrlReq::RespawnWindow(workdir, command));
     }
     "lock-server" | "lock-session" | "lock" | "locks" => {
         // Lock is a no-op on Windows (no terminal locking concept)

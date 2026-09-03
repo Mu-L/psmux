@@ -310,6 +310,19 @@ pub struct Pane {
     /// #450 pwsh `ReadLineFromFile` FailFast right after a warm-pane transplant)
     /// and respawned in place, so the user still gets a working window.
     pub spawned_at: Option<Instant>,
+    /// The command operand this pane was created with, exposed read-only as
+    /// `#{pane_start_command}` (issue #580). tmux keeps the spawn argv on the
+    /// pane (`window_pane.argc/argv`, set in `spawn.c` only when a command was
+    /// actually given) and `format_cb_start_command` stringifies it, which
+    /// yields the EMPTY STRING for a pane running the plain default shell.
+    /// psmux carries the operand as one string, so the same contract is: empty
+    /// for a default-shell pane (including a transplanted warm-pool spare),
+    /// the user's command otherwise. Set at every spawn site
+    /// (`new-session`/`new-window`/`split-window`, string and `--` argv form)
+    /// and replaced by `respawn-pane`/`respawn-window` ONLY when that respawn
+    /// carried a command of its own (tmux spawn.c: "Replace the stored
+    /// arguments if there are new ones").
+    pub start_command: String,
 }
 
 /// Pre-spawned shell ready to be transplanted into a new window instantly.
@@ -2248,7 +2261,7 @@ pub enum CtrlReq {
         window_id: Option<usize>,
         size: Option<(u16, u16)>,
     },
-    RespawnWindow,
+    RespawnWindow(Option<String>, Option<String>),  // optional workdir (-c), optional shell-command operand
     FocusIn,
     FocusOut,
     CommandPrompt(String),

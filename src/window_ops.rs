@@ -2626,7 +2626,21 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     let win = &mut app.windows[app.active_idx];
     let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) else { return Ok(()); };
     let pane_id = pane.id;
-    
+    // tmux spawn.c: a respawn with no command of its own reuses the arguments
+    // already stored on the pane ("Replace the stored arguments if there are
+    // new ones. If not, the existing ones will be used (they will only exist
+    // for respawn)"), so `respawn-pane -k` on a pane created with a command
+    // re-runs THAT command, and only a pane created with the default shell
+    // comes back as a shell. Issue #580: this also keeps
+    // `#{pane_start_command}` honest across a respawn.
+    let new_start_command = command.map(|c| crate::pane::start_command_raw(Some(c)));
+    let inherited = if command.is_none() && !pane.start_command.is_empty() {
+        Some(pane.start_command.clone())
+    } else {
+        None
+    };
+    let command = command.or(inherited.as_deref());
+
     let size = PtySize { rows: pane.last_rows, cols: pane.last_cols, pixel_width: 0, pixel_height: 0 };
     let pair = pty_system.openpty(size).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
     // Issue #399: honor an explicit `-- <command>` (e.g. Claude Code agent-teams
@@ -2690,6 +2704,13 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     // blanked #{pane_pid} and sent #{pane_current_command} to its
     // foreground-window fallback for the rest of the pane's life.
     pane.child_pid = child_pid;
+    // #580: a respawn that carried its own command replaces what the pane
+    // reports as `#{pane_start_command}`; a bare respawn keeps the recorded
+    // one (it just re-ran it above), and a bare respawn of a default-shell
+    // pane leaves it empty. Same rule as tmux spawn.c.
+    if let Some(c) = new_start_command {
+        pane.start_command = c;
+    }
     pane.vt_bridge_cache = None;
     pane.vti_mode_cache = None;
     pane.mouse_input_cache = None;
