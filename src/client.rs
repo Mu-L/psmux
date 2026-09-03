@@ -1182,17 +1182,44 @@ fn window_content_fill_style(style: Option<Style>) -> Style {
         .bg(style.bg.unwrap_or(Color::Reset))
 }
 
+/// Pin the border colours without touching the border attributes.
+///
+/// tmux paints a border cell with `style_add` (style.c:459): a colour replaces
+/// the cell colour only when the style actually names one, but the attributes
+/// are merged in unconditionally (`gc->attr |= sy->gc.attr;`) and the
+/// underscore colour rides along with them (`gc->us`). psmux needs the colour
+/// half of that to be absolute, because an omitted `fg=`/`bg=` in an explicit
+/// pane-border-style must reset rather than inherit whatever the pane under the
+/// separator painted (#624). The attribute half must survive: rebuilding the
+/// style from `Style::default()` dropped `bold`, the underline modifiers and
+/// `us=`, so `pane-border-style 'fg=red,bold'` drew red but never bold (#626).
 fn complete_pane_border_colors(style: Style) -> Style {
-    Style::default()
+    style
         .fg(style.fg.unwrap_or(Color::Reset))
         .bg(style.bg.unwrap_or(Color::Reset))
 }
 
-fn parse_pane_border_colors(raw: Option<&str>, default: Style) -> Style {
+pub(crate) fn parse_pane_border_colors(raw: Option<&str>, default: Style) -> Style {
     let Some(raw) = raw.filter(|style| !style.is_empty()) else {
         return complete_pane_border_colors(default);
     };
     complete_pane_border_colors(crate::style::parse_tmux_style(raw))
+}
+
+/// The style a pane border falls back to when the option is unset.
+///
+/// tmux keeps these in options-table.c (pane-border-style
+/// `fg=themelightgrey`, pane-active-border-style `fg=themegreen`), so an unset
+/// option and a freshly started server always agree. psmux carries the same
+/// pair as concrete ratatui colours, and `pane_border_default_style` is the one
+/// place that names them so the option catalog, the client renderer and the
+/// server-side renderer cannot drift apart (#626).
+pub(crate) fn pane_border_default_style(active: bool) -> Style {
+    if active {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
 }
 
 /// Hover is an overlay, so omitted colors keep the separator's own colors.
@@ -5816,11 +5843,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         let status_format = state.status_format;
         let pane_border_style = parse_pane_border_colors(
             state.pane_border_style.as_deref(),
-            Style::default().fg(Color::DarkGray),
+            pane_border_default_style(false),
         );
         let pane_active_border_style = parse_pane_border_colors(
             state.pane_active_border_style.as_deref(),
-            Style::default().fg(Color::Green),
+            pane_border_default_style(true),
         );
         let pane_border_hover_style =
             parse_pane_border_hover_style(state.pane_border_hover_style.as_deref());
@@ -7539,3 +7566,7 @@ mod test_issue619_window_style_fallback;
 #[cfg(test)]
 #[path = "../tests-rs/test_pane_border_backgrounds.rs"]
 mod test_pane_border_backgrounds;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue626_border_attrs_default.rs"]
+mod test_issue626_border_attrs_default;

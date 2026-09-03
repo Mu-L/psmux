@@ -47,10 +47,18 @@ fn effective_when_unset(name: &str) -> Option<&'static str> {
         "copy-mode-current-line-number-style" => "fg=yellow,bold",
         // TERM handed to panes when default-terminal was never set.
         "default-terminal" => "xterm-256color",
+        // The pane borders are the exception to the `default` rule below. tmux
+        // gives them a real default style in options-table.c (:1605
+        // `fg=themelightgrey`, :1540 `themegreen`) and `show -g` prints that
+        // style, not the word `default`. psmux renders the same pair from
+        // client::pane_border_default_style, so reporting `default` here
+        // claimed a terminal default foreground the border never had, and the
+        // option catalog copied that claim into the value `-u` restores (#626).
+        "pane-border-style" => "fg=brightblack",
+        "pane-active-border-style" => "fg=green",
         // tmux reports `default` for a style that has not been overridden.
         "status-style" | "status-left-style" | "status-right-style"
         | "message-style" | "message-command-style" | "mode-style"
-        | "pane-border-style" | "pane-active-border-style"
         | "pane-border-hover-style" | "window-status-style"
         | "window-status-current-style" | "window-status-activity-style"
         | "window-status-bell-style" | "window-status-last-style" => "default",
