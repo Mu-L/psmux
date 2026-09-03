@@ -237,6 +237,24 @@ fn cli_pane_index_exists_in_window(window_spec: &str, idx_spec: &str) -> Option<
 /// most recently used (issue #569). Enumerating the namespace is what lets the
 /// caller refuse an ambiguous target instead of acting on the wrong pane.
 fn cli_sessions_with_pane_id(ns: Option<&str>, pane_id: &str) -> Vec<String> {
+    // -s scopes to the whole session rather than the active window, so a pane
+    // in a background window still counts.
+    cli_sessions_owning_id(ns, b"list-panes -s -F #{pane_id}\n", pane_id)
+}
+
+/// The window-id counterpart of `cli_sessions_with_pane_id`: the sessions in
+/// this namespace that contain the given `@<id>` window id.
+///
+/// Window ids share the pane ids' per-session allocation, so `@1` exists in
+/// every session at once and an unqualified `-t @N` is only answerable by
+/// asking who actually owns it (issue #627).
+fn cli_sessions_with_window_id(ns: Option<&str>, window_id: &str) -> Vec<String> {
+    cli_sessions_owning_id(ns, b"list-windows -F #{window_id}\n", window_id)
+}
+
+/// Ask every session in `ns` to list its ids with `probe` and collect the
+/// registry base names whose reply contains `id`.
+fn cli_sessions_owning_id(ns: Option<&str>, probe: &[u8], id: &str) -> Vec<String> {
     let mut found = Vec::new();
     for base in crate::session::list_session_names_ns(ns) {
         let port = match std::fs::read_to_string(crate::paths::port_file(&base))
@@ -251,17 +269,83 @@ fn cli_sessions_with_pane_id(ns: Option<&str>, pane_id: &str) -> Vec<String> {
             Err(_) => continue,
         };
         let addr = format!("127.0.0.1:{}", port);
-        // -s scopes to the whole session rather than the active window, so a
-        // pane in a background window still counts.
-        if let Ok(resp) = crate::session::send_auth_cmd_response(
-            &addr, &key, b"list-panes -s -F #{pane_id}\n",
-        ) {
-            if resp.lines().any(|l| l.trim() == pane_id) {
+        if let Ok(resp) = crate::session::send_auth_cmd_response(&addr, &key, probe) {
+            if resp.lines().any(|l| l.trim() == id) {
                 found.push(base);
             }
         }
     }
     found
+}
+
+/// Strip the `-L` namespace prefix off a registry base name so the message
+/// names the session the caller can actually type: inside a `-L` namespace the
+/// registry base is `<ns>__<session>` but the user addresses the short name.
+fn cli_display_session_name(ns: Option<&str>, base: &str) -> String {
+    match ns {
+        Some(p) => base.strip_prefix(&format!("{}__", p)).unwrap_or(base).to_string(),
+        None => base.to_string(),
+    }
+}
+
+/// What an unqualified `%N`/`@N` target resolved to across the namespace.
+enum UnqualifiedId {
+    /// Nobody could be asked (no reachable server in the namespace). The caller
+    /// falls back to its single-session validator rather than blocking.
+    Unknown,
+    /// Exactly one session owns the id, and routing now points at it.
+    Routed,
+    /// The routed session owns the id (possibly among others): leave routing be.
+    RoutedOwns,
+}
+
+/// Resolve an unqualified `%<id>`/`@<id>` target to the session that owns it
+/// (issue #627).
+///
+/// psmux allocates pane and window ids per session, so an unqualified id is
+/// only meaningful when exactly one session in the namespace holds it. The
+/// client used to route these by recency alone: `-t %3` in a namespace where
+/// only session `alpha` had `%3` was still sent to whichever session was most
+/// recently created, and the server, finding no such id, silently expanded the
+/// format against its ACTIVE pane and exited 0 (`expand_format_for_pane_by_id`
+/// falls back to `expand_format`). A bare `@N` was not validated by the client
+/// at all, so it reached the wrong server and came back as a raw
+/// `ERROR: can't find window: @N` reply.
+///
+/// The contract now: a unique owner wins and routing is repointed at it, zero
+/// owners is `can't find`, and several owners is refused as ambiguous unless
+/// the session we are already routed to is one of them (the #569 carve-out that
+/// keeps the ordinary "grab a %id from this session and use it" idiom working).
+fn cli_resolve_unqualified_id(ns: Option<&str>, id: &str, kind: &str) -> UnqualifiedId {
+    let owners = if id.starts_with('@') {
+        cli_sessions_with_window_id(ns, id)
+    } else {
+        cli_sessions_with_pane_id(ns, id)
+    };
+    if owners.is_empty() {
+        return UnqualifiedId::Unknown;
+    }
+    let routed = std::env::var("PSMUX_TARGET_SESSION").unwrap_or_default();
+    if !routed.is_empty() && owners.iter().any(|o| *o == routed) {
+        return UnqualifiedId::RoutedOwns;
+    }
+    if owners.len() == 1 {
+        // Unique owner: repoint routing at it. send_control{,_with_response}
+        // read PSMUX_TARGET_SESSION at call time, so this is what makes the
+        // command land on the session that actually holds the id.
+        std::env::set_var("PSMUX_TARGET_SESSION", &owners[0]);
+        return UnqualifiedId::Routed;
+    }
+    let names = owners
+        .iter()
+        .map(|b| cli_display_session_name(ns, b))
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "psmux: ambiguous {} id {}: present in sessions {}; qualify as session:window.pane",
+        kind, id, names
+    );
+    std::process::exit(1);
 }
 
 /// True for a pane component that names a pane by POSITION rather than identity:
@@ -298,40 +382,52 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
     // Bare "%<id>" pane target. These ids are NOT unique across a namespace (see
     // cli_sessions_with_pane_id), so an unqualified one can be genuinely
     // unanswerable. But it is only unanswerable when NOTHING decides which
-    // session is meant: if the session this command is already routed to owns
-    // the id, that is the answer, and refusing there would break the ordinary
-    // "grab a %id from this session and use it" idiom (issue #569 first shipped
-    // an unconditional refusal, which broke exactly that and failed
-    // test_named_session_parity).
+    // session is meant: if exactly one session owns the id that session IS the
+    // answer (issue #627), and if the session this command is already routed to
+    // owns the id, that is the answer too — refusing there would break the
+    // ordinary "grab a %id from this session and use it" idiom (issue #569
+    // first shipped an unconditional refusal, which broke exactly that and
+    // failed test_named_session_parity).
     //
     // So the refusal is scoped to the case the report was actually about: the
     // routed session does NOT hold the id, several others do, and resolving
     // would fall back to picking one by recency.
     if full.starts_with('%') {
-        let owners = cli_sessions_with_pane_id(ns, &full);
-        let routed = std::env::var("PSMUX_TARGET_SESSION").unwrap_or_default();
-        let routed_owns = !routed.is_empty() && owners.iter().any(|o| *o == routed);
-        if owners.len() > 1 && !routed_owns {
-            // Report the names the caller can actually type: inside a `-L`
-            // namespace the registry base is "<ns>__<session>" but the user
-            // addresses the session by its short name.
-            let names = owners
-                .iter()
-                .map(|b| match ns {
-                    Some(p) => b.strip_prefix(&format!("{}__", p)).unwrap_or(b).to_string(),
-                    None => b.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            eprintln!(
-                "psmux: ambiguous pane id {}: present in sessions {}; qualify as session:window.pane",
-                full, names
-            );
-            std::process::exit(1);
+        if let UnqualifiedId::Unknown = cli_resolve_unqualified_id(ns, &full, "pane") {
+            if cli_pane_id_exists(&full) == Some(false) {
+                eprintln!("psmux: can't find pane: {}", full);
+                std::process::exit(1);
+            }
         }
-        if owners.is_empty() && cli_pane_id_exists(&full) == Some(false) {
-            eprintln!("psmux: can't find pane: {}", full);
-            std::process::exit(1);
+        return;
+    }
+    // Bare "@<id>" window target, optionally with a ".<pane>" suffix
+    // ("@2", "@2.0", "@2.%3" — all forms cli::parse_target accepts). Issue
+    // #627: this had NO client-side arm at all, so the target was neither
+    // resolved to its owning session nor validated; it was sent to whichever
+    // session recency picked and the server's unresolvable-target reply
+    // ("ERROR: can't find window: @2") was printed by the caller as ordinary
+    // output at exit 0.
+    if full.starts_with('@') {
+        let (win_part, pane_part) = match full.find('.') {
+            Some(d) => (&full[..d], Some(&full[d + 1..])),
+            None => (&full[..], None),
+        };
+        if win_part.len() > 1 && win_part[1..].chars().all(|c| c.is_ascii_digit()) {
+            if let UnqualifiedId::Unknown = cli_resolve_unqualified_id(ns, win_part, "window") {
+                if cli_window_exists(win_part) == Some(false) {
+                    eprintln!("psmux: can't find window: {}", win_part);
+                    std::process::exit(1);
+                }
+            }
+            // The pane component is resolved inside the window we just routed
+            // to; only the unambiguous %id form is safe to pre-validate here.
+            if let Some(p) = pane_part {
+                if p.starts_with('%') && cli_pane_id_exists(p) == Some(false) {
+                    eprintln!("psmux: can't find pane: {}", p);
+                    std::process::exit(1);
+                }
+            }
         }
         return;
     }
@@ -3187,6 +3283,20 @@ fn run_main() -> io::Result<()> {
                 cmd.push('\n');
                 if print_to_stdout {
                     let resp = send_control_with_response(cmd)?;
+                    // Issue #627: an unresolvable -t makes the server answer
+                    // "ERROR: can't find window: X" instead of the expanded
+                    // format. Printing that reply verbatim on STDOUT at exit 0
+                    // handed every script a diagnostic it could not tell from a
+                    // real value, and left the shell believing the command had
+                    // succeeded. Route it to stderr with the same "psmux: "
+                    // prefix the client's own target errors use, and exit 1.
+                    if resp.trim_start().starts_with("ERROR:") {
+                        eprintln!(
+                            "psmux: {}",
+                            resp.trim().trim_start_matches("ERROR:").trim()
+                        );
+                        std::process::exit(1);
+                    }
                     print!("{}", resp);
                 } else {
                     send_control(cmd)?;
