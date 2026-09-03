@@ -2864,3 +2864,7 @@ mod tests_issue600_bash_rehome;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue607_copy_mode_inherit.rs"]
 mod tests_issue607_copy_mode_inherit;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue630_conpty_cwd_pin.rs"]
+mod tests_issue630_conpty_cwd_pin;
