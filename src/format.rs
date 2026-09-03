@@ -2147,3 +2147,7 @@ mod tests_issue272_format_shell_cache;
 #[cfg(test)]
 #[path = "../tests-rs/test_modifier_over_empty_var.rs"]
 mod tests_modifier_over_empty_var;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue580_pane_start_command.rs"]
+mod tests_issue580_pane_start_command;
