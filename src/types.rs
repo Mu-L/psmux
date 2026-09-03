@@ -2239,7 +2239,7 @@ pub enum CtrlReq {
         window_id: Option<usize>,
         size: Option<(u16, u16)>,
     },
-    RespawnWindow,
+    RespawnWindow(Option<String>, Option<String>),  // optional workdir (-c), optional shell-command operand
     FocusIn,
     FocusOut,
     CommandPrompt(String),

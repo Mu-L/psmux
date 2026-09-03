@@ -3279,7 +3279,15 @@ fn run_main() -> io::Result<()> {
                                 i += 1;
                             }
                         }
-                        _ => { cmd.push_str(&format!(" {}", cmd_args[i])); }
+                        // The shell-command operand is opaque and must reach
+                        // the server as ONE token: the server re-tokenizes the
+                        // wire line, so an unquoted `respawn-pane -k "cmd with
+                        // args"` arrived as several arguments and only its
+                        // first word was taken as the command (#580, same
+                        // shape as the #563 pipe-pane fix). Tokens of a `--`
+                        // argv tail keep their own boundaries because each is
+                        // quoted separately.
+                        s => { cmd.push_str(&format!(" {}", crate::util::quote_arg_if_needed(s))); }
                     }
                     i += 1;
                 }
@@ -4709,7 +4717,28 @@ fn run_main() -> io::Result<()> {
             }
             // respawn-window - Respawn active pane in window
             "respawn-window" | "respawnw" => {
-                send_control("respawn-window\n".to_string())?;
+                // Every argument was dropped here, so `-c <dir>` and the
+                // documented `[shell-command]` operand never reached the
+                // server (#580). Forward them the way respawn-pane does, with
+                // the opaque command quoted into one wire token.
+                let mut cmd = "respawn-window".to_string();
+                let mut i = 1;
+                while i < cmd_args.len() {
+                    match cmd_args[i].as_str() {
+                        "-k" => { cmd.push_str(" -k"); }
+                        "-c" | "-t" => {
+                            let flag = cmd_args[i].clone();
+                            if let Some(v) = cmd_args.get(i + 1) {
+                                cmd.push_str(&format!(" {} {}", flag, crate::util::quote_arg_if_needed(v)));
+                                i += 1;
+                            }
+                        }
+                        s => { cmd.push_str(&format!(" {}", crate::util::quote_arg_if_needed(s))); }
+                    }
+                    i += 1;
+                }
+                cmd.push('\n');
+                send_control(cmd)?;
                 return Ok(());
             }
             // link-window - Link a window

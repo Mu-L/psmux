@@ -5857,9 +5857,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::RespawnWindow => {
+                CtrlReq::RespawnWindow(workdir, command) => {
                     // Kill all panes in the active window and respawn
-                    respawn_active_pane(&mut app, Some(&*pty_system), None, true, None, false)?;
+                    respawn_active_pane(&mut app, Some(&*pty_system), workdir.as_deref(), true, command.as_deref(), false)?;
                     state_dirty = true;
                 }
                 CtrlReq::PopupInput(data) => {
