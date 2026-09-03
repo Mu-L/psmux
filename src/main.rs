@@ -372,6 +372,27 @@ fn is_relative_pane(p: &str) -> bool {
     false
 }
 
+/// Split an unqualified window-id target into its `@<digits>` window component
+/// and optional pane component, matching what `cli::parse_target` accepts for
+/// an `@`-prefixed target: `@2`, `@2.0` and `@2.%3`.
+///
+/// Returns None for anything that is not a well-formed bare window id, so an
+/// `@`-prefixed string that `parse_target` would ignore (`@dev`, `@`, `@2x`) is
+/// never validated as a window (issue #627).
+fn split_bare_window_id(full: &str) -> Option<(&str, Option<&str>)> {
+    if !full.starts_with('@') {
+        return None;
+    }
+    let (win_part, pane_part) = match full.find('.') {
+        Some(d) => (&full[..d], Some(&full[d + 1..])),
+        None => (full, None),
+    };
+    if win_part.len() < 2 || !win_part[1..].chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((win_part, pane_part.filter(|p| !p.is_empty())))
+}
+
 fn cli_validate_window_pane_target(ns: Option<&str>) {
     let full = match std::env::var("PSMUX_TARGET_FULL") {
         Ok(f) if !f.is_empty() => f,
@@ -408,27 +429,26 @@ fn cli_validate_window_pane_target(ns: Option<&str>) {
     // session recency picked and the server's unresolvable-target reply
     // ("ERROR: can't find window: @2") was printed by the caller as ordinary
     // output at exit 0.
-    if full.starts_with('@') {
-        let (win_part, pane_part) = match full.find('.') {
-            Some(d) => (&full[..d], Some(&full[d + 1..])),
-            None => (&full[..], None),
-        };
-        if win_part.len() > 1 && win_part[1..].chars().all(|c| c.is_ascii_digit()) {
-            if let UnqualifiedId::Unknown = cli_resolve_unqualified_id(ns, win_part, "window") {
-                if cli_window_exists(win_part) == Some(false) {
-                    eprintln!("psmux: can't find window: {}", win_part);
-                    std::process::exit(1);
-                }
-            }
-            // The pane component is resolved inside the window we just routed
-            // to; only the unambiguous %id form is safe to pre-validate here.
-            if let Some(p) = pane_part {
-                if p.starts_with('%') && cli_pane_id_exists(p) == Some(false) {
-                    eprintln!("psmux: can't find pane: {}", p);
-                    std::process::exit(1);
-                }
+    if let Some((win_part, pane_part)) = split_bare_window_id(&full) {
+        if let UnqualifiedId::Unknown = cli_resolve_unqualified_id(ns, win_part, "window") {
+            if cli_window_exists(win_part) == Some(false) {
+                eprintln!("psmux: can't find window: {}", win_part);
+                std::process::exit(1);
             }
         }
+        // The pane component is resolved inside the window we just routed
+        // to; only the unambiguous %id form is safe to pre-validate here.
+        if let Some(p) = pane_part {
+            if p.starts_with('%') && cli_pane_id_exists(p) == Some(false) {
+                eprintln!("psmux: can't find pane: {}", p);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if full.starts_with('@') {
+        // An `@`-prefixed target that is not a well-formed window id (e.g. a
+        // session literally named "@dev"): leave it to the existing arms.
         return;
     }
     if let Some(ci) = full.find(':') {
@@ -5766,3 +5786,7 @@ mod sbai_7120_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue627_unqualified_targets.rs"]
+mod tests_issue627_unqualified_targets;
