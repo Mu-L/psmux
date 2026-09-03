@@ -7,6 +7,17 @@ use crate::server::option_catalog::WINDOW_OPTION_NAMES;
 /// refuses anything outside that range on every route (#606).
 pub(crate) const REPEAT_TIME_MAX_MS: i64 = 2_000_000;
 
+/// Parse a main-pane-width / main-pane-height value.
+///
+/// psmux stores both as a percentage (see AppState::main_pane_width), and tmux
+/// documents the percentage spelling for them (options-table.c:1474, "This may
+/// be a percentage, for example '10%'"), so a trailing `%` is accepted and
+/// dropped. A value that is not a number at all leaves the current setting
+/// alone, which is what both setters did before.
+pub(crate) fn parse_main_pane_size(value: &str) -> Option<u16> {
+    value.trim().trim_end_matches('%').parse::<u16>().ok()
+}
+
 fn is_window_option(name: &str) -> bool {
     WINDOW_OPTION_NAMES.contains(&name)
 }
@@ -608,10 +619,10 @@ pub(crate) fn apply_set_option(
             if let Ok(n) = value.parse::<u64>() { app.status_interval = n; }
         }
         "main-pane-width" => {
-            if let Ok(n) = value.parse::<u16>() { app.main_pane_width = n; }
+            if let Some(n) = parse_main_pane_size(value) { app.main_pane_width = n; }
         }
         "main-pane-height" => {
-            if let Ok(n) = value.parse::<u16>() { app.main_pane_height = n; }
+            if let Some(n) = parse_main_pane_size(value) { app.main_pane_height = n; }
         }
         "window-size" => { app.window_size = value.to_string(); }
         "allow-passthrough" => { app.allow_passthrough = value.to_string(); }

@@ -1177,9 +1177,19 @@ fn negative_integer_is_rejected_before_only_if_unset_short_circuit() {
          set -go history-limit -1\n",
     );
     assert_eq!(app.history_limit, 42);
-    assert!(app.config_warnings.iter().any(|warning| {
-        warning.contains("history-limit") && warning.contains("-1")
-    }));
+    // An integer that is simply out of range is reported with tmux's strtonum
+    // wording (options.c:1295), which names the value and not the option; the
+    // config warning already carries the file and line that names it. A value
+    // that is not an integer at all still gets the psmux message that does name
+    // the option, see malformed_numeric_keeps_prior_value in
+    // test_issue370_config_warnings.rs.
+    assert!(
+        app.config_warnings
+            .iter()
+            .any(|warning| warning.contains("value is too small: -1")),
+        "expected an out of range refusal, got: {:?}",
+        app.config_warnings,
+    );
 }
 
 #[test]

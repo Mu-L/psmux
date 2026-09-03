@@ -1352,10 +1352,14 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         "wrap-search" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "lock-after-time" | "lock-command" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "main-pane-width" => {
-            if let Ok(n) = value.parse::<u16>() { app.main_pane_width = n; }
+            if let Some(n) = crate::server::options::parse_main_pane_size(value) {
+                app.main_pane_width = n;
+            }
         }
         "main-pane-height" => {
-            if let Ok(n) = value.parse::<u16>() { app.main_pane_height = n; }
+            if let Some(n) = crate::server::options::parse_main_pane_size(value) {
+                app.main_pane_height = n;
+            }
         }
         "status-left-length" => {
             if let Ok(n) = value.parse::<usize>() { app.status_left_length = n; }

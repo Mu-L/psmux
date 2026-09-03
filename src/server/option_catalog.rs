@@ -22,7 +22,6 @@ impl OptionScope {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NumberKind {
     I64,
-    U16,
     U64,
     Usize,
     Index,
@@ -30,19 +29,39 @@ pub enum NumberKind {
 }
 
 impl NumberKind {
-    fn accepts(self, value: &str) -> bool {
+    /// Inclusive bounds of the destination type, widened so every kind fits.
+    fn range(self) -> (i128, i128) {
         match self {
-            Self::I64 => value.parse::<i64>().is_ok(),
-            Self::U16 => value.parse::<u16>().is_ok(),
-            Self::U64 => value.parse::<u64>().is_ok(),
-            Self::Usize => value.parse::<usize>().is_ok(),
-            Self::Index => value
-                .parse::<usize>()
-                .is_ok_and(|index| index <= isize::MAX as usize),
-            Self::RepeatTime => value
-                .parse::<i64>()
-                .is_ok_and(|ms| (0..=crate::server::options::REPEAT_TIME_MAX_MS).contains(&ms)),
+            Self::I64 => (i64::MIN as i128, i64::MAX as i128),
+            Self::U64 => (0, u64::MAX as i128),
+            Self::Usize => (0, usize::MAX as i128),
+            Self::Index => (0, isize::MAX as i128),
+            Self::RepeatTime => (0, crate::server::options::REPEAT_TIME_MAX_MS as i128),
         }
+    }
+
+    /// tmux validates a number option with strtonum and reports the errstr it
+    /// hands back: "value is too small: N", "value is too large: N" or
+    /// "value is invalid: X" (options.c:1295). psmux keeps its own wording for
+    /// a value that is not an integer at all, because that message names the
+    /// option, but a value that IS an integer and merely falls outside the
+    /// destination range now gets tmux's out of range wording instead of the
+    /// misleading "expected a number".
+    fn validate(self, name: &str, value: &str) -> Result<(), String> {
+        let Ok(parsed) = value.trim().parse::<i128>() else {
+            return Err(format!(
+                "invalid value '{}' for option '{}' (expected a number)",
+                value, name,
+            ));
+        };
+        let (minimum, maximum) = self.range();
+        if parsed < minimum {
+            return Err(format!("value is too small: {}", value));
+        }
+        if parsed > maximum {
+            return Err(format!("value is too large: {}", value));
+        }
+        Ok(())
     }
 }
 
@@ -95,22 +114,8 @@ impl OptionType {
     fn validate_value(self, name: &str, value: &str) -> Result<(), String> {
         match self {
             Self::Choice(kind) => kind.validate_value(value),
-            Self::Number(NumberKind::RepeatTime) => match value.parse::<i64>() {
-                Ok(ms) if ms < 0 => Err(format!("value is too small: {}", value)),
-                Ok(ms) if ms > crate::server::options::REPEAT_TIME_MAX_MS => {
-                    Err(format!("value is too large: {}", value))
-                }
-                Ok(_) => Ok(()),
-                Err(_) => Err(format!(
-                    "invalid value '{}' for option '{}' (expected a number)",
-                    value, name,
-                )),
-            },
-            Self::Number(kind) if !kind.accepts(value) => Err(format!(
-                "invalid value '{}' for option '{}' (expected a number)",
-                value, name,
-            )),
-            Self::String | Self::Boolean | Self::Number(_) => Ok(()),
+            Self::Number(kind) => kind.validate(name, value),
+            Self::String | Self::Boolean => Ok(()),
         }
     }
 
@@ -175,7 +180,7 @@ impl ValidationOnlyOptionDef {
 }
 
 use ChoiceKind::{Priority, Unvalidated};
-use NumberKind::{I64, Index, RepeatTime, U16, U64, Usize};
+use NumberKind::{I64, Index, RepeatTime, U64, Usize};
 use OptionScope::{Pane, Server, Session, Window};
 use OptionType::{Boolean, Choice, Number};
 
@@ -256,8 +261,11 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     OptionDef { name: "monitor-activity", scope: Window, option_type: Boolean, default: "off", description: "Monitor for activity in window" },
     OptionDef { name: "remain-on-exit", scope: Window, option_type: Boolean, default: "off", description: "Keep pane open after command exits" },
     OptionDef { name: "aggressive-resize", scope: Window, option_type: Boolean, default: "off", description: "Resize window to smallest attached client" },
-    OptionDef { name: "main-pane-width", scope: Window, option_type: Number(U16), default: "0", description: "Width of main pane in main-* layouts (0 sizes it automatically)" },
-    OptionDef { name: "main-pane-height", scope: Window, option_type: Number(U16), default: "0", description: "Height of main pane in main-* layouts (0 sizes it automatically)" },
+    // tmux types both of these OPTIONS_TABLE_STRING (options-table.c:1474) and
+    // documents a percentage form ("10%"), so they cannot be validated as a
+    // number without rejecting input real tmux accepts.
+    OptionDef { name: "main-pane-width", scope: Window, option_type: OptionType::String, default: "0", description: "Width of main pane in main-* layouts (0 sizes it automatically, percentages accepted)" },
+    OptionDef { name: "main-pane-height", scope: Window, option_type: OptionType::String, default: "0", description: "Height of main pane in main-* layouts (0 sizes it automatically, percentages accepted)" },
     OptionDef { name: "window-size", scope: Window, option_type: UNVALIDATED_CHOICE, default: "latest", description: "Window sizing strategy" },
     OptionDef { name: "window-status-format", scope: Window, option_type: OptionType::String, default: "#I:#W#{?window_flags,#{window_flags}, }", description: "Window status bar format" },
     OptionDef { name: "window-status-current-format", scope: Window, option_type: OptionType::String, default: "#I:#W#{?window_flags,#{window_flags}, }", description: "Active window status bar format" },

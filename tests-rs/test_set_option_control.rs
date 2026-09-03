@@ -128,7 +128,6 @@ fn numeric_options_use_catalog_destination_ranges() {
     use crate::server::option_catalog::{NumberKind, OptionType, OPTION_CATALOG};
 
     let cases = [
-        ("main-pane-width", NumberKind::U16, u16::MAX as u128),
         ("escape-time", NumberKind::U64, u64::MAX as u128),
         ("history-limit", NumberKind::Usize, usize::MAX as u128),
         ("base-index", NumberKind::Index, isize::MAX as u128),
@@ -150,13 +149,80 @@ fn numeric_options_use_catalog_destination_ranges() {
         );
 
         let too_large = (maximum.parse::<u128>().unwrap() + 1).to_string();
+        let rejection = parse_set_option_args(&["-g", name, &too_large])
+            .validate(false)
+            .expect_err(&format!("{name} should reject {too_large}"));
         assert!(
-            parse_set_option_args(&["-g", name, &too_large])
-                .validate(false)
-                .is_err(),
-            "{name} should reject {too_large}",
+            rejection.contains("value is too large"),
+            "{name} must report an out of range value the way tmux does, got {rejection}",
         );
     }
+}
+
+/// tmux types main-pane-width and main-pane-height OPTIONS_TABLE_STRING and
+/// documents a percentage form (options-table.c:1474), so validating them as a
+/// number rejected input real tmux accepts.
+#[test]
+fn main_pane_dimensions_are_strings_that_accept_percentages() {
+    use crate::server::option_catalog::{OptionType, OPTION_CATALOG};
+
+    for name in ["main-pane-width", "main-pane-height"] {
+        let definition = OPTION_CATALOG
+            .iter()
+            .find(|definition| definition.name == name)
+            .unwrap();
+        assert_eq!(definition.option_type, OptionType::String);
+        for value in ["0", "80", "100000", "10%"] {
+            assert_eq!(
+                parse_set_option_args(&["-g", name, value]).validate(false),
+                Ok(()),
+                "{name} should accept {value}",
+            );
+        }
+    }
+
+    // psmux stores both as a percentage, so the documented tmux spelling has to
+    // reach the stored value, not just survive validation.
+    use crate::server::options::parse_main_pane_size;
+    assert_eq!(parse_main_pane_size("50%"), Some(50));
+    assert_eq!(parse_main_pane_size("50"), Some(50));
+    assert_eq!(parse_main_pane_size(" 10% "), Some(10));
+    assert_eq!(parse_main_pane_size("wide"), None);
+}
+
+/// An integer that simply falls outside the destination range is reported the
+/// way tmux reports it (strtonum errstr, options.c:1295), not as "expected a
+/// number", which only fits a value that is not an integer at all.
+#[test]
+fn out_of_range_integers_are_reported_as_out_of_range() {
+    let too_small = parse_set_option_args(&["-g", "base-index", "-1"])
+        .validate(false)
+        .expect_err("base-index must reject -1");
+    assert!(
+        too_small.contains("value is too small: -1"),
+        "got {too_small}",
+    );
+
+    let not_a_number = parse_set_option_args(&["-g", "base-index", "1x"])
+        .validate(false)
+        .expect_err("base-index must reject 1x");
+    assert!(
+        not_a_number.contains("expected a number"),
+        "got {not_a_number}",
+    );
+
+    let repeat_low = parse_set_option_args(&["-g", "repeat-time", "-5"])
+        .validate(false)
+        .expect_err("repeat-time must reject -5");
+    assert!(repeat_low.contains("value is too small: -5"), "got {repeat_low}");
+
+    let repeat_high = parse_set_option_args(&["-g", "repeat-time", "2000001"])
+        .validate(false)
+        .expect_err("repeat-time must reject 2000001");
+    assert!(
+        repeat_high.contains("value is too large: 2000001"),
+        "got {repeat_high}",
+    );
 }
 
 #[test]
