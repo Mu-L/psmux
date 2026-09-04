@@ -376,8 +376,17 @@ for ($i = 1; $i -le 3; $i++) {
 }
 
 psmux send-keys -t tui_multi "echo multi_test_ok" Enter
-Start-Sleep -Seconds 1
-$capM = psmux capture-pane -t tui_multi -p 2>&1 | Out-String
+# The three queued fake-TUI launches take ~2s each (pwsh startup + sleep 1), so
+# the echo only runs once the third one exits. A fixed 1s capture raced that
+# and failed while the terminal was provably fine (the arrow-key round trip
+# below passed). Poll like Wait-ShellBack instead of sampling once.
+$capM = ""
+$deadlineM = (Get-Date).AddSeconds(15)
+while ((Get-Date) -lt $deadlineM) {
+    Start-Sleep -Milliseconds 500
+    $capM = psmux capture-pane -t tui_multi -p 2>&1 | Out-String
+    if ($capM -match 'multi_test_ok') { break }
+}
 Add-Result "Multi TUI: terminal works after 3 launches" ($capM -match 'multi_test_ok')
 
 $hasMultiGarbage = $capM -match '\[\d{2,};[\d;]+[Mm]'
