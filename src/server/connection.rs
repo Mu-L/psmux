@@ -49,6 +49,22 @@ fn expand_set_option_value(
     // worse than dropping the assignment.
     rrx.recv_timeout(Duration::from_secs(5)).unwrap_or(value)
 }
+
+/// SetPaneOption/ShowPaneOptions resolve only "" (the active pane) and bare
+/// "%N"/"N" pane ids. set-option keeps its -t in the argument list for the
+/// shared parser (unlike every other command, whose -t without_outer_target
+/// strips), so a richer form like "session:win.pane" reaches these arms
+/// verbatim. That form was already resolved AND validated by the
+/// FocusTargetTemp issued before dispatch, making the active pane the target;
+/// forwarding the raw text made the bare-id parse fail and reported a pane
+/// that provably exists as missing (#583 arm 6 regression).
+fn pane_scope_target(raw: String) -> String {
+    if raw.is_empty() || raw.trim().trim_start_matches('%').parse::<usize>().is_ok() {
+        raw
+    } else {
+        String::new()
+    }
+}
 use crate::cli::{extract_flag_value, parse_set_option_args, parse_target};
 use crate::util::base64_decode;
 use crate::control;
@@ -2609,9 +2625,11 @@ match cmd {
         // never consumes the next argument.
         let pane_scope = flag_chars.contains('p');
         if pane_scope {
-            let raw_target = extract_flag_value(&args, "-t")
-                .map(|s| s.trim_matches('"').to_string())
-                .unwrap_or_default();
+            let raw_target = pane_scope_target(
+                extract_flag_value(&args, "-t")
+                    .map(|s| s.trim_matches('"').to_string())
+                    .unwrap_or_default(),
+            );
             let reply = if has_u {
                 let option = non_flag_args[0];
                 let (rtx, rrx) = mpsc::channel::<String>();
@@ -2736,9 +2754,11 @@ match cmd {
         // Pane scope (issue #580): list the target pane's `set-option -p`
         // options. `-p` is a bare flag; only -t carries a value.
         if combined_has('p') {
-            let raw_target = extract_flag_value(&args, "-t")
-                .map(|s| s.trim_matches('"').to_string())
-                .unwrap_or_default();
+            let raw_target = pane_scope_target(
+                extract_flag_value(&args, "-t")
+                    .map(|s| s.trim_matches('"').to_string())
+                    .unwrap_or_default(),
+            );
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ShowPaneOptions(raw_target, rtx));
             if let Ok(reply) = rrx.recv_timeout(Duration::from_millis(2000)) {
@@ -4366,9 +4386,11 @@ fn dispatch_control_command(
             // `-F` expands the value as a format before it is stored.
             let format_expand = flag_chars.contains('F');
             if pane_scope {
-                let raw = extract_flag_value(&args, "-t")
-                    .map(|s| s.trim_matches('"').to_string())
-                    .unwrap_or_default();
+                let raw = pane_scope_target(
+                    extract_flag_value(&args, "-t")
+                        .map(|s| s.trim_matches('"').to_string())
+                        .unwrap_or_default(),
+                );
                 let (rtx, rrx) = mpsc::channel::<String>();
                 if unset && !positional.is_empty() {
                     let _ = tx.send(CtrlReq::SetPaneOption(raw, positional[0].to_string(), String::new(), rtx));
@@ -4438,9 +4460,11 @@ fn dispatch_control_command(
             };
             // Pane scope (#580): list a pane's `set-option -p` options.
             if combined_has2('p') {
-                let raw = extract_flag_value(&args, "-t")
-                    .map(|s| s.trim_matches('"').to_string())
-                    .unwrap_or_default();
+                let raw = pane_scope_target(
+                    extract_flag_value(&args, "-t")
+                        .map(|s| s.trim_matches('"').to_string())
+                        .unwrap_or_default(),
+                );
                 let _ = tx.send(CtrlReq::ShowPaneOptions(raw, rtx));
                 let reply = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
                 let _ = resp_tx.send(reply);
@@ -5092,3 +5116,7 @@ mod tests_set_option_control;
 #[cfg(test)]
 #[path = "../../tests-rs/test_pane_border_indicator_control.rs"]
 mod tests_pane_border_indicator_control;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue583_pane_scope_target.rs"]
+mod tests_issue583_pane_scope_target;
