@@ -1605,6 +1605,65 @@ fn strip_quotes(s: &str) -> &str {
 /// directly on the CommandBuilder and run the program without the `env` prefix,
 /// independent of PATH.  Returns None when the `env ` idiom is not present.
 /// (issue #399)
+/// Byte offset of the first `&&` that is NOT inside a quoted segment, so a
+/// directory whose name happens to contain `&&` cannot cut the `cd` operand
+/// short.
+#[cfg(windows)]
+fn find_unquoted_ampamp(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if c == b'\'' || c == b'"' {
+                    quote = Some(c);
+                } else if c == b'&' && i + 1 < b.len() && b[i + 1] == b'&' {
+                    return Some(i);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Quote one already-unquoted token so it survives a PowerShell `&` call as a
+/// single literal argument.  Only tokens that would otherwise be split (or that
+/// carry a quote of their own) are wrapped, so the common no-space case keeps
+/// the exact text the caller sent.
+#[cfg(windows)]
+fn quote_for_pwsh(tok: &str) -> String {
+    if tok.is_empty() {
+        return "''".to_string();
+    }
+    if tok.chars().any(|c| c.is_whitespace()) || tok.contains('\'') || tok.contains('"') {
+        format!("'{}'", tok.replace('\'', "''"))
+    } else {
+        tok.to_string()
+    }
+}
+
+/// Detect the POSIX `env VAR=val ... <program> <args>` launch idiom, optionally
+/// preceded by `cd <dir> &&`.  Tools written for real tmux (notably Claude Code
+/// agent-teams, which launches each teammate with
+/// `cd '<cwd>' && env CLAUDECODE=1 ... '<claude>' --agent-id ...`) use it.
+///
+/// The scan is quote aware end to end (#634).  It used to cut tokens on plain
+/// whitespace, so a single assignment whose value carried a space — POSIX
+/// quoted exactly as `env` expects, e.g.
+/// `env XDIR='D:\POC Code\todosample' '<prog>'` — was chopped in half: `XDIR`
+/// took only `'D:\POC`, and the orphaned tail `Code\todosample'` became the
+/// program.  The pane then ran `& Code\todosample' ...` and PowerShell, which
+/// reads `Name\Command` as a module qualified call, answered
+/// "The module 'Code' could not be loaded", which is what every teammate pane
+/// showed when the project lived under a path with a space in it.
 #[cfg(windows)]
 fn detect_env_prefix_command(cmd: &str) -> Option<(Option<String>, Vec<(String, String)>, String)> {
     let mut rest = cmd.trim();
@@ -1612,7 +1671,7 @@ fn detect_env_prefix_command(cmd: &str) -> Option<(Option<String>, Vec<(String, 
 
     // Optional leading `cd <dir> && `
     if let Some(after_cd) = rest.strip_prefix("cd ") {
-        if let Some(amp) = after_cd.find("&&") {
+        if let Some(amp) = find_unquoted_ampamp(after_cd) {
             cwd_override = Some(strip_quotes(after_cd[..amp].trim()).to_string());
             rest = after_cd[amp + 2..].trim();
         }
@@ -1622,28 +1681,36 @@ fn detect_env_prefix_command(cmd: &str) -> Option<(Option<String>, Vec<(String, 
     let after_env = rest.strip_prefix("env ")?;
 
     // Consume leading `KEY=VALUE` tokens; the first non-assignment token begins
-    // the program + args.
+    // the program + args.  Tokenising honours quotes, so a quoted value keeps
+    // its spaces instead of spilling into the program position.
+    let tokens = split_spawn_tokens(after_env);
     let mut env_sets: Vec<(String, String)> = Vec::new();
-    let mut remainder = after_env.trim_start();
-    loop {
-        let token_end = remainder.find(char::is_whitespace).unwrap_or(remainder.len());
-        let token = &remainder[..token_end];
-        if let Some(eq) = token.find('=') {
-            let key = &token[..eq];
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let tok = &tokens[idx];
+        if let Some(eq) = tok.find('=') {
+            let key = &tok[..eq];
             if !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                let val = strip_quotes(&token[eq + 1..]).to_string();
-                env_sets.push((key.to_string(), val));
-                remainder = remainder[token_end..].trim_start();
+                env_sets.push((key.to_string(), tok[eq + 1..].to_string()));
+                idx += 1;
                 continue;
             }
         }
         break;
     }
 
-    if remainder.is_empty() {
+    if idx >= tokens.len() {
         return None;
     }
-    Some((cwd_override, env_sets, remainder.to_string()))
+    // Re-quote for the `&` call the caller builds: the tokeniser consumed the
+    // original quotes, so a program (or argument) holding a space has to get
+    // them back or PowerShell would split it again.
+    let remainder = tokens[idx..]
+        .iter()
+        .map(|t| quote_for_pwsh(t))
+        .collect::<Vec<String>>()
+        .join(" ");
+    Some((cwd_override, env_sets, remainder))
 }
 
 /// Split a spawn-command string into whitespace-separated tokens, honouring
@@ -2679,6 +2746,10 @@ pub fn spawn_reader_thread(
 #[cfg(test)]
 #[path = "../tests-rs/test_issue399_env_prefix.rs"]
 mod test_issue399_env_prefix;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue634_env_value_spaces.rs"]
+mod test_issue634_env_value_spaces;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue151_strict_mode.rs"]
