@@ -477,9 +477,13 @@ Write-Perf "10 windows created in $($sw.ElapsedMilliseconds)ms (${perWindow}ms/w
 # Threshold history: originally 50ms/window. The 2026-08-21 sweep measured
 # 55-58ms on the then-current build AND 59.6ms on pre-change 5d938aa, and the
 # 2026-08-22 sweep measured 61.5ms: the drift is the MACHINE, not the product
-# (A/B on old builds proves it). 75ms keeps headroom to catch a genuine
-# regression (a 2x jump still fails) without flagging environment drift.
-if ($perWindow -lt 75) { Write-Pass "Window creation: ${perWindow}ms/window < 75ms" } else { Write-Fail "too slow: ${perWindow}ms" }
+# (A/B on old builds proves it). Raised 50 -> 75 then. The 2026-09-05 sweep
+# measured 104.4ms under sweep load and 75.5-78.8ms quiet; the same-moment
+# A/B put pre-batch 63f637e at 118.3ms BEST vs 75.4ms on the current build,
+# so the machine drifted again (the product got FASTER). 110ms keeps the
+# 2x-from-steady-state canary (a jump past ~155 still fails) and stops
+# flagging sweep-load readings.
+if ($perWindow -lt 110) { Write-Pass "Window creation: ${perWindow}ms/window < 110ms" } else { Write-Fail "too slow: ${perWindow}ms" }
 
 Write-Test "8.2 Rapid window switching (50 cycles)"
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
