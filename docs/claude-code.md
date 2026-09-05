@@ -257,6 +257,31 @@ This is expected behavior. Opus prefers `isolation: "worktree"` over the teammat
 
 **Workaround:** Add a `CLAUDE.md` instruction telling the model to prefer teammates over worktree isolation. This is best-effort, the model ultimately decides.
 
+### Teammate panes show "The module 'X' could not be loaded"
+
+A teammate pane that opens with
+
+```
+&: The module 'Code' could not be loaded. For more information, run 'Import-Module Code'.
+```
+
+is the signature of a launch line that lost its quoting on the way into the
+pane ([#634](https://github.com/psmux/psmux/issues/634)). Claude Code sends the
+teammate command as one operand,
+`cd '<cwd>' && env <VAR=val ...> '<claude>' <flags>`, and it POSIX quotes every
+value that contains a space. psmux used to scan that assignment run on plain
+whitespace, so a value such as `XDIR='D:\POC Code\todosample'` was read as the
+assignment `XDIR='D:\POC` plus a leftover `Code\todosample'`, and the leftover
+became the program psmux invoked. PowerShell reads `Name\Command` as a module
+qualified call, which is where the module name in the message comes from: it is
+whatever word followed the first space in the value.
+
+The scan is quote aware from psmux 3.3.9, so projects and Claude Code installs
+under paths with spaces (`OneDrive - Contoso`, `POC Code`, `Program Files`) work
+without any workaround. On 3.3.8 and earlier the workaround is to launch the
+team from a path without spaces, or to clear any environment variable whose
+value contains a space from the list Claude Code forwards to teammates.
+
 ### Claude command not found
 
 Make sure `claude.exe` is on your PATH. Install via:
