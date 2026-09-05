@@ -2259,7 +2259,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // expansions elsewhere (display-message -p) still run
                     // synchronously (see format.rs) without anything to remember
                     // here.
-                    let sf = helpers::expand_status_formats(&app, &cached_status_style)?;
+                    let sf = helpers::expand_status_formats(&app, &cached_status_style);
                     let ss_escaped = json_escape_string(&sf.status_style);
                     let sl_expanded = json_escape_string(&sf.status_left);
                     let sr_expanded = json_escape_string(&sf.status_right);
@@ -2296,10 +2296,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.scroll_enter_copy_mode,
                         app.bold_is_bright,
                     ));
-                    helpers::append_client_render_options_json(
+                    // #633 follow up: a malformed buffer here used to be a quiet
+                    // no op; never let it end the server. Skipping the append
+                    // degrades to the client's own defaults for these fields.
+                    if let Err(e) = helpers::append_client_render_options_json(
                         &mut combined_buf,
                         &sf.client_render_options,
-                    )?;
+                    ) {
+                        if crate::debug_log::server_log_enabled() {
+                            crate::debug_log::server_log(
+                                "render",
+                                &format!("client render options omitted: {e}"),
+                            );
+                        }
+                    }
                     // Issue #7 batch D: dump-state's JSON never identified which
                     // session it belonged to (no consumer could tell two
                     // sessions' dump-state responses apart without a separate
@@ -6473,7 +6483,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             // All of it goes through the one guarded helper — this block used to
             // carry its own copy of the list WITHOUT the async guard, which is
             // what made every keystroke wait on a status-bar #() spawn.
-            let sf = helpers::expand_status_formats(&app, &cached_status_style)?;
+            let sf = helpers::expand_status_formats(&app, &cached_status_style);
             let ss_escaped = json_escape_string(&sf.status_style);
             let sl_expanded = json_escape_string(&sf.status_left);
             let sr_expanded = json_escape_string(&sf.status_right);
@@ -6509,10 +6519,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 app.scroll_enter_copy_mode,
                 app.bold_is_bright,
             ));
-            helpers::append_client_render_options_json(
+            // #633 follow up: a malformed buffer here used to be a quiet
+            // no op; never let it end the server. Skipping the append degrades
+            // to the client's own defaults for these fields.
+            if let Err(e) = helpers::append_client_render_options_json(
                 &mut combined_buf,
                 &sf.client_render_options,
-            )?;
+            ) {
+                if crate::debug_log::server_log_enabled() {
+                    crate::debug_log::server_log(
+                        "render",
+                        &format!("client render options omitted: {e}"),
+                    );
+                }
+            }
             // Inject overlay state (popup, menu, confirm, display_panes)
             {
                 // Inject clock_colour if set

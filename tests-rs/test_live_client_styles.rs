@@ -44,7 +44,7 @@ fn mk_window(name: &str, id: usize) -> crate::types::Window {
 }
 
 fn append_client_render_options(buf: &mut String, app: &AppState) -> std::io::Result<()> {
-    let formats = expand_status_formats(app, "")?;
+    let formats = expand_status_formats(app, "");
     append_client_render_options_json(buf, &formats.client_render_options)
 }
 

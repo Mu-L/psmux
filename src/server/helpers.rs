@@ -151,13 +151,14 @@ pub(crate) struct StatusFormats {
 /// `status_style` is passed in rather than read from `app` because both callers
 /// hold it in a metadata cache that is only rebuilt on structural change.
 ///
-/// # Errors
-///
-/// Returns an error if a render option escaped catalog validation.
+/// Infallible by design: this runs once per rendered frame inside
+/// `run_server`, where an `Err` would end the server and every pane with it.
+/// A render option that escaped catalog validation degrades to its default
+/// instead (the same fallback the client applies to a missing field).
 pub(crate) fn expand_status_formats(
     app: &AppState,
     status_style: &str,
-) -> io::Result<StatusFormats> {
+) -> StatusFormats {
     use crate::format::expand_format;
     // The one guard. Everything below expands #() asynchronously against the
     // TTL cache instead of blocking the event loop.
@@ -168,8 +169,16 @@ pub(crate) fn expand_status_formats(
         .unwrap_or(crate::pane_border::INDICATORS_DEFAULT);
     let pane_border_indicators =
         crate::pane_border::PaneBorderIndicators::parse(pane_border_indicators)
-            .map_err(io::Error::other)?;
-    Ok(StatusFormats {
+            .unwrap_or_else(|e| {
+                if crate::debug_log::server_log_enabled() {
+                    crate::debug_log::server_log(
+                        "render",
+                        &format!("{e}; falling back to the default"),
+                    );
+                }
+                crate::pane_border::PaneBorderIndicators::default()
+            });
+    StatusFormats {
         status_style: expand_format(status_style, app),
         status_left: expand_format(&app.status_left, app),
         status_right: expand_format(&app.status_right, app),
@@ -232,7 +241,7 @@ pub(crate) fn expand_status_formats(
         } else {
             None
         },
-    })
+    }
 }
 
 /// Append typed client-render options to a buffer ending in `}`.
@@ -877,6 +886,10 @@ mod tests_live_client_styles;
 #[cfg(test)]
 #[path = "../../tests-rs/test_render_path_async_format.rs"]
 mod tests_render_path_async_format;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue633_followup_render_fallback.rs"]
+mod tests_issue633_followup_render_fallback;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue556_color_reply_order.rs"]

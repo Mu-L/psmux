@@ -99,7 +99,7 @@ fn status_right_hash_paren_does_not_block_the_render_path() {
 
     // No AsyncFormatGuard here on purpose — expand_status_formats owns it.
     let t0 = Instant::now();
-    let out = expand_status_formats(&app, "").unwrap();
+    let out = expand_status_formats(&app, "");
     let elapsed = t0.elapsed();
 
     assert!(
@@ -171,7 +171,7 @@ fn set_titles_string_is_guarded() {
     app.set_titles_string = format!("#({})", slow_tracer(&counter));
 
     let t0 = Instant::now();
-    let out = expand_status_formats(&app, "").unwrap();
+    let out = expand_status_formats(&app, "");
     let elapsed = t0.elapsed();
 
     assert!(
@@ -189,7 +189,7 @@ fn set_titles_string_is_guarded() {
 fn host_title_is_none_when_set_titles_is_off() {
     let app = mock_app(15);
     assert!(
-        expand_status_formats(&app, "").unwrap().host_title.is_none(),
+        expand_status_formats(&app, "").host_title.is_none(),
         "set-titles off must not emit a host_title"
     );
 }
@@ -204,7 +204,7 @@ fn client_render_option_formats_do_not_block_the_render_path() {
     app.status_left_style = format!("#({})", slow_tracer(&counter));
 
     let t0 = Instant::now();
-    let formats = expand_status_formats(&app, "").unwrap();
+    let formats = expand_status_formats(&app, "");
     let mut buf = String::from("{}");
     append_client_render_options_json(&mut buf, &formats.client_render_options).unwrap();
     let elapsed = t0.elapsed();
