@@ -1,9 +1,17 @@
 // Live-client style options must share one server-side render-state contract:
-//   1. append_extra_style_json() emits status and pane-content style fields.
+//   1. ClientRenderOptions emits status and pane-content style fields.
 //   2. list_windows_json_with_tabs() must carry per-window bell/last/activity
 //      flags so the client can pick the right style.
 
 use super::*;
+
+#[derive(serde::Deserialize)]
+struct LegacyClientRenderOptions {
+    wsa_style: Option<String>,
+    wsb_style: Option<String>,
+    wsl_style: Option<String>,
+    pane_border_indicators: Option<String>,
+}
 
 fn mk_app() -> AppState {
     let mut app = AppState::new("live_client_styles".to_string());
@@ -35,9 +43,14 @@ fn mk_window(name: &str, id: usize) -> crate::types::Window {
     }
 }
 
-// ── 1. The render-state JSON carries live-client status styles ──
+fn append_client_render_options(buf: &mut String, app: &AppState) -> std::io::Result<()> {
+    let formats = expand_status_formats(app, "")?;
+    append_client_render_options_json(buf, &formats.client_render_options)
+}
+
+// ── 1. The render-state JSON carries shared client-render options ──
 #[test]
-fn append_extra_style_json_emits_status_styles() {
+fn client_render_options_emit_status_and_window_flag_styles() {
     let mut app = mk_app();
     app.status_left_style = "fg=colour201".to_string();
     app.status_right_style = "bg=colour21".to_string();
@@ -46,23 +59,33 @@ fn append_extra_style_json_emits_status_styles() {
     app.window_status_last_style = "fg=green".to_string();
 
     let mut buf = String::from("{\"status_style\":\"x\"}");
-    append_extra_style_json(&mut buf, &app);
+    append_client_render_options(&mut buf, &app).unwrap();
 
-    assert!(buf.contains("\"status_left_style\":\"fg=colour201\""), "status-left-style missing: {buf}");
-    assert!(buf.contains("\"status_right_style\":\"bg=colour21\""), "status-right-style missing: {buf}");
-    assert!(buf.contains("\"wsa_style\":\"reverse\""), "activity-style missing: {buf}");
-    assert!(buf.contains("\"wsb_style\":\"bg=blue\""), "bell-style missing: {buf}");
-    assert!(buf.contains("\"wsl_style\":\"fg=green\""), "last-style missing: {buf}");
-
-    // Result must remain a single valid JSON object.
-    assert!(buf.ends_with('}'));
-    let parsed: serde_json::Value = serde_json::from_str(&buf).expect("valid JSON");
-    assert_eq!(parsed["wsa_style"], "reverse");
-    assert_eq!(parsed["status_left_style"], "fg=colour201");
+    let parsed: crate::render_state::ClientRenderOptions =
+        serde_json::from_str(&buf).expect("typed client render options");
+    assert_eq!(parsed.status_left_style.as_deref(), Some("fg=colour201"));
+    assert_eq!(parsed.status_right_style.as_deref(), Some("bg=colour21"));
+    assert_eq!(
+        parsed.window_status_activity_style.as_deref(),
+        Some("reverse"),
+    );
+    assert_eq!(
+        parsed.window_status_bell_style.as_deref(),
+        Some("bg=blue"),
+    );
+    assert_eq!(
+        parsed.window_status_last_style.as_deref(),
+        Some("fg=green"),
+    );
+    let legacy: LegacyClientRenderOptions =
+        serde_json::from_str(&buf).expect("legacy wire options");
+    assert_eq!(legacy.wsa_style.as_deref(), Some("reverse"));
+    assert_eq!(legacy.wsb_style.as_deref(), Some("bg=blue"));
+    assert_eq!(legacy.wsl_style.as_deref(), Some("fg=green"));
 }
 
 #[test]
-fn append_extra_style_json_emits_global_window_content_styles() {
+fn client_render_options_emit_global_window_content_styles() {
     let mut app = mk_app();
     app.user_options.insert(
         "window-style".to_string(),
@@ -74,51 +97,75 @@ fn append_extra_style_json_emits_global_window_content_styles() {
     );
 
     let mut buf = String::from("{\"layout\":{}}");
-    append_extra_style_json(&mut buf, &app);
+    append_client_render_options(&mut buf, &app).unwrap();
 
-    let parsed: serde_json::Value = serde_json::from_str(&buf).expect("valid JSON");
-    assert_eq!(parsed["window_style"], "fg=colour245,bg=colour236");
-    assert_eq!(parsed["window_active_style"], "fg=colour250,bg=black");
+    let parsed: crate::render_state::ClientRenderOptions =
+        serde_json::from_str(&buf).expect("typed client render options");
+    assert_eq!(
+        parsed.window_style.as_deref(),
+        Some("fg=colour245,bg=colour236"),
+    );
+    assert_eq!(
+        parsed.window_active_style.as_deref(),
+        Some("fg=colour250,bg=black"),
+    );
 }
 
 #[test]
-fn append_extra_style_json_emits_empty_global_window_content_styles_when_unset() {
+fn client_render_options_emit_empty_global_window_content_styles_when_unset() {
     let app = mk_app();
     let mut buf = String::from("{\"layout\":{}}");
-    append_extra_style_json(&mut buf, &app);
+    append_client_render_options(&mut buf, &app).unwrap();
 
-    let parsed: serde_json::Value = serde_json::from_str(&buf).expect("valid JSON");
-    assert_eq!(parsed["window_style"], "");
-    assert_eq!(parsed["window_active_style"], "");
+    let parsed: crate::render_state::ClientRenderOptions =
+        serde_json::from_str(&buf).expect("typed client render options");
+    assert_eq!(parsed.window_style.as_deref(), Some(""));
+    assert_eq!(parsed.window_active_style.as_deref(), Some(""));
 }
 
 #[test]
-fn append_extra_style_json_emits_pane_border_indicators_and_default() {
+fn client_render_options_emit_pane_border_indicators_and_default() {
     let mut app = mk_app();
     let mut default_buf = String::from("{\"layout\":{}}");
-    append_extra_style_json(&mut default_buf, &app);
-    let default_json: serde_json::Value =
-        serde_json::from_str(&default_buf).expect("valid default JSON");
-    assert_eq!(default_json["pane_border_indicators"], "colour");
+    append_client_render_options(&mut default_buf, &app).unwrap();
+    let default_options: crate::render_state::ClientRenderOptions =
+        serde_json::from_str(&default_buf).expect("typed default options");
+    assert_eq!(
+        default_options.pane_border_indicators,
+        Some(crate::pane_border::PaneBorderIndicators::Colour),
+    );
+    let default_legacy: LegacyClientRenderOptions =
+        serde_json::from_str(&default_buf).expect("legacy default options");
+    assert_eq!(
+        default_legacy.pane_border_indicators.as_deref(),
+        Some("colour"),
+    );
 
     app.user_options.insert(
         "pane-border-indicators".to_string(),
         "arrows".to_string(),
     );
     let mut arrows_buf = String::from("{\"layout\":{}}");
-    append_extra_style_json(&mut arrows_buf, &app);
-    let arrows_json: serde_json::Value =
-        serde_json::from_str(&arrows_buf).expect("valid arrows JSON");
-    assert_eq!(arrows_json["pane_border_indicators"], "arrows");
+    append_client_render_options(&mut arrows_buf, &app).unwrap();
+    let arrows_options: crate::render_state::ClientRenderOptions =
+        serde_json::from_str(&arrows_buf).expect("typed arrows options");
+    assert_eq!(
+        arrows_options.pane_border_indicators,
+        Some(crate::pane_border::PaneBorderIndicators::Arrows),
+    );
+    let arrows_legacy: LegacyClientRenderOptions =
+        serde_json::from_str(&arrows_buf).expect("legacy arrows options");
+    assert_eq!(
+        arrows_legacy.pane_border_indicators.as_deref(),
+        Some("arrows"),
+    );
 }
 
-// Guard the injection contract: never touch a buffer that is not a closed object.
 #[test]
-fn append_extra_style_json_noop_when_not_object() {
-    let mut app = mk_app();
-    app.window_status_activity_style = "reverse".to_string();
-    let mut buf = String::from("[1,2,3]"); // not ending in '}'
-    append_extra_style_json(&mut buf, &app);
+fn client_render_options_reject_missing_object_delimiter() {
+    let app = mk_app();
+    let mut buf = String::from("[1,2,3]");
+    assert!(append_client_render_options(&mut buf, &app).is_err());
     assert_eq!(buf, "[1,2,3]", "must not corrupt a non-object buffer");
 }
 

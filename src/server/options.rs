@@ -31,7 +31,7 @@ fn is_window_option(name: &str) -> bool {
 /// customize-mode shows a "default" the running session does not have.
 fn effective_when_unset(name: &str) -> Option<&'static str> {
     Some(match name {
-        // Consumed at src/rendering.rs, missing entry means border_lines::DEFAULT.
+        // Consumed by the client renderer; missing means border_lines::DEFAULT.
         "pane-border-lines" => crate::border_lines::DEFAULT,
         "pane-border-indicators" => crate::pane_border::INDICATORS_DEFAULT,
         // Consumed at src/server/helpers.rs, a missing entry disables the gutter.

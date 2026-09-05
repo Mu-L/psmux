@@ -1,8 +1,7 @@
 //! Shared color and style parsing utilities.
 //!
-//! This module consolidates ALL tmux-compatible color/style parsing into a
-//! single place, eliminating duplication between rendering.rs and client.rs.
-//! Both the server-side renderer and the remote client import from here.
+//! This module owns tmux-compatible color and style parsing for the active
+//! client renderer and shared terminal helpers.
 
 use ratatui::prelude::*;
 use ratatui::style::{Style, Modifier};

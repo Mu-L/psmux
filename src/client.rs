@@ -13,9 +13,9 @@ use crate::util::{WinTree, base64_encode, quote_arg};
 use crate::session::read_session_key;
 use crate::rendering::{
     BorderGeometry, centered_rect, dim_color, dim_predictions_enabled,
-    fix_border_intersections, map_color,
+    fix_border_intersections,
 };
-use crate::style::parse_tmux_style_components;
+use crate::style::{map_color, parse_tmux_style_components};
 use crate::config::{parse_key_string, normalize_key_for_binding};
 use crate::clipboard::{copy_to_system_clipboard, read_from_system_clipboard};
 use crate::debug_log::{client_log, client_log_enabled, input_log, input_log_enabled};
@@ -1477,7 +1477,7 @@ pub fn render_layout_json(
                         }
                         let mut style = Style::default().fg(fg).bg(bg);
                         if in_selection {
-                            let ms = crate::rendering::parse_tmux_style(mode_style_str);
+                            let ms = crate::style::parse_tmux_style(mode_style_str);
                             style = ms;
                         }
                         if cell.inverse { style = style.add_modifier(Modifier::REVERSED); }
@@ -2342,12 +2342,8 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         pane_active_border_style: Option<String>,
         #[serde(default)]
         pane_border_hover_style: Option<String>,
-        #[serde(default)]
-        pane_border_indicators: Option<PaneBorderIndicators>,
-        #[serde(default)]
-        window_style: Option<String>,
-        #[serde(default)]
-        window_active_style: Option<String>,
+        #[serde(flatten)]
+        client_render_options: crate::render_state::ClientRenderOptions,
         #[serde(default)]
         pane_border_status: Option<String>,
         #[serde(default)]
@@ -2379,21 +2375,6 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// window-status-current-style
         #[serde(default)]
         wsc_style: Option<String>,
-        /// #451: status-left-style (was dropped in modularization)
-        #[serde(default)]
-        status_left_style: Option<String>,
-        /// #451: status-right-style
-        #[serde(default)]
-        status_right_style: Option<String>,
-        /// #451: window-status-activity-style
-        #[serde(default)]
-        wsa_style: Option<String>,
-        /// #451: window-status-bell-style
-        #[serde(default)]
-        wsb_style: Option<String>,
-        /// #451: window-status-last-style
-        #[serde(default)]
-        wsl_style: Option<String>,
         /// clock-mode active
         #[serde(default)]
         clock_mode: bool,
@@ -6036,22 +6017,25 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 } else { None }
             };
             let window_styles = WindowContentStyles {
-                inactive: state.window_style.as_deref()
+                inactive: state.client_render_options.window_style.as_deref()
                     .filter(|style| !style.is_empty())
                     .map(crate::style::parse_tmux_style),
-                active: state.window_active_style.as_deref()
+                active: state.client_render_options.window_active_style.as_deref()
                     .filter(|style| !style.is_empty())
                     .map(crate::style::parse_tmux_style),
                 // tmux `style.c` reads a `dim=N` percentage out of both window
                 // styles and `tty.c` applies it via `colour_dim` (#619 item 4).
-                inactive_dim: state.window_style.as_deref()
+                inactive_dim: state.client_render_options.window_style.as_deref()
                     .map(crate::style::parse_style_dim).unwrap_or(0),
-                active_dim: state.window_active_style.as_deref()
+                active_dim: state.client_render_options.window_active_style.as_deref()
                     .map(crate::style::parse_style_dim).unwrap_or(0),
             };
             let floating_pane_focused =
                 srv_floats.iter().any(|float| float.focused);
-            let border_indicators = state.pane_border_indicators.unwrap_or_default();
+            let border_indicators = state
+                .client_render_options
+                .pane_border_indicators
+                .unwrap_or_default();
             let (tiled_active_rect, tiled_active_border_style) =
                 tiled_border_focus(
                     active_rect,
@@ -6170,7 +6154,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             } // if let sel_s, sel_e
 
             if session_chooser {
-                let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
+                let sel_style = crate::style::parse_tmux_style(&mode_style_str);
                 let filtered_indices = session_filtered_indices(&session_entries, &session_filter);
                 // Popup size: when preview is OFF use the original
                 // pre-#257 dynamic sizing (compact, list-only). When preview
@@ -6385,7 +6369,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
             }
             if tree_chooser {
-                let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
+                let sel_style = crate::style::parse_tmux_style(&mode_style_str);
                 // Popup size: when preview is OFF use the original
                 // pre-#257 dynamic sizing (compact, list-only). When preview
                 // is ON expand to 85x75% so the right-side preview has room.
@@ -6586,7 +6570,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
             }
             if buffer_chooser {
-                let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
+                let sel_style = crate::style::parse_tmux_style(&mode_style_str);
                 let overlay = Block::default().borders(Borders::ALL)
                     .title(" choose-buffer (digits+enter=jump, Enter=paste, d=delete, q/Esc=close) ")
                     .border_style(sel_style);
@@ -6723,11 +6707,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             // #451: status-left-style is layered over the base status style so
             // inline #[...] overrides in status-left still win. Dropped in the
             // app.rs->client.rs modularization; restored here.
-            let left_base = match state.status_left_style.as_deref() {
-                Some(s) if !s.is_empty() => sb_base.patch(crate::rendering::parse_tmux_style(s)),
+            let left_base = match state.client_render_options.status_left_style.as_deref() {
+                Some(s) if !s.is_empty() => sb_base.patch(crate::style::parse_tmux_style(s)),
                 _ => sb_base,
             };
-            let mut left_spans: Vec<Span> = crate::rendering::parse_inline_styles(&left_prefix, left_base);
+            let mut left_spans: Vec<Span> = crate::style::parse_inline_styles(&left_prefix, left_base);
 
             // Window tabs (the window list)
             let mut tab_spans_all: Vec<Span> = Vec::new();
@@ -6745,7 +6729,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 };
                 if i > 0 {
                     // Parse inline styles in separator (e.g. "#[fg=#44475a]|")
-                    let sep_spans = crate::rendering::parse_inline_styles(&win_status_sep, sb_base);
+                    let sep_spans = crate::style::parse_inline_styles(&win_status_sep, sb_base);
                     let sep_w: u16 = sep_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref()) as u16).sum();
                     tab_spans_all.extend(sep_spans);
                     tab_cursor += sep_w;
@@ -6770,7 +6754,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // attributes like `reverse` (the activity/bell default) work.
                 let flag_style = |raw: &Option<String>| -> Option<Style> {
                     match raw.as_deref() {
-                        Some(s) if !s.is_empty() => Some(normal_style.patch(crate::rendering::parse_tmux_style(s))),
+                        Some(s) if !s.is_empty() => Some(normal_style.patch(crate::style::parse_tmux_style(s))),
                         _ => None,
                     }
                 };
@@ -6785,15 +6769,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         sb_base
                     }
                 } else if w.bell {
-                    flag_style(&state.wsb_style).unwrap_or(normal_style)
+                    flag_style(&state.client_render_options.window_status_bell_style)
+                        .unwrap_or(normal_style)
                 } else if w.activity {
-                    flag_style(&state.wsa_style).unwrap_or(normal_style)
+                    flag_style(&state.client_render_options.window_status_activity_style)
+                        .unwrap_or(normal_style)
                 } else if w.last {
-                    flag_style(&state.wsl_style).unwrap_or(normal_style)
+                    flag_style(&state.client_render_options.window_status_last_style)
+                        .unwrap_or(normal_style)
                 } else {
                     normal_style
                 };
-                let parsed = crate::rendering::parse_inline_styles(&tab_text, fallback_style);
+                let parsed = crate::style::parse_inline_styles(&tab_text, fallback_style);
                 let tab_start = tab_cursor;
                 let tab_w: u16 = parsed.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref()) as u16).sum();
                 tab_cursor += tab_w;
@@ -6808,11 +6795,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     right_text.len(), right_text.chars().take(100).collect::<String>()));
             }
             // #451: status-right-style, layered like status-left-style above.
-            let right_base = match state.status_right_style.as_deref() {
-                Some(s) if !s.is_empty() => sb_base.patch(crate::rendering::parse_tmux_style(s)),
+            let right_base = match state.client_render_options.status_right_style.as_deref() {
+                Some(s) if !s.is_empty() => sb_base.patch(crate::style::parse_tmux_style(s)),
                 _ => sb_base,
             };
-            let mut right_spans = crate::rendering::parse_inline_styles(&right_text, right_base);
+            let mut right_spans = crate::style::parse_inline_styles(&right_text, right_base);
 
             // Enforce status-left-length / status-right-length truncation (tmux parity)
             crate::style::truncate_spans_to_width(&mut left_spans, state.status_left_length);
@@ -6903,7 +6890,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // #372: honor the configured message-style (sent expanded by the
                 // server) instead of a hard-coded colour. Falls back to tmux's
                 // default bg=yellow,fg=black when unset/empty.
-                let msg_style = crate::rendering::parse_tmux_style(
+                let msg_style = crate::style::parse_tmux_style(
                     match state.message_style.as_deref() {
                         Some(s) if !s.is_empty() => s,
                         _ => "bg=yellow,fg=black",
@@ -7069,7 +7056,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 f.render_widget(para, overlay.inner(oa));
             }
             if srv_menu_active {
-                let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
+                let sel_style = crate::style::parse_tmux_style(&mode_style_str);
                 let title_str = if srv_menu_title.is_empty() { "Menu".to_string() } else { srv_menu_title.clone() };
                 let overlay = Block::default().borders(Borders::ALL).title(title_str).border_style(sel_style);
                 let item_count = srv_menu_items.len();

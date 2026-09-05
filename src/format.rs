@@ -279,14 +279,11 @@ thread_local! {
 /// result value and never repainted). This restores tmux-parity: async only for
 /// the status bar, synchronous everywhere else.
 ///
-/// DO NOT construct this at a render call site. It is created inside the three
-/// functions that make up the render path —
-/// `server::helpers::expand_status_formats`, `list_windows_json_with_tabs`, and
-/// `append_extra_style_json`. It was previously created at the call sites, and
-/// the server auto-push block was written without it, so `#()` in the status bar
-/// spawned a process synchronously on the event loop that also delivers
-/// keystrokes — on every pane output burst. Keeping construction inside the
-/// functions means a new render path cannot reintroduce that.
+/// The periodic render path owns its guards inside
+/// `server::helpers::expand_status_formats` and `list_windows_json_with_tabs`,
+/// so a new call site cannot forget one. The state-aware window preview uses a
+/// separate guard because it expands one requested window outside those
+/// helpers.
 pub struct AsyncFormatGuard(bool);
 impl AsyncFormatGuard {
     pub fn new() -> Self {
