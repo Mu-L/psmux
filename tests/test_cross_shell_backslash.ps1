@@ -202,10 +202,25 @@ Write-Host ""
 if ($hasGitBash) {
     Write-Test "9a. Bash pane: send-keys delivers text"
     Clean-Start -Session "bs_t9" -Config "set -g default-shell `"$bashPath`""
+    # Bash startup race: keys sent before bash's readline is up are swallowed,
+    # so 9a failed with an EMPTY capture while 9b on the SAME pane passed a
+    # second later. Wait for the pane to draw its prompt before the first send,
+    # then poll for the echo instead of sampling once.
+    $ready = $false
+    for ($i = 0; $i -lt 40; $i++) {
+        $probe = (& $PSMUX capture-pane -t bs_t9 -p 2>&1) | Out-String
+        if ($probe.Trim().Length -gt 0) { $ready = $true; break }
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not $ready) { Write-Info "  WARNING: bash pane drew nothing within 10s, sending anyway" }
     $marker9 = "BST9_$(Get-Random)"
     & $PSMUX send-keys -t bs_t9 "echo ${marker9}_hello" Enter 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
-    $output = (& $PSMUX capture-pane -t bs_t9 -p 2>&1) | Out-String
+    $output = ""
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 500
+        $output = (& $PSMUX capture-pane -t bs_t9 -p 2>&1) | Out-String
+        if ($output -match "${marker9}_hello") { break }
+    }
     if ($output -match "${marker9}_hello") {
         Write-Pass "Bash pane: send-keys text delivered"
     } else {
