@@ -201,6 +201,7 @@ pub fn create_popup_pane(
         // A popup is not a window pane, so it has no `#{pane_start_command}`
         // of its own (#580).
         start_command: String::new(),
+        cwd_hint: None,
     })
 }
 
@@ -273,6 +274,7 @@ pub fn create_empty_pane(rows: u16, cols: u16, pane_id: usize) -> Option<Pane> {
         // Nothing was ever started here, so `#{pane_start_command}` is empty
         // until a respawn gives the pane a command (#580).
         start_command: String::new(),
+        cwd_hint: None,
     })
 }
 

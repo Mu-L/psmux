@@ -106,6 +106,7 @@ fn make_pane(id: usize) -> crate::types::Pane {
         output_ring: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         spawned_at: None,
         start_command: String::new(),
+        cwd_hint: None,
     }
 }
 

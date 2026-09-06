@@ -1396,8 +1396,53 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
 
                 // Layer 1: PEB walk (authoritative for local processes -- pwsh,
                 // cmd, cygwin bash and git bash all move it on `cd`).
-                if let Some(pid) = p.child_pid {
-                    if let Some(cwd) = crate::platform::process_info::get_foreground_cwd(pid) {
+                //
+                // A pane claimed from the warm pool is the one case where that
+                // reading is known to be a lie for a while: the spare is
+                // already running in the directory the pool spawned it in (the
+                // server's own cwd), and `-c <dir>` is honoured by typing a
+                // `cd` into it, which only takes effect once the shell reaches
+                // a prompt.  `cwd_hint` carries both the directory that was
+                // asked for and the reading taken just before that `cd` was
+                // written, so the request is reported for exactly as long as
+                // the process has not moved, and `split-window -c <dir>` never
+                // answers with the server's working directory (#615 follow
+                // up).  Everything else keeps trusting the reading.
+                {
+                    let live = p
+                        .child_pid
+                        .and_then(crate::platform::process_info::get_foreground_cwd);
+                    if let Some(hint) = p.cwd_hint.as_ref() {
+                        if hint.pid == p.child_pid
+                            && !hint.settled.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            match live.as_deref() {
+                                // Still sitting where the pool left it: the
+                                // injected `cd` has not run yet.
+                                Some(cwd)
+                                    if hint
+                                        .stale
+                                        .as_deref()
+                                        .is_some_and(|s| crate::util::same_dir(s, cwd)) =>
+                                {
+                                    return hint.requested.clone();
+                                }
+                                // Nothing readable at all: the request is the
+                                // only thing known about this pane.
+                                None => return hint.requested.clone(),
+                                // The process moved, either into the requested
+                                // directory or somewhere the user went first.
+                                // Either way the reading is live from now on,
+                                // latched so a later `cd` back into the pool's
+                                // directory cannot revive the hint.
+                                Some(_) => {
+                                    hint.settled
+                                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(cwd) = live {
                         return cwd;
                     }
                 }

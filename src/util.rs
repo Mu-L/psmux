@@ -65,6 +65,45 @@ pub fn usable_start_dir(dir: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Render a directory the way `#{pane_current_path}` renders one read out of a
+/// live process, so a directory psmux was HANDED (`split-window -c <dir>`) and
+/// one psmux READ back out of the pane's process compare and print alike.
+///
+/// Windows accepts `/` and `\` interchangeably and tolerates a trailing
+/// separator; the PEB reading never has one except on a drive root (`C:\`),
+/// which must keep it or the value stops being a usable path. Case is left
+/// exactly as given: `C:\Users` is what the user typed and what the reading
+/// comes back as, and lowercasing it to compare would mean printing something
+/// nobody asked for.
+pub fn normalize_dir_for_display(dir: &str) -> String {
+    let mut s = if cfg!(windows) { dir.replace('/', "\\") } else { dir.to_string() };
+    if cfg!(windows) {
+        // `C:\` (and `\\server\share\`) keep their trailing separator; anything
+        // else loses it.  A bare `\` or `/` is a path in its own right.
+        while s.len() > 1 && s.ends_with('\\') && !s.ends_with(":\\") {
+            s.pop();
+        }
+    } else {
+        while s.len() > 1 && s.ends_with('/') {
+            s.pop();
+        }
+    }
+    s
+}
+
+/// True when two directory strings name the same directory as far as this
+/// platform is concerned: separator- and trailing-separator-insensitive
+/// everywhere, and case-insensitive on Windows, where `C:\USERS` and
+/// `C:\Users` are one directory.
+pub fn same_dir(a: &str, b: &str) -> bool {
+    let (a, b) = (normalize_dir_for_display(a), normalize_dir_for_display(b));
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(&b)
+    } else {
+        a == b
+    }
+}
+
 /// Expand `~` to the user's home directory in a shell command string,
 /// then rewrite `~/.psmux/plugins/` to `~/.config/psmux/plugins/` when
 /// the classic path does not exist but the XDG path does (issue psmux-plugins#2).

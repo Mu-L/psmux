@@ -298,5 +298,6 @@ pub fn create_proxy_pane(
         // The command lives on the owning server's pane; a proxy reports no
         // `#{pane_start_command}` of its own (#580).
         start_command: String::new(),
+        cwd_hint: None,
     })
 }

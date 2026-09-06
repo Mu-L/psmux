@@ -323,6 +323,48 @@ pub struct Pane {
     /// carried a command of its own (tmux spawn.c: "Replace the stored
     /// arguments if there are new ones").
     pub start_command: String,
+    /// The directory this pane was ASKED to start in, kept until the shell is
+    /// observed to actually be somewhere (issue #615 follow up).
+    ///
+    /// tmux stores the requested cwd on the pane (`window_pane.cwd`, spawn.c)
+    /// and the child is `chdir`ed into it before `exec`, so `#{pane_current_path}`
+    /// is right from the instant the pane exists.  psmux cannot do that for a
+    /// pane claimed from the warm pool: that shell is ALREADY RUNNING in the
+    /// directory the pool spawned it in (the server's own cwd), and a running
+    /// process's cwd cannot be set from outside, so `-c <dir>` is honoured by
+    /// typing a `cd` into it (`pane::silent_rehome`).  That line runs instantly
+    /// on an idle box and seconds later when the machine is loaded and the
+    /// spare is still booting.  Until it does, the PEB reading is the POOL's
+    /// directory, and `#{pane_current_path}` used to report it.
+    /// That is how `split-window -c <dir>` could answer with the server's own
+    /// working directory, which is never a directory the user asked for.
+    ///
+    /// With the hint set, the requested directory is reported for exactly as
+    /// long as the pane's process is still sitting in the pre-`cd` directory.
+    /// The moment the reading moves, whether to the requested directory or
+    /// anywhere else because the user typed their own `cd` first, the live
+    /// reading takes over permanently.
+    pub cwd_hint: Option<CwdHint>,
+}
+
+/// A pane's requested-but-not-yet-observed working directory. See
+/// [`Pane::cwd_hint`].
+#[derive(Debug)]
+pub struct CwdHint {
+    /// The pane process the hint describes.  A `respawn-pane` (or any other
+    /// path that puts a different child behind the pane) changes `child_pid`,
+    /// which retires the hint without every respawn site having to know it
+    /// exists.
+    pub pid: Option<u32>,
+    /// The directory the pane was asked for, in native form.
+    pub requested: String,
+    /// The reading taken the moment before the `cd` was injected: the
+    /// directory the process is in until the shell moves itself. `None` when
+    /// nothing could be read, in which case any successful reading is trusted.
+    pub stale: Option<String>,
+    /// Latched once a reading other than `stale` is seen, so a later `cd` back
+    /// into `stale` cannot resurrect the hint.
+    pub settled: std::sync::atomic::AtomicBool,
 }
 
 /// Pre-spawned shell ready to be transplanted into a new window instantly.

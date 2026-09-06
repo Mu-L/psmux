@@ -139,6 +139,20 @@ function Real-Cwd([string]$t) {
 function Split-AndVerify([string]$sess, [string]$expect, [string]$label) {
     $sp = CurPath "${sess}:0.0"
     & $PSMUX -L $SOCK split-window -d -t "${sess}:0.0" -c $sp 2>&1 | Out-Null
+    # Asked FIRST, before any settling time.  tmux stores the requested cwd on
+    # the pane and chdirs the child into it before exec, so the answer is right
+    # from the instant the pane exists; psmux claims an already-running spare
+    # from the warm pool and moves it with an injected `cd`, so it has to
+    # remember what it was asked for.  Until it did, this read returned the
+    # directory the pool spawned the spare in, i.e. the psmux server's own, and
+    # a loaded machine could still be reporting it three seconds later, which
+    # is how this suite failed intermittently in the full sweep.
+    $imm = CurPath "${sess}:0.1"
+    if ($imm -eq $expect) {
+        Write-Pass "$label split-window -c '$sp' reports '$expect' immediately, with no settling time"
+    } else {
+        Write-Fail "$label split-window -c '$sp' reported '$imm' immediately, expected '$expect'"
+    }
     Start-Sleep -Seconds 3
     $np = CurPath "${sess}:0.1"
     $real = Real-Cwd "${sess}:0.1"
