@@ -193,7 +193,12 @@ fn foreground_is_shell_classifies_live_processes() {
 
     let _g = lock();
     let classify = |pid, expected| {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        // Generous on purpose: this waits on the OS to spawn a process and
+        // publish it in the process table, which has no bound under load. The
+        // loop breaks the instant the verdict is right, so a healthy machine
+        // never pays for the headroom; a loaded one stops reporting a product
+        // failure it does not have. Seen at 3s while a full sweep was running.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let mut verdict = None;
         loop {
             let present = process_table(Duration::ZERO)
