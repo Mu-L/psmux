@@ -959,7 +959,7 @@ fn has_any_exited(node: &mut Node) -> bool {
 }
 
 pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
-    let remain = app.remain_on_exit;
+    let global_remain = app.remain_on_exit;
     let kill_descendants = app.kill_descendants_on_exit();
     let mut any_pruned = false;
     let mut any_newly_dead = false;
@@ -970,6 +970,11 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
         }
         let leaves_before = count_panes(&app.windows[i].root);
         let active_pane_id = get_active_pane_id(&app.windows[i].root, &app.windows[i].active_path);
+        // #648: remain-on-exit is a WINDOW option. The reaper used to read one
+        // session-wide flag for every window, so `set -w -t <one window>
+        // remain-on-exit on` kept dead panes alive everywhere; the reporter's
+        // ordinary PowerShell panes stopped closing after `exit` because of it.
+        let remain = crate::server::options::window_flag(app, i, "remain-on-exit", global_remain);
         let root = std::mem::replace(&mut app.windows[i].root, Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
         let (pruned_result, newly_dead_count) = prune_exited(root, remain, kill_descendants);
         if newly_dead_count > 0 {

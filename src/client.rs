@@ -2416,7 +2416,24 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut srv_customize_options: Vec<CustomizeOption> = Vec::new();
 
     #[derive(serde::Deserialize, Default)]
-    struct WinStatus { id: usize, name: String, active: bool, #[serde(default)] activity: bool, #[serde(default)] bell: bool, #[serde(default)] last: bool, #[serde(default)] tab_text: String, #[serde(default)] idx: usize }
+    struct WinStatus {
+        id: usize,
+        name: String,
+        active: bool,
+        #[serde(default)] activity: bool,
+        #[serde(default)] bell: bool,
+        #[serde(default)] last: bool,
+        #[serde(default)] tab_text: String,
+        #[serde(default)] idx: usize,
+        /// Per-window `window-status-*-style` overrides (#648). Absent for a
+        /// window that set none, which is the ordinary case, so the server
+        /// wide styles below keep doing all the work.
+        #[serde(default)] ws_style: Option<String>,
+        #[serde(default)] wsc_style: Option<String>,
+        #[serde(default)] wsa_style: Option<String>,
+        #[serde(default)] wsb_style: Option<String>,
+        #[serde(default)] wsl_style: Option<String>,
+    }
     
     fn default_base_index() -> usize { 1 }
     fn default_prediction_dimming() -> bool { dim_predictions_enabled() }
@@ -7015,7 +7032,11 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
                 // Normal (non-current) window-status-style, used as the base for
                 // flagged windows and the fallback for plain ones.
-                let normal_style = if let Some((fg, bg, bold)) = win_status_style {
+                // #648: a window that set `window-status-style` on itself wins
+                // over the server wide one; the parsed server wide style is
+                // still the base so an override that only names a foreground
+                // keeps the rest.
+                let server_normal_style = if let Some((fg, bg, bold)) = win_status_style {
                     let mut s = Style::default();
                     if let Some(c) = fg { s = s.fg(c); }
                     if let Some(c) = bg { s = s.bg(c); }
@@ -7024,6 +7045,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 } else {
                     sb_base
                 };
+                let normal_style = match w.ws_style.as_deref() {
+                    Some(style) if !style.is_empty() => {
+                        server_normal_style.patch(crate::style::parse_tmux_style(style))
+                    }
+                    _ => server_normal_style,
+                };
                 // #451: restore the tmux flag-style priority that the monolithic
                 // app.rs renderer had (current > bell > activity > last > normal).
                 // The modularization dropped bell/last entirely and hard-coded the
@@ -7031,14 +7058,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 // no effect. Each flagged style is layered over the normal style so
                 // an option that only sets fg keeps the normal bg, and full
                 // attributes like `reverse` (the activity/bell default) work.
-                let flag_style = |raw: &Option<String>| -> Option<Style> {
-                    match raw.as_deref() {
-                        Some(s) if !s.is_empty() => Some(normal_style.patch(crate::style::parse_tmux_style(s))),
-                        _ => None,
-                    }
+                // #648: the window's own flag style outranks the server wide
+                // one, so `set -w -t <window> window-status-bell-style ...`
+                // colours only that window's alert.
+                let flag_style = |local: &Option<String>, server: &Option<String>| -> Option<Style> {
+                    let raw = local
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| server.as_deref().filter(|s| !s.is_empty()))?;
+                    Some(normal_style.patch(crate::style::parse_tmux_style(raw)))
                 };
                 let fallback_style = if w.active {
-                    if let Some((fg, bg, bold)) = win_status_current_style {
+                    let server_current = if let Some((fg, bg, bold)) = win_status_current_style {
                         let mut s = Style::default();
                         if let Some(c) = fg { s = s.fg(c); }
                         if let Some(c) = bg { s = s.bg(c); }
@@ -7046,15 +7077,21 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         s
                     } else {
                         sb_base
+                    };
+                    match w.wsc_style.as_deref() {
+                        Some(style) if !style.is_empty() => {
+                            server_current.patch(crate::style::parse_tmux_style(style))
+                        }
+                        _ => server_current,
                     }
                 } else if w.bell {
-                    flag_style(&state.client_render_options.window_status_bell_style)
+                    flag_style(&w.wsb_style, &state.client_render_options.window_status_bell_style)
                         .unwrap_or(normal_style)
                 } else if w.activity {
-                    flag_style(&state.client_render_options.window_status_activity_style)
+                    flag_style(&w.wsa_style, &state.client_render_options.window_status_activity_style)
                         .unwrap_or(normal_style)
                 } else if w.last {
-                    flag_style(&state.client_render_options.window_status_last_style)
+                    flag_style(&w.wsl_style, &state.client_render_options.window_status_last_style)
                         .unwrap_or(normal_style)
                 } else {
                     normal_style

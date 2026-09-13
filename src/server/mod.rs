@@ -2328,11 +2328,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // ── Automatic rename / allow-rename: resolve window names ──
                     {
                         let in_copy = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
-                        let auto_rename = app.automatic_rename;
+                        let global_auto_rename = app.automatic_rename;
                         let allow_rename = app.allow_rename;
-                        if (auto_rename || allow_rename) && !in_copy {
-                            for win in app.windows.iter_mut() {
+                        // #648: automatic-rename is a WINDOW option, so each
+                        // window decides for itself whether the rename loop
+                        // touches it. Resolved before the mutable borrow below.
+                        let per_window_auto: Vec<bool> = (0..app.windows.len())
+                            .map(|i| crate::server::options::window_flag(
+                                &app, i, "automatic-rename", global_auto_rename,
+                            ))
+                            .collect();
+                        if (per_window_auto.iter().any(|on| *on) || allow_rename) && !in_copy {
+                            for (win_index, win) in app.windows.iter_mut().enumerate() {
                                 if win.manual_rename { continue; }
+                                let auto_rename = per_window_auto[win_index];
+                                if !auto_rename && !allow_rename { continue; }
                                 if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
                                     if p.dead { continue; }
                                     if p.last_title_check.elapsed().as_millis() < 1000 { continue; }
