@@ -348,7 +348,10 @@ if ($r.rc -eq 0 -and $pv -eq 'on' -and $wvz -eq 'off') {
 } else { Write-Fail "-p over -w: rc=$($r.rc) pane=[$pv] window=[$wvz]" }
 
 # ---------------------------------------------------------------------------
-# Arm 8: config file route.
+# Arm 8: config file route. A STARTUP config runs before any window exists, so
+# an untargeted `-w` line has no window to aim at and lands in the global window
+# table, which is where psmux has always put it. A config SOURCED at runtime has
+# real windows, so `-w -t <window>` there reaches exactly one of them.
 # ---------------------------------------------------------------------------
 Write-Host "[Arm 8] config file route" -ForegroundColor Yellow
 
@@ -357,7 +360,6 @@ $conf = Join-Path $env:TEMP "psmux_648.conf"
 set -g remain-on-exit off
 set -w monitor-activity on
 setw monitor-silence 7
-set -w window-status-format "CFG#I"
 setw status-left "[#S] cfg"
 "@ | Set-Content -Path $conf -Encoding ASCII
 
@@ -373,31 +375,48 @@ if (-not $ready) {
     & $PSMUX new-window -d -t "${CFGSESS}:" -n cfgone 2>&1 | Out-Null
     Start-Sleep -Milliseconds 900
 
-    $v = Read-WinOpt "${CFGSESS}:cfgzero" 'monitor-activity'
-    if ($v -eq 'on') { Write-Pass "config `set -w monitor-activity on` applied to the config-time window" }
-    else { Write-Fail "config set -w monitor-activity = [$v]" }
+    # No window existed when the startup config ran, so the value went to the
+    # global window table and every window inherits it. tmux 3.4 drops such a
+    # line entirely; psmux keeps landing it, because every .psmux.conf with a
+    # bare `setw` line depends on that.
+    $v  = Read-WinOpt "${CFGSESS}:cfgzero" 'monitor-activity'
+    $v2 = Read-WinOpt "${CFGSESS}:cfgone"  'monitor-activity'
+    $vg = Read-GlobalOpt $CFGSESS 'monitor-activity'
+    if ($v -eq 'on' -and $v2 -eq 'on' -and $vg -eq 'on') {
+        Write-Pass "an untargeted startup-config set -w lands in the global window table: zero=$v one=$v2 global=$vg"
+    } else { Write-Fail "startup config set -w: zero=[$v] one=[$v2] global=[$vg]" }
 
-    # A window created AFTER the config ran never had the config line applied to
-    # it, so it inherits the global - which is exactly the isolation #648 is
-    # about. A shared store would have handed it the value.
-    $v2 = Read-WinOpt "${CFGSESS}:cfgone" 'monitor-activity'
-    if ($v2 -eq 'off') { Write-Pass "a window created later inherits the global, not the config-time window's value" }
-    else { Write-Fail "BUG #648: a later window picked up a window-scoped config write: [$v2]" }
+    $v = Read-GlobalOpt $CFGSESS 'monitor-silence'
+    if ($v -eq '7') { Write-Pass "an untargeted startup-config setw lands there too: monitor-silence=$v" }
+    else { Write-Fail "startup config setw monitor-silence = [$v]" }
 
-    $v = Read-WinOpt "${CFGSESS}:cfgzero" 'monitor-silence'
-    if ($v -eq '7') { Write-Pass "config `setw monitor-silence 7` applied per window" }
-    else { Write-Fail "config setw monitor-silence = [$v]" }
-
-    $v = Read-WinOpt "${CFGSESS}:cfgzero" 'window-status-format'
-    if ($v -eq 'CFG#I') { Write-Pass "config `set -w window-status-format` applied per window" }
-    else { Write-Fail "config set -w window-status-format = [$v]" }
-
-    # tmux derives scope from the option NAME, so a SESSION option under -w/setw
-    # still lands in the session store. Every config that spells `setw
-    # status-left ...` must keep working.
+    # tmux derives scope from the option NAME, so a SESSION option under
+    # -w/setw still lands in the session store. Every config that spells
+    # `setw status-left ...` must keep working.
     $v = (Invoke-Psmux @('show-options', '-gv', '-t', $CFGSESS, 'status-left')).out
     if ($v -eq '[#S] cfg') { Write-Pass "a session option under setw still lands in the session store: $v" }
     else { Write-Fail "setw status-left = [$v], expected '[#S] cfg'" }
+
+    # Sourced at RUNTIME, with real windows, a targeted -w line reaches one.
+    $conf2 = Join-Path $env:TEMP "psmux_648_runtime.conf"
+    @"
+set -w -t "${CFGSESS}:cfgone" window-status-format "CFG#I"
+setw -t "${CFGSESS}:cfgone" remain-on-exit on
+"@ | Set-Content -Path $conf2 -Encoding ASCII
+    Invoke-Psmux @('source-file', '-t', $CFGSESS, $conf2) | Out-Null
+    Start-Sleep -Milliseconds 700
+
+    $f1 = Read-WinOpt "${CFGSESS}:cfgone"  'window-status-format'
+    $f0 = Read-WinOpt "${CFGSESS}:cfgzero" 'window-status-format'
+    if ($f1 -eq 'CFG#I' -and $f0 -ne 'CFG#I') {
+        Write-Pass "a sourced config `set -w -t <window>` wrote one window: cfgone=[$f1] cfgzero=[$f0]"
+    } else { Write-Fail "sourced config set -w -t: cfgone=[$f1] cfgzero=[$f0]" }
+
+    $r1 = Read-WinOpt "${CFGSESS}:cfgone"  'remain-on-exit'
+    $r0 = Read-WinOpt "${CFGSESS}:cfgzero" 'remain-on-exit'
+    if ($r1 -eq 'on' -and $r0 -eq 'off') {
+        Write-Pass "a sourced config `setw -t <window>` wrote one window: cfgone=[$r1] cfgzero=[$r0]"
+    } else { Write-Fail "sourced config setw -t: cfgone=[$r1] cfgzero=[$r0]" }
 }
 & $PSMUX kill-session -t $CFGSESS 2>&1 | Out-Null
 

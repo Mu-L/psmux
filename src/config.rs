@@ -1002,8 +1002,18 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
     // scope follows the option NAME (tmux's options_scope_from_name), so a
     // session or server option under `-w` still lands in the global store and
     // every config that has ever relied on that keeps working.
+    // A startup config file runs BEFORE any window exists, so an untargeted
+    // `-w` line has no window to write to. Real tmux drops it on the floor
+    // (measured on 3.4: `setw monitor-activity on` in a `-f` config left both
+    // the window and the global table untouched), but psmux has always landed
+    // those lines in the one store, and every `.psmux.conf` carrying a bare
+    // `setw` line depends on that. So an untargeted `-w` with no window to aim
+    // at falls through to the global window table below rather than vanishing.
+    let has_window_to_target = !app.windows.is_empty()
+        || !target.trim().is_empty();
     if window_scope
         && !is_global
+        && has_window_to_target
         && crate::server::options::is_window_scoped_write(key)
     {
         let value = if format_expand && !raw_value.is_empty() {

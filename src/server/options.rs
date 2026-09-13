@@ -132,6 +132,14 @@ pub(crate) fn resolve_option_target_window(app: &AppState, raw: &str) -> Result<
                 .ok_or_else(|| format!("can't find pane: %{}", pane_id));
         }
     }
+    // `-t <session>` with no window part is the session's CURRENT window
+    // (cmd-find.c: a session-only target resolves to `s->curw`). Without this
+    // the bare session spelling every existing caller uses — `show-options -w
+    // -v -t mysession automatic-rename` — would be read as a window NAMED
+    // "mysession" and refused.
+    if parsed.window.is_none() && parsed.window_name.is_none() && parsed.pane.is_none() {
+        return Ok(app.active_idx);
+    }
     app.resolve_window_spec(raw, false)?
         .pos()
         .ok_or_else(|| format!("can't find window: {}", raw))
