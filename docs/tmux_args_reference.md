@@ -511,6 +511,9 @@ A psmux extension that creates a pane floating above the tiled layout.
 - Boolean: `-N` (numeric input only), `-W` (word input only)
 - Value: `-I` (initial value), `-p` (prompt list), `-T` (prompt type), `-t` (target)
 - Not accepted: `-1`, `-b`, `-e`, `-F`, `-i`, `-k`, `-l`
+- `-T` is parsed and its value consumed, but the prompt type itself is ignored: psmux has no target completion. `-t` is consumed and ignored the same way. The flags end at the first argument that is not a flag, so a template given unquoted (`command-prompt move-window -t %%`) keeps its own flags.
+- One token may carry several flags, as tmux writes its own `/` binding: `-kpkey` is `-k` followed by `-p key`. A flag that takes no value falls through to the next letter in the token, and the first one that does takes whatever is left of it.
+- With no `-p`, the prompt is headed with the name of the command the template will run, in brackets: `command-prompt "move-window -t '%%'"` opens a prompt headed `(move-window)`.
 
 **choose-tree**, **choose-window**, **choose-session**, **choose-client**, **choose-buffer**, **customize-mode**, **clock-mode**
 - No flags. These open client side overlays. While an overlay is open its keys are handled before any key table, so a bound key does not reach the tables until the overlay closes.

@@ -35,6 +35,20 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     ("&",       "confirm-before -p 'kill-window #W? (y/n)' kill-window"),
     (",",       "rename-window"),
     ("'",       "select-window-index"),
+    // tmux binds `.` by default: prompt for an index and move the current
+    // window there. Measured on tmux 3.6a, `list-keys -T prefix` renders it as
+    //     command-prompt -T target { move-window -t "%%" }
+    // psmux has no `{}` command blocks, so the same command is written in the
+    // quoting form psmux's parser reads. parse_command_line strips the quotes
+    // again before move-window sees the index, so the two are equivalent.
+    //
+    // `-T target` is what every tmux release from 3.4 to 3.7b binds here. tmux
+    // dropped the `target` and `window-target` prompt types after 3.7b (7b02cb6d,
+    // "Fix . and ; bindings"), so its own HEAD now writes the binding without a
+    // prompt type. It is kept because it is what a user copying a released tmux
+    // will have, and psmux consumes and ignores the flag either way: the prompt
+    // types only ever chose which completions tmux offered, and psmux has none.
+    (".",       "command-prompt -T target \"move-window -t '%%'\""),
     ("0",       "select-window -t :0"),
     ("1",       "select-window -t :1"),
     ("2",       "select-window -t :2"),
