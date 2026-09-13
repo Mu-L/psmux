@@ -81,8 +81,226 @@ pub(crate) fn parse_main_pane_size(value: &str) -> Option<u16> {
     value.trim().trim_end_matches('%').parse::<u16>().ok()
 }
 
-fn is_window_option(name: &str) -> bool {
+pub(crate) fn is_window_option(name: &str) -> bool {
     WINDOW_OPTION_NAMES.contains(&name)
+}
+
+/// True when a `-w` write for `name` belongs on the WINDOW rather than in the
+/// global store (#648).
+///
+/// tmux decides scope from the option NAME, not from the flag:
+/// `options_scope_from_name` looks the name up in the options table and uses
+/// the scope declared there, so `set -w status-left x` in tmux still writes the
+/// session option. psmux follows the same rule, so `-w` on a session or server
+/// option keeps behaving exactly as it did.
+///
+/// User options (`@...`) are deliberately NOT included. tmux gives them the
+/// scope of the flags because they carry no table entry, but every psmux read
+/// of an `@` name goes through the session-wide `user_options` map — the
+/// format expander (`#{@k}`), the pane `@mouse-force` latch, the plugin drain —
+/// and none of those has a window to resolve against. Scoping the WRITE
+/// without the reads would store the value where nothing could ever find it,
+/// which is the silent no-op #580 exists to prevent. `set -wg @k v` and
+/// `set -g @k v` therefore remain the way to set one.
+pub(crate) fn is_window_scoped_write(name: &str) -> bool {
+    is_window_option(name)
+}
+
+/// Resolve a raw `-t` target to the position of an existing window.
+///
+/// Every window-scoped option route funnels through here so `-t s:zero`,
+/// `-t s:1`, `-t @3`, `-t :$` and a bare `-t s` all mean the same window they
+/// mean for `select-window`. The route this replaces kept only the numeric
+/// half of the parsed target and threw the NAME away, so `-t "s:zero"`
+/// resolved to the active window and the reporter's targeted write landed
+/// somewhere else entirely (#648).
+///
+/// An empty target is the active window, which is what tmux does when `-t` is
+/// omitted (cmd-find.c falls back to the current window).
+pub(crate) fn resolve_option_target_window(app: &AppState, raw: &str) -> Result<usize, String> {
+    let raw = raw.trim().trim_matches('"');
+    if raw.is_empty() {
+        return Ok(app.active_idx);
+    }
+    // A pane target (`%N`, or `sess:win.pane`) names the window that holds it,
+    // exactly as tmux's window resolution does for a pane spec.
+    let parsed = crate::cli::parse_target(raw);
+    if parsed.pane_is_id && parsed.window.is_none() && parsed.window_name.is_none() {
+        if let Some(pane_id) = parsed.pane {
+            return crate::tree::find_pane_by_id_global(app, pane_id)
+                .map(|(window_index, _)| window_index)
+                .ok_or_else(|| format!("can't find pane: %{}", pane_id));
+        }
+    }
+    app.resolve_window_spec(raw, false)?
+        .pos()
+        .ok_or_else(|| format!("can't find window: {}", raw))
+}
+
+/// The window's OWN value for `name`, or `None` when it inherits.
+///
+/// Borrowing on purpose: the render loop resolves several of these per frame
+/// (`window-status-format` once per window, `remain-on-exit` once per reap)
+/// and the overwhelmingly common answer is "this window set nothing", which
+/// must not cost an allocation. Callers that already hold the typed global in
+/// an `AppState` field use this and fall back to the field.
+pub(crate) fn window_local_option<'a>(
+    app: &'a AppState,
+    window_index: usize,
+    name: &str,
+) -> Option<&'a str> {
+    app.windows
+        .get(window_index)?
+        .window_options
+        .get(name)
+        .map(String::as_str)
+}
+
+/// Effective value of a window option for one window: the window's own entry,
+/// else whatever the global store reports (`get_option_value`).
+///
+/// This is tmux's `options_get`, which walks from the window's table up to
+/// `global_w_options` (options.c), and it is what `show-options -w` reports.
+pub(crate) fn resolve_window_option(app: &AppState, window_index: usize, name: &str) -> String {
+    if let Some(value) = window_local_option(app, window_index, name) {
+        return value.to_string();
+    }
+    get_option_value(app, name)
+}
+
+/// Boolean form of [`resolve_window_option`] for a caller that already holds
+/// the global as a typed `AppState` field. No allocation when the window
+/// inherits, which is every window until someone writes to one.
+pub(crate) fn window_flag(
+    app: &AppState,
+    window_index: usize,
+    name: &str,
+    global: bool,
+) -> bool {
+    match window_local_option(app, window_index, name) {
+        Some(value) => matches!(value, "on" | "true" | "1" | "yes"),
+        None => global,
+    }
+}
+
+/// Numeric form of [`resolve_window_option`]. A window-local value that does
+/// not parse falls back to the global, the same way every numeric setter in
+/// this file leaves the current setting alone on a bad value.
+pub(crate) fn window_number(
+    app: &AppState,
+    window_index: usize,
+    name: &str,
+    global: u64,
+) -> u64 {
+    window_local_option(app, window_index, name)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(global)
+}
+
+/// Write one window-scoped option onto ONE window (`set-option -w -t <window>`).
+///
+/// Returns the reply string the CLI prints: empty on success, `ERROR: ...`
+/// otherwise. A name that is not window scoped is reported rather than
+/// silently stored, because a stored no-op is exactly the failure mode #580
+/// fixed for pane options.
+pub(crate) fn set_window_option(
+    app: &mut AppState,
+    window_index: usize,
+    name: &str,
+    value: &str,
+) -> Result<(), String> {
+    crate::server::option_catalog::validate_option_value(name, value)?;
+    let Some(window) = app.windows.get_mut(window_index) else {
+        return Err(format!("can't find window: {}", window_index));
+    };
+    window.window_options.insert(name.to_string(), value.to_string());
+    Ok(())
+}
+
+/// The whole of `set-option -w [-u|-a|-o] [-q] -t <window> <name> [value]`,
+/// shared by the TCP/CLI route, the in-TUI command prompt and the config file
+/// so all three land the same write (#648).
+///
+/// Returns the reply the caller prints: empty on success, `ERROR: ...`
+/// otherwise. Never a silent stored no-op — a swallowed option write looks
+/// exactly like success to a script that only reads exit codes, which is the
+/// failure #580 fixed for pane options and #648 for window ones.
+pub(crate) fn apply_set_window_option(
+    app: &mut AppState,
+    target: &str,
+    option: &str,
+    value: &str,
+    unset: bool,
+    append: bool,
+    only_if_unset: bool,
+    quiet: bool,
+) -> String {
+    let index = match resolve_option_target_window(app, target) {
+        Ok(index) => index,
+        Err(error) => return format!("ERROR: {}", error),
+    };
+    if unset {
+        unset_window_option(app, index, option);
+        // `automatic-rename` predates the window store and also answers from
+        // `Window::manual_rename` (#266). Unsetting the option has to clear
+        // that flag too, otherwise the window keeps reporting `off` from a
+        // second, invisible per window store.
+        if let Some(window) = app.windows.get_mut(index) {
+            match option {
+                "automatic-rename" => window.manual_rename = false,
+                "window-size" => window.window_size = None,
+                _ => {}
+            }
+        }
+        return String::new();
+    }
+    if only_if_unset && window_local_option(app, index, option).is_some() {
+        if quiet {
+            return String::new();
+        }
+        return format!("ERROR: already set: {}", option);
+    }
+    let value = if append {
+        format!("{}{}", resolve_window_option(app, index, option), value)
+    } else {
+        value.to_string()
+    };
+    if let Err(error) = set_window_option(app, index, option, &value) {
+        return format!("ERROR: {}", error);
+    }
+    // Side effects the global setter performs, applied to the targeted window
+    // only. `set -w automatic-rename on` re-arms the rename loop for THIS
+    // window the way `set -g` does for the active one (options.rs
+    // apply_set_option), and `window-size` keeps its dedicated field so
+    // resize-window and the layout code keep reading one value.
+    match option {
+        "automatic-rename" => {
+            if matches!(value.as_str(), "on" | "true" | "1" | "yes") {
+                if let Some(window) = app.windows.get_mut(index) {
+                    window.manual_rename = false;
+                }
+            }
+        }
+        "window-size" => {
+            if let Some(window) = app.windows.get_mut(index) {
+                window.window_size = Some(value.clone());
+            }
+        }
+        _ => {}
+    }
+    String::new()
+}
+
+/// Remove one window's own value so it inherits again (`set-option -w -u`).
+///
+/// tmux's `-u` at window scope is `options_remove`, NOT a write of the table
+/// default: the entry goes away and the window follows `global_w_options`
+/// from then on (options.c `options_remove_or_default`, which only defaults
+/// when the table being edited IS one of the global ones).
+pub(crate) fn unset_window_option(app: &mut AppState, window_index: usize, name: &str) {
+    if let Some(window) = app.windows.get_mut(window_index) {
+        window.window_options.remove(name);
+    }
 }
 
 /// Effective value of an option that is stored empty or not stored at all.
@@ -286,8 +504,12 @@ pub(crate) fn get_window_option_value_for(
     if !is_window_option(name) {
         return String::new();
     }
+    let idx = target_window.unwrap_or(app.active_idx);
+    // #648: the window's own entry outranks everything below it.
+    if let Some(value) = window_local_option(app, idx, name) {
+        return value.to_string();
+    }
     if name == "automatic-rename" {
-        let idx = target_window.unwrap_or(app.active_idx);
         if let Some(w) = app.windows.get(idx) {
             if w.manual_rename {
                 return "off".into();
@@ -295,7 +517,6 @@ pub(crate) fn get_window_option_value_for(
         }
     }
     if name == "window-size" {
-        let idx = target_window.unwrap_or(app.active_idx);
         if let Some(value) = app.windows.get(idx).and_then(|window| window.window_size.as_ref()) {
             return value.clone();
         }
@@ -303,16 +524,51 @@ pub(crate) fn get_window_option_value_for(
     get_option_value(app, name)
 }
 
-pub(crate) fn render_window_options(app: &AppState) -> String {
+/// True when window `idx` takes `name` from the global store rather than from
+/// its own table. Drives the `*` marker `show-options -A` puts on an inherited
+/// entry (cmd-show-options.c: `if (o->owner != oo) ... "*"`).
+pub(crate) fn window_option_is_inherited(app: &AppState, idx: usize, name: &str) -> bool {
+    if window_local_option(app, idx, name).is_some() {
+        return false;
+    }
+    // The two options that were per window BEFORE #648 gave windows a real
+    // table are still window-local when their dedicated field is set.
+    match name {
+        "automatic-rename" => !app.windows.get(idx).is_some_and(|w| w.manual_rename),
+        "window-size" => !app.windows.get(idx).is_some_and(|w| w.window_size.is_some()),
+        _ => true,
+    }
+}
+
+/// Body of `show-options -w [-A]` for one window.
+///
+/// psmux prints the RESOLVED view (every window option with the value that
+/// window will actually use), not tmux's window-local-only listing: libtmux and
+/// tmuxp probe window scope for options psmux keeps session wide and expect an
+/// answer (#321), and psmux's own suites pin the full list. `-A` adds tmux's
+/// inheritance marker, so a caller can still tell a window-local value from an
+/// inherited one — which is the distinction #648 is about.
+pub(crate) fn render_window_options_for(app: &AppState, target_window: Option<usize>, mark_inherited: bool) -> String {
+    let idx = target_window.unwrap_or(app.active_idx);
     let mut output = String::new();
     for name in WINDOW_OPTION_NAMES {
+        let marker = if mark_inherited && window_option_is_inherited(app, idx, name) {
+            "*"
+        } else {
+            ""
+        };
         output.push_str(&format!(
-            "{} {}\n",
+            "{}{} {}\n",
             name,
-            get_window_option_value(app, name),
+            marker,
+            get_window_option_value_for(app, name, Some(idx)),
         ));
     }
     output
+}
+
+pub(crate) fn render_window_options(app: &AppState) -> String {
+    render_window_options_for(app, None, false)
 }
 
 /// Returns `true` if the given option name is a boolean (on/off) option.

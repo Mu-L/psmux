@@ -940,6 +940,7 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
     let mut unset_mode = false;     // -u: unset (reset to default)
     let mut quiet = false;          // -q: suppress the "already set" error
     let mut window_scope = window_command;
+    let mut target = String::new();
 
     while i < toks.len() {
         let p = toks[i].1.as_str();
@@ -964,7 +965,13 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
             // are still reported.
             if p.contains('q') { quiet = true; }
             i += 1;
-            if p.contains('t') && i < toks.len() { i += 1; }
+            // #648: the target was skipped and thrown away, so a config line
+            // `set -w -t "s:zero" remain-on-exit on` could not name a window
+            // even once windows had their own option tables.
+            if p.contains('t') && i < toks.len() {
+                target = strip_wrapping_quotes(&toks[i].1).to_string();
+                i += 1;
+            }
         } else {
             break;
         }
@@ -987,6 +994,43 @@ fn parse_set_option(app: &mut AppState, line: &str, window_command: bool) {
         )
     {
         warn_config(app, error);
+        return;
+    }
+
+    // #648: `-w` / `setw` without `-g` writes the TARGET WINDOW's own option
+    // table, not the one global store. Same rule as the CLI and TCP routes:
+    // scope follows the option NAME (tmux's options_scope_from_name), so a
+    // session or server option under `-w` still lands in the global store and
+    // every config that has ever relied on that keeps working.
+    if window_scope
+        && !is_global
+        && crate::server::options::is_window_scoped_write(key)
+    {
+        let value = if format_expand && !raw_value.is_empty() {
+            crate::format::expand_format(&raw_value, app)
+        } else {
+            raw_value.clone()
+        };
+        // A boolean named with no value toggles, exactly as it does at global
+        // scope (#278) — against the value the WINDOW currently resolves to.
+        let (value, unset_mode) = if value.is_empty() && !unset_mode && !append_mode
+            && crate::server::options::is_boolean_option(key)
+        {
+            let index = crate::server::options::resolve_option_target_window(app, &target)
+                .unwrap_or(app.active_idx);
+            let current = crate::server::options::resolve_window_option(app, index, key);
+            (if current == "on" { "off".to_string() } else { "on".to_string() }, false)
+        } else {
+            (value, unset_mode)
+        };
+        let reply = crate::server::options::apply_set_window_option(
+            app, &target, key, &value, unset_mode, append_mode, only_if_unset, quiet,
+        );
+        if let Some(error) = reply.strip_prefix("ERROR: ") {
+            warn_config(app, error.to_string());
+        } else {
+            app.user_set_options.insert(key.to_string());
+        }
         return;
     }
 

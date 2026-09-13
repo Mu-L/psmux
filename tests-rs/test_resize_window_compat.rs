@@ -21,6 +21,7 @@ fn empty_window(id: usize, name: &str, width: u16, height: u16) -> Window {
         id,
         area: Rect::new(0, 0, width, height),
         window_size: None,
+        window_options: Default::default(),
         activity_flag: false,
         bell_flag: false,
         silence_flag: false,

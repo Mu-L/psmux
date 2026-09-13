@@ -137,6 +137,7 @@ impl Harness {
             id: 0,
             area: app.client_area,
             window_size: None,
+            window_options: Default::default(),
             activity_flag: false,
             bell_flag: false,
             silence_flag: false,
