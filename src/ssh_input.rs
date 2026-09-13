@@ -1850,8 +1850,18 @@ impl VtParser {
             // silently did nothing over SSH.  See [`csi_u_key_code`] for why
             // the code point becomes a named `KeyCode`.
             'u' => {
-                if let Some(code) = csi_u_key_code(self.params[0] as u32) {
-                    emit(make_key(code, mods));
+                // A Kitty protocol RELEASE report (`CSI 13;2:3u`, the event
+                // type riding behind the modifiers on a sub-parameter) carries
+                // nothing for the client, and this parser keeps sub-parameters
+                // as ordinary ones, so without this the console path absorbed
+                // the release while the VT path turned it into a second press.
+                // psmux never asks a terminal for release reporting; when one
+                // sends it anyway, both paths now drop it.
+                let kitty_release = self.pidx >= 3 && self.params[2] == 3;
+                if !kitty_release {
+                    if let Some(code) = csi_u_key_code(self.params[0] as u32) {
+                        emit(make_key(code, mods));
+                    }
                 }
             }
             '~' => self.dispatch_tilde(mods, emit),

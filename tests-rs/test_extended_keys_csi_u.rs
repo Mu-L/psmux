@@ -615,6 +615,25 @@ fn a_sequence_after_typing_still_decodes() {
     assert_eq!(key_of(&out).modifiers, KeyModifiers::SHIFT);
 }
 
+/// The two paths have to agree about a Kitty RELEASE report as well.  The VT
+/// parser keeps a sub-parameter as an ordinary one, so `CSI 13;2:3u` reached
+/// its `u` arm as the parameters 13, 2, 3 and was emitted as a second PRESS,
+/// while the console path absorbed it.  psmux never asks a terminal for release
+/// reporting; a terminal that sends it anyway is dropped on both paths now.
+#[test]
+fn the_vt_parser_drops_a_kitty_release_too() {
+    assert!(
+        parse_vt("\x1b[13;2:3u").is_empty(),
+        "a release report must not become a key: {:?}",
+        parse_vt("\x1b[13;2:3u")
+    );
+    // The press form of the same report is still a key.
+    let out = parse_vt("\x1b[13;2:1u");
+    assert_eq!(out.len(), 1, "the press form must survive: {:?}", out);
+    assert_eq!(key_of(&out[0]).code, KeyCode::Enter);
+    assert_eq!(key_of(&out[0]).modifiers, KeyModifiers::SHIFT);
+}
+
 /// A held key repeats faster than the text window, so a decoded sequence must
 /// not count as text itself: every press has to decode.
 #[test]
