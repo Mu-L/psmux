@@ -277,7 +277,7 @@ const CLI_COMMANDS: &[(&str, &str, &str)] = &[
     ("attach-session",    "attach",   "Attach to an existing session"),
     ("detach-client",     "detach",   "Detach from the current session"),
     ("has-session",       "has",      "Check if a session exists"),
-    ("kill-server",       "",         "Kill the server and all sessions"),
+    ("kill-server",       "",         "Kill every server on this socket (-a: all)"),
     ("kill-session",      "",         "Destroy a session"),
     ("list-sessions",     "ls",       "List sessions"),
     ("new-session",       "new",      "Create a new session"),

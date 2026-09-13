@@ -95,9 +95,11 @@ Write-Host "  psmux: $PSMUX" -ForegroundColor DarkGray
 
 try {
     # Case 1: in-scope wedged server with a matching identity -> reaped.
+    # The base name is bare, so it belongs to the DEFAULT namespace, which is
+    # the only thing a bare kill-server is allowed to touch since #649.
     Reset-PidFiles
     $p1 = Start-Probe
-    Write-PidFile "scoped__victim" $p1.Pid $p1.FileTime
+    Write-PidFile "scopedvictim" $p1.Pid $p1.FileTime
     & $PSMUX kill-server 2>&1 | Out-Null
     Write-Result "in-scope probe with matching identity is force-killed" (Wait-Dead $p1.Pid 4000) `
         "probe $($p1.Pid) still alive after kill-server"
@@ -105,7 +107,7 @@ try {
     # Case 2: same pid but wrong creation time (simulated pid reuse) -> spared.
     Reset-PidFiles
     $p2 = Start-Probe
-    Write-PidFile "scoped__reuse" $p2.Pid ($p2.FileTime + 99999)
+    Write-PidFile "scopedreuse" $p2.Pid ($p2.FileTime + 99999)
     & $PSMUX kill-server 2>&1 | Out-Null
     Start-Sleep -Milliseconds 400
     Write-Result "probe with a mismatched creation time (pid reuse) is spared" (Test-Alive $p2.Pid) `
@@ -119,6 +121,21 @@ try {
     Start-Sleep -Milliseconds 400
     Write-Result "probe in another namespace is spared by -L b kill-server" (Test-Alive $p3.Pid) `
         "probe $($p3.Pid) in namespace 'a' was killed by -L b kill-server"
+
+    # Case 4 (#649): a namespaced probe is spared by a BARE kill-server, which
+    # scopes to the default namespace exactly as tmux scopes to its socket.
+    Reset-PidFiles
+    $p4 = Start-Probe
+    Write-PidFile "a__victim" $p4.Pid $p4.FileTime
+    & $PSMUX kill-server 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 400
+    Write-Result "probe in namespace 'a' is spared by a bare kill-server" (Test-Alive $p4.Pid) `
+        "probe $($p4.Pid) in namespace 'a' was killed by a bare kill-server"
+
+    # Case 5 (#649): -a is the explicit everything sweep and still reaches it.
+    & $PSMUX kill-server -a 2>&1 | Out-Null
+    Write-Result "kill-server -a reaches every namespace" (Wait-Dead $p4.Pid 4000) `
+        "probe $($p4.Pid) in namespace 'a' survived kill-server -a"
 }
 finally {
     foreach ($id in $probes) { Stop-Process -Id $id -Force -EA SilentlyContinue }

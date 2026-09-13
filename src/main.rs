@@ -60,8 +60,7 @@ use crossterm::event::{EnableMouseCapture, DisableMouseCapture, EnableBracketedP
 use crate::platform::enable_virtual_terminal_processing;
 use crate::cli::{print_help, print_version, print_commands};
 use crate::session::{cleanup_stale_port_files, reap_orphaned_servers, read_session_key, send_control,
-    send_control_with_response, resolve_default_session_name,
-    force_kill_targets, confirms_identity};
+    send_control_with_response, resolve_default_session_name};
 use crate::rendering::apply_cursor_style;
 use crate::server::run_server;
 use crate::client::run_remote;
@@ -1172,87 +1171,45 @@ fn run_main() -> io::Result<()> {
     match cmd {
         // kill-server MUST be handled early before any potential fall-through
         "kill-server" => {
+            // `-a`/`--all` is the psmux-only escape hatch that keeps the old
+            // machine-wide sweep; everything else is tmux's socket-scoped kill.
+            let mut kill_all = false;
+            for a in cmd_args.iter().skip(1) {
+                match a.as_str() {
+                    "-a" | "--all" => kill_all = true,
+                    "--" => break,
+                    s if s.starts_with('-') && s.len() > 1 => {
+                        eprintln!("psmux: kill-server: unknown option '{}'", s);
+                        std::process::exit(1);
+                    }
+                    _ => {}
+                }
+            }
             let psmux_dir = crate::paths::psmux_dir();
-            // Compute namespace prefix for -L filtering (matches list-sessions behavior)
-            let ns_prefix = l_socket_name.as_ref().map(|l| format!("{l}__"));
-            // Snapshot the force-kill candidates from this data dir's .pid files
-            // BEFORE the graceful pass removes them. Scoped to this dir and (with
-            // -L) this namespace, so the fallback can never reach another instance.
-            let fk_targets =
-                force_kill_targets(std::path::Path::new(&psmux_dir), ns_prefix.as_deref());
-            let mut targets: Vec<(std::path::PathBuf, u16, String)> = Vec::new();
-            let mut stale_ports: Vec<std::path::PathBuf> = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&psmux_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map(|e| e == "port").unwrap_or(false) {
-                        if let Some(session_name) = path.file_stem().and_then(|s| s.to_str()) {
-                            // Apply -L namespace filtering:
-                            // With -L: only kill sessions under that namespace
-                            // Without -L: kill ALL sessions (tmux behavior)
-                            if let Some(ref pfx) = ns_prefix {
-                                if !session_name.starts_with(pfx.as_str()) { continue; }
-                            }
-                            if let Ok(port_str) = std::fs::read_to_string(&path) {
-                                if let Ok(port) = port_str.trim().parse::<u16>() {
-                                    let sess_key = read_session_key(session_name).unwrap_or_default();
-                                    targets.push((path.clone(), port, sess_key));
-                                }
-                            } else {
-                                stale_ports.push(path.clone());
-                            }
-                        }
-                    }
+            // tmux's kill-server ends the server on the socket it was invoked
+            // on: with `-L foo` that namespace, without it the default one.
+            // Sessions on other sockets are somebody else's work and survive
+            // (#649). `-a` opts back into the everything sweep.
+            let scope = if kill_all {
+                crate::session::KillScope::All
+            } else {
+                crate::session::KillScope::Namespace(l_socket_name.as_deref())
+            };
+            let killed = crate::session::kill_servers_in_scope(
+                std::path::Path::new(&psmux_dir),
+                scope,
+                None,
+            );
+            if killed == 0 && !kill_all {
+                // tmux's client cannot connect and prints `no server running on
+                // <socket>` at exit 1; scripts (`tmux kill-server 2>/dev/null ||
+                // true`) lean on that code, and an exit 0 here used to claim a
+                // kill that never happened.
+                match l_socket_name.as_deref() {
+                    Some(l) => eprintln!("psmux: no server running on {} (-L {})", psmux_dir, l),
+                    None => eprintln!("psmux: no server running on {}", psmux_dir),
                 }
-            }
-            // Send kill-server to all sessions in parallel via threads
-            let handles: Vec<std::thread::JoinHandle<()>> = targets.into_iter().map(|(path, port, sess_key)| {
-                std::thread::spawn(move || {
-                    let addr = format!("127.0.0.1:{}", port);
-                    if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-                        &addr.parse().unwrap(),
-                        Duration::from_millis(500),
-                    ) {
-                        let _ = stream.set_nodelay(true);
-                        let _ = write!(stream, "AUTH {}\n", sess_key);
-                        let _ = stream.flush();
-                        let _ = std::io::Write::write_all(&mut stream, b"kill-server\n");
-                        let _ = stream.flush();
-                        let _ = stream.shutdown(std::net::Shutdown::Write);
-                        // Wait for server to exit (EOF = done)
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
-                        let mut buf = [0u8; 64];
-                        loop {
-                            match std::io::Read::read(&mut stream, &mut buf) {
-                                Ok(0) => break,
-                                Err(_) => break,
-                                Ok(_) => continue,
-                            }
-                        }
-                    }
-                    // Remove the whole registry set regardless. Deleting only
-                    // port/key/pid used to strand the `.sid`, which no sweep can
-                    // reach once its `.port` is gone (#530).
-                    crate::session::remove_session_registry_files(&path);
-                })
-            }).collect();
-            // Wait for all threads to complete
-            for h in handles { let _ = h.join(); }
-            // Clean up stale registry sets (whole set, including `.sid` — #530)
-            for path in &stale_ports {
-                crate::session::remove_session_registry_files(path);
-            }
-            // Force-kill any wedged server that ignored the graceful kill. The
-            // candidates were read from this data dir's (and, with -L, this
-            // namespace's) own .pid files before the graceful pass removed them,
-            // so nothing outside this instance is ever reached. The identity gate
-            // (exact process-creation-time match) skips any pid that has already
-            // exited or been recycled — no machine-wide, name-based scan.
-            std::thread::sleep(Duration::from_millis(50));
-            for t in fk_targets {
-                if confirms_identity(crate::platform::process_kill::process_creation_time(t.pid), t.creation_time) {
-                    crate::platform::process_kill::terminate_server_pid(t.pid, None);
-                }
+                std::process::exit(1);
             }
             return Ok(());
         }

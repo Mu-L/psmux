@@ -271,18 +271,21 @@ A few commands intentionally behave differently from upstream tmux. These are de
 
 ### `kill-server` with Multiple Sockets
 
-In upstream tmux, each `-L <name>` socket is a fully separate server, and `kill-server` only ever affects the socket it was invoked on. Bare `tmux kill-server` kills the default socket and leaves any `-L` servers running.
-
-psmux differs: **bare `psmux kill-server` tears down every socket and every session at once**, the default namespace plus all `-L` namespaces. It is a single "stop everything" switch. This is convenient on Windows, where leftover background servers are easy to lose track of.
-
-The namespaced form stays scoped, exactly like tmux:
+In upstream tmux, each `-L <name>` socket is a fully separate server, and `kill-server` only ever affects the socket it was invoked on. psmux matches that: **a bare `kill-server` ends the default namespace and leaves every `-L` namespace running**, and `-L <name> kill-server` ends that one namespace only.
 
 ```text
-psmux kill-server            # kills ALL sockets and ALL sessions (default + every -L namespace)
-psmux -L work kill-server    # kills ONLY the "work" socket; other sockets keep running
+psmux kill-server            # ends the DEFAULT namespace only; -L namespaces keep running
+psmux -L work kill-server    # ends the "work" namespace only
+psmux kill-server -a         # psmux extension: ends EVERY namespace in the data dir
 ```
 
-So if you rely on isolated `-L` instances, always pass `-L <name>` to `kill-server` to limit the blast radius. Reach for bare `kill-server` only when you genuinely want a clean slate.
+`-a` (long form `--all`) is the psmux-only "stop everything" switch, for when you have lost track of background servers and want a clean slate. tmux has no equivalent, because on Unix each socket is a separate process tree you can see in `ps`.
+
+Exit codes follow tmux: when there is nothing to kill in the scope, `kill-server` prints `no server running on <socket>` and exits 1, so `psmux kill-server || true` behaves the way scripts written against tmux expect. `-a` is a sweep rather than a request to one server, so it exits 0 even when it finds nothing.
+
+**Changed after psmux 3.3.8 (#649).** Up to that release a bare `kill-server` tore down every socket at once, which meant one command in one shell could end somebody else's `-L` sessions in the same data dir. If you relied on that, use `kill-server -a`.
+
+An attached client's `kill-server` (typed at the command prompt, or bound to a key) follows the same rule: it ends every server on the client's own socket, which is what tmux's single-process server does implicitly.
 
 ### Background Processes When a Pane Exits
 

@@ -15,7 +15,9 @@
   investigate if it changes.
 - Clean up only the test namespace with
   `psmux -L <unique-test-namespace> kill-server`.
-- Never use bare `psmux kill-server` for test cleanup because it affects every
-  namespace.
+- Never use bare `psmux kill-server` for test cleanup: it is scoped to the
+  DEFAULT namespace (#649), so it misses your test namespace and hits whatever
+  the user is running in the default one. Never use `kill-server -a` either,
+  which is the deliberate every-namespace sweep.
 - Run the full test suite only in CI or another disposable Windows environment
   where user sessions cannot be affected.

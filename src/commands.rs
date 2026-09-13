@@ -1744,6 +1744,29 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "kill-server" => {
+            // tmux's kill-server ends the whole server the client is attached
+            // to. psmux runs one server per session, so the equivalent is every
+            // server on this client's socket: its own `-L` namespace, or the
+            // default one. Other namespaces are other sockets and survive
+            // (#649); `-a` is the psmux-only everything sweep.
+            let kill_all = parts
+                .iter()
+                .skip(1)
+                .any(|a| *a == "-a" || *a == "--all");
+            let scope = if kill_all {
+                crate::session::KillScope::All
+            } else {
+                crate::session::KillScope::Namespace(app.socket_name.as_deref())
+            };
+            // The peers go first, with this server excluded: it is the one
+            // running this very command, so it cannot answer its own graceful
+            // kill until the command returns. It kills itself below.
+            let own_base = app.port_file_base();
+            crate::session::kill_servers_in_scope(
+                std::path::Path::new(&crate::paths::psmux_dir()),
+                scope,
+                Some(&own_base),
+            );
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "kill-server\n", &app.session_key);
             }

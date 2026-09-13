@@ -2735,7 +2735,14 @@ pub enum CtrlReq {
     AppendHook(String, String),
     ShowHooks(mpsc::Sender<String>),
     RemoveHook(String),
+    /// End THIS server only. What a one-shot CLI connection asks for: the CLI
+    /// has already worked out the scope and is fanning the request out itself,
+    /// so a server that fanned out again would recurse.
     KillServer,
+    /// `kill-server` typed by an ATTACHED client: end every server on this
+    /// client's socket — its `-L` namespace, or the default one — and then this
+    /// one. `true` is `-a`, the psmux-only sweep of every namespace (#649).
+    KillServerScoped(bool),
     WaitFor(String, WaitForOp),
     DisplayMenu(String, Option<i16>, Option<i16>),
     DisplayMenuDirect(Menu),

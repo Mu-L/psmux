@@ -3512,7 +3512,18 @@ match cmd {
             attached_sent = true;
         }
     }
-    "kill-server" => { let _ = tx.send(CtrlReq::KillServer); }
+    "kill-server" => {
+        // An ATTACHED client means tmux's "kill the server I am on", which in
+        // psmux is every server on this socket (#649). A one-shot CLI
+        // connection is the CLI's own fan-out arriving, so it must kill this
+        // server and nothing else, or the fan-out would recurse.
+        if persistent {
+            let all = args.iter().any(|a| *a == "-a" || *a == "--all");
+            let _ = tx.send(CtrlReq::KillServerScoped(all));
+        } else {
+            let _ = tx.send(CtrlReq::KillServer);
+        }
+    }
     "choose-tree" | "choose-window" | "choose-session" => {
         // These are interactive choosers — send a dump that client handles
         // For now, map to listing which the client renders as a chooser
