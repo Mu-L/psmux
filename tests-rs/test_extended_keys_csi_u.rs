@@ -47,7 +47,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, Ke
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use super::{EscCoalesce, ESC_COALESCE_MS};
+use super::{EscCoalesce, ESC_COALESCE_MS, TEXT_BURST_MS};
 
 fn press(code: KeyCode, mods: KeyModifiers) -> Event {
     Event::Key(KeyEvent {
@@ -552,5 +552,85 @@ fn the_vt_parser_agrees_on_named_keys() {
         assert_eq!(out.len(), 1, "{:?} produced {:?}", seq, out);
         assert_eq!(key_of(&out[0]).code, want, "{:?}", seq);
         assert_eq!(key_of(&out[0]).modifiers, mods, "{:?}", seq);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A paste is the same burst shape, and its text has to survive whole
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A pasted clipboard reaches a console as one burst of character records — the
+/// very shape an unparsed sequence arrives in — so text that happens to contain
+/// `[13;2u` was decoded into a Shift+Enter and six characters the user pasted
+/// disappeared.  Measured on a real attached client: a paste of `PA[13;2uXY`
+/// reached the pane's child as `PA` CR `XY`.
+///
+/// What separates the two is what comes IN FRONT of the `[`.  The console drops
+/// the sequence's ESC, so a real sequence opens its burst, while inside a paste
+/// the `[` follows the characters before it by microseconds.
+#[test]
+fn a_paste_carrying_the_sequence_stays_text() {
+    let mut c = EscCoalesce::new(true);
+    let t0 = Instant::now();
+
+    for ch in ['P', 'A'] {
+        let out = c
+            .feed(press(KeyCode::Char(ch), KeyModifiers::NONE), t0)
+            .expect("ordinary pasted characters pass straight through");
+        assert_eq!(key_of(&out).code, KeyCode::Char(ch));
+    }
+
+    let rest: Vec<Event> = "13;2uXY"
+        .chars()
+        .map(|ch| press(KeyCode::Char(ch), KeyModifiers::NONE))
+        .collect();
+    let (out, left) = drain(
+        &mut c,
+        press(KeyCode::Char('['), KeyModifiers::NONE),
+        rest,
+        t0,
+    );
+    assert_eq!(codes(&out), vec![KeyCode::Char('[')], "the `[` is text");
+    assert_eq!(
+        left.len(),
+        7,
+        "nothing behind a `[` inside a run of text may even be pulled"
+    );
+}
+
+/// The guard is a run of text, not a clock the key has to beat: a sequence that
+/// arrives once the run has gone quiet still decodes.
+#[test]
+fn a_sequence_after_typing_still_decodes() {
+    let mut c = EscCoalesce::new(true);
+    let t0 = Instant::now();
+    assert!(c
+        .feed(press(KeyCode::Char('a'), KeyModifiers::NONE), t0)
+        .is_some());
+
+    let out = Batch::from_sequence("\x1b[13;2u")
+        .feed_into(&mut c, t0 + Duration::from_millis(TEXT_BURST_MS))
+        .expect("the key must still be decoded");
+    assert_eq!(key_of(&out).code, KeyCode::Enter);
+    assert_eq!(key_of(&out).modifiers, KeyModifiers::SHIFT);
+}
+
+/// A held key repeats faster than the text window, so a decoded sequence must
+/// not count as text itself: every press has to decode.
+#[test]
+fn a_repeated_key_decodes_every_time() {
+    let mut c = EscCoalesce::new(true);
+    let t0 = Instant::now();
+    for press_number in 1..=3 {
+        let out = Batch::from_sequence("\x1b[13;2u")
+            .feed_into(&mut c, t0)
+            .unwrap_or_else(|| panic!("press {} must decode", press_number));
+        assert_eq!(key_of(&out).code, KeyCode::Enter, "press {}", press_number);
+        assert_eq!(
+            key_of(&out).modifiers,
+            KeyModifiers::SHIFT,
+            "press {}",
+            press_number
+        );
     }
 }

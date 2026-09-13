@@ -553,6 +553,22 @@ pub(crate) const ESC_COALESCE_MS: u64 = 50;
 /// starts like one, and must not keep the held Escape alive indefinitely.
 pub(crate) const CSI_MAX_PARAM_LEN: usize = 32;
 
+/// How close behind an ordinary character a `[` has to arrive before it is read
+/// as more of that character's run rather than the opening of an extended key.
+///
+/// A console hands over a pasted clipboard in one burst of character records,
+/// exactly the shape an unparsed `CSI u` sequence arrives in, so a paste that
+/// happens to contain the characters `[13;2u` would otherwise be decoded into a
+/// Shift+Enter and six characters of the user's own text would vanish.  What
+/// tells the two apart is what comes IN FRONT of the `[`: the console dropped
+/// the sequence's ESC, so a real sequence opens its burst, while inside a paste
+/// the `[` follows the characters before it by microseconds.
+///
+/// 20 ms is the same window the client's paste detector uses (`src/client.rs`),
+/// and is far longer than the gap inside any burst and far shorter than the gap
+/// between two keys a person pressed.
+pub(crate) const TEXT_BURST_MS: u64 = 20;
+
 /// Folds a bare Escape that is immediately followed by Enter into one
 /// `Alt+Enter` event (issue #611).
 ///
@@ -623,6 +639,10 @@ pub struct EscCoalesce {
     enabled: bool,
     /// Length of the hold window.
     window: Duration,
+    /// When the last ordinary character was handed to the client as text.
+    /// A `[` arriving within [`TEXT_BURST_MS`] of one is part of that run —
+    /// a paste — and never opens an extended key.
+    last_text: Option<Instant>,
 }
 
 impl EscCoalesce {
@@ -632,6 +652,27 @@ impl EscCoalesce {
             queue: VecDeque::new(),
             enabled,
             window: Duration::from_millis(ESC_COALESCE_MS),
+            last_text: None,
+        }
+    }
+
+    /// True when a character was handed on as text so recently that whatever
+    /// follows is still the same run: a paste, not a key.
+    fn in_text_burst(&self, now: Instant) -> bool {
+        self.last_text.is_some_and(|t| {
+            now.saturating_duration_since(t) < Duration::from_millis(TEXT_BURST_MS)
+        })
+    }
+
+    /// Remember that `ev` left here as text, so the character behind it is
+    /// read as more of the same run.
+    fn note_text(&mut self, ev: &Event, now: Instant) {
+        if let Event::Key(k) = ev {
+            if matches!(k.code, KeyCode::Char(_))
+                && matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            {
+                self.last_text = Some(now);
+            }
         }
     }
 
@@ -674,12 +715,19 @@ impl EscCoalesce {
                 }
             }
         }
+        // A `[` that follows text by microseconds belongs to that text: a
+        // pasted clipboard reaches a console as the same burst of character
+        // records an unparsed sequence does, and the user's own characters
+        // must not be eaten by a decoder.  A real sequence opens its burst,
+        // because the console dropped the ESC in front of it.
+        let in_text_burst = self.in_text_burst(now);
         match ev {
             // `[` may be the second byte of an extended key whose ESC the
             // console dropped.  Everything else of the sequence is already in
             // the queue, so this decides itself immediately.
             Event::Key(k)
                 if matches!(k.code, KeyCode::Char('['))
+                    && !in_text_burst
                     && !k
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -700,6 +748,10 @@ impl EscCoalesce {
                     // behind it and any held Escape, in arrival order.
                     Recovered::Raw(rest) => {
                         let had_escape = self.pending.take().is_some();
+                        // All of this leaves as text, so the run goes on.  A
+                        // decoded key deliberately does NOT count: two presses
+                        // of a held key must both still decode.
+                        self.last_text = Some(now);
                         self.queue.push_back(Event::Key(k));
                         self.queue.extend(rest);
                         if had_escape {
@@ -737,6 +789,7 @@ impl EscCoalesce {
                 None
             }
             other => {
+                self.note_text(&other, now);
                 if self.pending.take().is_some() {
                     self.queue.push_back(other);
                     Some(Self::escape_event())
