@@ -539,7 +539,11 @@ fn pid_owns_live_server(pid: u32) -> bool {
     if !cfg!(windows) {
         return true;
     }
-    match crate::platform::process_info::get_process_name(pid) {
+    // Snapshot-backed lookup (#650): an unopenable PID is not a dead one. A
+    // server started from an SSH logon carries the elevated token sshd mints,
+    // so a desktop CLI running under the UAC-filtered token is refused the
+    // handle and would otherwise prune a live server's satellites.
+    match crate::platform::process_info::get_process_name_or_snapshot(pid) {
         None => false,
         Some(name) => PSMUX_SERVER_IMAGE_NAMES.contains(&name.to_ascii_lowercase().as_str()),
     }
@@ -1089,6 +1093,12 @@ fn reap_orphaned_servers_in(psmux_dir: &Path) {
     }
     let mut candidates: Vec<ServerCandidate> = Vec::new();
     for (pid, ports) in by_pid {
+        // Handle-only on purpose, unlike the liveness lookups (#650). A PID
+        // that lands here becomes a candidate for TERMINATION, so "I cannot
+        // open it, therefore I cannot claim it is mine" is the fail-safe
+        // answer. Naming a process psmux cannot open would widen what the
+        // reaper is willing to kill, and the reap this issue is about is the
+        // registry sweep, not this one.
         let is_psmux = crate::platform::process_info::get_process_name(pid)
             .map(|n| {
                 let n = n.to_ascii_lowercase();
@@ -1180,6 +1190,20 @@ const PID_REUSE_MARGIN_TICKS: u64 = 60 * 10_000_000; // 60s in 100ns ticks
 ///   None        - no usable `.pid` anchor (pre-#448 registry) -> caller must
 ///                 fall back to the network probe.
 fn pid_anchor_verdict(port_path: &Path) -> Option<bool> {
+    pid_anchor_verdict_with(
+        port_path,
+        crate::platform::process_info::get_process_name_or_snapshot,
+    )
+}
+
+/// [`pid_anchor_verdict`] with the process-name lookup injected, so a test can
+/// drive the "the handle path is refused but the process is right there in the
+/// snapshot" case that issue #650 is about without needing a second Terminal
+/// Services session and a differently-elevated token.
+fn pid_anchor_verdict_with<F>(port_path: &Path, name_of: F) -> Option<bool>
+where
+    F: Fn(u32) -> Option<String>,
+{
     // The process-table queries below are Windows-only; other platforms fall
     // back to the network probe rather than misreading stub returns as "dead".
     if !cfg!(windows) {
@@ -1189,9 +1213,20 @@ fn pid_anchor_verdict(port_path: &Path) -> Option<bool> {
     // Tolerate both `pid` and `pid:creation_filetime` bodies (the latter written
     // so kill-server can verify identity); the anchor only needs the pid.
     let (pid, _creation) = parse_pid_file_contents(&std::fs::read_to_string(&pid_path).ok()?)?;
-    let name = match crate::platform::process_info::get_process_name(pid) {
-        // No such process (a same-user psmux server is always openable with
-        // QUERY_LIMITED_INFORMATION, so an unopenable PID is not our server).
+    let name = match name_of(pid) {
+        // No such process anywhere on the machine — not openable AND not in the
+        // process table. That is a genuinely dead PID, so the #448 fast reap
+        // still fires here.
+        //
+        // It used to be enough for the PID to be merely unopenable, on the
+        // assumption that a same-user psmux server is always openable with
+        // QUERY_LIMITED_INFORMATION. It is not: a server started from an
+        // OpenSSH logon lives in Terminal Services session 0 under the elevated
+        // token sshd mints, and an unelevated desktop shell in session 1 is
+        // refused the handle with ERROR_ACCESS_DENIED, so every desktop
+        // invocation, `psmux -V` included, deleted the live server's registry
+        // files (#650). See `get_process_name_or_snapshot` for the measured
+        // access matrix.
         None => return Some(false),
         Some(n) => n.to_ascii_lowercase(),
     };
@@ -2549,3 +2584,7 @@ mod tests_issue603_bare_routing;
 #[cfg(test)]
 #[path = "../tests-rs/test_picker_namespace_filter.rs"]
 mod tests_picker_namespace_filter;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue650_cross_session_process_name.rs"]
+mod tests_issue650_cross_session_process_name;

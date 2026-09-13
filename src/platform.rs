@@ -2829,6 +2829,11 @@ pub mod process_kill {
         if pid == 0 || pid == 4 {
             return true;
         }
+        // Handle-only on purpose: `process_info::get_process_name_or_snapshot`
+        // exists for liveness questions (#650) and must not be used here. This
+        // gate refuses to kill what it cannot identify, so answering from the
+        // snapshot for a PID psmux cannot open would turn "protected" into
+        // "killable" for exactly the targets the guard was added for.
         match super::process_info::get_process_name(pid) {
             None => return true,
             Some(name) => {
@@ -3308,6 +3313,73 @@ pub mod process_info {
                 .map(|s| s.to_string_lossy().into_owned())?;
             Some(name)
         }
+    }
+
+    /// Executable name of `pid` for callers asking "is this process still
+    /// alive", where an unopenable PID must NOT be read as a dead one.
+    ///
+    /// `get_process_name` needs a per-process handle, and
+    /// `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` is not the universal
+    /// same-user privilege the old `pid_anchor_verdict` comment assumed. A
+    /// server started from an OpenSSH logon lives in Terminal Services session
+    /// 0 under the elevated token sshd mints for an administrator; a desktop
+    /// shell lives in session 1 under the UAC-filtered Medium token. Measured
+    /// on Windows 11 10.0.26200, same user in every row:
+    ///
+    /// | caller                    | target                   | QLI handle   |
+    /// |---------------------------|--------------------------|--------------|
+    /// | session 1, Medium token   | session 0 (sshd spawned) | ERROR 5      |
+    /// | session 1, elevated token | session 0 (sshd spawned) | succeeds     |
+    /// | session 0                 | session 1                | succeeds     |
+    /// | session 1, Medium token   | session 1, elevated      | succeeds     |
+    ///
+    /// So the refusal needs BOTH halves, a target in another Terminal Services
+    /// session and a caller that is not elevated, which is why it only ever bit
+    /// the desktop side and why a purely local high-versus-medium pair does not
+    /// reproduce it. Reading that one-way refusal as "no such process" made
+    /// every desktop invocation, `psmux -V` included, delete a live server's
+    /// registry files (issue #650).
+    ///
+    /// `CreateToolhelp32Snapshot` needs no handle and answers for exactly the
+    /// PIDs `OpenProcess` refuses, so it is the right second opinion. It only
+    /// runs on the failure path, so the common case pays nothing, and a PID
+    /// that is genuinely absent from the table still yields `None` — the fast
+    /// reap from issue #448 keeps working.
+    ///
+    /// This is deliberately a separate entry point rather than a fallback
+    /// inside `get_process_name`. The kill guard
+    /// (`process_kill::is_protected_system_process`) and the orphan reaper's
+    /// candidate filter both read an unopenable PID as "do not touch", and
+    /// teaching them to name a process they cannot open would make psmux MORE
+    /// willing to kill, which is exactly the direction the BSOD in the kill
+    /// guard's history came from. Only the liveness questions move.
+    pub fn get_process_name_or_snapshot(pid: u32) -> Option<String> {
+        if let Some(name) = get_process_name(pid) {
+            return Some(name);
+        }
+        process_name_from_snapshot(pid)
+    }
+
+    /// Executable name of `pid` from a fresh process-table snapshot, with the
+    /// same `.exe`-stripped shape `get_process_name` returns (the snapshot
+    /// carries the full `foo.exe`, lowercased; the handle path returns the file
+    /// stem).
+    ///
+    /// `Duration::ZERO` on purpose: this answers a liveness question, and the
+    /// cached table exists for the render path, where being one refresh behind
+    /// is invisible. Serving a stale entry here would report a process that has
+    /// just exited as alive and postpone the reap.
+    fn process_name_from_snapshot(pid: u32) -> Option<String> {
+        // PID 0 is the Toolhelp32 entry for "[System Process]" and is never a
+        // real process anyone here is asking about.
+        if pid == 0 {
+            return None;
+        }
+        let table = process_table(std::time::Duration::ZERO)?;
+        table
+            .iter()
+            .find(|(entry_pid, _, _)| *entry_pid == pid)
+            .map(|(_, _, image)| image.strip_suffix(".exe").unwrap_or(image).to_string())
     }
 
     /// Get the current working directory of a process by PID.
@@ -4415,6 +4487,7 @@ pub mod process_info {
 #[cfg(not(windows))]
 pub mod process_info {
     pub fn get_process_name(_pid: u32) -> Option<String> { None }
+    pub fn get_process_name_or_snapshot(_pid: u32) -> Option<String> { None }
     pub fn get_process_cwd(_pid: u32) -> Option<String> { None }
     pub fn get_foreground_process_name(_pid: u32) -> Option<String> { None }
     pub fn get_deepest_foreground_process_name(_pid: u32) -> Option<String> { None }
