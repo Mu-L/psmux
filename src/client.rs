@@ -199,10 +199,11 @@ struct CommandPromptSpec {
 /// case that needs it: skipping the flag but not its value left `target` as the
 /// first word of the template, so Enter ran `target move-window -t '3'`.
 ///
-/// Three more shapes follow tmux's `args_parse_flags`: the flags end at the
-/// first token that is not one (so a `-t` inside an unquoted template stays in
-/// the template), `--` ends them explicitly, and a value glued to its flag
-/// (`-pindex`) satisfies it on its own.
+/// Four more shapes follow tmux's `args_parse_flags` (arguments.c:207): the
+/// flags end at the first token that is not one (so a `-t` inside an unquoted
+/// template stays in the template), `--` ends them explicitly, a value glued to
+/// its flag (`-pindex`) satisfies it on its own, and one token can carry
+/// several flags.
 fn parse_command_prompt_args(args: &str) -> CommandPromptSpec {
     let tokens = crate::config::shell_words(args);
     let mut spec = CommandPromptSpec::default();
@@ -215,36 +216,49 @@ fn parse_command_prompt_args(args: &str) -> CommandPromptSpec {
         }
         // A bare `-`, and anything not starting with `-`, ends the flags: what
         // is left is the template.
-        let Some((flag, glued)) = token.strip_prefix('-').and_then(|rest| {
-            let mut chars = rest.chars();
-            chars.next().map(|f| (f, chars.as_str().to_string()))
-        }) else {
+        let Some(rest) = token.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
             break;
         };
-        let value = if !crate::cli::flag_takes_value("command-prompt", flag) {
-            None
-        } else if !glued.is_empty() {
-            Some(glued)
-        } else {
-            i += 1;
-            tokens.get(i).cloned()
-        };
-        match flag {
-            'I' => spec.initial = value.unwrap_or_default(),
-            'p' => spec.label = value,
-            // -t (target) and -T (prompt type) are consumed and dropped: psmux
-            // has no per-client prompt routing and no prompt-type completion.
-            _ => {}
+        // tmux walks the CHARACTERS of one token (arguments.c:227): a flag that
+        // takes no value falls through to the next letter in the same token, and
+        // the first one that does takes whatever is left of the token, or the
+        // token after it. tmux's own `/` binding is written that way, as
+        // `command-prompt -kpkey { list-keys -1N '%%' }`, which is `-k` plus
+        // `-p key`; reading only the first letter would have dropped `pkey` and
+        // left the prompt headed after the template instead.
+        for (at, flag) in rest.char_indices() {
+            if !crate::cli::flag_takes_value("command-prompt", flag) {
+                continue;
+            }
+            let glued = &rest[at + flag.len_utf8()..];
+            let value = if !glued.is_empty() {
+                Some(glued.to_string())
+            } else {
+                i += 1;
+                tokens.get(i).cloned()
+            };
+            match flag {
+                'I' => spec.initial = value.unwrap_or_default(),
+                'p' => spec.label = value,
+                // -t (target) and -T (prompt type) are consumed and dropped:
+                // psmux has no per-client prompt routing and no prompt-type
+                // completion.
+                _ => {}
+            }
+            break;
         }
         i += 1;
     }
     if i < tokens.len() {
         let template = tokens[i..].join(" ");
         if spec.label.is_none() {
-            // With no -p, tmux's prompt names the command it is about to run
-            // (cmd-command-prompt.c):
-            //     tmp = xstrndup(cdata->template, strcspn(cdata->template, " ,"));
-            //     xasprintf(&new_prompt, "(%s) ", tmp);
+            // With no -p, tmux's prompt names the command it is about to run.
+            // cmd-command-prompt.c:113 asks for that name and wraps it:
+            //     tmp = args_make_commands_get_command(cdata->state);
+            //     xasprintf(&prompts, "(%s)", tmp);
+            // and for a template that is still a string, which is the only
+            // shape psmux has, that name is the first word (arguments.c:885):
+            //     n = strcspn(state->cmd, " ,");
             let head = template.split(|c| c == ' ' || c == ',').next().unwrap_or("");
             if !head.is_empty() {
                 spec.label = Some(format!("({})", head));
@@ -3836,7 +3850,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('t') => { cmd_batch.push("clock-mode\n".into()); }
                                 KeyCode::Char('=') => { do_choose_buffer = true; }
                                 KeyCode::Char('#') => { cmd_batch.push("list-buffers\n".into()); }
-                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len(); }
+                                // `:` is a bare command-prompt: whatever is typed
+                                // IS the command. Clear the template here too,
+                                // because the `.` fallback below sets one and
+                                // this table is read before the first state dump
+                                // has a chance to rebuild either prompt.
+                                KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len(); command_template = None; command_prompt_label = None; }
                                 KeyCode::Char('\'') => { window_idx_input = true; window_idx_buf.clear(); }
                                 // Same command as the PREFIX_DEFAULTS entry for
                                 // `.`, so the key is not dead for the moment

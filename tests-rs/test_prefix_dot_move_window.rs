@@ -138,6 +138,29 @@ fn a_value_glued_to_its_flag_satisfies_it() {
 }
 
 #[test]
+fn one_token_can_carry_several_flags() {
+    // tmux's args_parse_flags walks the CHARACTERS of a token (arguments.c:227):
+    // a flag that takes no value falls through to the next letter, and the first
+    // one that does takes the rest of the token. tmux's own `/` binding is
+    // written this way: `command-prompt -kpkey { list-keys -1N '%%' }`.
+    let spec = parse_command_prompt_args("-kpkey \"list-keys -1N '%%'\"");
+    assert_eq!(spec.label.as_deref(), Some("key"));
+    assert_eq!(spec.template.as_deref(), Some("list-keys -1N '%%'"));
+
+    // All booleans bundled: the whole token is consumed and the template is the
+    // next one.
+    let spec = parse_command_prompt_args("-1N \"move-window -t '%%'\"");
+    assert_eq!(spec.template.as_deref(), Some("move-window -t '%%'"));
+    assert_eq!(spec.label.as_deref(), Some("(move-window)"));
+
+    // A bundle ending in a value-taking flag with nothing glued takes the next
+    // token, not the template.
+    let spec = parse_command_prompt_args("-1p index \"move-window -t '%%'\"");
+    assert_eq!(spec.label.as_deref(), Some("index"));
+    assert_eq!(spec.template.as_deref(), Some("move-window -t '%%'"));
+}
+
+#[test]
 fn double_dash_ends_the_flags() {
     let spec = parse_command_prompt_args("-- -N");
     assert_eq!(spec.template.as_deref(), Some("-N"));
