@@ -59,7 +59,19 @@ if (-not $cargo) {
         Write-Skip "repo HEAD is detached; cargo install --git needs a branch"
     } else {
         $root = Join-Path $env:TEMP "psmux-i647-root"
-        $shared = Join-Path $env:TEMP "psmux-i647-target"
+        # One target dir PER REVISION. Cargo reuses a git package's whole
+        # build across checkouts when the target dir is shared: measured
+        # 2026-09-13, `cargo install --git` of 33d4854 through the target dir
+        # that had built 45c441f the day before printed "Fresh psmux
+        # (checkouts\...d4854)" and installed a binary reporting 45c441f,
+        # in 4 seconds. Two checkouts of one git package share a metadata
+        # directory and the old dep-info paths are all unchanged, so no rerun
+        # trigger in build.rs can help. Keying the dir by HEAD keeps a rerun
+        # at the same revision fast and makes a new revision build from clean.
+        $shared = Join-Path $env:TEMP "psmux-i647-target-$head"
+        Get-ChildItem $env:TEMP -Directory -Filter "psmux-i647-target*" -EA SilentlyContinue |
+            Where-Object { $_.FullName -ne $shared } |
+            ForEach-Object { Remove-Item -Recurse -Force $_.FullName -EA SilentlyContinue }
         Remove-Item -Recurse -Force $root -EA SilentlyContinue
         $url = "file:///" + ($repo -replace '\\', '/')
 
