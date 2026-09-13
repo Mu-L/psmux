@@ -640,8 +640,8 @@ pub struct EscCoalesce {
     /// Length of the hold window.
     window: Duration,
     /// When the last ordinary character was handed to the client as text.
-    /// A `[` arriving within [`TEXT_BURST_MS`] of one is part of that run —
-    /// a paste — and never opens an extended key.
+    /// A `[` arriving within [`TEXT_BURST_MS`] of one is part of that run,
+    /// which is to say a paste, and never opens an extended key.
     last_text: Option<Instant>,
 }
 

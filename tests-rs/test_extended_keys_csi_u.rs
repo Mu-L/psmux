@@ -559,8 +559,8 @@ fn the_vt_parser_agrees_on_named_keys() {
 // A paste is the same burst shape, and its text has to survive whole
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A pasted clipboard reaches a console as one burst of character records — the
-/// very shape an unparsed sequence arrives in — so text that happens to contain
+/// A pasted clipboard reaches a console as one burst of character records, the
+/// very shape an unparsed sequence arrives in, so text that happens to contain
 /// `[13;2u` was decoded into a Shift+Enter and six characters the user pasted
 /// disappeared.  Measured on a real attached client: a paste of `PA[13;2uXY`
 /// reached the pane's child as `PA` CR `XY`.

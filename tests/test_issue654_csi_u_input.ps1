@@ -162,7 +162,7 @@ if (-not $bash)               { Write-Skip "Git Bash is missing, so no byte logg
 if (-not (Test-Path $injExe)) { Write-Skip "the record injector did not compile"; $ready = $false }
 
 # ==========================================================================
-# PART A: the console path — the reported seven records
+# PART A: the console path, with the reported seven records
 # ==========================================================================
 Write-Host "`n[Part A] Console records: CSI 13;2u must arrive as Shift+Enter" -ForegroundColor Yellow
 
@@ -289,7 +289,7 @@ if ($ready) {
 }
 
 # ==========================================================================
-# PART D: the VT path — SSH, WezTerm, the JetBrains terminals
+# PART D: the VT path, which is SSH, WezTerm and the JetBrains terminals
 # ==========================================================================
 Write-Host "`n[Part D] VT bytes: CSI 13;2u over a real ConPTY" -ForegroundColor Yellow
 
