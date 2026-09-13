@@ -224,6 +224,33 @@ A command with no `-t` reaches the session with the most recent activity, the sa
 
 Multi-byte UTF-8 characters (box-drawing, emoji, CJK text) render correctly in panes. Pasting CJK text no longer crashes the session. Japanese and Korean IME input is handled with minimal latency (the paste-detection heuristic was tuned to avoid misidentifying rapid IME bursts).
 
+### Window-scoped Options
+
+Every window carries its own option table, so a window-scoped write reaches one window and nothing else (#648, from the #647 WIN-01 report):
+
+```text
+psmux new-session -d -s s -n zero
+psmux new-window  -d -t "s:" -n one
+psmux set-option -w -t "s:zero" remain-on-exit on
+
+psmux show-options -w -v -t "s:zero" remain-on-exit   # on
+psmux show-options -w -v -t "s:one"  remain-on-exit   # off  (inherited)
+psmux show-options -g -v remain-on-exit               # off  (untouched)
+```
+
+The chain is pane, then window, then global, the way tmux resolves an option. `-wg` writes the global window table, `-w -u` removes one window's entry so it inherits again, and `-p` still outranks `-w` on the pane that has it. `show-options -w -A` marks every inherited entry with tmux's `*`:
+
+```text
+psmux show-options -w -A -t "s:zero"   # remain-on-exit on
+psmux show-options -w -A -t "s:one"    # remain-on-exit* off
+```
+
+Which store a write lands in follows the option NAME, as in tmux, so `setw status-left ...` still writes the session option. `@name` user options stay in the one session-wide map psmux reads them from everywhere, so set those with `-g` (or `-wg`).
+
+Before #648 psmux kept a single ordinary option store and `-w` selected the same map as `-g`. The visible symptom was a reporting one (`zero=on one=on global=on`), but the pane reaper read that one flag for every window, so ordinary panes in an untargeted window stopped closing after `exit`. `-t` also dropped the window NAME and acted on the active window; it now resolves names, indices, `@id` and tmux's symbolic window spellings on the CLI, TCP, command-prompt and config-file routes alike.
+
+Two window options keep a dedicated field alongside the table because other code reads them directly: `automatic-rename` still reports `off` for a window born with `-n NAME` (#266) and `window-size` still drives `resize-window`. Both stay in step with the table on a write and on a `-u`.
+
 ### Value-only `show-options -v`
 
 `-v` prints the value and nothing else in every scope, so a script can compare stdout with `on` or `off` directly (#647):

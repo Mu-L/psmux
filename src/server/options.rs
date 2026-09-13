@@ -1100,6 +1100,10 @@ where
 mod tests_issue647_show_options_value;
 
 #[cfg(test)]
+#[path = "../../tests-rs/test_issue648_window_scoped_options.rs"]
+mod tests_issue648_window_scoped_options;
+
+#[cfg(test)]
 #[path = "../../tests-rs/test_issue266_per_window_autorename.rs"]
 mod tests_issue266_per_window_autorename;
 
