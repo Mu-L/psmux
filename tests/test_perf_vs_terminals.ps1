@@ -779,8 +779,13 @@ $WtWasRunning = [bool](Get-Process WindowsTerminal -ErrorAction SilentlyContinue
 # identifiable and never mixed up with one the user opened.
 $WtWindow = "psmuxbench$PID"
 
-$GitSha = ""
-try { $GitSha = (& git -C $RepoRoot rev-parse HEAD 2>$null | Select-Object -First 1) } catch {}
+# The sha is the one of the tree the MEASURED binary was built in, or
+# "installed" for a cargo install copy, never the checkout this script happens
+# to sit in: pointed at the installed psmux, the old form stamped the run with
+# whatever HEAD the worktree was on, which is a lie in exactly the case that
+# matters, comparing a fresh build against the installed one.
+. "$PSScriptRoot\perf_metrics_common.ps1"
+$GitSha = Get-PerfGitSha $Psmux
 $CpuName = ""
 try { $CpuName = (Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Name) } catch {}
 $RamGb = 0
