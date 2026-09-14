@@ -222,6 +222,9 @@ fn the_modifier_parameter_is_decoded() {
             8,
             KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
         ),
+        // Meta (bit 8) is Alt, as in tmux's tty_keys_extended_key.
+        (9, KeyModifiers::ALT),
+        (13, KeyModifiers::CONTROL | KeyModifiers::ALT),
     ] {
         let mut c = EscCoalesce::new(true);
         let out = Batch::from_sequence(&format!("\x1b[13;{}u", param))

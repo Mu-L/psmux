@@ -1167,6 +1167,12 @@ fn decode_modifiers(n: u16) -> KeyModifiers {
     if m & 4 != 0 {
         mods |= KeyModifiers::CONTROL;
     }
+    // Bit 8 is Meta. tmux folds it into the same modifier as Alt
+    // (tty-keys.c, tty_keys_extended_key: both set KEYC_META), and psmux has no
+    // separate Meta, so a terminal reporting Meta lands on Alt here too.
+    if m & 8 != 0 {
+        mods |= KeyModifiers::ALT;
+    }
     mods
 }
 
