@@ -2332,16 +2332,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let allow_rename = app.allow_rename;
                         // #648: automatic-rename is a WINDOW option, so each
                         // window decides for itself whether the rename loop
-                        // touches it. Resolved before the mutable borrow below.
-                        let per_window_auto: Vec<bool> = (0..app.windows.len())
-                            .map(|i| crate::server::options::window_flag(
-                                &app, i, "automatic-rename", global_auto_rename,
-                            ))
-                            .collect();
-                        if (per_window_auto.iter().any(|on| *on) || allow_rename) && !in_copy {
-                            for (win_index, win) in app.windows.iter_mut().enumerate() {
+                        // touches it. Resolved per window inside the loop from
+                        // the window's own table, so this tick allocates nothing.
+                        let any_auto_rename = global_auto_rename
+                            || app.windows.iter().any(|w| {
+                                crate::server::options::win_flag(w, "automatic-rename", global_auto_rename)
+                            });
+                        if (any_auto_rename || allow_rename) && !in_copy {
+                            for win in app.windows.iter_mut() {
                                 if win.manual_rename { continue; }
-                                let auto_rename = per_window_auto[win_index];
+                                let auto_rename =
+                                    crate::server::options::win_flag(win, "automatic-rename", global_auto_rename);
                                 if !auto_rename && !allow_rename { continue; }
                                 if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
                                     if p.dead { continue; }

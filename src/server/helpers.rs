@@ -469,20 +469,18 @@ pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
 
     // #648: monitor-activity and monitor-silence are WINDOW options, so each
     // window's alert rules come from its own table with the session-wide value
-    // as the parent. Resolved once per window here, before the loop takes a
-    // mutable borrow, rather than once for the whole server as it used to be.
+    // as the parent, rather than once for the whole server as it used to be.
     let attached = app.attached_clients > 0;
-    let per_window: Vec<(bool, u64)> = (0..app.windows.len())
-        .map(|i| {
-            (
-                crate::server::options::window_flag(app, i, "monitor-activity", app.monitor_activity),
-                crate::server::options::window_number(app, i, "monitor-silence", app.monitor_silence),
-            )
-        })
-        .collect();
+    let global_monitor_activity = app.monitor_activity;
+    let global_monitor_silence = app.monitor_silence;
 
     for (i, win) in app.windows.iter_mut().enumerate() {
-        let (monitor_activity, monitor_silence_secs) = per_window[i];
+        // Resolved per window inside the loop from the window's own table, so
+        // this tick path allocates nothing.
+        let monitor_activity =
+            crate::server::options::win_flag(win, "monitor-activity", global_monitor_activity);
+        let monitor_silence_secs =
+            crate::server::options::win_number(win, "monitor-silence", global_monitor_silence);
         // ── Bell detection: check all panes for pending bells ──
         let has_bell = check_pane_bells(&win.root);
         if has_bell && i != active {

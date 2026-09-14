@@ -191,6 +191,26 @@ pub(crate) fn window_flag(
     }
 }
 
+/// [`window_flag`] for a caller that already holds the `Window`, so a loop
+/// that iterates `app.windows` mutably can resolve inside the loop instead of
+/// collecting every window's answer into a per-tick `Vec` first. No
+/// allocation on either path.
+pub(crate) fn win_flag(window: &crate::types::Window, name: &str, global: bool) -> bool {
+    match window.window_options.get(name).map(String::as_str) {
+        Some(value) => matches!(value, "on" | "true" | "1" | "yes"),
+        None => global,
+    }
+}
+
+/// [`window_number`] for a caller that already holds the `Window`.
+pub(crate) fn win_number(window: &crate::types::Window, name: &str, global: u64) -> u64 {
+    window
+        .window_options
+        .get(name)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(global)
+}
+
 /// Numeric form of [`resolve_window_option`]. A window-local value that does
 /// not parse falls back to the global, the same way every numeric setter in
 /// this file leaves the current setting alone on a bad value.
