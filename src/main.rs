@@ -1071,7 +1071,17 @@ fn run_main() -> io::Result<()> {
         // any ':'-bearing target (the fully-qualified form scripts use)
         // skipped validation entirely and exited 0 on a miss. Their older
         // per-arm validators are deleted; this shared one is a superset.
-        | "select-pane" | "selectp" | "select-window" | "selectw")
+        | "select-pane" | "selectp" | "select-window" | "selectw"
+        // Issue #656: split-window and select-layout take an EXISTING pane or
+        // window as -t but were left off this list, so a bare %N never went
+        // through the #627 owner resolution and was routed by recency. With a
+        // second session alive the split reached a server that had no such
+        // pane ("ERROR: can't find pane: %N" from the wrong session) and
+        // select-layout silently re-laid-out the other session's active
+        // window at exit 0.
+        | "split-window" | "splitw" | "split-pane" | "splitp"
+        | "select-layout" | "selectl" | "next-layout" | "nextl"
+        | "previous-layout" | "prevl")
     {
         cli_validate_window_pane_target(l_socket_name.as_deref());
     }
