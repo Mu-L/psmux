@@ -35,8 +35,9 @@
 # Runs in its own `-L` namespace and kills only that namespace, so it cannot
 # disturb sessions the developer is using.
 param(
-    # Defaults to the installed psmux on PATH. Point it at a build to compare
-    # two of them. The name must stay one the server recognises as its own image
+    # Defaults to this checkout's target\release build, then PSMUX_TEST_BIN,
+    # then the psmux on PATH. Point it at a build to compare two of them. The
+    # name must stay one the server recognises as its own image
     # (psmux / pmux / tmux): session.rs gates the warm server claim on it, so a
     # differently named copy silently loses the fast path and the run would be
     # measuring the rename.
@@ -72,10 +73,17 @@ param(
     # floor with headroom and still far below anything pathological.
     [int]$MaxLimitMs = 1500,
     [int]$PollMs = 10,
+    # The resource cell: how many windows and splits are stacked up before the
+    # second memory sample is taken, and how long the quiet windows are.
+    [int]$ResourceWindows = 20,
+    [int]$ResourceSplits = 3,
+    [int]$IdleSeconds = 3,
+    [switch]$SkipResources,
     [string]$MetricsDir = ""
 )
 
 $ErrorActionPreference = "Continue"
+. "$PSScriptRoot\perf_metrics_common.ps1"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 
@@ -86,15 +94,22 @@ function Write-Test { param($msg) Write-Host "[TEST] $msg" -ForegroundColor Whit
 function Write-Perf { param($msg) Write-Host "[PERF] $msg" -ForegroundColor Magenta }
 
 # ── binary ────────────────────────────────────────────────────────────────
-if (-not $Binary) {
-    $cmd = Get-Command psmux -ErrorAction SilentlyContinue
-    if ($cmd) { $Binary = $cmd.Source }
-}
+# The BUILD IN THE TREE comes first, ahead of the installed copy on PATH.
+# run_all_tests.ps1 announces target\release\psmux.exe as the binary under test,
+# and a gate that quietly timed the installed psmux instead would report a green
+# sweep for a build nobody measured. -Binary or PSMUX_TEST_BINARY override,
+# which is how two builds are compared against each other.
+if (-not $Binary -and $env:PSMUX_TEST_BIN) { $Binary = $env:PSMUX_TEST_BIN }
+if (-not $Binary -and $env:PSMUX_TEST_BINARY) { $Binary = $env:PSMUX_TEST_BINARY }
 if (-not $Binary) {
     foreach ($n in @("psmux.exe", "pmux.exe", "tmux.exe")) {
         $c = Join-Path $PSScriptRoot "..\target\release\$n"
         if (Test-Path $c) { $Binary = $c; break }
     }
+}
+if (-not $Binary) {
+    $cmd = Get-Command psmux -ErrorAction SilentlyContinue
+    if ($cmd) { $Binary = $cmd.Source }
 }
 if (-not $Binary -or -not (Test-Path $Binary)) {
     Write-Fail "no psmux binary found (not on PATH, nothing in target\release)"
@@ -284,6 +299,107 @@ function Test-Cell {
     }
 }
 
+# ── memory and CPU, the cost of holding a session open ────────────────────
+#
+# The latency cells above run DETACHED, so they have a server and no client.
+# This cell attaches one, because "what does psmux cost" is a question about
+# both processes, and takes four samples:
+#
+#   at prompt            one window, one pane, prompt up, nothing typed
+#   idle after prompt    CPU over a quiet window, as a percentage of ONE core.
+#                        This is the busy polling detector: a 1 ms sleep loop
+#                        that Windows rounds up to a 15.6 ms timer tick is
+#                        invisible in every latency number and obvious here.
+#   after N windows      working set and private bytes once $ResourceWindows
+#                        windows and $ResourceSplits splits are stacked up, ie
+#                        what a real working session costs, plus the CPU those
+#                        creations consumed
+#   idle after N windows the same quiet window again, with everything open. A
+#                        per pane poll shows up as a number that grew with the
+#                        pane count while the first idle sample looked fine.
+#
+# RECORDED, NOT GATED. The thresholds on these numbers live in
+# test_perf_vs_terminals (T6 memory, T7 idle CPU, T8 keystroke CPU); inventing a
+# second set here would mean two places to argue with. The one assertion is that
+# the section produced data, because a JSON full of nulls that still says PASS
+# is worse than a failure.
+$script:ResourceBlock = $null
+
+function Test-Resources {
+    Write-Test "memory and CPU of the server and an attached client"
+    Remove-Namespace
+    $client = $null
+    try {
+        $client = Start-Process -FilePath $Binary -ArgumentList "-L", $Ns, "new-session", "-s", $Sess -PassThru
+    } catch {
+        Write-Fail "resources - could not launch an attached client: $_"
+        return
+    }
+    try {
+        $inf = Wait-Registered
+        if ($null -eq $inf) { Write-Fail "resources - the session never registered"; return }
+        if (-not (Wait-FirstPrompt $inf.Port $inf.Key)) { Write-Fail "resources - the first pane never reached a prompt"; return }
+        Start-Sleep -Milliseconds $SettleMs
+
+        $srv = Get-PerfServerPid -Ns $Ns -Session $Sess -DataDir $DataDir
+        $roles = [ordered]@{}
+        if ($srv -gt 0) { $roles["server"] = $srv }
+        if ($client -and -not $client.HasExited) { $roles["client"] = $client.Id }
+        if ($roles.Count -eq 0) {
+            Write-Fail "resources - neither the server nor the client could be identified, so nothing was sampled"
+            return
+        }
+
+        $atPrompt = Get-PerfResourceSnapshot $roles
+        Write-Info (Format-PerfResourceLine $atPrompt "at prompt      ")
+        $idle1 = Measure-PerfIdleCpu $roles $IdleSeconds
+
+        # A wall clock budget on the whole fill, so a machine that has gone slow
+        # cannot turn this section into a suite timeout. Whatever was opened by
+        # the time the budget runs out is what gets measured, and the count is
+        # recorded, so the sample is still honest.
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $budgetMs = 120000
+        $made = 0
+        for ($i = 0; $i -lt $ResourceWindows -and $sw.ElapsedMilliseconds -lt $budgetMs; $i++) {
+            $old = Get-ActivePaneId $inf.Port $inf.Key
+            if ((Measure-Creation $inf.Port $inf.Key "new-window" $old) -ge 0) { $made++ }
+        }
+        for ($i = 0; $i -lt $ResourceSplits -and $sw.ElapsedMilliseconds -lt $budgetMs; $i++) {
+            $old = Get-ActivePaneId $inf.Port $inf.Key
+            if ((Measure-Creation $inf.Port $inf.Key "split-window -v" $old) -ge 0) { $made++ }
+        }
+        $sw.Stop()
+        $afterOpen = Get-PerfResourceSnapshot $roles
+        Write-Info (Format-PerfResourceLine $afterOpen ("after {0} panes " -f $made))
+        $openCpu = Get-PerfCpuDelta $atPrompt $afterOpen ([double][Math]::Max($made, 1)) 1.0
+        $idle2 = Measure-PerfIdleCpu $roles $IdleSeconds
+        Write-Info ("idle cpu at one pane  : " + (@($idle1.pct_of_one_core.Keys | ForEach-Object { "{0} {1:F2}%" -f $_, $idle1.pct_of_one_core[$_] }) -join "  "))
+        Write-Info ("idle cpu at $made panes: " + (@($idle2.pct_of_one_core.Keys | ForEach-Object { "{0} {1:F2}%" -f $_, $idle2.pct_of_one_core[$_] }) -join "  "))
+
+        $script:ResourceBlock = [ordered]@{
+            panes_opened            = $made
+            windows_requested       = $ResourceWindows
+            splits_requested        = $ResourceSplits
+            open_elapsed_ms         = [math]::Round($sw.Elapsed.TotalMilliseconds, 0)
+            idle_window_seconds     = $IdleSeconds
+            at_prompt               = (Get-PerfMemorySummary $atPrompt)
+            after_panes             = (Get-PerfMemorySummary $afterOpen)
+            cpu_ms_per_creation     = $openCpu
+            idle_cpu_pct_one_pane   = $idle1.pct_of_one_core
+            idle_cpu_pct_many_panes = $idle2.pct_of_one_core
+        }
+        $srvWs = if ($atPrompt.Contains("server")) { $atPrompt.server.ws_mb } else { 0 }
+        $srvWs2 = if ($afterOpen.Contains("server")) { $afterOpen.server.ws_mb } else { 0 }
+        Write-Perf ("{0,-18} server ws {1} -> {2} MB over {3} panes" -f "resources", $srvWs, $srvWs2, $made)
+        Write-Pass ("memory and CPU collected for the server and the client, one pane and $made panes")
+    } finally {
+        Remove-Namespace
+        try { if ($client -and -not $client.HasExited) { Stop-Process -Id $client.Id -Force -ErrorAction SilentlyContinue } } catch { }
+        Start-Sleep -Milliseconds 300
+    }
+}
+
 Write-Host ""
 Write-Host ("=" * 76)
 Write-Host " Creation latency gate - time to a VISIBLE PROMPT, $Count back to back"
@@ -293,31 +409,31 @@ Write-Host ("=" * 76)
 Test-Cell -Label "new-window"      -Cmd "new-window"
 Test-Cell -Label "split-window -v" -Cmd "split-window -v" -KillAfter
 Test-Cell -Label "split-window -h" -Cmd "split-window -h" -KillAfter
+if (-not $SkipResources) { Test-Resources }
 
 # ── samples on disk, never in the repo ────────────────────────────────────
-try {
-    if (-not (Test-Path $MetricsDir)) { New-Item -ItemType Directory -Force -Path $MetricsDir | Out-Null }
-    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $outFile = Join-Path $MetricsDir "creation_latency_gate-$stamp.json"
-    [ordered]@{
-        suite = "test_creation_latency_gate"
-        binary = $Binary
-        when = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-        count = $Count
-        settle_ms = $SettleMs
-        slow_ms = $SlowMs
-        slow_budget = $SlowBudget
-        p90_limit_ms = $P90LimitMs
-        max_limit_ms = $MaxLimitMs
-        poll_ms = $PollMs
-        samples_ms = $allSamples
-        passed = $script:TestsPassed
-        failed = $script:TestsFailed
-    } | ConvertTo-Json -Depth 6 | Set-Content -Path $outFile -Encoding UTF8
-    Write-Info "samples written to $outFile"
-} catch {
-    Write-Info "could not write metrics: $_"
-}
+# Percentiles are computed here rather than left to the reader: p50 and p90 per
+# cell are what tests/perf_summary.ps1 plots, and the raw samples stay alongside
+# them so a suspicious percentile can always be checked against the run it came
+# from.
+$stats = [ordered]@{}
+foreach ($k in @($allSamples.Keys)) { $stats[$k] = (Get-PerfStats $allSamples[$k] 1) }
+$outFile = Write-PerfMetrics -Suite "test_creation_latency_gate" -Binary $Binary `
+    -FileStem "creation_latency_gate" -MetricsDir $MetricsDir -Data ([ordered]@{
+    count = $Count
+    settle_ms = $SettleMs
+    slow_ms = $SlowMs
+    slow_budget = $SlowBudget
+    p90_limit_ms = $P90LimitMs
+    max_limit_ms = $MaxLimitMs
+    poll_ms = $PollMs
+    samples_ms = $allSamples
+    stats_ms = $stats
+    resources = $script:ResourceBlock
+    passed = $script:TestsPassed
+    failed = $script:TestsFailed
+})
+if ($outFile) { Write-Info "samples written to $outFile" }
 
 Remove-Namespace
 Write-Host ""

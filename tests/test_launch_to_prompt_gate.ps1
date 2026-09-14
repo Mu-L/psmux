@@ -47,6 +47,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+. "$PSScriptRoot\perf_metrics_common.ps1"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 $script:TestsSkipped = 0
@@ -56,6 +57,8 @@ function Write-Skip { param($msg) Write-Host "[SKIP] $msg" -ForegroundColor Yell
 function Write-Info { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 function Write-Perf { param($msg) Write-Host "[PERF] $msg" -ForegroundColor Magenta }
 
+if (-not $Binary -and $env:PSMUX_TEST_BIN) { $Binary = $env:PSMUX_TEST_BIN }
+if (-not $Binary -and $env:PSMUX_TEST_BINARY) { $Binary = $env:PSMUX_TEST_BINARY }
 if (-not $Binary) {
     $local = "$PSScriptRoot\..\target\release\psmux.exe"
     if (Test-Path $local) { $Binary = (Resolve-Path $local).Path }
@@ -171,8 +174,10 @@ if ($null -eq $bareMed -or $null -eq $muxMed) {
     Write-Fail "launch to prompt: a shell never reached its prompt (bare=$($bare -join ',') psmux=$($mux -join ','))"
 } else {
     $delta = [math]::Round($muxMed - $bareMed, 1)
-    Write-Perf ("bare  median: {0} ms" -f $bareMed)
-    Write-Perf ("psmux median: {0} ms" -f $muxMed)
+    $bareStats = Get-PerfStats $bare 1
+    $muxStats  = Get-PerfStats $mux 1
+    Write-Perf ("bare  median: {0} ms  (p90 {1}, max {2})" -f $bareMed, $bareStats.p90, $bareStats.max)
+    Write-Perf ("psmux median: {0} ms  (p90 {1}, max {2})" -f $muxMed, $muxStats.p90, $muxStats.max)
     Write-Perf ("delta       : {0} ms (gate {1} ms)" -f $delta, $MaxDeltaMs)
     if ($delta -le $MaxDeltaMs) {
         Write-Pass "launch to prompt: psmux adds $delta ms over bare pwsh (<= $MaxDeltaMs ms)"
@@ -181,23 +186,24 @@ if ($null -eq $bareMed -or $null -eq $muxMed) {
     }
 }
 
-# Samples land outside the repo, under the shared test-data root.
-$metrics = Join-Path $env:USERPROFILE ".psmux-test-data\metrics"
-New-Item -ItemType Directory -Force $metrics | Out-Null
-$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$jsonPath = Join-Path $metrics "launch-to-prompt-$stamp.json"
-[ordered]@{
-    timestamp   = (Get-Date).ToString("o")
-    binary      = $Binary
-    iterations  = $N
-    gate_ms     = $MaxDeltaMs
-    bare_ms     = $bare
-    psmux_ms    = $mux
-    bare_median = $bareMed
+# Samples land outside the repo, under the shared test-data root, carrying the
+# shared envelope (git sha of the binary's tree, machine, CPU) so a run can be
+# lined up against another run of another build. The median fields are kept as
+# they were so files written before the envelope landed still compare; the
+# percentile blocks are the new part, and they are what tests/perf_summary.ps1
+# reads.
+$jsonPath = Write-PerfMetrics -Suite "test_launch_to_prompt_gate" -Binary $Binary -FileStem "launch-to-prompt" -Data ([ordered]@{
+    iterations   = $N
+    gate_ms      = $MaxDeltaMs
+    bare_ms      = $bare
+    psmux_ms     = $mux
+    bare_median  = $bareMed
     psmux_median = $muxMed
-    delta_ms    = $(if ($null -ne $bareMed -and $null -ne $muxMed) { [math]::Round($muxMed - $bareMed, 1) } else { $null })
-} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath
-Write-Info "samples: $jsonPath"
+    bare_stats   = (Get-PerfStats $bare 1)
+    psmux_stats  = (Get-PerfStats $mux 1)
+    delta_ms     = $(if ($null -ne $bareMed -and $null -ne $muxMed) { [math]::Round($muxMed - $bareMed, 1) } else { $null })
+})
+if ($jsonPath) { Write-Info "samples: $jsonPath" }
 
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 

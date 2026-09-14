@@ -31,6 +31,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot\perf_metrics_common.ps1"
+if (-not $Psmux -and $env:PSMUX_TEST_BIN) { $Psmux = $env:PSMUX_TEST_BIN }
+if (-not $Psmux -and $env:PSMUX_TEST_BINARY) { $Psmux = $env:PSMUX_TEST_BINARY }
 if ($Psmux) {
     $PSMUX = $Psmux
 } else {
@@ -930,15 +933,22 @@ if ($FAIL -gt 0) {
 Write-Host ""
 
 # Samples on disk so two runs can be compared later, and NEVER inside the repo:
-# a perf suite that commits its own output makes every run a dirty tree.
+# a perf suite that commits its own output makes every run a dirty tree. The
+# file carries the shared envelope from tests/perf_metrics_common.ps1 (git sha
+# of the binary's tree or "installed", machine, CPU) plus per cell percentiles,
+# which is what tests/perf_summary.ps1 lines up against the other gates.
 try {
-    $metricsDir = if ($MetricsDir) { $MetricsDir } else { "$env:USERPROFILE\.psmux-test-data\metrics" }
-    if (-not (Test-Path $metricsDir)) { New-Item -ItemType Directory -Force -Path $metricsDir | Out-Null }
-    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $outFile = Join-Path $metricsDir "pane_startup_perf-$stamp.json"
-    [ordered]@{
-        suite = "test_pane_startup_perf"
-        binary = $PSMUX
+    $stats = [ordered]@{
+        new_window_ms                = (Get-PerfStats $windowTimes 1)
+        split_ms                     = (Get-PerfStats $splitTimes 1)
+        new_session_ms               = (Get-PerfStats $sessionTimes 1)
+        pool_depth5_new_window_ms    = (Get-PerfStats $poolWin 1)
+        pool_depth5_split_v_ms       = (Get-PerfStats $poolSplitV 1)
+        pool_depth5_split_h_ms       = (Get-PerfStats $poolSplitH 1)
+        standby_armed_new_session_ms = (Get-PerfStats $armedTimes 1)
+    }
+    $outFile = Write-PerfMetrics -Suite "test_pane_startup_perf" -Binary $PSMUX `
+        -FileStem "pane_startup_perf" -MetricsDir $MetricsDir -Data ([ordered]@{
         when = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
         baseline_pwsh_noprofile_ms = [math]::Round($baselineAvg, 1)
         baseline_pwsh_profile_ms = [math]::Round($profileAvg, 1)
@@ -949,11 +959,12 @@ try {
         pool_depth5_split_v_ms = @($poolSplitV | ForEach-Object { [math]::Round($_, 1) })
         pool_depth5_split_h_ms = @($poolSplitH | ForEach-Object { [math]::Round($_, 1) })
         standby_armed_new_session_ms = @($armedTimes | ForEach-Object { [math]::Round($_, 1) })
+        stats_ms = $stats
         passed = $PASS
         failed = $FAIL
         total = $TOTAL_TESTS
-    } | ConvertTo-Json -Depth 6 | Set-Content -Path $outFile -Encoding UTF8
-    Write-Host "  metrics written to $outFile" -ForegroundColor Gray
+    })
+    if ($outFile) { Write-Host "  metrics written to $outFile" -ForegroundColor Gray }
 } catch {
     Write-Host "  could not write metrics: $_" -ForegroundColor DarkYellow
 }

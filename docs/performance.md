@@ -309,6 +309,50 @@ Get-CimInstance Win32_Process -Filter "Name='psmux.exe'" |
 
 If a number looks wrong, the debug and crash logs described in [Diagnostics](diagnostics.md) show where the time went.
 
+## The metrics folder, and reading the trend
+
+Every performance suite writes one JSON file per run into `%USERPROFILE%\.psmux-test-data\metrics\`, never into the repository. Nothing is ever overwritten, so the folder is a history: a suspected regression is compared against the run that last passed instead of against a number in a comment.
+
+Each file carries the same envelope, written by `tests/perf_metrics_common.ps1`:
+
+| field | what it is |
+| --- | --- |
+| `schema` | envelope version, so a reader can tell old files apart |
+| `suite` | the suite that wrote the file |
+| `timestamp` | round trip format, local time with offset |
+| `binary` | full path of the psmux that was measured |
+| `git_sha` | short HEAD of the tree that binary was built in, found by walking up from the binary itself, or `installed` when it is a `cargo install` copy that sits in no work tree |
+| `version` | the binary's own `psmux -V` line |
+| `machine`, `os`, `cpu`, `cpu_count`, `ram_gb` | where it was measured |
+
+`git_sha` is taken from the binary's own directory and not from the current checkout, which matters in the one case that matters: comparing a fresh build against the installed one. A run of the installed psmux is honestly labelled `installed` rather than tagged with whatever `HEAD` the shell happened to be sitting on.
+
+These are the files that carry numbers:
+
+| file | what is in it |
+| --- | --- |
+| `launch-to-prompt-<stamp>.json` | psmux against a bare pwsh, per iteration samples plus p50 / p90 / p99 for both arms |
+| `keystroke-latency-<stamp>.json` | the echo cell, pooled percentiles and every sample, plus the memory and CPU block |
+| `keystroke-latency-pwsh-<stamp>.json` | the shell cell and the ConPTY floor measured in the same run |
+| `creation_latency_gate-<stamp>.json` | `new-window`, `split-window -v` and `-h`, samples and percentiles, plus the memory and CPU block |
+| `pane_startup_perf-<stamp>.json` | first session, warm pool depth and burst creation |
+| `perf_vs_terminals-<stamp>.json` | the head to head against Windows Terminal, WezTerm and Alacritty, with every threshold and its verdict |
+
+**Memory and CPU** are collected by the two latency gates as data, not as a gate. The keystroke gate samples the server and the attached client at the prompt and again after a burst of keystrokes, and reports working set, private bytes, the CPU those keystrokes cost as ms per 100 keys, and the CPU burnt over a quiet window with nothing typed. The creation gate does the same at one pane and again after it has opened twenty windows and three splits, which is what shows a per pane poll: a number that grew with the pane count while the one pane sample looked fine. Idle CPU is reported as a percentage of one core, and its resolution is one scheduler tick, 15.6 ms, so about 0.5 percent over a three second window. The thresholds on all of these live in `test_perf_vs_terminals` (T6 memory, T7 idle CPU, T8 keystroke CPU) so there is only one place to argue with; the gates assert only that the section produced data, because a JSON full of nulls that still says PASS is worse than a failure.
+
+`tests/perf_summary.ps1` reads the folder and prints the trend:
+
+```powershell
+pwsh -NoProfile -File tests\perf_summary.ps1              # last 8 runs of every metric
+pwsh -NoProfile -File tests\perf_summary.ps1 -Last 20     # a longer window
+pwsh -NoProfile -File tests\perf_summary.ps1 -Metric B    # one section: A, B, C or D
+pwsh -NoProfile -File tests\perf_summary.ps1 -Csv perf.csv
+```
+
+The four sections are the four questions: **A** launch to a usable prompt, psmux against a bare pwsh and against every terminal a head to head run found; **B** keystroke to screen at p50, p90 and p99, with the shell cell judged against the ConPTY floor measured in the same run; **C** creation latency at p50 and p90 for `new-window` and both splits; **D** working set, private bytes and CPU for the server and the client. Every row carries the git sha and the binary, so two rows can be compared without guessing what produced them. Rows written before the envelope existed show a blank sha and are still listed: the shape of the line is the point.
+
+All four latency suites are part of `tests\run_all_tests.ps1` as performance suites, so `-SkipPerf` skips them and a default sweep runs them. They take the build in `target\release` by default, ahead of the psmux on `PATH`; `-Binary <path>` or `PSMUX_TEST_BINARY` points them somewhere else, which is how two builds are compared against each other.
+
 ## FAQ
 
 ### Is psmux faster than tmux inside WSL?

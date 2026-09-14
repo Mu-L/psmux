@@ -77,15 +77,32 @@
 #
 #   pwsh -File tests\test_keystroke_latency_gate.ps1 -MedianMaxMs 3 -P99MaxMs 8
 #
+# MEMORY AND CPU RIDE ALONG
+# -------------------------
+# The first echo run also samples the server and the attached client: working
+# set and private bytes at the prompt and again after the key burst, the CPU
+# those keystrokes cost normalised to ms per 100 keys, and the CPU burnt over a
+# quiet window with nothing typed. The keystroke run is the only part of this
+# suite that holds a real server and a real client alive with a prompt up, so it
+# is the cheapest place to take the sample. The numbers are RECORDED, not gated:
+# the thresholds on them live in test_perf_vs_terminals (T6, T7, T8), and the
+# only assertion here is that the section produced data at all, because a JSON
+# full of nulls that still says PASS is worse than a failure.
+#
 # SAMPLES ARE KEPT
 # ----------------
 # Every sample is written to %USERPROFILE%\.psmux-test-data\metrics as JSON, so a
 # regression can be compared against the run that last passed instead of against
-# a number in a comment. Never inside the repo.
+# a number in a comment. Never inside the repo. Each file carries the shared
+# envelope from tests/perf_metrics_common.ps1: the git sha of the tree the
+# binary was built in (or "installed"), the binary path, the machine name and
+# the CPU model, so two files can be compared without guessing what produced
+# them. tests/perf_summary.ps1 prints the trend across them.
 
 param(
-    # Binary under test. Defaults to whatever `psmux` resolves to, which is what
-    # the suite runner wants; pass -Binary to A/B a build that is not installed.
+    # Binary under test. Defaults to this checkout's target\release build, which
+    # is the binary run_all_tests.ps1 announces, then PSMUX_TEST_BIN, then the
+    # psmux on PATH; pass -Binary to A/B two builds against each other.
     [string]$Binary = "",
     [int]$Runs = 3,
     [int]$N = 40,
@@ -111,10 +128,15 @@ param(
     # Sanity ceiling in case the floor measurement itself fails or the machine is
     # pathological: a shell keystroke must land inside this no matter what.
     [double]$PwshAbsMedianMaxMs = 30.0,
-    [switch]$SkipPwsh
+    # Quiet window for the idle CPU sample, in seconds. Nothing is typed during
+    # it, so whatever the server and the client burn is work nobody asked for.
+    [int]$IdleSeconds = 3,
+    [switch]$SkipPwsh,
+    [switch]$SkipResources
 )
 
 $ErrorActionPreference = "Continue"
+. "$PSScriptRoot\perf_metrics_common.ps1"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 
@@ -122,12 +144,25 @@ function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
 function Write-Info($msg) { Write-Host "  [INFO] $msg" -ForegroundColor DarkCyan }
 
+# Binary selection, in the order the suite runner needs it. The BUILD IN THE
+# TREE comes before the installed copy on PATH: run_all_tests.ps1 reports
+# target\release\psmux.exe as the binary under test and a gate that quietly
+# measured the installed psmux instead would report a green sweep for a build
+# nobody timed. -Binary or PSMUX_TEST_BINARY still override, which is how two
+# builds are compared against each other.
+if (-not $Binary -and $env:PSMUX_TEST_BIN) { $Binary = $env:PSMUX_TEST_BIN }
+if (-not $Binary -and $env:PSMUX_TEST_BINARY) { $Binary = $env:PSMUX_TEST_BINARY }
+if (-not $Binary) {
+    $local = Join-Path $PSScriptRoot "..\target\release\psmux.exe"
+    if (Test-Path $local) { $Binary = (Resolve-Path $local).Path }
+}
 if (-not $Binary) {
     $cmd = Get-Command psmux -EA SilentlyContinue
     if (-not $cmd) { Write-Fail "psmux not found on PATH and no -Binary given"; exit 1 }
     $Binary = $cmd.Source
 }
 if (-not (Test-Path $Binary)) { Write-Fail "binary not found: $Binary"; exit 1 }
+$Binary = (Resolve-Path $Binary).Path
 Write-Info "binary under test: $Binary"
 
 # This shell's own psmux routing must not reach the client we launch, or the
@@ -176,10 +211,11 @@ function Get-OwnPids {
 # or "pwsh" (a real shell, cursor oracle, erase on). Everything else about the
 # measurement is identical between the two, which is the point: the difference
 # between the two numbers is what the shell adds, not what the harness adds.
-function Invoke-Run([int]$idx, [string]$cell = "echo") {
+function Invoke-Run([int]$idx, [string]$cell = "echo", [bool]$withResources = $false) {
     $ns = "klgate$cell$idx$PID"
     $before = Get-OwnPids
     $client = $null
+    $resAtPrompt = $null; $resAfterKeys = $null; $resIdle = $null; $keyCpu = $null
     $paneCmd = if ($cell -eq "pwsh") { @("pwsh", "-NoLogo", "-NoProfile") } else { @($EchoChild) }
     try {
         $client = Start-Process -FilePath $Binary `
@@ -202,12 +238,53 @@ function Invoke-Run([int]$idx, [string]$cell = "echo") {
         if ($cell -eq "pwsh") { Start-Sleep -Seconds 4 } else { Start-Sleep -Seconds 2 }
         $out = Join-Path $OutDir "gate_${cell}_$idx.txt"
         Remove-Item $out -EA SilentlyContinue
+        # MEMORY AND CPU, sampled around the same keystroke run, because this is
+        # the only place in the suite that holds a real server and a real
+        # attached client alive with a prompt up. The server is found by its
+        # <ns>__g.pid anchor, never by image name: the machine routinely has a
+        # dozen psmux servers belonging to other sessions and a warm standby
+        # shares this binary and this namespace.
+        $roles = $null
+        if ($withResources) {
+            $srv = Get-PerfServerPid -Ns $ns -Session "g"
+            $roles = [ordered]@{}
+            if ($srv -gt 0) { $roles["server"] = $srv }
+            if ($client -and -not $client.HasExited) { $roles["client"] = $client.Id }
+            $resAtPrompt = Get-PerfResourceSnapshot $roles
+        }
         if ($cell -eq "pwsh") {
             & $KeyLat --pid $client.Id --label "gate$cell$idx" --out $out `
                 --mode single --n $N --warmup 5 --gap 120 --oracle "cursor" | Out-Null
         } else {
             & $KeyLat --pid $client.Id --label "gate$idx" --out $out `
                 --mode single --n $N --warmup 5 --gap 120 --oracle "cell:0,0" --noerase | Out-Null
+        }
+        if ($withResources -and $resAtPrompt) {
+            $resAfterKeys = Get-PerfResourceSnapshot $roles
+            # ms of CPU per 100 keystrokes, so cells with different key counts
+            # stay comparable.
+            $keyCpu = Get-PerfCpuDelta $resAtPrompt $resAfterKeys ([double]$N) 100.0
+            # Then sit still. Nothing is typed in this window, so anything the
+            # server or the client burns in it is a poll loop, and no latency
+            # number in this file can see it.
+            $resIdle = Measure-PerfIdleCpu $roles $IdleSeconds
+            # Kept at script scope rather than returned, so a run that produces
+            # no keystroke samples still contributes its resource numbers.
+            $script:ResourceBlock = [ordered]@{
+                cell                  = $cell
+                run                   = $idx
+                keys                  = $N
+                idle_window_seconds   = $IdleSeconds
+                at_prompt             = (Get-PerfMemorySummary $resAtPrompt)
+                after_key_burst       = (Get-PerfMemorySummary $resAfterKeys)
+                cpu_ms_per_100_keys   = $keyCpu
+                idle_cpu_pct_of_core  = $resIdle.pct_of_one_core
+                idle_measured_over_ms = $resIdle.window_ms
+            }
+            Write-Info (Format-PerfResourceLine $resAtPrompt "at prompt  ")
+            Write-Info (Format-PerfResourceLine $resAfterKeys "after keys ")
+            Write-Info ("cpu ms per 100 keys   : " + (@($keyCpu.Keys | ForEach-Object { "{0} {1:F1}" -f $_, $keyCpu[$_] }) -join "  "))
+            Write-Info ("idle cpu, % of a core : " + (@($resIdle.pct_of_one_core.Keys | ForEach-Object { "{0} {1:F2}%" -f $_, $resIdle.pct_of_one_core[$_] }) -join "  "))
         }
         if (Test-Path $out) {
             # keylat writes every per keystroke measurement on one RAW line, as
@@ -258,8 +335,11 @@ Write-Host "=== Keystroke to screen latency gate ===" -ForegroundColor Cyan
 Write-Host "--- cell 1: raw echo child in the pane (psmux's own path) ---" -ForegroundColor DarkCyan
 $runStats = @()
 $all = @()
+$script:ResourceBlock = $null
 for ($i = 1; $i -le $Runs; $i++) {
-    $r = Invoke-Run $i "echo"
+    # Run 1 also carries the memory and CPU sample: one is enough for a trend
+    # line and each one costs an extra $IdleSeconds of sitting still.
+    $r = Invoke-Run $i "echo" ($i -eq 1 -and -not $SkipResources)
     if ($null -eq $r) { Write-Info "run $i produced no samples"; continue }
     $runStats += $r
     $all += $r.Samples
@@ -290,10 +370,8 @@ Write-Info ("pooled n={0}  min={1:N2}  median={2:N2}  p90={3:N2}  p99={4:N2}  ma
     $n, $min, $median, $p90, $p99, $max)
 
 $stamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
-$jsonPath = Join-Path $MetricsDir "keystroke-latency-$stamp.json"
-[pscustomobject]@{
-    timestamp    = (Get-Date).ToString("o")
-    binary       = $Binary
+$jsonPath = Write-PerfMetrics -Suite "test_keystroke_latency_gate" -Binary $Binary `
+    -FileStem "keystroke-latency" -MetricsDir $MetricsDir -Stamp $stamp -Data ([ordered]@{
     runs         = $Runs
     keysPerRun   = $N
     medianMaxMs  = $MedianMaxMs
@@ -302,9 +380,10 @@ $jsonPath = Join-Path $MetricsDir "keystroke-latency-$stamp.json"
     perRun       = @($runStats | ForEach-Object {
         [pscustomobject]@{ run = $_.Run; n = $_.N; min = $_.Min; median = $_.Median; p90 = $_.P90; p99 = $_.P99; max = $_.Max }
     })
+    resources    = $script:ResourceBlock
     samplesMs    = $all
-} | ConvertTo-Json -Depth 6 | Set-Content -Path $jsonPath -Encoding UTF8
-Write-Info "samples written to $jsonPath"
+})
+if ($jsonPath) { Write-Info "samples written to $jsonPath" }
 
 if ($median -lt $MedianMaxMs) {
     Write-Pass ("keystroke to screen median {0:N2}ms is under the {1:N1}ms gate" -f $median, $MedianMaxMs)
@@ -316,6 +395,21 @@ if ($p99 -lt $P99MaxMs) {
     Write-Pass ("keystroke to screen p99 {0:N2}ms is under the {1:N1}ms gate" -f $p99, $P99MaxMs)
 } else {
     Write-Fail ("keystroke to screen p99 {0:N2}ms exceeds the {1:N1}ms gate - some samples are waiting out a timer; a median inside the gate does not clear this" -f $p99, $P99MaxMs)
+}
+
+# A resource section that silently produced nothing is worse than one that is
+# missing, because the JSON still looks complete. This asserts the data is
+# there; it deliberately does NOT put a threshold on the numbers, which is
+# test_perf_vs_terminals' job (T6, T7, T8).
+if (-not $SkipResources) {
+    if ($script:ResourceBlock -and $script:ResourceBlock.at_prompt -and $script:ResourceBlock.at_prompt.Contains("server")) {
+        Write-Pass ("memory and CPU collected: server ws {0} MB private {1} MB, client ws {2} MB, idle window {3} ms" -f `
+            $script:ResourceBlock.at_prompt.server.ws_mb, $script:ResourceBlock.at_prompt.server.private_mb,
+            $(if ($script:ResourceBlock.at_prompt.Contains("client")) { $script:ResourceBlock.at_prompt.client.ws_mb } else { "n/a" }),
+            $script:ResourceBlock.idle_measured_over_ms)
+    } else {
+        Write-Fail "memory and CPU were not collected: the server process could not be found from its pid anchor, so this run has no resource data"
+    }
 }
 
 # ── cell 2: a real shell in the pane, gated on psmux's overhead over the floor ──
@@ -390,18 +484,16 @@ if (-not $SkipPwsh) {
         }
     }
     if ($pwshStats) {
-        $pwshJson = Join-Path $MetricsDir "keystroke-latency-pwsh-$stamp.json"
-        ([pscustomobject]@{
-            timestamp = (Get-Date).ToString("o")
-            binary    = $Binary
+        $pwshJson = Write-PerfMetrics -Suite "test_keystroke_latency_gate (pwsh cell)" -Binary $Binary `
+            -FileStem "keystroke-latency-pwsh" -MetricsDir $MetricsDir -Stamp $stamp -Data ([ordered]@{
             runs      = $Runs
             keysPerRun = $N
             medianDeltaMaxMs = $PwshMedianDeltaMaxMs
             p99DeltaMaxMs    = $PwshP99DeltaMaxMs
             absMedianMaxMs   = $PwshAbsMedianMaxMs
             pwsh      = $pwshStats
-        } | ConvertTo-Json -Depth 6) | Set-Content -Path $pwshJson -Encoding UTF8
-        Write-Info "pwsh cell samples written to $pwshJson"
+        })
+        if ($pwshJson) { Write-Info "pwsh cell samples written to $pwshJson" }
     }
 }
 
