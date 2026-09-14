@@ -130,6 +130,7 @@ fn a_new_window_does_not_open_in_copy_mode() {
         id: app.next_win_id,
         area: app.client_area,
         window_size: None,
+        window_options: Default::default(),
         activity_flag: false,
         bell_flag: false,
         silence_flag: false,

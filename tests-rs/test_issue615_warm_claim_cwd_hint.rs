@@ -151,6 +151,7 @@ fn app_with(pane: crate::types::Pane) -> crate::types::AppState {
         id: 0,
         area: ratatui::layout::Rect::new(0, 0, COLS, ROWS),
         window_size: None,
+        window_options: Default::default(),
         activity_flag: false,
         bell_flag: false,
         silence_flag: false,

@@ -189,10 +189,20 @@ pub(crate) fn expand_status_formats(
     // The one guard. Everything below expands #() asynchronously against the
     // TTL cache instead of blocking the event loop.
     let _async_fmt = crate::format::AsyncFormatGuard::new();
-    let pane_border_indicators = app.user_options
-        .get("pane-border-indicators")
-        .map(String::as_str)
-        .unwrap_or(crate::pane_border::INDICATORS_DEFAULT);
+    // #648: pane-border-indicators is a WINDOW option. The frame draws the
+    // active window's borders, so the active window's own entry wins over the
+    // server wide one.
+    let pane_border_indicators = crate::server::options::window_local_option(
+        app,
+        app.active_idx,
+        "pane-border-indicators",
+    )
+    .or_else(|| {
+        app.user_options
+            .get("pane-border-indicators")
+            .map(String::as_str)
+    })
+    .unwrap_or(crate::pane_border::INDICATORS_DEFAULT);
     let pane_border_indicators =
         crate::pane_border::PaneBorderIndicators::parse(pane_border_indicators)
             .unwrap_or_else(|e| {
@@ -316,12 +326,20 @@ pub(crate) fn list_windows_json_with_tabs(app: &AppState) -> io::Result<String> 
     let mut v: Vec<WinInfo> = Vec::new();
     for (i, w) in app.windows.iter().enumerate() {
         let is_active = i == app.active_idx;
+        // #648: window-status-format, its -current- twin and the five window
+        // status styles are WINDOW options. Each window's own entry wins over
+        // the server wide one; `window_local_option` borrows, so a window that
+        // set nothing (every window, until someone writes to one) costs no
+        // allocation on this per-frame path.
+        let local = |name: &str| crate::server::options::window_local_option(app, i, name);
         let fmt = if is_active {
-            &app.window_status_current_format
+            local("window-status-current-format")
+                .unwrap_or(&app.window_status_current_format)
         } else {
-            &app.window_status_format
+            local("window-status-format").unwrap_or(&app.window_status_format)
         };
         let tab = expand_format_for_window(fmt, app, i);
+        let owned = |name: &str| local(name).map(|value| expand_format_for_window(value, app, i));
         v.push(WinInfo {
             id: w.id,
             name: w.name.clone(),
@@ -331,6 +349,11 @@ pub(crate) fn list_windows_json_with_tabs(app: &AppState) -> io::Result<String> 
             last: i == app.last_window_idx,
             tab_text: tab,
             idx: app.win_display_index(i),
+            ws_style: owned("window-status-style"),
+            wsc_style: owned("window-status-current-style"),
+            wsa_style: owned("window-status-activity-style"),
+            wsb_style: owned("window-status-bell-style"),
+            wsl_style: owned("window-status-last-style"),
         });
     }
     serde_json::to_string(&v)
@@ -440,12 +463,24 @@ pub(crate) fn window_data_version(win: &Window) -> u64 {
 /// and checks monitor-silence timeout to set silence_flag.
 pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
     let active = app.active_idx;
-    let monitor_silence_secs = app.monitor_silence;
     let bell_action = app.bell_action.clone();
     let mut triggered_hooks: Vec<&'static str> = Vec::new();
     let mut forward_bell = false;
 
+    // #648: monitor-activity and monitor-silence are WINDOW options, so each
+    // window's alert rules come from its own table with the session-wide value
+    // as the parent, rather than once for the whole server as it used to be.
+    let attached = app.attached_clients > 0;
+    let global_monitor_activity = app.monitor_activity;
+    let global_monitor_silence = app.monitor_silence;
+
     for (i, win) in app.windows.iter_mut().enumerate() {
+        // Resolved per window inside the loop from the window's own table, so
+        // this tick path allocates nothing.
+        let monitor_activity =
+            crate::server::options::win_flag(win, "monitor-activity", global_monitor_activity);
+        let monitor_silence_secs =
+            crate::server::options::win_number(win, "monitor-silence", global_monitor_silence);
         // ── Bell detection: check all panes for pending bells ──
         let has_bell = check_pane_bells(&win.root);
         if has_bell && i != active {
@@ -475,7 +510,7 @@ pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
         }
 
         // ── Activity detection ──
-        if i == active && app.attached_clients > 0 {
+        if i == active && attached {
             // Active window with a client viewing it: alerts are seen the
             // moment they happen, so clear the flags (tmux clears alerts when
             // the window is current in an attached session). #559: a DETACHED
@@ -499,7 +534,7 @@ pub(crate) fn check_window_activity(app: &mut AppState) -> Vec<&'static str> {
         }
         let cur = window_data_version(win);
         if cur != win.last_seen_version {
-            if app.monitor_activity && !win.activity_flag {
+            if monitor_activity && !win.activity_flag {
                 win.activity_flag = true;
                 triggered_hooks.push("alert-activity");
             }

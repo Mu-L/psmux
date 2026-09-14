@@ -123,6 +123,7 @@ fn mock_window(name: &str) -> crate::types::Window {
         id: 0,
         area: ratatui::layout::Rect::new(0, 0, 120, 30),
         window_size: None,
+        window_options: Default::default(),
         activity_flag: false,
         bell_flag: false,
         silence_flag: false,

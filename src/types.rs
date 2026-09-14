@@ -810,6 +810,21 @@ pub struct Window {
     pub area: Rect,
     /// Per-window `window-size` override. `resize-window` sets this to manual.
     pub window_size: Option<String>,
+    /// Window scoped options written by `set-option -w -t <window>` (#648).
+    ///
+    /// tmux keeps one option table per window plus a `global_w_options` table,
+    /// and `options_get` walks from the window's table to the global one
+    /// (options.c). psmux had only the global store, so `-w` and `-g` selected
+    /// the same map: a write aimed at one window landed on every window AND on
+    /// the global, which is how the reporter's later panes inherited
+    /// `remain-on-exit on` and stopped closing.
+    ///
+    /// A name present here overrides the global store for THIS window only. A
+    /// missing name inherits, so `set -w -u` is just a removal and the window
+    /// goes back to following the global value. Reads go through
+    /// `crate::server::options::window_local_option` (borrowing, for the
+    /// render loop) or `resolve_window_option` (owning, for reporting).
+    pub window_options: std::collections::HashMap<String, String>,
     /// Activity flag: set when pane output is received while window is not active
     pub activity_flag: bool,
     /// Bell flag: set when a bell (\x07) is detected in a pane
@@ -2562,8 +2577,29 @@ pub enum CtrlReq {
     SetOptionToggle(String),  // set-option <bool-option> with no value (#535)
     /// Per-window `window-size` override; None unsets the local value.
     SetWindowSize(Option<String>),
+    /// `set-option -w [-u|-a|-o] [-t <window>] <name> [value]` (#648).
+    ///
+    /// `target` is the RAW `-t` string so the server can resolve a window by
+    /// name (`s:zero`), by index (`s:1`), by id (`@3`) or by any of tmux's
+    /// symbolic spellings. The old window path carried a pre-parsed index and
+    /// dropped the name form entirely, which is why the reporter's
+    /// `-t "s:zero"` silently acted on the ACTIVE window. Empty means "the
+    /// window the client is looking at".
+    SetWindowOption {
+        target: String,
+        option: String,
+        value: String,
+        unset: bool,
+        append: bool,
+        only_if_unset: bool,
+        quiet: bool,
+        resp: mpsc::Sender<String>,
+    },
     ShowOptions(mpsc::Sender<String>),
     ShowWindowOptions(mpsc::Sender<String>),
+    /// `show-options -w [-A] [-t <window>]`: the window option listing for one
+    /// resolved window. The bool asks for tmux's `*` inherited marker (#648).
+    ShowWindowOptionsFor(mpsc::Sender<String>, String, bool),
     SourceFile(String),
     /// Expand `#{...}` format variables against the live server state and send
     /// the result back: `(format_string, reply)`.
@@ -2752,12 +2788,13 @@ pub enum CtrlReq {
     ResizePaneAbsolute(String, u16),
     ResizePanePercent(String, u8), // axis, percentage (0-100)
     ShowOptionValue(mpsc::Sender<String>, String),
-    /// Read a window-scoped option value. Optional window index targets a
-    /// specific window (from `show-options -w -t :N`); None falls back to
-    /// the active window. Required so per-window overrides like
-    /// `automatic-rename` (implicitly off for `-n NAME` windows, #266)
-    /// can be reported correctly instead of returning the global value.
-    ShowWindowOptionValue(mpsc::Sender<String>, String, Option<usize>),
+    /// Read a window-scoped option value. The third field is the RAW `-t`
+    /// target so the server resolves `s:zero`, `s:1`, `@3` and tmux's
+    /// symbolic window spellings alike; empty means the active window.
+    /// Required so per-window values — `automatic-rename` (implicitly off for
+    /// `-n NAME` windows, #266) and every option in the window's own store
+    /// (#648) — are reported instead of the global one.
+    ShowWindowOptionValue(mpsc::Sender<String>, String, String),
     ChooseBuffer(mpsc::Sender<String>),
     ServerInfo(mpsc::Sender<String>),
     SendPrefix,

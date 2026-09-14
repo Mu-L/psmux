@@ -184,7 +184,28 @@ pub fn infer_title_from_prompt(screen: &vt100::Screen, rows: u16, cols: u16) -> 
 // resolve_last_session_name and resolve_default_session_name are in session.rs
 
 #[derive(Serialize, Deserialize)]
-pub struct WinInfo { pub id: usize, pub name: String, pub active: bool, #[serde(default)] pub activity: bool, #[serde(default)] pub bell: bool, #[serde(default)] pub last: bool, #[serde(default)] pub tab_text: String, #[serde(default)] pub idx: usize }
+pub struct WinInfo {
+    pub id: usize,
+    pub name: String,
+    pub active: bool,
+    #[serde(default)] pub activity: bool,
+    #[serde(default)] pub bell: bool,
+    #[serde(default)] pub last: bool,
+    #[serde(default)] pub tab_text: String,
+    #[serde(default)] pub idx: usize,
+    /// This window's OWN `window-status-*-style`, when it set one (#648).
+    ///
+    /// The five window status styles used to travel once per frame as server
+    /// wide strings, so a per window override had nowhere to live. They travel
+    /// per window now, and ONLY when the window overrode them: a default
+    /// configuration still adds nothing to the frame, and the client keeps
+    /// patching the server wide style when a field is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub ws_style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub wsc_style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub wsa_style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub wsb_style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub wsl_style: Option<String>,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct PaneInfo { pub id: usize, pub title: String }
@@ -207,7 +228,7 @@ pub enum LayoutSimple {
 
 pub fn list_windows_json(app: &AppState) -> io::Result<String> {
     let mut v: Vec<WinInfo> = Vec::new();
-    for (i, w) in app.windows.iter().enumerate() { v.push(WinInfo { id: w.id, name: w.name.clone(), active: i == app.active_idx, activity: w.activity_flag, bell: w.bell_flag, last: i == app.last_window_idx, tab_text: String::new(), idx: app.win_display_index(i) }); }
+    for (i, w) in app.windows.iter().enumerate() { v.push(WinInfo { id: w.id, name: w.name.clone(), active: i == app.active_idx, activity: w.activity_flag, bell: w.bell_flag, last: i == app.last_window_idx, tab_text: String::new(), idx: app.win_display_index(i), ws_style: None, wsc_style: None, wsa_style: None, wsb_style: None, wsl_style: None }); }
     let s = serde_json::to_string(&v).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("json error: {e}")))?;
     Ok(s)
 }

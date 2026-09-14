@@ -2684,6 +2684,7 @@ match cmd {
         let crate::cli::ParsedSetOptionArgs {
             flag_chars,
             positionals: non_flag_args,
+            target: set_target,
             ..
         } = parse_set_option_args(&args);
         let has_u = flag_chars.contains('u') || flag_chars.contains('U');
@@ -2700,7 +2701,48 @@ match cmd {
         // tmux parity (#580): `-p` is a bare PANE-SCOPE flag like `-w`; it
         // never consumes the next argument.
         let pane_scope = flag_chars.contains('p');
-        if pane_scope {
+        // #648: `-w` (and the `setw` spelling) without `-g`/`-s` writes the
+        // TARGET WINDOW's own option table, not the one global store. Only a
+        // name the catalog marks window scope, or a user option, is scoped
+        // that way — tmux derives scope from the option name, so `set -w` on
+        // a session option keeps landing in the session store.
+        let window_scope = (flag_chars.contains('w')
+            || matches!(cmd, "set-window-option" | "setw"))
+            && !global
+            && !pane_scope;
+        let window_option = window_scope
+            && non_flag_args
+                .first()
+                .is_some_and(|name| crate::server::options::is_window_scoped_write(name));
+        if window_option {
+            let raw_target = set_target
+                .map(|t| t.trim_matches('"').to_string())
+                .unwrap_or_default();
+            let option = non_flag_args[0].to_string();
+            let value = if has_u {
+                String::new()
+            } else {
+                let joined = non_flag_args[1..].join(" ").trim_matches('"').to_string();
+                expand_set_option_value(&tx, has_f, joined)
+            };
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::SetWindowOption {
+                target: raw_target,
+                option,
+                value,
+                unset: has_u,
+                append: has_a,
+                only_if_unset: has_o,
+                quiet: has_q,
+                resp: rtx,
+            });
+            if let Ok(reply) = rrx.recv_timeout(Duration::from_millis(2000)) {
+                if !reply.is_empty() {
+                    let _ = write!(write_stream, "{}\n", reply);
+                    let _ = write_stream.flush();
+                }
+            }
+        } else if pane_scope {
             let raw_target = pane_scope_target(
                 extract_flag_value(&args, "-t")
                     .map(|s| s.trim_matches('"').to_string())
@@ -2876,19 +2918,20 @@ match cmd {
             .filter(|a| !a.starts_with('-'))
             .copied()
             .last();
-        // Extract window index from -t target (issue #266 — needed so
-        // per-window options like automatic-rename can return the right
-        // value for explicitly-targeted windows).
-        let target_window: Option<usize> = extract_flag_value(&args, "-t")
-            .as_deref()
-            .map(parse_target)
-            .and_then(|pt| pt.window);
+        // The RAW -t target (issue #266 — per-window options like
+        // automatic-rename must answer for the explicitly targeted window;
+        // #648 — the server resolves it, because keeping only the numeric
+        // half here threw the `s:NAME` form away and silently answered for
+        // the ACTIVE window instead).
+        let target_window: String = extract_flag_value(&args, "-t")
+            .map(|t| t.trim_matches('"').to_string())
+            .unwrap_or_default();
         if has_v && opt_name.is_some() || (opt_name.is_some() && !has_q) {
             // Single-option query: show-options -v <name> or show <name>
             if let Some(name) = opt_name {
                 let (rtx, rrx) = mpsc::channel::<String>();
                 if window_scope {
-                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name.to_string(), target_window));
+                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name.to_string(), target_window.clone()));
                 } else {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name.to_string()));
                 }
@@ -2938,7 +2981,7 @@ match cmd {
             // -v without option name: list all options, values only
             let (rtx, rrx) = mpsc::channel::<String>();
             if window_scope {
-                let _ = tx.send(CtrlReq::ShowWindowOptions(rtx));
+                let _ = tx.send(CtrlReq::ShowWindowOptionsFor(rtx, target_window.clone(), false));
             } else {
                 let _ = tx.send(CtrlReq::ShowOptions(rtx));
             }
@@ -2968,7 +3011,10 @@ match cmd {
         } else {
             if window_scope {
                 let (rtx, rrx) = mpsc::channel::<String>();
-                let _ = tx.send(CtrlReq::ShowWindowOptions(rtx));
+                // #648: `-A` asks tmux's inheritance question, so the listing
+                // marks every option this window takes from the global store
+                // with a trailing `*` on the NAME (cmd-show-options.c).
+                let _ = tx.send(CtrlReq::ShowWindowOptionsFor(rtx, target_window.clone(), has_a));
                 if let Ok(mut text) = rrx.recv() {
                     if has_a {
                         let (srtx, srrx) = mpsc::channel::<String>();
@@ -4505,6 +4551,7 @@ fn dispatch_control_command(
             let crate::cli::ParsedSetOptionArgs {
                 flag_chars,
                 positionals: positional,
+                target: set_target,
                 ..
             } = parsed_set;
             let quiet = flag_chars.contains('q');
@@ -4537,6 +4584,40 @@ fn dispatch_control_command(
                     let _ = resp_tx.send("ERROR: set-option -p: option and value required".to_string());
                     return true;
                 }
+                let reply = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
+                let _ = resp_tx.send(reply);
+                return true;
+            }
+            // #648: `-w`/`setw` without `-g` writes the target window's own
+            // option table. Same rule as the one-shot route: only a name the
+            // catalog marks window scope, or a user option, is scoped that way.
+            let window_scope = (flag_chars.contains('w') || window_command) && !global;
+            if window_scope
+                && positional
+                    .first()
+                    .is_some_and(|name| crate::server::options::is_window_scoped_write(name))
+            {
+                let raw_target = set_target
+                    .map(|t| t.trim_matches('"').to_string())
+                    .unwrap_or_default();
+                let option = positional[0].to_string();
+                let value = if unset {
+                    String::new()
+                } else {
+                    let joined = positional[1..].join(" ").trim_matches('"').to_string();
+                    expand_set_option_value(tx, format_expand, joined)
+                };
+                let (rtx, rrx) = mpsc::channel::<String>();
+                let _ = tx.send(CtrlReq::SetWindowOption {
+                    target: raw_target,
+                    option,
+                    value,
+                    unset,
+                    append,
+                    only_if_unset,
+                    quiet,
+                    resp: rtx,
+                });
                 let reply = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
                 let _ = resp_tx.send(reply);
                 return true;
@@ -4633,12 +4714,11 @@ fn dispatch_control_command(
             let server_scope2 = combined_has2('s') && !window_scope2;
             let opt_name = args.iter().filter(|a| !a.starts_with('-')).next().map(|s| s.to_string());
             let has_opt_name = opt_name.is_some();
-            // See issue #266 — same -t window-index extraction as the
-            // primary handler above.
-            let target_window2: Option<usize> = extract_flag_value(&args, "-t")
-                .as_deref()
-                .map(parse_target)
-                .and_then(|pt| pt.window);
+            // The RAW -t target, resolved server-side (#266, #648) — same as
+            // the primary handler above.
+            let target_window2: String = extract_flag_value(&args, "-t")
+                .map(|t| t.trim_matches('"').to_string())
+                .unwrap_or_default();
             if opt_name.is_none() && server_scope2 {
                 // Bare `show-options -s`: server options only (tmux parity).
                 let mut text = String::new();
@@ -4657,22 +4737,23 @@ fn dispatch_control_command(
                 return true;
             }
             if let Some(name) = opt_name {
-                if value_only {
-                    let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
-                } else if window_scope2 {
-                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name, target_window2));
-                } else {
-                    let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
-                }
-            } else if value_only {
-                // -v/-gv without option name: list all, values only
+                // #648: `-wv <name>` used to fall into the plain
+                // ShowOptionValue arm because `value_only` was tested first,
+                // so the attached route answered with the GLOBAL value while
+                // the one-shot route answered per window. Window scope decides
+                // which store is read; `-v` only decides whether the name is
+                // printed alongside the value.
                 if window_scope2 {
-                    let _ = tx.send(CtrlReq::ShowWindowOptions(rtx));
+                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name, target_window2.clone()));
                 } else {
-                    let _ = tx.send(CtrlReq::ShowOptions(rtx));
+                    let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
                 }
             } else if window_scope2 {
-                let _ = tx.send(CtrlReq::ShowWindowOptions(rtx));
+                let _ = tx.send(CtrlReq::ShowWindowOptionsFor(
+                    rtx,
+                    target_window2.clone(),
+                    !value_only && combined_has2('A'),
+                ));
             } else {
                 let _ = tx.send(CtrlReq::ShowOptions(rtx));
             }

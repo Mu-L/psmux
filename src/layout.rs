@@ -1160,6 +1160,17 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
 /// Apply a named layout to the current window.
 /// Collects ALL leaf panes and rebuilds the tree structure from scratch.
 pub fn apply_layout(app: &mut AppState, layout: &str) {
+    // #648: main-pane-width / main-pane-height are WINDOW options, so the
+    // layout this window gets comes from this window's own entries with the
+    // server wide values as the parent. Resolved before the mutable borrow.
+    let window_index = app.active_idx;
+    let window_main_size = |name: &str, global: u16| -> u16 {
+        crate::server::options::window_local_option(app, window_index, name)
+            .and_then(crate::server::options::parse_main_pane_size)
+            .unwrap_or(global)
+    };
+    let main_pane_height = window_main_size("main-pane-height", app.main_pane_height);
+    let main_pane_width = window_main_size("main-pane-width", app.main_pane_width);
     let win = &mut app.windows[app.active_idx];
     
     // Collect all leaf panes from the current tree
@@ -1185,8 +1196,8 @@ pub fn apply_layout(app: &mut AppState, layout: &str) {
     }
 
     // Determine main-pane percentage
-    let main_h_pct = if app.main_pane_height > 0 { app.main_pane_height.min(95) } else { 60 };
-    let main_v_pct = if app.main_pane_width > 0 { app.main_pane_width.min(95) } else { 60 };
+    let main_h_pct = if main_pane_height > 0 { main_pane_height.min(95) } else { 60 };
+    let main_v_pct = if main_pane_width > 0 { main_pane_width.min(95) } else { 60 };
 
     match layout.to_lowercase().as_str() {
         "even-horizontal" | "even-h" => {

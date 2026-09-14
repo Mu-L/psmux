@@ -561,8 +561,15 @@ fn drain_plugin_req(
             let _ = resp.send(val);
         }
         CtrlReq::ShowWindowOptionValue(resp, name, target) => {
-            let val = crate::server::options::get_window_option_value_for(app, &name, target);
+            let index = crate::server::options::resolve_option_target_window(app, &target).ok();
+            let val = crate::server::options::get_window_option_value_for(app, &name, index);
             let _ = resp.send(val);
+        }
+        CtrlReq::SetWindowOption { target, option, value, unset, append, only_if_unset, quiet, resp } => {
+            let reply = crate::server::options::apply_set_window_option(
+                app, &target, &option, &value, unset, append, only_if_unset, quiet,
+            );
+            let _ = resp.send(reply);
         }
         CtrlReq::ShowOptions(resp) => {
             // Minimal: just send empty to unblock the caller
@@ -570,6 +577,12 @@ fn drain_plugin_req(
         }
         CtrlReq::ShowWindowOptions(resp) => {
             let _ = resp.send(render_window_options(app));
+        }
+        CtrlReq::ShowWindowOptionsFor(resp, target, mark_inherited) => {
+            let index = crate::server::options::resolve_option_target_window(app, &target).ok();
+            let _ = resp.send(crate::server::options::render_window_options_for(
+                app, index, mark_inherited,
+            ));
         }
         CtrlReq::BindKey(table_name, key, command, repeat) => {
             if let Some(kc) = parse_key_string(&key) {
@@ -2355,11 +2368,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // ── Automatic rename / allow-rename: resolve window names ──
                     {
                         let in_copy = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
-                        let auto_rename = app.automatic_rename;
+                        let global_auto_rename = app.automatic_rename;
                         let allow_rename = app.allow_rename;
-                        if (auto_rename || allow_rename) && !in_copy {
+                        // #648: automatic-rename is a WINDOW option, so each
+                        // window decides for itself whether the rename loop
+                        // touches it. Resolved per window inside the loop from
+                        // the window's own table, so this tick allocates nothing.
+                        let any_auto_rename = global_auto_rename
+                            || app.windows.iter().any(|w| {
+                                crate::server::options::win_flag(w, "automatic-rename", global_auto_rename)
+                            });
+                        if (any_auto_rename || allow_rename) && !in_copy {
                             for win in app.windows.iter_mut() {
                                 if win.manual_rename { continue; }
+                                let auto_rename =
+                                    crate::server::options::win_flag(win, "automatic-rename", global_auto_rename);
+                                if !auto_rename && !allow_rename { continue; }
                                 if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
                                     if p.dead { continue; }
                                     if p.last_title_check.elapsed().as_millis() < 1000 { continue; }
@@ -6070,11 +6094,29 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(val);
                 }
                 CtrlReq::ShowWindowOptionValue(resp, name, target) => {
-                    let val = crate::server::options::get_window_option_value_for(&app, &name, target);
+                    let index = crate::server::options::resolve_option_target_window(&app, &target).ok();
+                    let val = crate::server::options::get_window_option_value_for(&app, &name, index);
                     let _ = resp.send(val);
+                }
+                CtrlReq::SetWindowOption { target, option, value, unset, append, only_if_unset, quiet, resp } => {
+                    let reply = crate::server::options::apply_set_window_option(
+                        &mut app, &target, &option, &value, unset, append, only_if_unset, quiet,
+                    );
+                    // A window option can change what the status bar and the
+                    // layout draw (window-status-*, main-pane-*), so the frame
+                    // has to be rebuilt, not just the value stored.
+                    meta_dirty = true;
+                    state_dirty = true;
+                    let _ = resp.send(reply);
                 }
                 CtrlReq::ShowWindowOptions(resp) => {
                     let _ = resp.send(render_window_options(&app));
+                }
+                CtrlReq::ShowWindowOptionsFor(resp, target, mark_inherited) => {
+                    let index = crate::server::options::resolve_option_target_window(&app, &target).ok();
+                    let _ = resp.send(crate::server::options::render_window_options_for(
+                        &app, index, mark_inherited,
+                    ));
                 }
                 CtrlReq::ChooseBuffer(resp) => {
                     let mut output = String::new();

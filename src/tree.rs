@@ -464,6 +464,24 @@ pub fn get_split_mut<'a>(node: &'a mut Node, path: &Vec<usize>) -> Option<&'a mu
 /// - `newly_dead_count` tracks panes that transitioned alive→dead in this call
 ///   (remain-on-exit case), so callers can fire hooks even when the tree shape
 ///   doesn't change.
+/// The whole `remain-on-exit` decision for one pane that just exited.
+///
+/// The chain is pane, then window, then global, exactly as tmux resolves an
+/// option (options.c walks the pane table, the window table, then the global
+/// window table). `pane` is the pane's own `set-option -p` entry, `window` is
+/// what `set-option -w` resolved to for the window that holds it (#648) with
+/// the session-wide value as its parent, and `failed` keeps the pane only when
+/// the process exited nonzero — what a supervisor wants: crashed panes stay
+/// visible with their error, clean exits close.
+pub fn keep_dead_pane(pane: Option<&str>, window: bool, exit_success: bool) -> bool {
+    match pane {
+        Some("on") => true,
+        Some("off") => false,
+        Some("failed") => !exit_success,
+        _ => window,
+    }
+}
+
 pub fn prune_exited(n: Node, remain_on_exit: bool, kill_descendants: bool) -> (Option<Node>, usize) {
     match n {
         Node::Leaf(mut p) => {
@@ -476,12 +494,11 @@ pub fn prune_exited(n: Node, remain_on_exit: bool, kill_descendants: bool) -> (O
                     // the process exited nonzero — which is exactly what a
                     // teammate supervisor wants: crashed panes stay visible
                     // with their error, clean exits close.
-                    let keep = match p.pane_options.get("remain-on-exit").map(|s| s.as_str()) {
-                        Some("on") => true,
-                        Some("off") => false,
-                        Some("failed") => !status.success(),
-                        _ => remain_on_exit,
-                    };
+                    let keep = keep_dead_pane(
+                        p.pane_options.get("remain-on-exit").map(String::as_str),
+                        remain_on_exit,
+                        status.success(),
+                    );
                     if keep {
                         p.dead = true;
                         (Some(Node::Leaf(p)), 1)
@@ -959,7 +976,7 @@ fn has_any_exited(node: &mut Node) -> bool {
 }
 
 pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
-    let remain = app.remain_on_exit;
+    let global_remain = app.remain_on_exit;
     let kill_descendants = app.kill_descendants_on_exit();
     let mut any_pruned = false;
     let mut any_newly_dead = false;
@@ -970,6 +987,11 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool, bool)> {
         }
         let leaves_before = count_panes(&app.windows[i].root);
         let active_pane_id = get_active_pane_id(&app.windows[i].root, &app.windows[i].active_path);
+        // #648: remain-on-exit is a WINDOW option. The reaper used to read one
+        // session-wide flag for every window, so `set -w -t <one window>
+        // remain-on-exit on` kept dead panes alive everywhere; the reporter's
+        // ordinary PowerShell panes stopped closing after `exit` because of it.
+        let remain = crate::server::options::window_flag(app, i, "remain-on-exit", global_remain);
         let root = std::mem::replace(&mut app.windows[i].root, Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
         let (pruned_result, newly_dead_count) = prune_exited(root, remain, kill_descendants);
         if newly_dead_count > 0 {
