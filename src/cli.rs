@@ -574,7 +574,9 @@ SESSION COMMANDS:
         -t <name>           Target session name
     kill-session, kill-ses  Kill a session
         -t <name>           Target session name
-    kill-server             Kill all sessions and the server
+    kill-server             Kill every session on this socket (-L namespace,
+                            or the default one when no -L is given)
+        -a, --all           Kill every session in every -L namespace
     rename-session, rename  Rename the current session
     switch-client, switchc  Switch to another session
     list-clients, lsc       List connected clients
@@ -951,7 +953,7 @@ pub fn print_commands() {
   if-shell (if)             - Conditional command execution
   join-pane                 - Join a pane to a window
   kill-pane                 - Kill a pane
-  kill-server               - Kill the psmux server
+  kill-server               - Kill the servers on this socket (-a: all namespaces)
   kill-session              - Kill a session
   kill-window               - Kill a window
   last-pane                 - Select the previously active pane

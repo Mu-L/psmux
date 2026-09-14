@@ -12,8 +12,10 @@
 #     trip the nesting guard, so `new-session` never spawns a real server and
 #     the test silently no-ops. Saved and restored alongside USERPROFILE/HOME.
 #   * Remove-PsmuxTestEnv shuts servers down namespace-scoped (`-L <ns>
-#     kill-server`, NEVER a bare kill-server, which has a nuclear kill-all-by-
-#     image-name fallback), force-nets only processes whose ExecutablePath is the
+#     kill-server`, NEVER a bare kill-server: since #649 that is scoped to the
+#     DEFAULT namespace, so it would miss ours and hit anything a concurrent
+#     suite left there, and `kill-server -a` would take the whole machine's data
+#     dir with it), force-nets only processes whose ExecutablePath is the
 #     binary under test (so an installed psmux at another path is never killed),
 #     restores USERPROFILE/HOME, then deletes the temp dir.
 #

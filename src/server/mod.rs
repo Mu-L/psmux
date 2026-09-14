@@ -44,6 +44,46 @@ use crate::control;
 use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override, set_named_buffer_override};
 use crate::help;
 
+/// End this server process: tell control clients, drop the registry entry,
+/// detach the clients and kill the pane children. Never returns.
+///
+/// One body for both kill-server routes — the one-shot CLI request and an
+/// attached client's namespace-wide kill (which fans out to its peers first,
+/// then lands here) — so the shutdown sequence cannot drift between them.
+fn shutdown_this_server(app: &mut AppState) -> ! {
+    // Notify control clients that the server is going away, matching tmux's
+    // "%exit" wire notification before close. Flushes through the writer
+    // thread so iTerm2 sees a proper EOF-with-reason instead of a raw TCP RST.
+    if !app.control_clients.is_empty() {
+        control::emit_notification(
+            app,
+            crate::types::ControlNotification::Exit {
+                reason: Some("server exited".to_string()),
+            },
+        );
+        // Brief drain window so writer threads can flush %exit + ST before the
+        // process exits.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    // Remove port/key files FIRST so clients see the session as gone
+    // immediately, then kill processes.
+    let regpath = crate::paths::port_file(&app.port_file_base());
+    let keypath = crate::paths::key_file(&app.port_file_base());
+    let _ = std::fs::remove_file(&regpath);
+    let _ = std::fs::remove_file(&keypath);
+    crate::types::send_directive_to_all_clients("DETACH");
+    std::thread::sleep(Duration::from_millis(50));
+    crate::types::shutdown_persistent_streams();
+    // Kill all child processes using a single process snapshot
+    tree::kill_all_children_batch(&mut app.windows);
+    // Kill warm pane's child (process::exit skips Drop)
+    app.warm_pane.kill_all();
+    // TerminateProcess is synchronous on Windows — processes are already dead.
+    // Minimal delay for OS handle cleanup.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    std::process::exit(0);
+}
+
 /// True when `path` sits on a mapped network drive (`DRIVE_REMOTE`): its
 /// CreateFile can stall like a UNC path when the host is unreachable, so the
 /// direct file sink refuses it and points the user at a shell sink (which
@@ -5768,39 +5808,31 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::RemoveHook(hook) => {
                     app.hooks.remove(&hook);
                 }
+                CtrlReq::KillServerScoped(all) => {
+                    // tmux's kill-server from an attached client ends the whole
+                    // server it is attached to. psmux runs one server per
+                    // session, so the equivalent is every server on this
+                    // client's socket: this server's `-L` namespace, or the
+                    // default one. Another namespace is another socket and
+                    // survives (#649); `-a` is the explicit everything sweep.
+                    // Peers first, with this server excluded — it cannot answer
+                    // its own graceful kill from inside this handler; it ends
+                    // itself immediately afterwards.
+                    let scope = if all {
+                        crate::session::KillScope::All
+                    } else {
+                        crate::session::KillScope::Namespace(app.socket_name.as_deref())
+                    };
+                    let own_base = app.port_file_base();
+                    crate::session::kill_servers_in_scope(
+                        std::path::Path::new(&crate::paths::psmux_dir()),
+                        scope,
+                        Some(&own_base),
+                    );
+                    shutdown_this_server(&mut app);
+                }
                 CtrlReq::KillServer => {
-                    // Notify control clients that the server is going away,
-                    // matching tmux's "%exit" wire notification before close.
-                    // Flushes through the writer thread so iTerm2 sees a
-                    // proper EOF-with-reason instead of a raw TCP RST.
-                    if !app.control_clients.is_empty() {
-                        control::emit_notification(
-                            &app,
-                            crate::types::ControlNotification::Exit {
-                                reason: Some("server exited".to_string()),
-                            },
-                        );
-                        // Brief drain window so writer threads can flush
-                        // %exit + ST before the process exits.
-                        std::thread::sleep(std::time::Duration::from_millis(80));
-                    }
-                    // Remove port/key files FIRST so clients see the session
-                    // as gone immediately, then kill processes.
-                    let regpath = crate::paths::port_file(&app.port_file_base());
-                    let keypath = crate::paths::key_file(&app.port_file_base());
-                    let _ = std::fs::remove_file(&regpath);
-                    let _ = std::fs::remove_file(&keypath);
-                    crate::types::send_directive_to_all_clients("DETACH");
-                    std::thread::sleep(Duration::from_millis(50));
-                    crate::types::shutdown_persistent_streams();
-                    // Kill all child processes using a single process snapshot
-                    tree::kill_all_children_batch(&mut app.windows);
-                    // Kill warm pane's child (process::exit skips Drop)
-                    app.warm_pane.kill_all();
-                    // TerminateProcess is synchronous on Windows — processes
-                    // are already dead.  Minimal delay for OS handle cleanup.
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    std::process::exit(0);
+                    shutdown_this_server(&mut app);
                 }
                 CtrlReq::WaitFor(channel, op) => {
                     match op {

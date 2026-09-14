@@ -56,7 +56,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 | `if-shell` | `if` | `bFt:` | CLI, SRV, CFG |
 | `join-pane` | `joinp` | `dhvs:t:` | CLI, SRV, CFG |
 | `kill-pane` | `killp` | `t:` | CLI, SRV, CFG, CTL |
-| `kill-server` | *(none)* | none | CLI, SRV, CFG, CTL |
+| `kill-server` | *(none)* | `a` (psmux extension) | CLI, SRV, CFG, CTL |
 | `kill-session` | `kill-ses` | `t:` | CLI, SRV, CFG |
 | `kill-window` | `killw` | `at:` | CLI, SRV, CFG, CTL |
 | `last-pane` | `lastp` | none | CLI, SRV, CFG, CTL |
@@ -188,8 +188,10 @@ Five mouse wire commands are an exception and are genuinely usable for scripting
 - No flags. All three are no-ops on Windows, which has no terminal locking concept.
 
 **kill-server**
-- No flags.
-- Note: bare `kill-server` stops every socket and session (the default plus all `-L` namespaces), unlike tmux which only kills the current socket. Use `-L <name> kill-server` to scope it to one namespace. See [compatibility.md](compatibility.md#kill-server-with-multiple-sockets).
+- `-a`, `--all`: psmux extension. Kill every session in every `-L` namespace in the data dir, not just this socket's. tmux has no such flag.
+- Scope, as in tmux: a bare `kill-server` ends the default namespace only, and `-L <name> kill-server` ends that namespace only. Other `-L` namespaces are separate sockets and keep running.
+- Exit code, as in tmux: nothing to kill in scope prints `no server running on <socket>` and exits 1. `-a` is a sweep and exits 0 either way.
+- See [compatibility.md](compatibility.md#kill-server-with-multiple-sockets).
 
 **start-server** (`start`, `warmup`)
 - No flags. Pre-spawns a warm server so the next `new-session` is instant.

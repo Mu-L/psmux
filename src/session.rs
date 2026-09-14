@@ -45,6 +45,46 @@ pub fn session_namespace(full: &str) -> Option<&str> {
     }
 }
 
+/// Whether the registry base `base` belongs to namespace `ns`.
+///
+/// This is the file-name convention in one place: a `-L` namespace writes
+/// `<ns>__<session>`, the default namespace writes a bare `<session>`, and the
+/// default namespace's own warm helper `__warm__` is the single bare name that
+/// contains `__`. Membership, unlike [`session_visible_from`], counts the warm
+/// helpers: they are real servers, so a namespace-wide sweep must reach them.
+pub fn registry_base_in_namespace(base: &str, ns: Option<&str>) -> bool {
+    match ns {
+        Some(n) => base.starts_with(&format!("{}__", n)),
+        None => !base.contains("__") || base == "__warm__",
+    }
+}
+
+/// What a `kill-server` is allowed to touch.
+///
+/// tmux's `kill-server` kills the server on the selected socket and nothing
+/// else; sessions on other sockets are untouched. psmux keeps every `-L`
+/// namespace in one registry directory, so the socket boundary has to be
+/// applied by name — that is [`KillScope::Namespace`]. [`KillScope::All`] is
+/// the psmux-only `kill-server -a`, the deliberate machine-wide sweep that used
+/// to be what a bare `kill-server` did (#649).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillScope<'a> {
+    /// Every registry entry in the data dir, every namespace (`-a`/`--all`).
+    All,
+    /// One socket: `Some(ns)` for `-L ns`, `None` for the default namespace.
+    Namespace(Option<&'a str>),
+}
+
+impl KillScope<'_> {
+    /// Whether a registry base name (a `.port`/`.pid` file stem) is in scope.
+    pub fn covers(&self, base: &str) -> bool {
+        match self {
+            KillScope::All => true,
+            KillScope::Namespace(ns) => registry_base_in_namespace(base, *ns),
+        }
+    }
+}
+
 /// Whether the registry base `base` is visible from namespace `ns`.
 ///
 /// tmux parity: a `-L` socket is a separate server, and a client on one
@@ -816,21 +856,21 @@ pub fn format_pid_file_contents(pid: u32, creation_time: u64) -> String {
 }
 
 /// Force-kill candidates for `kill-server`'s fallback, scoped by construction to
-/// a single data dir: the `pid:creation_filetime` `.pid` files in `dir`. When
-/// `ns_prefix` is `Some`, only files whose base starts with it are considered —
-/// mirroring the graceful pass's `-L` filter, so a namespaced kill-server never
-/// reaches another namespace. Bare-pid and malformed files are skipped (no
-/// recorded creation time means no identity gate, so they are not force-kill
-/// candidates). This selects targets; it does not kill.
-pub fn force_kill_targets(dir: &std::path::Path, ns_prefix: Option<&str>) -> Vec<PidTarget> {
+/// a single data dir: the `pid:creation_filetime` `.pid` files in `dir`, further
+/// narrowed by `scope` so the fallback reaches exactly the servers the graceful
+/// pass aimed at — one namespace for a bare or `-L` kill-server, everything for
+/// `-a`. Bare-pid and malformed files are skipped (no recorded creation time
+/// means no identity gate, so they are not force-kill candidates). This selects
+/// targets; it does not kill.
+pub fn force_kill_targets(dir: &std::path::Path, scope: KillScope) -> Vec<PidTarget> {
     let mut targets = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return targets; };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().map(|e| e == "pid").unwrap_or(false) {
-            if let Some(pfx) = ns_prefix {
+            {
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                if !stem.starts_with(pfx) { continue; }
+                if !scope.covers(stem) { continue; }
             }
             if let Ok(contents) = std::fs::read_to_string(&path) {
                 // A recorded creation time is required: it is the identity gate.
@@ -854,6 +894,151 @@ pub fn confirms_identity(queried: Option<u64>, expected: u64) -> bool {
     queried == Some(expected)
 }
 
+/// A server `kill-server` is about to end: its `.port` file, the port it names
+/// and the auth key that goes with it.
+pub struct KillTarget {
+    pub base: String,
+    pub port_path: std::path::PathBuf,
+    pub port: u16,
+}
+
+/// Registry entries a `kill-server` in `scope` should end, plus the stale
+/// `.port` files (unreadable, so nothing to talk to) that should simply be
+/// swept. `exclude_base` drops one entry — the caller's own server, when the
+/// command came from inside it and must kill itself last.
+///
+/// Selection only: nothing is contacted or deleted here, which is what makes
+/// the scope rule testable without starting a server.
+pub fn kill_server_targets(
+    dir: &std::path::Path,
+    scope: KillScope,
+    exclude_base: Option<&str>,
+) -> (Vec<KillTarget>, Vec<std::path::PathBuf>) {
+    let mut targets: Vec<KillTarget> = Vec::new();
+    let mut stale: Vec<std::path::PathBuf> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return (targets, stale) };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e != "port").unwrap_or(true) {
+            continue;
+        }
+        let Some(base) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        // tmux parity (#649): a bare kill-server ends the server on the socket
+        // it was invoked on and nothing else. Without this, every `-L`
+        // namespace sharing the data dir died with it.
+        if !scope.covers(base) {
+            continue;
+        }
+        if exclude_base == Some(base) {
+            continue;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(port_str) => match port_str.trim().parse::<u16>() {
+                Ok(port) => targets.push(KillTarget {
+                    base: base.to_string(),
+                    port_path: path.clone(),
+                    port,
+                }),
+                // A `.port` with no parseable port names no live server.
+                Err(_) => stale.push(path.clone()),
+            },
+            Err(_) => stale.push(path.clone()),
+        }
+    }
+    (targets, stale)
+}
+
+/// How many of the targets are real user sessions, i.e. not warm standbys.
+/// tmux answers `no server running` when there is nothing to kill, and a warm
+/// standby is an implementation detail, not a session (the same rule `ls`
+/// applies), so it must not make an empty namespace look occupied.
+pub fn user_session_count(targets: &[KillTarget]) -> usize {
+    targets.iter().filter(|t| !is_warm_session(&t.base)).count()
+}
+
+/// Send `kill-server` to every server in `scope`, sweep their registry sets and
+/// force-kill whatever ignored the graceful request. Returns the number of user
+/// sessions (warm standbys excluded) that were in scope.
+///
+/// One implementation for every dispatch route — the CLI, the command prompt of
+/// an attached client and a config file — so the blast radius cannot drift
+/// between them again.
+pub fn kill_servers_in_scope(
+    dir: &std::path::Path,
+    scope: KillScope,
+    exclude_base: Option<&str>,
+) -> usize {
+    // Snapshot the force-kill candidates BEFORE the graceful pass removes the
+    // `.pid` files, scoped the same way, so the fallback can never reach a
+    // server the graceful pass was not allowed to touch.
+    let fk_targets: Vec<PidTarget> = force_kill_targets(dir, scope);
+    let excluded_pid = exclude_base.and_then(|b| {
+        std::fs::read_to_string(crate::paths::pid_file(b))
+            .ok()
+            .and_then(|s| parse_pid_file_contents(&s))
+            .map(|(pid, _)| pid)
+    });
+    let (targets, stale) = kill_server_targets(dir, scope, exclude_base);
+    let killed = user_session_count(&targets);
+    let handles: Vec<std::thread::JoinHandle<()>> = targets
+        .into_iter()
+        .map(|t| {
+            std::thread::spawn(move || {
+                let key = read_session_key(&t.base).unwrap_or_default();
+                let addr = format!("127.0.0.1:{}", t.port);
+                if let Ok(sock) = addr.parse() {
+                    if let Ok(mut stream) =
+                        std::net::TcpStream::connect_timeout(&sock, Duration::from_millis(500))
+                    {
+                        let _ = stream.set_nodelay(true);
+                        let _ = write!(stream, "AUTH {}\n", key);
+                        let _ = stream.flush();
+                        let _ = stream.write_all(b"kill-server\n");
+                        let _ = stream.flush();
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                        // Wait for the server to exit (EOF = done).
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+                        let mut buf = [0u8; 64];
+                        loop {
+                            match std::io::Read::read(&mut stream, &mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => continue,
+                            }
+                        }
+                    }
+                }
+                // Remove the whole registry set regardless. Deleting only
+                // port/key/pid used to strand the `.sid`, which no sweep can
+                // reach once its `.port` is gone (#530).
+                remove_session_registry_files(&t.port_path);
+            })
+        })
+        .collect();
+    for h in handles {
+        let _ = h.join();
+    }
+    // Clean up stale registry sets (whole set, including `.sid` — #530)
+    for path in &stale {
+        remove_session_registry_files(path);
+    }
+    // Force-kill any wedged server that ignored the graceful kill. The
+    // identity gate (exact process-creation-time match) skips any pid that has
+    // already exited or been recycled — no machine-wide, name-based scan.
+    std::thread::sleep(Duration::from_millis(50));
+    for t in fk_targets {
+        if Some(t.pid) == excluded_pid {
+            continue;
+        }
+        if confirms_identity(
+            crate::platform::process_kill::process_creation_time(t.pid),
+            t.creation_time,
+        ) {
+            crate::platform::process_kill::terminate_server_pid(t.pid, None);
+        }
+    }
+    killed
+}
+
 /// `.pid` registry entries belonging to namespace `ns`, excluding `self_pid`
 /// (issue #509).
 ///
@@ -870,13 +1055,10 @@ pub fn namespace_peer_pids(dir: &Path, ns: Option<&str>, self_pid: u32) -> Vec<P
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-        let mine = match ns {
-            Some(n) => stem.starts_with(&format!("{}__", n)),
-            // A bare session name has no `__` separator; the default namespace's
-            // own warm helper is the one exception.
-            None => !stem.contains("__") || stem == "__warm__",
-        };
-        if !mine {
+        // A bare session name has no `__` separator; the default namespace's
+        // own warm helper is the one exception. One rule, shared with
+        // kill-server's scope (`registry_base_in_namespace`).
+        if !registry_base_in_namespace(stem, ns) {
             continue;
         }
         if let Ok(contents) = std::fs::read_to_string(&path) {
@@ -2544,6 +2726,10 @@ pub fn list_all_sessions_tree(current_session: &str, current_windows: &[(String,
 #[cfg(test)]
 #[path = "../tests-rs/test_session.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue649_kill_server_namespace_scope.rs"]
+mod tests_issue649_kill_server_namespace_scope;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue250_root_cause.rs"]

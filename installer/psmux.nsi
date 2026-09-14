@@ -61,10 +61,12 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 ; ── Macros ───────────────────────────────────────────────────────────────
 ; Kill running psmux servers — used by both install and uninstall
 !macro KillPsmuxServers
-  ; Try graceful kill-server via existing installed binary
+  ; Try graceful kill-server via existing installed binary. `-a` because the
+  ; installer must free EVERY namespace's binary, not just the default one
+  ; (a bare kill-server is socket scoped since #649).
   IfFileExists "$INSTDIR\psmux.exe" 0 +3
-    DetailPrint "Running psmux kill-server..."
-    nsExec::ExecToLog '"$INSTDIR\psmux.exe" kill-server'
+    DetailPrint "Running psmux kill-server -a..."
+    nsExec::ExecToLog '"$INSTDIR\psmux.exe" kill-server -a'
 
   ; Force-kill any remaining processes
   DetailPrint "Force-killing remaining psmux/pmux/tmux processes..."

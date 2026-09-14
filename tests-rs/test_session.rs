@@ -457,7 +457,7 @@ fn force_kill_targets_reads_pid_files_in_its_dir() {
     let dir = temp_psmux_dir("fkt_basic");
     fs::write(dir.join("ns__a.pid"), "1234:567890").unwrap();
 
-    let targets = force_kill_targets(&dir, None);
+    let targets = force_kill_targets(&dir, KillScope::All);
 
     assert_eq!(
         targets,
@@ -476,7 +476,7 @@ fn force_kill_targets_is_scoped_to_its_dir() {
     fs::write(dir_a.join("a.pid"), "111:1").unwrap();
     fs::write(dir_b.join("b.pid"), "999:2").unwrap();
 
-    let targets = force_kill_targets(&dir_a, None);
+    let targets = force_kill_targets(&dir_a, KillScope::All);
 
     assert_eq!(targets, vec![PidTarget { pid: 111, creation_time: 1 }]);
     assert!(
@@ -495,7 +495,7 @@ fn force_kill_targets_skips_bare_and_malformed_pid_files() {
     fs::write(dir.join("bad_pid.pid"), "notanumber:6").unwrap();
     fs::write(dir.join("bad_time.pid"), "7:notatime").unwrap();
 
-    let targets = force_kill_targets(&dir, None);
+    let targets = force_kill_targets(&dir, KillScope::All);
 
     assert_eq!(
         targets,
@@ -517,7 +517,7 @@ fn force_kill_targets_honors_ns_prefix() {
     fs::write(dir.join("ns2__c.pid"), "21:3").unwrap();
     fs::write(dir.join("plain.pid"), "30:4").unwrap();
 
-    let ns1 = force_kill_targets(&dir, Some("ns1__"));
+    let ns1 = force_kill_targets(&dir, KillScope::Namespace(Some("ns1")));
 
     assert!(
         ns1.iter().all(|t| t.pid == 11 || t.pid == 12),
