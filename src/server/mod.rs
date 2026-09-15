@@ -915,6 +915,62 @@ fn rekey_session_guard(guard: &mut Option<crate::platform::SessionMutex>, new_ba
     }
 }
 
+/// Everything the "NC" decision is allowed to look at. See [`nc_allowed`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NcInputs {
+    /// Persistent connection: it already holds the previous frame. A one-shot
+    /// connection has nothing to compare against and always needs full state.
+    pub allow_nc: bool,
+    /// Pane content changed (pty output, key echo, mouse, copy mode).
+    pub state_dirty: bool,
+    /// Metadata changed (active window, window names, layout, options).
+    pub meta_dirty: bool,
+    /// A bell is waiting to be forwarded; it rides on a real frame.
+    pub bell_forward: bool,
+    /// The active pane is inside a squelch window, so its content is moving.
+    pub has_squelch: bool,
+    /// The server has a cached frame to say "same as that one" about.
+    pub have_cached_frame: bool,
+    /// The cached frame's data version still describes the live state.
+    pub version_matches: bool,
+    /// This client has been sent at least one full frame, so "NC" is meaningful
+    /// to it.
+    pub seen_full_frame: bool,
+}
+
+/// Whether a `dump-state` may be answered with the two byte "NC" marker
+/// instead of a full frame.
+///
+/// "NC" is a claim about the world: nothing has changed since the frame you
+/// already have. Every input below is one way that claim can be false.
+///
+/// `meta_dirty` used to be missing from this list (#658), and it is the half
+/// that covers a WINDOW SWITCH. `FocusWindowCmd`, `NextWindow` and
+/// `PrevWindow` set only `meta_dirty`, never `state_dirty`, and
+/// `version_matches` cannot stand in for it: `combined_data_version` sums the
+/// data counters of the panes in the ACTIVE window, so two windows whose panes
+/// are equally idle produce the same number. The server therefore answered "NC"
+/// to the very dump-state that was meant to carry the new window. Measured on
+/// e70323c with one persistent connection sending `select-window` and
+/// `dump-state` back to back so both landed in one request batch: 5 switches,
+/// 5 "NC" replies, 5 times out of 5.
+///
+/// It was invisible on screen because the bottom of loop push repaired it
+/// milliseconds later - `meta_dirty` survives the `continue` that follows an
+/// "NC" - but a reply that says nothing changed when something did is a lie the
+/// client cannot check, and the client's only other way of finding out is the
+/// once a second floor in `client::should_request_dump`.
+pub(crate) fn nc_allowed(i: NcInputs) -> bool {
+    i.allow_nc
+        && !i.state_dirty
+        && !i.meta_dirty
+        && !i.bell_forward
+        && !i.has_squelch
+        && i.have_cached_frame
+        && i.version_matches
+        && i.seen_full_frame
+}
+
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>, env_vars: Vec<(String, String)>) -> io::Result<()> {
     crate::startup_trace::mark("srv.entry");
     // Write crash info to a log file when stderr is unavailable (detached server)
@@ -2442,17 +2498,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // instead of cloning 50-100KB of JSON.
                     // Only allowed for persistent connections that already have
                     // the previous frame; one-shot connections always need full state.
+                    //
+                    // The decision itself lives in `nc_allowed`, with the #658
+                    // history of why `meta_dirty` belongs in it.
                     let has_squelch = app.windows.get(app.active_idx)
                         .and_then(|w| crate::tree::active_pane(&w.root, &w.active_path))
                         .map_or(false, |p| p.squelch_until.is_some());
-                    if allow_nc
-                        && !state_dirty
-                        && !app.bell_forward
-                        && !has_squelch
-                        && !cached_dump_state.is_empty()
-                        && cached_data_version == combined_data_version(&app)
-                        && dump_state_seen_full.contains(&dump_client_id)
-                    {
+                    if nc_allowed(NcInputs {
+                        allow_nc,
+                        state_dirty,
+                        meta_dirty,
+                        bell_forward: app.bell_forward,
+                        has_squelch,
+                        have_cached_frame: !cached_dump_state.is_empty(),
+                        version_matches: cached_data_version == combined_data_version(&app),
+                        seen_full_frame: dump_state_seen_full.contains(&dump_client_id),
+                    }) {
                         let _ = resp.send("NC".to_string());
                         continue;
                     }
@@ -7314,3 +7375,7 @@ mod test_issue370_startup_error_passthrough;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue459_warm_single_instance.rs"]
 mod test_issue459_warm_single_instance;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue658_nc_decision.rs"]
+mod test_issue658_nc_decision;

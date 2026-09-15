@@ -6008,17 +6008,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // dump_in_flight prevents >1 concurrent request; the interval check
         // ensures we don't re-request faster than ~100fps when typing.
         let overlays_active = command_input || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
-        let should_dump = if force_dump || size_changed {
-            true
-        } else if typing_active {
-            since_dump >= 10  // ~100fps cap when typing (matches poll_ms)
-        } else {
-            // Server auto-pushes frames when state changes (PTY output,
-            // new window, etc.) — no idle dump-state polling needed.
-            // This saves CPU + bandwidth: no 50-100KB JSON roundtrips
-            // when the client is just sitting idle.
-            false
-        };
+        let should_dump = should_request_dump(force_dump, size_changed, typing_active, since_dump);
         if should_dump && !dump_in_flight {
             if writer.write_all(b"dump-state\n").is_err() { break; }
             if writer.flush().is_err() { break; }
@@ -8063,6 +8053,60 @@ pub(crate) fn key_echo_window_expired(elapsed_ms: u128) -> bool {
     elapsed_ms > KEY_ECHO_WINDOW_MS
 }
 
+/// How long an idle attached client may go without asking the server for a
+/// screen (#658).
+///
+/// Not a refresh cadence. The server pushes a frame whenever pane or metadata
+/// state changes, and that push is what an idle client renders. This is the
+/// floor UNDER the push: the longest the display may stay wrong if one push
+/// does not land.
+///
+/// One second was chosen against the two numbers either side of it. Below, an
+/// idle client at this floor reads 1.0 socket lines per second, which is a
+/// fifth of the 5/sec quiet gate that `tests/test_idle_socket_traffic.ps1`
+/// asserts idle means, and two orders of magnitude under the 187/sec
+/// request/reply spin that commit 9093e03 removed. Above, a stale screen the
+/// user is looking at is a bug whether it lasts one second or thirty minutes,
+/// and only the first second of it is worth paying for. 2000 would halve an
+/// already immeasurable cost: the idle CPU of both processes is the same with
+/// the floor as without it (measured in
+/// `tests/test_issue658_stale_frame_recovery.ps1`), so there is nothing left
+/// to save by waiting longer.
+pub(crate) const IDLE_FLOOR_MS: u64 = 1000;
+
+/// Whether this iteration of the client loop should put a `dump-state` on the
+/// wire.
+///
+/// Pure so the FLOOR can be tested. `force_dump` and a resize are immediate;
+/// while typing the request is capped at ~100fps to match `input_poll_ms`; and
+/// an idle client asks once per [`IDLE_FLOOR_MS`].
+///
+/// The idle arm used to be a hard `false`, on the premise that a server push is
+/// a reliable notification. It is not guaranteed: everything that has to go
+/// right for one to arrive is on the far side of a socket, the client has no
+/// way to check that it did, and with `force_dump` spent on the request rather
+/// than latched there was no retry path left. One push that did not land left
+/// the client painted with a stale screen for ever - tabs stopped switching,
+/// keys stopped echoing - until the user detached and attached again. Asking
+/// once a second cannot spin, because the server answers "NC" in two bytes and
+/// the client stamps `last_dump_time` when it reads one, which puts the next
+/// request another whole second away.
+pub(crate) fn should_request_dump(
+    force_dump: bool,
+    size_changed: bool,
+    typing_active: bool,
+    since_dump: u64,
+) -> bool {
+    if force_dump || size_changed {
+        true
+    } else if typing_active {
+        // ~100fps cap when typing (matches poll_ms)
+        since_dump >= 10
+    } else {
+        since_dump >= IDLE_FLOOR_MS
+    }
+}
+
 /// The console-input poll interval, in milliseconds, for one iteration of the
 /// client loop.
 ///
@@ -8170,3 +8214,7 @@ mod test_switch_client_target_routing;
 #[cfg(test)]
 #[path = "../tests-rs/test_prefix_dot_move_window.rs"]
 mod test_prefix_dot_move_window;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue658_idle_dump_floor.rs"]
+mod test_issue658_idle_dump_floor;
