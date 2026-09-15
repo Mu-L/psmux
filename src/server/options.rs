@@ -568,35 +568,68 @@ pub(crate) fn window_option_is_inherited(app: &AppState, idx: usize, name: &str)
     }
 }
 
-/// Body of `show-options -w [-A]` for one window.
+/// Which table one `show-options` window listing reads, and whether it answers
+/// tmux's `-A` inheritance question.
 ///
-/// psmux prints the RESOLVED view (every window option with the value that
-/// window will actually use), not tmux's window-local-only listing: libtmux and
-/// tmuxp probe window scope for options psmux keeps session wide and expect an
-/// answer (#321), and psmux's own suites pin the full list. `-A` adds tmux's
-/// inheritance marker, so a caller can still tell a window-local value from an
-/// inherited one — which is the distinction #648 is about.
-pub(crate) fn render_window_options_for(app: &AppState, target_window: Option<usize>, mark_inherited: bool) -> String {
+/// tmux picks the table from the flags in `options_scope_from_flags`
+/// (options.c:1086-1099): `-w` is `wl->window->options`, `-wg` is
+/// `global_w_options`. `cmd_show_options_all` (cmd-show-options.c:241-290)
+/// then walks the options table and, for each entry, calls
+/// `options_get_only(oo, name)`: an entry the chosen table does not own is
+/// SKIPPED unless `-A` was given, and with `-A` it is fetched from the parent
+/// and printed with a `*`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum WindowListing {
+    /// `show-options -w`: only the values that window itself stores.
+    Local,
+    /// `show-options -wA`: the window's own values plain, every inherited one
+    /// marked with `*`, merged into ONE list.
+    LocalAndInherited,
+    /// `show-options -wg`: the global window table, which owns every entry, so
+    /// nothing is ever skipped and nothing is ever marked.
+    Global,
+}
+
+/// Body of `show-options -w [-A] [-g]` for one window.
+///
+/// Before #655 this always printed the RESOLVED view (every window option with
+/// the value that window would use) and `-A` only added the marker, so a window
+/// with one override reported all sixteen names and a window with none reported
+/// sixteen names tmux prints nothing for. The listing now follows
+/// `cmd_show_options_all`; the RESOLVED view a caller that probes window scope
+/// for a session wide option depends on (#321) is still reachable, through the
+/// `-v <name>` query (unchanged) and through `-wg`, which prints the whole
+/// window table the way tmux's own `-wg` does.
+pub(crate) fn render_window_options_for(
+    app: &AppState,
+    target_window: Option<usize>,
+    listing: WindowListing,
+) -> String {
     let idx = target_window.unwrap_or(app.active_idx);
     let mut output = String::new();
     for name in WINDOW_OPTION_NAMES {
-        let marker = if mark_inherited && window_option_is_inherited(app, idx, name) {
-            "*"
-        } else {
-            ""
-        };
+        if listing == WindowListing::Global {
+            output.push_str(&format!("{} {}\n", name, get_option_value(app, name)));
+            continue;
+        }
+        let inherited = window_option_is_inherited(app, idx, name);
+        if inherited && listing == WindowListing::Local {
+            continue;
+        }
         output.push_str(&format!(
             "{}{} {}\n",
             name,
-            marker,
+            if inherited { "*" } else { "" },
             get_window_option_value_for(app, name, Some(idx)),
         ));
     }
     output
 }
 
+/// The global window table listing, which is what a caller with no window in
+/// hand wants (`show-options -wg`, the option default audits).
 pub(crate) fn render_window_options(app: &AppState) -> String {
-    render_window_options_for(app, None, false)
+    render_window_options_for(app, None, WindowListing::Global)
 }
 
 /// Returns `true` if the given option name is a boolean (on/off) option.
@@ -1070,6 +1103,65 @@ pub(crate) fn apply_set_option(
     Ok(())
 }
 
+/// Catalog options psmux stores per pane, in the order `show-options -p`
+/// prints them.
+///
+/// `set-option -p` accepts exactly two names (server/mod.rs
+/// `CtrlReq::SetPaneOption`): `remain-on-exit`, which is a catalog option a
+/// pane can inherit from its window and then the global store, and
+/// `@mouse-force`, which is a USER option. tmux prints a user option from the
+/// table's own entries (cmd-show-options.c:249-254, the `options_table_entry(o)
+/// == NULL` walk) and never invents an inherited one for it, so only the
+/// catalog name belongs here.
+pub(crate) const PANE_OPTION_NAMES: &[&str] = &["remain-on-exit"];
+
+/// Body of `show-options -p [-A]` for one pane.
+///
+/// `listing` is the server's `ShowPaneOptions` reply: one `name value` pair per
+/// line for every option the pane actually stores. Without `-A` that IS the
+/// answer, which is what tmux prints. With `-A` every catalog name the pane
+/// does not own is appended with its inherited value and a `*`, the same rule
+/// [`render_window_options_for`] applies one scope up (#655); before that `-A`
+/// was silently a no-op on a bare pane listing while it already worked for a
+/// named `-p` query (#647).
+pub(crate) fn render_pane_options<F>(
+    listing: &str,
+    include_inherited: bool,
+    mut inherited: F,
+) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    // A refusal from the server (unknown pane target) is not an option
+    // listing; hand it straight back so the caller still reports it.
+    if listing.starts_with("ERROR:") {
+        return format!("{}\n", listing);
+    }
+    let owns = |name: &str| -> bool {
+        listing
+            .lines()
+            .any(|line| line.split(' ').next() == Some(name))
+    };
+    let mut output = String::new();
+    for line in listing.lines() {
+        if !line.trim().is_empty() {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if include_inherited {
+        for name in PANE_OPTION_NAMES {
+            if owns(name) {
+                continue;
+            }
+            if let Some(value) = inherited(name) {
+                output.push_str(&format!("{}* {}\n", name, value));
+            }
+        }
+    }
+    output
+}
+
 /// Pick one entry out of a pane option listing for `show-options -p <name>`.
 ///
 /// `listing` is the server's `ShowPaneOptions` reply: one `name value` pair per
@@ -1130,6 +1222,10 @@ mod tests_issue647_show_options_value;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue648_window_scoped_options.rs"]
 mod tests_issue648_window_scoped_options;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue655_show_options_window_listing.rs"]
+mod tests_issue655_show_options_window_listing;
 
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue266_per_window_autorename.rs"]

@@ -2841,6 +2841,19 @@ match cmd {
         let window_scope = matches!(cmd, "show-window-options" | "showw" | "show-window-option") || has_w;
         let has_v = combined_has('v');
         let has_q = combined_has('q');
+        // #655: `-g` picks the GLOBAL window table, not the target window's own
+        // one (options.c options_scope_from_flags:1086-1090). It used to be
+        // parsed nowhere on this route, so `show -wg` answered with the active
+        // window's resolved values and reported a window-local override as if
+        // the global table held it.
+        let has_g = combined_has('g');
+        let window_listing = if has_g {
+            crate::server::options::WindowListing::Global
+        } else if has_a {
+            crate::server::options::WindowListing::LocalAndInherited
+        } else {
+            crate::server::options::WindowListing::Local
+        };
         // Issue #618: `-s` used to be parsed into a variable nothing read, so
         // `show-options -s` was accepted but printed the whole store, session
         // options and all. tmux points `-s` at the server option table
@@ -2872,11 +2885,10 @@ match cmd {
         // Pane scope (issue #580): list the target pane's `set-option -p`
         // options. `-p` is a bare flag; only -t carries a value.
         if combined_has('p') {
-            let raw_target = pane_scope_target(
-                extract_flag_value(&args, "-t")
-                    .map(|s| s.trim_matches('"').to_string())
-                    .unwrap_or_default(),
-            );
+            let raw_t = extract_flag_value(&args, "-t")
+                .map(|s| s.trim_matches('"').to_string())
+                .unwrap_or_default();
+            let raw_target = pane_scope_target(raw_t.clone());
             // #647 (WIN-02): a named query used to be ignored, so
             // `show-options -p -v -t %0 remain-on-exit` printed the whole pane
             // store as `name value` pairs where tmux prints just `on`. tmux
@@ -2891,20 +2903,26 @@ match cmd {
             let (rtx, rrx) = mpsc::channel::<String>();
             let _ = tx.send(CtrlReq::ShowPaneOptions(raw_target, rtx));
             if let Ok(reply) = rrx.recv_timeout(Duration::from_millis(2000)) {
+                // What a pane INHERITS is its window's value, then the global
+                // one, not the global one alone. tmux walks the same chain
+                // (`show -pA` in a window with `remain-on-exit on` prints
+                // `remain-on-exit* on`, verified against tmux 3.4).
+                let inherited = |n: &str| -> Option<String> {
+                    let (frtx, frrx) = mpsc::channel::<String>();
+                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(
+                        frtx,
+                        n.to_string(),
+                        raw_t.clone(),
+                    ));
+                    frrx.recv_timeout(Duration::from_millis(2000)).ok()
+                        .filter(|v| !v.is_empty())
+                };
                 let out = if let Some(name) = name {
-                    let inherited = |n: &str| -> Option<String> {
-                        let (frtx, frrx) = mpsc::channel::<String>();
-                        let _ = tx.send(CtrlReq::ShowOptionValue(frtx, n.to_string()));
-                        frrx.recv_timeout(Duration::from_millis(2000)).ok()
-                            .filter(|v| !v.is_empty())
-                    };
                     crate::server::options::select_pane_option_line(
                         &reply, name, has_v, has_a, inherited,
                     )
-                } else if reply.is_empty() {
-                    String::new()
                 } else {
-                    format!("{}\n", reply)
+                    crate::server::options::render_pane_options(&reply, has_a, inherited)
                 };
                 if !out.is_empty() {
                     let _ = write_stream.write_all(out.as_bytes());
@@ -2930,7 +2948,10 @@ match cmd {
             // Single-option query: show-options -v <name> or show <name>
             if let Some(name) = opt_name {
                 let (rtx, rrx) = mpsc::channel::<String>();
-                if window_scope {
+                // `-wg <name>` reads the GLOBAL window table, never the target
+                // window's own one (#655), the same split tmux makes in
+                // options_scope_from_name (options.c:1046-1056).
+                if window_scope && !has_g {
                     let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name.to_string(), target_window.clone()));
                 } else {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name.to_string()));
@@ -2981,7 +3002,7 @@ match cmd {
             // -v without option name: list all options, values only
             let (rtx, rrx) = mpsc::channel::<String>();
             if window_scope {
-                let _ = tx.send(CtrlReq::ShowWindowOptionsFor(rtx, target_window.clone(), false));
+                let _ = tx.send(CtrlReq::ShowWindowOptionsFor(rtx, target_window.clone(), window_listing));
             } else {
                 let _ = tx.send(CtrlReq::ShowOptions(rtx));
             }
@@ -3014,21 +3035,17 @@ match cmd {
                 // #648: `-A` asks tmux's inheritance question, so the listing
                 // marks every option this window takes from the global store
                 // with a trailing `*` on the NAME (cmd-show-options.c).
-                let _ = tx.send(CtrlReq::ShowWindowOptionsFor(rtx, target_window.clone(), has_a));
-                if let Ok(mut text) = rrx.recv() {
-                    if has_a {
-                        let (srtx, srrx) = mpsc::channel::<String>();
-                        let _ = tx.send(CtrlReq::ShowOptions(srtx));
-                        if let Ok(session_text) = srrx.recv() {
-                            if !text.ends_with('\n') && !text.is_empty() {
-                                text.push('\n');
-                            }
-                            text.push_str(&session_text);
-                        }
-                    }
+                // #655: that is the WHOLE of what `-A` adds. This arm used to
+                // append the entire session listing after the window one, so
+                // `show -wA` answered with 77 lines where tmux prints one
+                // merged window-scope list.
+                let _ = tx.send(CtrlReq::ShowWindowOptionsFor(rtx, target_window.clone(), window_listing));
+                if let Ok(text) = rrx.recv() {
                     if persistent {
                         let _ = tx.send(CtrlReq::ShowTextPopup("show-options".to_string(), text));
-                    } else {
+                    } else if !text.is_empty() {
+                        // A window that owns nothing prints NOTHING, not the
+                        // blank line a bare `{}\n` would emit (#655).
                         let _ = write!(write_stream, "{}\n", text);
                         let _ = write_stream.flush();
                     }
@@ -4676,11 +4693,10 @@ fn dispatch_control_command(
             };
             // Pane scope (#580): list a pane's `set-option -p` options.
             if combined_has2('p') {
-                let raw = pane_scope_target(
-                    extract_flag_value(&args, "-t")
-                        .map(|s| s.trim_matches('"').to_string())
-                        .unwrap_or_default(),
-                );
+                let raw_t = extract_flag_value(&args, "-t")
+                    .map(|s| s.trim_matches('"').to_string())
+                    .unwrap_or_default();
+                let raw = pane_scope_target(raw_t.clone());
                 let _ = tx.send(CtrlReq::ShowPaneOptions(raw, rtx));
                 let reply = rrx.recv_timeout(Duration::from_millis(2000)).unwrap_or_default();
                 // #647 (WIN-02): a named query answers with that one option,
@@ -4691,21 +4707,27 @@ fn dispatch_control_command(
                     .filter(|a| !a.starts_with('-'))
                     .copied()
                     .last();
-                let out = match name {
-                    Some(name) => {
-                        let inherited = |n: &str| -> Option<String> {
-                            let (frtx, frrx) = mpsc::channel::<String>();
-                            let _ = tx.send(CtrlReq::ShowOptionValue(frtx, n.to_string()));
-                            frrx.recv_timeout(Duration::from_millis(2000)).ok()
-                                .filter(|v| !v.is_empty())
-                        };
-                        crate::server::options::select_pane_option_line(
-                            &reply, name, combined_has2('v'), combined_has2('A'), inherited,
-                        ).trim_end_matches('\n').to_string()
-                    }
-                    None => reply,
+                let inherited = |n: &str| -> Option<String> {
+                    let (frtx, frrx) = mpsc::channel::<String>();
+                    let _ = tx.send(CtrlReq::ShowWindowOptionValue(
+                        frtx,
+                        n.to_string(),
+                        raw_t.clone(),
+                    ));
+                    frrx.recv_timeout(Duration::from_millis(2000)).ok()
+                        .filter(|v| !v.is_empty())
                 };
-                let _ = resp_tx.send(out);
+                let out = match name {
+                    Some(name) => crate::server::options::select_pane_option_line(
+                        &reply, name, combined_has2('v'), combined_has2('A'), inherited,
+                    ),
+                    // #655: `-A` adds the inherited entries here too, so the
+                    // command prompt and the CLI print the same listing.
+                    None => crate::server::options::render_pane_options(
+                        &reply, combined_has2('A'), inherited,
+                    ),
+                };
+                let _ = resp_tx.send(out.trim_end_matches('\n').to_string());
                 return true;
             }
             let value_only = combined_has2('v');
@@ -4743,16 +4765,29 @@ fn dispatch_control_command(
                 // the one-shot route answered per window. Window scope decides
                 // which store is read; `-v` only decides whether the name is
                 // printed alongside the value.
-                if window_scope2 {
+                // `-wg <name>` is the global window table, not this window's
+                // own store (#655).
+                if window_scope2 && !combined_has2('g') {
                     let _ = tx.send(CtrlReq::ShowWindowOptionValue(rtx, name, target_window2.clone()));
                 } else {
                     let _ = tx.send(CtrlReq::ShowOptionValue(rtx, name));
                 }
             } else if window_scope2 {
+                // Same three-way table choice as the one-shot route, so the
+                // command prompt and the CLI print the same listing (#655).
+                // `-v` no longer has to suppress `-A`: the marker rides on the
+                // NAME and the values-only stripper below drops the whole name.
+                let listing = if combined_has2('g') {
+                    crate::server::options::WindowListing::Global
+                } else if combined_has2('A') {
+                    crate::server::options::WindowListing::LocalAndInherited
+                } else {
+                    crate::server::options::WindowListing::Local
+                };
                 let _ = tx.send(CtrlReq::ShowWindowOptionsFor(
                     rtx,
                     target_window2.clone(),
-                    !value_only && combined_has2('A'),
+                    listing,
                 ));
             } else {
                 let _ = tx.send(CtrlReq::ShowOptions(rtx));

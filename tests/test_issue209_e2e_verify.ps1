@@ -348,13 +348,15 @@ Write-Host "     Lines: $gvSepCount"
 if ($gvSepCount -eq $gvCount) { Write-Pass "Separate -g -v matches combined -gv ($gvSepCount lines)" }
 else { Write-Fail "Mismatch: -gv=$gvCount lines, -g -v=$gvSepCount lines" }
 
-# 8e: -wv (window options, values only)
-Write-Host "[8e] CLI: show-options -wv" -ForegroundColor Yellow
-$wvOut = (& $PSMUX show-options -wv -t $SESSION 2>&1 | Out-String).Trim()
+# 8e: -wgv (window options, values only)
+# #655: a plain -wv is the target window's OWN table, empty until something is
+# written to that window, so the full window catalog is read with -g.
+Write-Host "[8e] CLI: show-options -wgv" -ForegroundColor Yellow
+$wvOut = (& $PSMUX show-options -wgv -t $SESSION 2>&1 | Out-String).Trim()
 $wvCount = ($wvOut -split "`n" | Where-Object { $_.Trim() -ne "" }).Count
 Write-Host "     Lines: $wvCount"
-if ($wvCount -gt 0) { Write-Pass "show-options -wv returns $wvCount window option values" }
-else { Write-Fail "show-options -wv returned empty" }
+if ($wvCount -gt 0) { Write-Pass "show-options -wgv returns $wvCount window option values" }
+else { Write-Fail "show-options -wgv returned empty" }
 
 # 8f: -gv with specific option name
 Write-Host "[8f] CLI: show-options -gv prefix" -ForegroundColor Yellow

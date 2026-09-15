@@ -348,6 +348,15 @@ $script:Create   = [ordered]@{}
 $script:Resource = [ordered]@{}                            # per cell memory and CPU
 $script:Floor    = $null                                   # ConPTY floor, measured in this run
 $script:Started  = [System.Collections.ArrayList]::new()   # every PID we spawned
+# PID -> creation time of the process we spawned under that PID. A PID on its
+# own is not an identity on Windows: it is recycled within seconds on a busy
+# machine, and 2026-09-16 a cell's freed pwsh PID was reissued to the cmd.exe
+# wrapper of the agent harness that was running this very suite (cmd.exe is one
+# of the images this suite launches, so the image guard passed). Its console
+# host was then attributed to the suite and reaped, taking the agent's bash and
+# node with it. Every attribution and every kill of a recorded PID now also has
+# to match the creation time recorded when the PID was spawned.
+$script:StartedAt = @{}
 $script:Opened   = [System.Collections.ArrayList]::new()   # GUI/console PIDs attributed to us
 $script:Reaped   = [System.Collections.ArrayList]::new()   # console hosts Windows had not reaped yet
 $script:Complete = $false
@@ -494,6 +503,54 @@ function Kill-Pid {
     try { Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue } catch {}
 }
 
+# Record a PID this suite spawned together with the creation time of the
+# process that holds it right now, so a later recycled PID is never mistaken
+# for it. Called immediately after Start-Process or after the marker file names
+# the cell's shell.
+function Register-Started {
+    param([int]$Id)
+    if ($Id -le 4) { return }
+    [void]$script:Started.Add($Id)
+    $ci = Get-ProcInfo $Id
+    if ($ci) { $script:StartedAt[$Id] = Get-CimStart $ci }
+}
+
+# True when the process holding $Id today is the one this suite recorded under
+# that PID: same PID AND a creation time within a second of the recorded one.
+# A PID this suite never recorded is never "ours". A recorded PID whose
+# creation time could not be read at registration is trusted only while the
+# process is still younger than the run, which keeps the pre-fix behaviour for
+# that rare case without widening it.
+function Is-OurProcess {
+    param([int]$Id)
+    if ($Id -le 4) { return $false }
+    if (-not $script:StartedAt.ContainsKey($Id)) { return $false }
+    $ci = Get-ProcInfo $Id
+    if (-not $ci) { return $false }
+    $now = Get-CimStart $ci
+    $then = $script:StartedAt[$Id]
+    if ($then -eq [datetime]::MinValue) { return ($now -ge $script:RunStartedAt.AddSeconds(-2)) }
+    if ($now -eq [datetime]::MinValue) { return $false }
+    return ([math]::Abs(($now - $then).TotalSeconds) -le 1.0)
+}
+$script:RunStartedAt = Get-Date
+
+# True when the console host recorded in $Rec (a Find-CellHosts record with a
+# `started` creation time) is still the same process, not a later one that was
+# handed the same PID. A record without a readable creation time falls back to
+# the pre-fix behaviour for that record only.
+function Is-SameHost {
+    param($Rec)
+    $ci = Get-ProcInfo ([int]$Rec.pid)
+    if (-not $ci) { return $false }
+    $then = [datetime]::MinValue
+    try { if ($null -ne $Rec.started) { $then = [datetime]$Rec.started } } catch {}
+    if ($then -eq [datetime]::MinValue) { return $true }
+    $now = Get-CimStart $ci
+    if ($now -eq [datetime]::MinValue) { return $false }
+    return ([math]::Abs(($now - $then).TotalSeconds) -le 1.0)
+}
+
 function Count-Children {
     param([int]$Id)
     return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$Id" -ErrorAction SilentlyContinue).Count
@@ -537,14 +594,22 @@ function Find-CellHosts {
             # inherited a just freed PID from a cell, had its console host blamed
             # on the suite, and failed T5 on three otherwise clean runs
             # (2026-09-10, "children still attached: bash.exe").
+            # The image check alone was not enough either: on 2026-09-16 the
+            # freed PID went to the agent harness's own cmd.exe wrapper, which
+            # IS one of these images. So the parent must also be the very
+            # process this suite spawned under that PID (creation time match,
+            # Is-OurProcess), not merely a process of the right image at the
+            # right PID.
             $ourImages = @("pwsh.exe","cmd.exe",$PsmuxImage)
             $pp = if ($byPid.ContainsKey($ppid)) { $byPid[$ppid] } else { Get-ProcInfo $ppid }
-            if (($Ours -contains $ppid) -and $pp -and ($ourImages -contains $pp.Name)) { $mine = $true }
+            if (($Ours -contains $ppid) -and $pp -and ($ourImages -contains $pp.Name) -and (Is-OurProcess $ppid)) { $mine = $true }
             elseif ($pp -and $Gui -and $pp.Name -like "$Gui*") { $mine = $true }
-            elseif ($pp -and ($Ours -contains [int]$pp.ParentProcessId) -and ($ourImages -contains $pp.Name)) { $mine = $true }
+            elseif ($pp -and ($Ours -contains [int]$pp.ParentProcessId) -and ($ourImages -contains $pp.Name) -and (Is-OurProcess ([int]$pp.ParentProcessId))) { $mine = $true }
         }
         if ($mine) {
-            $rec = [pscustomobject]@{ pid = $who; name = $hn; ppid = $ppid }
+            # stamp the host with its creation time so the audit at the end can
+            # tell this host from a later process that inherited its PID
+            $rec = [pscustomobject]@{ pid = $who; name = $hn; ppid = $ppid; started = $st }
             $found += $rec
             [void]$script:Opened.Add($rec)
         }
@@ -939,14 +1004,14 @@ function Invoke-LaunchRep {
 
     $t0 = [Diagnostics.Stopwatch]::GetTimestamp()
     $p = Start-Process -FilePath $spec.Exe -ArgumentList $spec.Argv -PassThru
-    [void]$script:Started.Add($p.Id)
+    Register-Started $p.Id
     $m = Wait-Marker $mf 30000
     $ms = -1.0
     $shellPid = 0
     if ($m) {
         $ms = ($m.Ticks - $t0) * 1000.0 / $Freq
         $shellPid = $m.ShellPid
-        [void]$script:Started.Add($shellPid)
+        Register-Started $shellPid
         Write-Host ("    {0,-22} rep {1}: {2,8:F1} ms" -f $name, $Rep, $ms) -ForegroundColor DarkGray
     } else { Warn ("    {0,-22} rep {1}: no marker within 30 s" -f $name, $Rep) }
 
@@ -1093,14 +1158,14 @@ function Measure-KeyCell {
     $since = Get-Date
     Remove-Item $MarkerFile -Force -ErrorAction SilentlyContinue
     $p = Start-Process -FilePath $Exe -ArgumentList $Argv -PassThru
-    [void]$script:Started.Add($p.Id)
+    Register-Started $p.Id
     $m = Wait-Marker $MarkerFile 30000
     $ok = $false
     $shellPid = 0
     if (-not $m) { Warn "  $Cell : the shell never came up" }
     else {
         $shellPid = $m.ShellPid
-        [void]$script:Started.Add($shellPid)
+        Register-Started $shellPid
         Start-Sleep -Seconds 3    # let the shell finish painting its first prompt
 
         # who makes this cell work
@@ -1992,6 +2057,7 @@ function Assert-NoLeftovers {
         if (-not $seen.Add([int]$o.pid)) { continue }
         if ($script:Protected.Contains([int]$o.pid)) { continue }
         if (-not (Get-Process -Id $o.pid -ErrorAction SilentlyContinue)) { continue }
+        if (-not (Is-SameHost $o)) { continue }   # the PID now belongs to somebody else's process
         if ($ConsoleNames -contains $o.name) {
             # What T5 is actually about is whether anything the user would have to
             # close is still running: a window, a tab, a shell, a server. A
@@ -2043,7 +2109,9 @@ for ($sweep = 0; $sweep -lt 4; $sweep++) {
     Start-Sleep -Milliseconds 500
 }
 foreach ($id in ($script:Started | Sort-Object -Unique)) {
-    if (Get-Process -Id $id -ErrorAction SilentlyContinue) { Kill-Pid $id }
+    # identity, not just liveness: a recorded PID that has since been reissued
+    # to somebody else's process is not ours to kill
+    if ((Get-Process -Id $id -ErrorAction SilentlyContinue) -and (Is-OurProcess $id)) { Kill-Pid $id }
 }
 foreach ($k in $SavedEnv.Keys) {
     if ($null -eq $SavedEnv[$k]) { Remove-Item "Env:\$k" -ErrorAction SilentlyContinue } else { Set-Item "Env:\$k" -Value $SavedEnv[$k] }
@@ -2063,6 +2131,7 @@ for ($settle = 0; $settle -lt 12; $settle++) {
     foreach ($o in $script:Opened) {
         if ($ConsoleNames -notcontains $o.name) { continue }
         if (-not (Get-Process -Id $o.pid -ErrorAction SilentlyContinue)) { continue }
+        if (-not (Is-SameHost $o)) { continue }
         $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($o.pid)" -ErrorAction SilentlyContinue)
         if ($kids.Count -eq 0) { continue }
         $busy++
@@ -2076,7 +2145,7 @@ for ($settle = 0; $settle -lt 12; $settle++) {
             if ($script:Protected.Contains($kid)) { continue }
             $chain = Get-Chain $kid
             $ours = $false
-            foreach ($id in $chain) { if ($script:Started -contains $id) { $ours = $true; break } }
+            foreach ($id in $chain) { if (($script:Started -contains $id) -and (Is-OurProcess $id)) { $ours = $true; break } }
             if (-not $ours -and $k.CommandLine -and $k.CommandLine.Contains($RunDir)) { $ours = $true }
             if ($ours) { Kill-Pid $kid }
         }
