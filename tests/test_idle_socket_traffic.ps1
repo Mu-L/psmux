@@ -85,6 +85,23 @@
 # break the cycle. Measured: 148 to 190 lines/sec on the unfixed client in this
 # cell, every run, against 0.1 with the flag cleared on the request. Cell 2 is
 # asserted on the quiet gate only - the loose ceiling is cell 1's history.
+#
+# WHAT IS RECORDED
+# ----------------
+# The whole point of this suite is a cost an idle pair is paying, so the same
+# idle window that counts socket lines also samples the server's and the
+# client's working set, private bytes, thread count and CPU, the CPU reported as
+# a percentage of one core over that window. No extra sleep is added for it: the
+# snapshots are taken at the two ends of the window this suite was already
+# sitting through, which is the window the assertion is about. Sampling the CPU
+# is not the assertion - the header above is the record of why counting events
+# is - but a build that keeps the line count down by spinning somewhere else is
+# then visible instead of invisible.
+#
+# The result lands in %USERPROFILE%\.psmux-test-data\metrics\ with the schema 2
+# envelope shared by every perf gate (tests\perf_metrics_common.ps1), so the
+# build that produced a number is recorded with it and tests\perf_summary.ps1
+# can line this suite up against the others. Never inside the repo.
 
 param(
     [string]$Binary = "",
@@ -98,8 +115,10 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+. "$PSScriptRoot\perf_metrics_common.ps1"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
+$script:Cells = [ordered]@{}
 function Write-Pass($m) { Write-Host "  [PASS] $m" -ForegroundColor Green; $script:TestsPassed++ }
 function Write-Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; $script:TestsFailed++ }
 function Write-Info($m) { Write-Host "  [INFO] $m" -ForegroundColor DarkCyan }
@@ -188,9 +207,21 @@ function Measure-IdleLines {
         # Record each trace file's size so only the measurement window is counted.
         $sizes0 = @{}
         Get-ChildItem "$tracePrefix.*" -EA SilentlyContinue | ForEach-Object { $sizes0[$_.Name] = $_.Length }
+        # The two ends of the SAME window the line count is taken over. The
+        # server is found by its <ns>__idle.pid anchor, never by image name: a
+        # warm standby shares this binary and this namespace but never the
+        # anchor, and this machine routinely runs psmux servers belonging to
+        # other sessions.
+        $srvPid = Get-PerfServerPid -Ns $ns -Session "idle"
+        $roles = [ordered]@{}
+        if ($srvPid -gt 0) { $roles["server"] = $srvPid }
+        $cliPid = Get-PerfClientPid -Binary $Binary -Ns $ns -ServerPid $srvPid
+        if ($cliPid -gt 0) { $roles["client"] = $cliPid }
+        $resBefore = if ($roles.Count -gt 0) { Get-PerfResourceSnapshot $roles } else { $null }
         $w = [Diagnostics.Stopwatch]::StartNew()
         Start-Sleep -Seconds $Secs
         $w.Stop()
+        $resAfter = if ($resBefore) { Get-PerfResourceSnapshot $roles } else { $null }
 
         $c = 0
         Get-ChildItem "$tracePrefix.*" -EA SilentlyContinue | ForEach-Object {
@@ -210,6 +241,34 @@ function Measure-IdleLines {
         }
         $lines = [math]::Round($c / $w.Elapsed.TotalSeconds, 1)
         Write-Info ("{0}: idle window {1:N1}s, {2} client socket reads, {3} per second" -f $Cell, $w.Elapsed.TotalSeconds, $c, $lines)
+        if ($resBefore -and $resAfter) {
+            $idleCpu = Get-PerfCpuDelta $resBefore $resAfter ([double]$w.Elapsed.TotalMilliseconds) 100.0
+            $script:Cells[$Cell] = [ordered]@{
+                cell                  = $Cell
+                pane_command          = ($PaneCmd -join " ")
+                key_injected          = [bool]$InjectKey
+                window_ms             = [math]::Round($w.Elapsed.TotalMilliseconds, 0)
+                client_socket_reads   = $c
+                lines_per_sec         = $lines
+                idle_start            = (Get-PerfMemorySummary $resBefore)
+                idle_end              = (Get-PerfMemorySummary $resAfter)
+                idle_cpu_pct_of_core  = $idleCpu
+            }
+            Write-Info (Format-PerfResourceLine $resAfter "idle end   ")
+            Write-Info ("idle cpu, % of a core : " + (@($idleCpu.Keys | ForEach-Object { "{0} {1:F2}%" -f $_, $idleCpu[$_] }) -join "  "))
+        } else {
+            # Still record what was measured: a missing process is a reason to
+            # have no memory row, not a reason to lose the line count.
+            $script:Cells[$Cell] = [ordered]@{
+                cell                = $Cell
+                pane_command        = ($PaneCmd -join " ")
+                key_injected        = [bool]$InjectKey
+                window_ms           = [math]::Round($w.Elapsed.TotalMilliseconds, 0)
+                client_socket_reads = $c
+                lines_per_sec       = $lines
+            }
+            Write-Info "neither the server nor the client could be identified, so no memory or CPU was sampled"
+        }
     } else {
         Write-Fail "$Cell : the attached session never came up, so idle traffic was not measured"
     }
@@ -251,6 +310,17 @@ Assert-Cell -Cell "silent pane" -Lines $lines
 Write-Host "--- cell 2: one keystroke into a pane that answers nothing ---" -ForegroundColor DarkCyan
 $lines2 = Measure-IdleLines -Cell "armed" -PaneCmd @("pwsh","-NoLogo","-NoProfile","-Command","Start-Sleep -Seconds 600") -InjectKey
 Assert-Cell -Cell "after one keystroke" -Lines $lines2 -QuietOnly
+
+# Outside the repo, with the envelope every other perf gate carries.
+$jsonPath = Write-PerfMetrics -Suite "test_idle_socket_traffic" -Binary $Binary -FileStem "idle-socket-traffic" -Data ([ordered]@{
+    idle_window_seconds   = $Secs
+    max_lines_per_sec     = $MaxLinesPerSec
+    quiet_lines_per_sec   = $QuietLinesPerSec
+    cells                 = $script:Cells
+    lines_per_sec_stats   = (Get-PerfStats (@($script:Cells.Keys | ForEach-Object { $script:Cells[$_].lines_per_sec })) 1)
+    failed                = $script:TestsFailed
+})
+if ($jsonPath) { Write-Info "samples: $jsonPath" }
 
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
 Write-Host "  Passed: $($script:TestsPassed)" -ForegroundColor Green

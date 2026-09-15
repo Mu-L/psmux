@@ -17,8 +17,9 @@
 #      the ConPTY floor measured in the same run
 #   C  creation latency for new-session, new-window and both splits, p50 / p90
 #   D  memory (working set and private bytes) and CPU (per creation, per 100
-#      keystrokes, and idle as a percentage of one core) for the server and the
-#      attached client
+#      keystrokes, at the first prompt of a fresh session, over an idle window,
+#      and idle as a percentage of one core) for the server and the attached
+#      client, from all five perf gates
 #
 # Every row carries the git sha of the tree the measured binary was built in, or
 # "installed" when it was a cargo install copy, so two rows can be compared
@@ -334,6 +335,67 @@ function Show-D {
                 (Num $row.idle_srv 2), (Num $row.idle_cli 2))
             Emit "D_keystroke_resources" $row
         }
+    }
+
+    # The launch gate samples one iteration at its prompt, so its row is the
+    # cheapest "what does a session cost the moment it is up" number there is.
+    $lt = Get-Runs "launch-to-prompt-*.json"
+    $lrows = @()
+    foreach ($r in $lt) {
+        $res = Prop $r.Json "resources"
+        if (-not $res) { continue }
+        $ap = Prop $res "at_prompt"; $idle = Prop $res "idle_cpu_pct_of_core"
+        $lrows += [pscustomobject]@{
+            when = $r.When.ToString("MM-dd HH:mm"); sha = (Sha $r.Json)
+            srv_ws = (Prop (Prop $ap "server") "ws_mb"); srv_priv = (Prop (Prop $ap "server") "private_mb")
+            cli_ws = (Prop (Prop $ap "client") "ws_mb"); cli_priv = (Prop (Prop $ap "client") "private_mb")
+            idle_srv = (Prop $idle "server"); idle_cli = (Prop $idle "client")
+        }
+    }
+    if ($lrows.Count -eq 0) { Note "no launch gate run has a resources block yet" }
+    else {
+        Write-Host ""
+        Write-Host ("  at the first prompt of a freshly launched session  (MB, idle % of one core)") -ForegroundColor DarkCyan
+        Write-Host ("  {0,-17} {1,-11} {2,9} {3,9} {4,9} {5,9} {6,9} {7,9}" -f `
+            "when", "sha", "srvWS", "srvPriv", "cliWS", "cliPriv", "idleSrv", "idleCli") -ForegroundColor DarkCyan
+        foreach ($row in $lrows) {
+            Write-Host ("  {0,-17} {1,-11} {2,9} {3,9} {4,9} {5,9} {6,9} {7,9}" -f `
+                $row.when, $row.sha, (Num $row.srv_ws 1), (Num $row.srv_priv 1), (Num $row.cli_ws 1),
+                (Num $row.cli_priv 1), (Num $row.idle_srv 2), (Num $row.idle_cli 2))
+            Emit "D_launch_resources" $row
+        }
+    }
+
+    # An idle attached pair: the line rate it was gated on, and what it cost.
+    $idl = Get-Runs "idle-socket-traffic-*.json"
+    $irows = @()
+    foreach ($r in $idl) {
+        $cells = Prop $r.Json "cells"
+        if (-not $cells) { continue }
+        foreach ($cn in @($cells.PSObject.Properties.Name)) {
+            $c = $cells.$cn
+            $ie = Prop $c "idle_end"; $ic = Prop $c "idle_cpu_pct_of_core"
+            $irows += [pscustomobject]@{
+                when = $r.When.ToString("MM-dd HH:mm"); sha = (Sha $r.Json); cell = $cn
+                lines_per_sec = (Prop $c "lines_per_sec")
+                srv_ws = (Prop (Prop $ie "server") "ws_mb"); cli_ws = (Prop (Prop $ie "client") "ws_mb")
+                idle_srv = (Prop $ic "server"); idle_cli = (Prop $ic "client")
+            }
+        }
+    }
+    if ($irows.Count -eq 0) { Note "no test_idle_socket_traffic run has a metrics file yet" }
+    else {
+        Write-Host ""
+        Write-Host ("  an idle attached pair, over the window the line count was taken on") -ForegroundColor DarkCyan
+        Write-Host ("  {0,-17} {1,-11} {2,-8} {3,10} {4,9} {5,9} {6,9} {7,9}" -f `
+            "when", "sha", "cell", "lines/sec", "srvWS", "cliWS", "idleSrv", "idleCli") -ForegroundColor DarkCyan
+        foreach ($row in $irows) {
+            Write-Host ("  {0,-17} {1,-11} {2,-8} {3,10} {4,9} {5,9} {6,9} {7,9}" -f `
+                $row.when, $row.sha, $row.cell, (Num $row.lines_per_sec 1), (Num $row.srv_ws 1),
+                (Num $row.cli_ws 1), (Num $row.idle_srv 2), (Num $row.idle_cli 2))
+            Emit "D_idle_socket" $row
+        }
+        Note "lines/sec is the gated number; the CPU beside it says whether a quiet socket was bought by spinning elsewhere"
     }
 
     $vt = Get-Runs "perf_vs_terminals-*.json"

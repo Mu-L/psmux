@@ -15,6 +15,13 @@
 //! the client's and the server's lines never interleave; merge and sort by the
 //! first column to read the whole path.
 //!
+//! THREE PROCESSES WRITE, AND THEIR FILES MUST NOT BE MERGED BY LABEL: the
+//! foreground CLI, the session server, and the warm standby server the session
+//! server spawns just before its loop. All three run `main`, so all three write
+//! `cli.entry`, and merging by label produces a timeline that runs backwards.
+//! The client is the pid the launcher started; the session server is the one
+//! that writes `srv.child.spawned`; anything else is the standby.
+//!
 //! Labels, in path order (`cli.` is the foreground CLI, `srv.` the server):
 //!   `cli.entry`        first line of `main`
 //!   `cli.dispatch`     argv parsed, about to act on the subcommand
@@ -22,11 +29,30 @@
 //!   `cli.server.spawn` `spawn_server_hidden` returned (cold path)
 //!   `cli.ready`        the readiness gate accepted the server
 //!   `cli.attach`       the attach/TUI path is entered
+//!   `cli.connected`    the client's socket to the server is up
 //!   `srv.entry`        first line of `run_server`
-//!   `srv.bound`        control listener bound, `.port`/`.key` written
+//!   `srv.appstate`     `AppState::new` returned
+//!   `srv.priority`     scheduling class claimed (#608)
+//!   `srv.mutex`        the single-server-per-name guard is held
+//!   `srv.listen`       `TcpListener::bind` returned, the port is known
+//!   `srv.keyfile`      the `.key` file is on disk (it precedes `.port`, #496)
+//!   `srv.reg.pid`      `.sid` and `.pid` written
+//!   `srv.reg.instance` the namespace instance token is established (#509)
+//!   `srv.reg.marker`   this process is claimed for the data dir (#510)
+//!   `srv.bound`        `.port` written: the readiness beacon is visible
 //!   `srv.config`       `load_config` returned
-//!   `srv.pane.spawn`   the initial pane's ConPTY child was created
+//!   `srv.pty.open`     `openpty` called
+//!   `srv.pty.ready`    `CreatePseudoConsole` returned
+//!   `srv.child.argv`   the pane child's argv, about to be spawned
+//!   `srv.child.spawned` `CreateProcessW` into the pseudoconsole returned
+//!   `srv.window`       the initial window exists
+//!   `srv.prewarm`      the spare pane pool has been filled
 //!   `srv.loop`         the main request loop is about to run
+//!
+//! The `srv.listen` .. `srv.bound` span is the session registry: six small
+//! files, and on a machine with realtime AV scanning each create costs several
+//! milliseconds, so the span is worth far more than its line count suggests.
+//! Its order is load bearing (see #496 and #509) and is not free to shuffle.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
