@@ -2964,3 +2964,7 @@ mod test_respawn_pane_refusal_survives;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue645_rotate_geometry.rs"]
 mod test_issue645_rotate_geometry;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue657_wheel_nonshell_full_screen.rs"]
+mod test_issue657_wheel_nonshell_full_screen;
