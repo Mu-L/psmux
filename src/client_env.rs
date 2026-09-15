@@ -82,6 +82,32 @@ pub fn is_server_owned(name: &OsStr) -> bool {
     SERVER_OWNED_VARS.iter().any(|k| *k == n)
 }
 
+/// Can this name be handed to `std::env::set_var` / `remove_var` at all?
+///
+/// Those functions PANIC rather than fail, and this code walks two
+/// environments it did not author: the server's own (`vars_os`) and a block
+/// read off disk.  Measured on rustc 1.96.0 / Windows 11 with a standalone
+/// probe:
+///
+/// ```text
+/// vars_os really hands out cmd.exe's per drive variables: ["=C:", "=ExitCode"]
+/// set_var("=C:", ..)            panicked: false   (a LEADING '=' is legal)
+/// set_var("A=B", ..)            panicked: true    (os error 87)
+/// set_var("", ..)               panicked: true
+/// set_var("X", "a\0b")          panicked: true
+/// ```
+///
+/// So an interior `=`, an empty name and a NUL are the shapes that must never
+/// reach the API. The cmd.exe `=C:` entries are legal but pointless to carry,
+/// and this filter drops them too, which also stops a claim from deleting the
+/// server's own per drive working directories.
+pub fn is_settable(name: &OsStr) -> bool {
+    let wide = to_wide(name);
+    !wide.is_empty()
+        && !wide.contains(&(b'=' as u16))
+        && !wide.contains(&0)
+}
+
 /// Encode `vars` as a Windows environment block: UTF-16LE `KEY=VALUE` entries,
 /// each NUL terminated, the whole block terminated by one more NUL.
 pub fn encode_env_block<I>(vars: I) -> Vec<u8>
@@ -162,7 +188,7 @@ pub fn plan_adoption(
     let incoming_keys: std::collections::HashSet<String> =
         incoming.iter().map(|(k, _)| norm_key(k)).collect();
     for (k, _) in current {
-        if is_server_owned(k) {
+        if is_server_owned(k) || !is_settable(k) {
             continue;
         }
         if !incoming_keys.contains(&norm_key(k)) {
@@ -173,7 +199,10 @@ pub fn plan_adoption(
     let current_map: std::collections::HashMap<String, &OsString> =
         current.iter().map(|(k, v)| (norm_key(k), v)).collect();
     for (k, v) in incoming {
-        if is_server_owned(k) {
+        // set_var panics on a value with an interior NUL too. A decoded block
+        // cannot hold one (NUL is its separator), but the file is read off
+        // disk, so this stays a check rather than an assumption.
+        if is_server_owned(k) || !is_settable(k) || to_wide(v).contains(&0) {
             continue;
         }
         let nk = norm_key(k);

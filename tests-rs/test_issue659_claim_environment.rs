@@ -189,6 +189,53 @@ fn an_insane_payload_produces_no_plan() {
     assert!(plan.is_empty(), "unexpected plan: {plan:?}");
 }
 
+/// cmd.exe plants per drive working directories as `=C:`, they are inherited
+/// by everything it starts, and `std::env::vars_os` really hands them back
+/// (measured: `["=C:", "=ExitCode"]`). A leading `=` is legal for set_var, but
+/// carrying these is pointless and deleting the server's own is worse, so the
+/// plan drops them. The shapes that would PANIC set_var outright (an interior
+/// `=`, an empty name, a NUL value) go through the same filter.
+#[test]
+fn the_cmd_drive_variables_never_reach_the_environment_api() {
+    let mut server = sane(&[]);
+    server.push((os("=C:"), os(r"C:\some\dir")));
+    server.push((os("=D:"), os(r"D:\other")));
+    let mut client = sane(&[]);
+    client.push((os("=C:"), os(r"C:\elsewhere")));
+
+    let plan = plan_adoption(&server, &client);
+    assert!(
+        plan.remove.iter().all(|k| is_settable(k)),
+        "unsettable name in remove: {plan:?}"
+    );
+    assert!(
+        plan.set.iter().all(|(k, _)| is_settable(k)),
+        "unsettable name in set: {plan:?}"
+    );
+}
+
+#[test]
+fn is_settable_rejects_what_set_var_cannot_take() {
+    assert!(is_settable(&os("PATH")));
+    assert!(!is_settable(&os("")));
+    assert!(!is_settable(&os("=C:")));
+    assert!(!is_settable(&os("A=B")));
+}
+
+/// A value with an interior NUL panics set_var as well, and the payload is
+/// read off disk rather than trusted.
+#[test]
+fn a_value_with_an_interior_nul_is_skipped() {
+    let server = sane(&[]);
+    let mut client = sane(&[]);
+    client.push((os("BAD"), OsString::from("a\u{0}b")));
+    let plan = plan_adoption(&server, &client);
+    assert!(
+        !plan.set.iter().any(|(k, _)| k == "BAD"),
+        "unexpected plan: {plan:?}"
+    );
+}
+
 #[test]
 fn duplicate_incoming_names_are_applied_once() {
     let server = sane(&[]);
