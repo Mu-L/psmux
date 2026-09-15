@@ -826,6 +826,19 @@ impl EscCoalesce {
     }
 }
 
+/// What a frame wake owes the caller before it returns (#658).
+///
+/// `read_timeout`'s loop ends with an `esc.expire()`, and that expire is the
+/// ONLY thing that releases a lone Escape once its coalescing window is up. A
+/// frame wake leaves the loop through an early `return`, so it used to jump
+/// straight over it: while frames kept arriving the held Escape had no way out
+/// at all. Factored out of the match arm so the decision can be exercised with
+/// no console and no clock of its own - see
+/// `tests-rs/test_issue658_frame_wake_escape.rs`.
+pub fn frame_wake_release(esc: &mut EscCoalesce, now: Instant) -> Option<Event> {
+    esc.expire(now)
+}
+
 /// Waking the client's input wait when a frame lands, not when a timer expires.
 ///
 /// The client loop has two things to wait for, console input and a frame off
@@ -1054,7 +1067,17 @@ impl InputSource {
                     // rather than when this interval happens to expire.
                     #[cfg(windows)]
                     let ready = match frame_wake::wait(wait.as_millis().min(u32::MAX as u128) as u32) {
-                        frame_wake::Woke::Frame => return Ok(None),
+                        // #658: a frame wake returns to the caller without
+                        // reading console input, so it jumps over the
+                        // `esc.expire()` at the foot of this loop - and that
+                        // expire is the only thing that releases a lone Escape
+                        // once its ESC_COALESCE_MS window is up. While frames
+                        // keep arriving, which is what a busy pane does, the
+                        // held Escape had no other way out. Give the deadline
+                        // its chance before handing control back.
+                        frame_wake::Woke::Frame => {
+                            return Ok(frame_wake_release(&mut esc, Instant::now()))
+                        }
                         frame_wake::Woke::Console => Some(crossterm::event::poll(Duration::ZERO)?),
                         frame_wake::Woke::Timeout => Some(false),
                         // No wake handles: fall back to crossterm's own wait.
@@ -3114,3 +3137,7 @@ impl InputSource {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue658_frame_wake_escape.rs"]
+mod test_issue658_frame_wake_escape;

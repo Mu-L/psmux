@@ -378,6 +378,13 @@ pub(crate) fn combined_data_version(app: &AppState) -> u64 {
     if let Some(win) = app.windows.get(app.active_idx) {
         walk(&win.root, &mut v);
     }
+    // #658: which window those counters came from is part of the identity of
+    // the frame they describe. Without this term the sum for window 0 and the
+    // sum for window 1 are the same number whenever their panes are equally
+    // idle, so the version guard on the "NC" fast path could not tell a window
+    // switch from no change at all. Mixed into a distinct field so it cannot
+    // cancel against a pane counter.
+    v = v.wrapping_add((app.active_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     // Include per-window status flags so non-active windows changing their
     // bell/activity/silence state forces a frame emission. Without this, the
     // status bar shows the bell or activity indicator only after some
