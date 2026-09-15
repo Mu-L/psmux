@@ -40,6 +40,7 @@ mod proxy_pane;
 mod cross_session;
 mod cross_session_server;
 mod paths;
+mod client_env;
 mod timer_res;
 mod pty_trace;
 mod startup_trace;
@@ -1791,10 +1792,20 @@ fn run_main() -> io::Result<()> {
                                     // config value) onto the standby, which set its
                                     // own class before this shell existed (#608).
                                     let claim_prio = crate::platform::claim_priority_arg();
+                                    // -e hands the standby THIS shell's whole
+                                    // environment, which is what a cold spawn
+                                    // would have given it (#659).
+                                    let claim_env = crate::client_env::write_own_environment(
+                                        &crate::client_env::claim_env_file(&warm_base),
+                                    );
+                                    let env_flag = match claim_env {
+                                        Some(ref p) => format!(" -e {}", crate::util::quote_arg(p)),
+                                        None => String::new(),
+                                    };
                                     let claim_cmd = if let Some(ref cwd) = client_cwd {
-                                        format!("claim-session {} {} -p {}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio))
+                                        format!("claim-session {} {} -p {}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio), env_flag)
                                     } else {
-                                        format!("claim-session {} -p {}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio))
+                                        format!("claim-session {} -p {}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio), env_flag)
                                     };
                                     match crate::session::send_auth_cmd_response(
                                         &warm_addr, &warm_key,
@@ -1860,6 +1871,10 @@ fn run_main() -> io::Result<()> {
                             // either way, so remove it. On failure this also
                             // ensures the dead/stale warm entry does not linger.
                             let _ = std::fs::remove_file(&claim_path);
+                            // Same for the environment handoff (#659): the
+                            // server deletes it as it reads it, so this only
+                            // catches a claim that never got that far.
+                            let _ = std::fs::remove_file(crate::client_env::claim_env_file(&warm_base));
                             result
                         } else {
                             // Lost the claim race (another client renamed it
@@ -4984,10 +4999,18 @@ fn run_main() -> io::Result<()> {
                         // `psmux` in a shell with PSMUX_PRIORITY set reach a standby
                         // that was spawned long before that shell (#608).
                         let claim_prio = crate::platform::claim_priority_arg();
+                        // -e hands the standby THIS shell's whole environment,
+                        // which is what a cold spawn would have given it (#659).
+                        let env_flag = match crate::client_env::write_own_environment(
+                            &crate::client_env::claim_env_file(&warm_base),
+                        ) {
+                            Some(ref p) => format!(" -e {}", crate::util::quote_arg(p)),
+                            None => String::new(),
+                        };
                         if let Some(ref cwd) = client_cwd {
-                            let _ = write!(stream, "claim-session {} {} -p {}\n", crate::util::quote_arg(&session_name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio));
+                            let _ = write!(stream, "claim-session {} {} -p {}{}\n", crate::util::quote_arg(&session_name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio), env_flag);
                         } else {
-                            let _ = write!(stream, "claim-session {} -p {}\n", crate::util::quote_arg(&session_name), crate::util::quote_arg(&claim_prio));
+                            let _ = write!(stream, "claim-session {} -p {}{}\n", crate::util::quote_arg(&session_name), crate::util::quote_arg(&claim_prio), env_flag);
                         }
                         let _ = stream.flush();
                         // Committed: we atomically own this warm (won the .port
@@ -5039,6 +5062,9 @@ fn run_main() -> io::Result<()> {
             }
             // Orphaned handoff file: server wrote <session>.port on success.
             let _ = std::fs::remove_file(&warm_claim_path);
+            // Same for the environment handoff (#659): the server deletes it as
+            // it reads it, so this only catches a claim that never got there.
+            let _ = std::fs::remove_file(crate::client_env::claim_env_file(&warm_base));
         }
 
 

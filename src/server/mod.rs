@@ -3817,7 +3817,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     hook_event = Some("after-rename-session");
                 }
-                CtrlReq::ClaimSession(name, client_cwd, client_priority, resp) => {
+                CtrlReq::ClaimSession(name, client_cwd, client_priority, client_env_file, resp) => {
                     // Guard against clobbering an already-claimed session. Under
                     // rapid `new-session`, a stale __warm__.port (or OS ephemeral
                     // port reuse) can route a claim to a server that has ALREADY
@@ -3914,6 +3914,37 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                     }
+                    // Adopt the claiming client's environment (#659).
+                    //
+                    // This standby was spawned by whatever needed a server
+                    // first - an earlier session's server, a shell that
+                    // predates the psmux install, psmux reached through WSL
+                    // interop - and a claim used to change nothing but the
+                    // name.  Everything this server spawns from here on
+                    // (run-shell children, hooks, plugin scripts, panes)
+                    // inherits its process environment, so a standby born with
+                    // a PATH that has no psmux directory made every shipped
+                    // plugin fail with "the term 'psmux' is not recognized"
+                    // for the whole life of the session.
+                    //
+                    // The cold path has no such problem: `spawn_server_hidden`
+                    // passes a null lpEnvironment, so a cold spawned server IS
+                    // the client's environment.  Adopting it here is what makes
+                    // the warm pool an optimisation rather than a behaviour
+                    // change.  It runs BEFORE the config reload below so
+                    // config-derived variables (PSMUX_CURSOR_STYLE, anything
+                    // `set-environment` plants) win over the client's, and
+                    // before PSMUX_TARGET_SESSION is re-asserted just below.
+                    let mut env_adopted = false;
+                    if let Some(ref envf) = client_env_file {
+                        let plan = crate::client_env::adopt_from_file(envf);
+                        env_adopted = !plan.is_empty();
+                        warm_debug(&format!(
+                            "CLAIM: env adopt set={} removed={}",
+                            plan.set.len(),
+                            plan.remove.len()
+                        ));
+                    }
                     // Update env so run-shell/hooks from this server target the new name
                     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     // Re-load user config so the claimed session reflects the
@@ -3975,6 +4006,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send("OK\n".to_string());
                     // Spawn a replacement warm server for the NEXT new-session
                     spawn_warm_server(&app);
+                    // The spare shells in the pane pool were spawned before the
+                    // environment above changed, and a process's environment
+                    // block cannot be edited from outside, so every spare is
+                    // now carrying the standby's old environment.  Respawn them
+                    // (#659) - same reasoning as the host-colors and resize
+                    // triggers in warm_pane_sync.  This is AFTER the claim
+                    // response on purpose: the client is already unblocked, so
+                    // the refill costs the user nothing.
+                    if env_adopted {
+                        crate::warm_pane_sync::apply(
+                            &mut app,
+                            &*pty_system,
+                            crate::warm_pane_sync::WarmPaneSync::Respawn("claim: client environment adopted"),
+                        );
+                    }
                     hook_event = Some("after-rename-session");
                     }
                 }

@@ -132,6 +132,70 @@ fn find_file_in_command(cmd: &str) -> Option<(String, String)> {
     }
 }
 
+/// Give a run-shell child a `PATH` on which the running psmux binary is
+/// resolvable.
+///
+/// A run-shell child inherits the **server's** environment, and a server is
+/// not necessarily started by something whose `PATH` contains the psmux
+/// install directory: a parked warm server keeps the environment of whatever
+/// spawned it, even after a later session claims it. Plugin scripts and user
+/// bindings that shell out to `psmux` then fail with "not recognized as the
+/// name of a cmdlet" although psmux is demonstrably running, and psmux
+/// surfaces that output in a modal popup.
+///
+/// So do not trust the inherited `PATH`: prepend the directory the running
+/// binary lives in. `psmux.exe`, `pmux.exe` and `tmux.exe` always sit in the
+/// same directory, so one entry covers every name a child may use.
+#[cfg(windows)]
+fn ensure_psmux_on_path(c: &mut std::process::Command) {
+    apply_own_dir_to_path(c, &std::env::var("PATH").unwrap_or_default());
+}
+
+/// Implementation of `ensure_psmux_on_path` with the inherited `PATH` passed
+/// in, so the decision is testable without touching the process environment.
+#[cfg(windows)]
+fn apply_own_dir_to_path(c: &mut std::process::Command, inherited: &str) {
+    let dir = match std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.to_owned())) {
+        Some(dir) => dir.to_string_lossy().into_owned(),
+        None => return,
+    };
+    if let Some(path) = prepend_if_absent(inherited, &dir) {
+        c.env("PATH", path);
+    }
+}
+
+/// `old` with `dir` prepended, or `None` when `dir` is already on it - in both
+/// cases the result is a `PATH` on which `dir` appears exactly once, so an
+/// environment that already knows about psmux is left as the caller set it up.
+#[cfg(windows)]
+fn prepend_if_absent(old: &str, dir: &str) -> Option<String> {
+    fn norm(s: &str) -> &str {
+        s.trim_end_matches(|c| c == '\\' || c == '/')
+    }
+    if old.split(';').any(|entry| norm(entry).eq_ignore_ascii_case(norm(dir))) {
+        return None;
+    }
+    Some(if old.is_empty() {
+        dir.to_string()
+    } else {
+        format!("{dir};{old}")
+    })
+}
+
+/// Build a `std::process::Command` for a run-shell invocation.
+///
+/// Wrapper around `build_run_shell_command_inner` that also makes the psmux
+/// binary reachable from the child process (`ensure_psmux_on_path`). Every
+/// run-shell path funnels through here: hooks, key bindings, `run` config
+/// lines, client-forwarded commands and the CLI fallback.
+pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut c = build_run_shell_command_inner(shell_cmd);
+    #[cfg(windows)]
+    ensure_psmux_on_path(&mut c);
+    c
+}
+
 /// Build a `std::process::Command` for a run-shell invocation.
 ///
 /// Avoids double-wrapping when the command already starts with a shell binary
@@ -139,7 +203,7 @@ fn find_file_in_command(cmd: &str) -> Option<(String, String)> {
 /// (including those with spaces) and uses the appropriate execution strategy:
 /// `-File` for `.ps1`, direct `Command::new` for `.exe`/`.cmd`/`.bat`,
 /// and PowerShell call operator `& 'path'` for other files with spaces.
-pub fn build_run_shell_command(shell_cmd: &str) -> std::process::Command {
+fn build_run_shell_command_inner(shell_cmd: &str) -> std::process::Command {
     #[cfg(windows)]
     {
         use crate::platform::HideWindowCommandExt;

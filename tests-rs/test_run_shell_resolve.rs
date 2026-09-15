@@ -384,3 +384,106 @@ fn parse_command_line_empty_string() {
     let parts = parse_command_line("");
     assert!(parts.is_empty());
 }
+
+// ─── run-shell child PATH ───────────────────────────────────────────────────
+//
+// A run-shell child inherits the SERVER's environment, which may not contain
+// the directory psmux itself runs from: a parked warm server keeps the
+// environment of whatever spawned it, even after another session claims it.
+// Plugin scripts and user bindings that shell out to `psmux` then fail with
+// "not recognized as the name of a cmdlet" although psmux is running.
+
+#[cfg(windows)]
+fn own_dir() -> String {
+    std::env::current_exe()
+        .expect("current_exe()")
+        .parent()
+        .expect("current_exe() has a parent")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(windows)]
+fn child_path(cmd: &std::process::Command) -> Option<String> {
+    cmd.get_envs()
+        .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
+        .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+}
+
+#[cfg(windows)]
+fn path_entries(path: &str) -> Vec<&str> {
+    path.split(';').collect()
+}
+
+#[test]
+#[cfg(windows)]
+fn prepend_if_absent_prepends_missing_dir() {
+    assert_eq!(
+        prepend_if_absent(r"C:\Windows;C:\Windows\System32", r"D:\psmux").as_deref(),
+        Some(r"D:\psmux;C:\Windows;C:\Windows\System32")
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn prepend_if_absent_handles_empty_path() {
+    assert_eq!(prepend_if_absent("", r"D:\psmux").as_deref(), Some(r"D:\psmux"));
+}
+
+#[test]
+#[cfg(windows)]
+fn prepend_if_absent_keeps_an_existing_entry() {
+    assert_eq!(prepend_if_absent(r"D:\psmux;C:\Windows", r"D:\psmux"), None);
+}
+
+#[test]
+#[cfg(windows)]
+fn prepend_if_absent_ignores_case_and_trailing_separator() {
+    assert_eq!(prepend_if_absent(r"d:\PSMUX\;C:\Windows", r"D:\psmux"), None);
+    assert_eq!(prepend_if_absent(r"C:\Windows;D:\psmux", r"D:\psmux\"), None);
+}
+
+/// The reported failure: a server whose `PATH` does not contain the psmux
+/// directory. The child still has to be able to resolve `psmux`, and the
+/// directory must show up exactly once.
+#[test]
+#[cfg(windows)]
+fn run_shell_child_gets_psmux_dir_on_a_poisoned_path() {
+    let mut cmd = std::process::Command::new("cmd");
+    apply_own_dir_to_path(&mut cmd, r"C:\Windows;C:\Windows\System32");
+
+    let path = child_path(&cmd).expect("the child must receive an explicit PATH");
+    let dir = own_dir();
+    let entries = path_entries(&path);
+    assert_eq!(
+        entries.first().map(|entry| entry.trim_end_matches(|c| c == '\\' || c == '/')),
+        Some(dir.trim_end_matches(|c| c == '\\' || c == '/')),
+        "expected {dir} first on the child PATH, got {path}"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.trim_end_matches(|c| c == '\\' || c == '/').eq_ignore_ascii_case(&dir))
+            .count(),
+        1,
+        "expected {dir} exactly once on the child PATH, got {path}"
+    );
+    assert!(
+        path.ends_with(r"C:\Windows;C:\Windows\System32"),
+        "the inherited PATH must be preserved after the prepended entry, got {path}"
+    );
+}
+
+/// An environment that already knows about psmux is left exactly as the caller
+/// set it up: no duplicate entry, no reordering.
+#[test]
+#[cfg(windows)]
+fn run_shell_child_path_is_untouched_when_psmux_is_already_on_it() {
+    let mut cmd = std::process::Command::new("cmd");
+    apply_own_dir_to_path(&mut cmd, &format!("{};C:\\Windows", own_dir()));
+    assert!(
+        child_path(&cmd).is_none(),
+        "an inherited PATH that already contains the psmux directory must not be rewritten"
+    );
+}
+

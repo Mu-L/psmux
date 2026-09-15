@@ -2478,13 +2478,17 @@ pub enum CtrlReq {
     RenameSession(String),
     /// Claim a warm server: rename session + send response so CLI knows it's done.
     /// Fields: session name, optional client CWD, optional client priority,
-    /// response sender.
+    /// optional path to the client's environment block, response sender.
     ///
     /// The priority rides along for the same reason the CWD does (#608): a warm
     /// standby was spawned ahead of time, in an environment that predates the
     /// claiming client, so anything the user set in the shell they ran psmux
     /// from can only reach the already running process through the claim.
-    ClaimSession(String, Option<String>, Option<String>, mpsc::Sender<String>),
+    ///
+    /// The environment file is the general case of that same problem (#659):
+    /// a cold spawned server inherits the client's whole environment block, so
+    /// a claimed standby has to be handed it too or it stays poisoned for life.
+    ClaimSession(String, Option<String>, Option<String>, Option<String>, mpsc::Sender<String>),
     SwapPane(String),
     /// swap-pane -t <target>: swap the active pane with the pane identified by
     /// (target, pane_is_id).  When `pane_is_id` is true the value is a pane id

@@ -393,22 +393,49 @@ pub fn quote_arg(s: &str) -> String {
 /// were, and cannot collide with a real path, because the pre-existing filter
 /// this replaces already assumed no positional starts with a dash.
 pub fn parse_claim_args(args: &[&str]) -> (Vec<String>, Option<String>) {
-    let mut priority: Option<String> = None;
-    let mut positionals: Vec<String> = Vec::new();
+    let parsed = parse_claim_args_full(args);
+    (parsed.positionals, parsed.priority)
+}
+
+/// Everything a `claim-session` line carries.
+#[derive(Debug, Default, PartialEq)]
+pub struct ClaimArgs {
+    /// `[0]` session name, `[1]` optional client CWD.
+    pub positionals: Vec<String>,
+    /// `-p`: the scheduling class the claiming client resolved (#608).
+    pub priority: Option<String>,
+    /// `-e`: file holding the claiming client's environment block (#659).
+    pub env_file: Option<String>,
+}
+
+/// Split a `claim-session` line into its positionals and its flags.
+///
+/// Every flag takes a value, and the value of a flag is NEVER a positional:
+/// the CWD is optional, so a stray value sliding into index 1 would be
+/// silently mistaken for the working directory. [`parse_claim_args`] is the
+/// two-field view of this, kept so the #608 wire tests read the same parser
+/// rather than a copy that can drift.
+pub fn parse_claim_args_full(args: &[&str]) -> ClaimArgs {
+    let mut parsed = ClaimArgs::default();
     let mut i = 0usize;
     while i < args.len() {
         let a = args[i];
         if a == "-p" {
-            priority = args.get(i + 1).map(|s| (*s).to_string());
+            parsed.priority = args.get(i + 1).map(|s| (*s).to_string());
+            i += 2;
+            continue;
+        }
+        if a == "-e" {
+            parsed.env_file = args.get(i + 1).map(|s| (*s).to_string());
             i += 2;
             continue;
         }
         if !a.starts_with('-') {
-            positionals.push(a.to_string());
+            parsed.positionals.push(a.to_string());
         }
         i += 1;
     }
-    (positionals, priority)
+    parsed
 }
 
 /// Quote an argument for the wire only when the server's quote-aware

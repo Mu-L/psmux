@@ -153,10 +153,23 @@ that later claims them. psmux carries the parts that matter across the claim:
   [configuration.md](configuration.md#process-priority).
 - **Config.** The claimed server reloads your config file on the claim, so a `set -g` line you
   added since the standby was spawned is honoured.
+- **Environment.** The claimed server adopts the claiming client's environment, which is what a
+  cold started server inherits anyway, so `run-shell` children, hooks, plugin scripts and every
+  pane spawned afterwards see the environment of the shell you ran psmux in. Before
+  [#659](https://github.com/psmux/psmux/issues/659) a standby kept the environment of whatever
+  spawned it for life, and a standby born without the psmux directory on `PATH` (a shell that
+  predates the install, psmux reached through WSL interop) made every plugin fail with "the term
+  'psmux' is not recognized". Two variables stay the server's own: `PSMUX_TARGET_SESSION`, which
+  is its identity, and `PSMUX_DATA_DIR`, which names the directory its registry files already
+  live in.
 
 What does not carry over: `-e VAR=value` on `new-session`, `new-window` or `split-window` cannot
 reach a shell that already has its environment, so a spawn with `-e` skips the warm pool and starts
-cold.
+cold. For the same reason the standby's first shell, the one you land in, keeps the environment it
+was born with: a running process's environment block cannot be edited from outside. Its `PATH` is
+read from the registry when the shell is spawned rather than inherited, so installed tools stay
+resolvable there; a variable you exported in your own shell reaches the panes you open next, not
+that first one. tmux behaves the same way, for the same reason.
 
 ## One Warm Server per Registry
 
