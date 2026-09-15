@@ -24,26 +24,52 @@
 #
 # THE MARGIN
 #   What is left after the fix is psmux's irreducible cold-start work plus the
-#   ConPTY tax, measured hop by hop with PSMUX_STARTUP_TRACE:
-#     ~11ms  client argv parse and server spawn call
-#     ~34ms  the server process (psmux.exe again) loading to main
-#     ~25ms  session mutex, control listener bind, .key/.port/.sid writes
-#     ~6ms   CreatePseudoConsole
-#     ~114ms CreateProcess into the pseudoconsole (10ms without ConPTY)
-#     ~68ms  the shell's own init is slower through ConPTY than a console
-#   That sums to ~258ms and matches an end-to-end median delta of ~250ms. The
+#   ConPTY tax. Measured hop by hop with PSMUX_STARTUP_TRACE, n=14 medians on a
+#   32 core box that was busy with other builds at the time (so the absolute
+#   numbers are high; the SHARES are what this list is for):
+#     ~16ms  client argv parse, warm claim attempt, server spawn call
+#     ~51ms  the server process (psmux.exe again) loading to main
+#      ~2ms  panic hook, AppState, priority, the single-server mutex
+#      ~2ms  TcpListener::bind
+#     ~23ms  the session registry: .key .sid .pid, the namespace instance
+#            token, the server marker, .port - six small files, several ms
+#            apiece with realtime AV scanning, and their ORDER is load bearing
+#            (#496, #509) so they are not free to move off the critical path
+#      ~8ms  CreatePseudoConsole
+#    ~173ms  CreateProcessW into the pseudoconsole. This is the console connect
+#            handshake with conhost, not psmux code, and it is the single
+#            largest hop; the warm pane pool exists because of it, which is why
+#            a SPLIT is ~25ms and a cold new-session is not
+#    ~540ms  pwsh's own init, which is slower through ConPTY than in a console
+#   psmux therefore owns roughly 100ms of a cold launch (two exe loads plus the
+#   registry); everything else is the shell and the operating system. The
 #   gate is set at 400ms: the measured ceiling plus room for a loaded machine
 #   (these suites run alongside others) and for the warm pane / warm server
 #   that psmux spawns during startup, which costs a further ~40-100ms of CPU
 #   contention. A regression that reintroduces a whole shell start is ~280ms
 #   and lands well outside it.
 #
+# MEMORY AND CPU
+#   A launch number on its own cannot tell a build that got there faster from a
+#   build that got there by burning the machine, so the last psmux iteration is
+#   also sampled: the working set, private bytes, CPU and thread count of the
+#   server and of the attached client at the moment the pane's shell reached its
+#   prompt, and then a quiet window with nothing driving the session, reported as
+#   a percentage of one core. Same helpers and same field names as the creation
+#   and keystroke gates (tests\perf_metrics_common.ps1), so a row from this file
+#   lines up with a row from those. The server is found by its <ns>__<session>.pid
+#   anchor, never by image name: this machine routinely has a dozen psmux servers
+#   belonging to other sessions, and a warm standby shares this binary and this
+#   namespace.
+#
 # Samples are written to %USERPROFILE%\.psmux-test-data\metrics\, never the repo.
 
 param(
     [string]$Binary = "",
     [int]$N = 5,
-    [int]$MaxDeltaMs = 400
+    [int]$MaxDeltaMs = 400,
+    # The quiet window used for the idle CPU sample on the last iteration.
+    [int]$IdleSeconds = 3
 )
 
 $ErrorActionPreference = "Continue"
@@ -127,7 +153,7 @@ function Measure-Bare([int]$i) {
     return $ms
 }
 
-function Measure-Psmux([int]$i) {
+function Measure-Psmux([int]$i, [switch]$Sample) {
     $out = Join-Path $work "psmux_$i.txt"
     if (Test-Path $out) { Remove-Item -LiteralPath $out -Force }
     $sess = "g$i"
@@ -138,6 +164,33 @@ function Measure-Psmux([int]$i) {
     $m = Wait-Marker $out
     $ms = $null
     if ($m) { $ms = [math]::Round((($m[0] - $t0) / $freq) * 1000, 1) }
+    # The resource sample is taken here, with the pane's shell at its prompt and
+    # the client still attached, and only on the iteration that asked for it, so
+    # the timing samples are never charged for the sampling. A failed launch is
+    # not sampled: there is no prompt to sample at.
+    if ($Sample -and $m) {
+        $srv = Get-PerfServerPid -Ns $ns -Session $sess
+        $roles = [ordered]@{}
+        if ($srv -gt 0) { $roles["server"] = $srv }
+        $cliPid = Get-PerfClientPid -Binary $Binary -Ns $ns -ServerPid $srv
+        if ($cliPid -le 0 -and $p -and -not $p.HasExited) { $cliPid = $p.Id }
+        if ($cliPid -gt 0) { $roles["client"] = $cliPid }
+        if ($roles.Count -gt 0) {
+            $atPrompt = Get-PerfResourceSnapshot $roles
+            $idle = Measure-PerfIdleCpu $roles $IdleSeconds
+            $script:ResourceBlock = [ordered]@{
+                iteration             = $i
+                idle_window_seconds   = $IdleSeconds
+                at_prompt             = (Get-PerfMemorySummary $atPrompt)
+                idle_cpu_pct_of_core  = $idle.pct_of_one_core
+                idle_measured_over_ms = $idle.window_ms
+            }
+            Write-Info (Format-PerfResourceLine $atPrompt "at prompt  ")
+            Write-Info ("idle cpu, % of a core : " + (@($idle.pct_of_one_core.Keys | ForEach-Object { "{0} {1:F2}%" -f $_, $idle.pct_of_one_core[$_] }) -join "  "))
+        } else {
+            Write-Info "neither the server nor the client could be identified, so no resource sample was taken"
+        }
+    }
     # Namespace-scoped teardown: never a kill by image name (other psmux
     # servers, including the user's own sessions, must not be touched).
     & $Binary -L $ns kill-server 2>$null | Out-Null
@@ -156,12 +209,16 @@ function Median($a) {
 
 & $Binary -L $ns kill-server 2>$null | Out-Null
 
+$script:ResourceBlock = $null
 $bare = @(); $mux = @()
 for ($i = 1; $i -le $N; $i++) {
     $b = Measure-Bare $i
     if ($null -eq $b) { $b = Measure-Bare $i }      # one retry: a shell that
-    $m = Measure-Psmux $i                           # never reached its prompt
-    if ($null -eq $m) { $m = Measure-Psmux $i }     # is a flake, not a datum
+    # Only the last iteration is sampled for memory and CPU, and the sampling
+    # happens after its own stopwatch has stopped, so no timing sample pays for it.
+    $sample = ($i -eq $N)
+    $m = Measure-Psmux $i -Sample:$sample           # never reached its prompt
+    if ($null -eq $m) { $m = Measure-Psmux $i -Sample:$sample }   # is a flake, not a datum
     $bare += $b; $mux += $m
     Write-Host ("       iter {0}: bare {1} ms | psmux {2} ms" -f $i, $b, $m)
 }
@@ -202,6 +259,7 @@ $jsonPath = Write-PerfMetrics -Suite "test_launch_to_prompt_gate" -Binary $Binar
     bare_stats   = (Get-PerfStats $bare 1)
     psmux_stats  = (Get-PerfStats $mux 1)
     delta_ms     = $(if ($null -ne $bareMed -and $null -ne $muxMed) { [math]::Round($muxMed - $bareMed, 1) } else { $null })
+    resources    = $script:ResourceBlock
 })
 if ($jsonPath) { Write-Info "samples: $jsonPath" }
 

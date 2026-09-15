@@ -863,7 +863,16 @@ function New-Wrapper {
 function Save-Metrics {
     param($Rows = @(), $Deltas = [ordered]@{})
     $payload = [ordered]@{
-        schema      = "psmux.perf_vs_terminals.v2"
+        # This suite keeps its own schema rather than the shared envelope's flat
+        # `schema = 2`: it is rewritten after every section (complete=false) and
+        # carries one block per HOST, which the shared shape has no room for.
+        # It already records everything the envelope does - binary, version,
+        # git_sha, machine, cpu, ram - so `envelope_schema` and `suite` are
+        # stated here to say so explicitly, and a reader that keys off either
+        # name finds this file. See tests\perf_metrics_common.ps1.
+        schema          = "psmux.perf_vs_terminals.v2"
+        envelope_schema = 2
+        suite           = "test_perf_vs_terminals"
         complete    = $script:Complete
         timestamp   = (Get-Date).ToString("o")
         binary      = $Psmux
