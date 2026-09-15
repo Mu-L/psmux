@@ -194,12 +194,15 @@ fn ensure_session_registry_files(app: &AppState) {
         let _ = std::fs::write(&pid_path, &pid_value);
     }
 
+    crate::startup_trace::mark("srv.reg.pid");
+
     // Establish the namespace's stable identity (issue #509) before the .port
     // beacon, so a client that sees a ready server can immediately query
     // `#{server_instance}` and get a value. Minted by the namespace's first
     // server and left alone by every later one; re-ensured here so it self-heals
     // if the file is lost while the namespace is still up.
     let _ = crate::session::ensure_namespace_instance(app.socket_name.as_deref(), self_pid);
+    crate::startup_trace::mark("srv.reg.instance");
 
     // Claim this process for this data dir (issue #510). Keyed by PID and kept
     // outside the per-session registry on purpose: the `.pid` entry above is
@@ -208,6 +211,7 @@ fn ensure_session_registry_files(app: &AppState) {
     // registry wipe, is exactly the case it must clean up. Re-ensured here so
     // the claim self-heals if the file is deleted underneath a live server.
     crate::session::write_server_marker(self_pid);
+    crate::startup_trace::mark("srv.reg.marker");
 
     // .port goes LAST: it is the readiness beacon (see comment above).
     if std::fs::read_to_string(&port_path)
@@ -943,6 +947,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let pty_system = native_pty_system();
 
     let mut app = AppState::new(session_name);
+    crate::startup_trace::mark("srv.appstate");
     // Adopt the palette the last attached client reported in this data root, so
     // the spares this server is about to pre spawn are born holding it.
     //
@@ -975,6 +980,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // option if the user set one; PSMUX_PRIORITY outranks both.
     app.priority = crate::platform::resolve_priority(None, true);
     crate::platform::set_process_priority(&app.priority);
+    crate::startup_trace::mark("srv.priority");
     // Preinitialize the async #(command) format-job channel (see the
     // format_job_rx doc in types.rs).
     {
@@ -1012,6 +1018,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         }
     };
 
+    crate::startup_trace::mark("srv.mutex");
+
     // Bind the control listener BEFORE loading config so that run-shell
     // commands spawned by load_config can connect back to the server.
     let (tx, rx) = mpsc::channel::<CtrlReq>();
@@ -1025,6 +1033,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     app.control_port = Some(port);
+    crate::startup_trace::mark("srv.listen");
     warm_debug(&format!("server STARTUP: session='{}' bound port={}", app.session_name, port));
 
     // Write port and key files IMMEDIATELY after binding, BEFORE loading
@@ -1063,6 +1072,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             .open(&keypath)
             .map(|mut f| std::io::Write::write_all(&mut f, session_key.as_bytes()));
     }
+    crate::startup_trace::mark("srv.keyfile");
 
     // TEST-ONLY fault injection — compiled out of release builds entirely
     // (gated on debug_assertions); inert in debug unless the env var is set.
