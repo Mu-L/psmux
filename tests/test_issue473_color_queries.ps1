@@ -21,6 +21,30 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 
+# Since 6b16d6d the server remembers the last palette a client reported in
+# <data dir>\host_colors, so that the next server in this data root is born
+# with it instead of Campbell (its spares then need no retirement on the first
+# report). That memory is exactly what Part A must NOT see: it asserts the
+# Campbell fallback for a server that has never had a client. Part E of this
+# very suite reports Solarized Light, and on 2026-09-14 that report was written
+# to the file and answered Part A in the next sweep two days later (scheme 2,
+# fg 657b83, bg fdf6e3: 12 passed, 5 failed). So the file is set aside here and
+# put back at the end, which also stops the suite planting a fake palette in
+# the user's real data root.
+$hostColorsFile = Join-Path $psmuxDir "host_colors"
+$script:SavedHostColors = $null
+if (Test-Path $hostColorsFile) {
+    $script:SavedHostColors = Get-Content $hostColorsFile -Raw
+    Remove-Item $hostColorsFile -Force -EA SilentlyContinue
+}
+function Restore-HostColorsFile {
+    if ($null -ne $script:SavedHostColors) {
+        Set-Content -Path $hostColorsFile -Value $script:SavedHostColors -NoNewline -Encoding UTF8
+    } else {
+        Remove-Item $hostColorsFile -Force -EA SilentlyContinue
+    }
+}
+
 function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
 
@@ -198,6 +222,7 @@ else {
     try { Stop-Process -Id $proc.Id -Force -EA SilentlyContinue } catch {}
 }
 Remove-Session $S3
+Restore-HostColorsFile
 
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
 Write-Host "  Passed: $($script:TestsPassed)" -ForegroundColor Green
