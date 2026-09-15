@@ -151,13 +151,16 @@ $val = $val.Trim()
 if ("$val" -eq "" -or "$val" -match "unknown") { Write-Pass "show-options -v unknown returns empty/error" }
 else { Write-Fail "show-options -v unknown got: '$val'" }
 
+# #655: a plain `-w` listing is the window's OWN table, which is empty on a
+# window nobody has written to, so the full catalog now lives behind -g (the
+# global window table) exactly as it does in tmux.
 Write-Test "show-window-options alias"
-$val = Psmux show-window-options -t feat3 | Out-String
+$val = Psmux show-window-options -g -t feat3 | Out-String
 if ("$val" -match "window-status-format|automatic-rename|window-size") { Write-Pass "show-window-options returns window options" }
 else { Write-Fail "show-window-options missing expected window options" }
 
 Write-Test "showw alias"
-$val = Psmux showw -t feat3 | Out-String
+$val = Psmux showw -g -t feat3 | Out-String
 if ("$val" -match "window-status-format|automatic-rename|window-size") { Write-Pass "showw alias returns window options" }
 else { Write-Fail "showw alias missing expected window options" }
 

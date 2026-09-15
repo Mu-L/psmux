@@ -578,10 +578,10 @@ fn drain_plugin_req(
         CtrlReq::ShowWindowOptions(resp) => {
             let _ = resp.send(render_window_options(app));
         }
-        CtrlReq::ShowWindowOptionsFor(resp, target, mark_inherited) => {
+        CtrlReq::ShowWindowOptionsFor(resp, target, listing) => {
             let index = crate::server::options::resolve_option_target_window(app, &target).ok();
             let _ = resp.send(crate::server::options::render_window_options_for(
-                app, index, mark_inherited,
+                app, index, listing,
             ));
         }
         CtrlReq::BindKey(table_name, key, command, repeat) => {
@@ -6112,10 +6112,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::ShowWindowOptions(resp) => {
                     let _ = resp.send(render_window_options(&app));
                 }
-                CtrlReq::ShowWindowOptionsFor(resp, target, mark_inherited) => {
+                CtrlReq::ShowWindowOptionsFor(resp, target, listing) => {
                     let index = crate::server::options::resolve_option_target_window(&app, &target).ok();
                     let _ = resp.send(crate::server::options::render_window_options_for(
-                        &app, index, mark_inherited,
+                        &app, index, listing,
                     ));
                 }
                 CtrlReq::ChooseBuffer(resp) => {

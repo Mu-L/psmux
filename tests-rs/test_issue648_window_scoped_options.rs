@@ -42,11 +42,11 @@
 //       show -w -v -t s:zero  -> ""        (the global table, not the window's)
 //     set -p beats set -w on the pane that has it.
 //
-// psmux reports the RESOLVED value where tmux reports a blank for an unset
-// window option (tmux's own `show -wA -v` reports the resolved value too), a
-// deliberate deviation libtmux/tmuxp depend on — see #321 and the note on
-// `render_window_options_for`. Everything else above is matched exactly, and
-// the `*` marker makes local and inherited distinguishable either way.
+// A `-v <name>` query reports the RESOLVED value where tmux reports a blank for
+// an unset window option (tmux's own `show -wA -v` reports the resolved value
+// too), a deliberate deviation libtmux/tmuxp depend on, see #321. The LISTING
+// follows tmux exactly since #655: `-w` is the window's own table, `-A` merges
+// the inherited values in with a `*`, `-wg` is the global window table.
 
 use super::*;
 use crate::types::{AppState, LayoutKind, Node};
@@ -294,17 +294,25 @@ fn the_reporter_scenario_leaves_the_other_window_closing_panes() {
 fn show_w_reports_the_targeted_windows_own_value() {
     let mut app = two_windows();
     apply_set_window_option(&mut app, "s:zero", "remain-on-exit", "on", false, false, false, false);
-    let zero = render_window_options_for(&app, Some(0), false);
-    let one = render_window_options_for(&app, Some(1), false);
+    let zero = render_window_options_for(&app, Some(0), WindowListing::Local);
+    let one = render_window_options_for(&app, Some(1), WindowListing::Local);
     assert!(
         zero.lines().any(|l| l == "remain-on-exit on"),
         "show -w -t s:zero must read the write back:\n{}",
         zero,
     );
+    // #655 supersedes the original #648 expectation here: tmux prints nothing
+    // for an option the window does not own, and the inherited value is what
+    // `-A` (below) or `-v remain-on-exit` answers with.
     assert!(
-        one.lines().any(|l| l == "remain-on-exit off"),
+        !one.lines().any(|l| l.starts_with("remain-on-exit")),
         "BUG #648: show -w -t s:one reported the other window's value:\n{}",
         one,
+    );
+    assert_eq!(
+        get_window_option_value_for(&app, "remain-on-exit", Some(1)),
+        "off",
+        "the sibling window still RESOLVES to the inherited off",
     );
 }
 
@@ -312,8 +320,8 @@ fn show_w_reports_the_targeted_windows_own_value() {
 fn show_wa_marks_an_inherited_option_with_a_star() {
     let mut app = two_windows();
     apply_set_window_option(&mut app, "s:zero", "remain-on-exit", "on", false, false, false, false);
-    let zero = render_window_options_for(&app, Some(0), true);
-    let one = render_window_options_for(&app, Some(1), true);
+    let zero = render_window_options_for(&app, Some(0), WindowListing::LocalAndInherited);
+    let one = render_window_options_for(&app, Some(1), WindowListing::LocalAndInherited);
     assert!(
         zero.lines().any(|l| l == "remain-on-exit on"),
         "a window-local value carries NO marker (tmux cmd-show-options.c):\n{}",
@@ -333,7 +341,7 @@ fn show_wa_marks_an_inherited_option_with_a_star() {
 fn show_w_without_dash_a_never_marks_anything() {
     let mut app = two_windows();
     apply_set_window_option(&mut app, "s:zero", "remain-on-exit", "on", false, false, false, false);
-    let listing = render_window_options_for(&app, Some(1), false);
+    let listing = render_window_options_for(&app, Some(1), WindowListing::Local);
     assert!(
         !listing.contains('*'),
         "the `*` marker belongs to -A only:\n{}",
@@ -344,16 +352,24 @@ fn show_w_without_dash_a_never_marks_anything() {
 #[test]
 fn every_window_option_name_is_listed_for_a_window() {
     // libtmux and tmuxp probe window scope and expect an answer for each name
-    // (#321), so the resolved listing stays complete after #648.
+    // (#321). After #655 the COMPLETE listing is what `-A` and `-wg` print;
+    // a plain `-w` is the window's own table the way tmux prints it.
     let app = two_windows();
-    let listing = render_window_options_for(&app, Some(1), false);
-    for name in crate::server::option_catalog::WINDOW_OPTION_NAMES {
-        assert!(
-            listing.lines().any(|l| l.starts_with(&format!("{} ", name))),
-            "show -w dropped {}:\n{}",
-            name,
-            listing,
-        );
+    for listing in [
+        render_window_options_for(&app, Some(1), WindowListing::LocalAndInherited),
+        render_window_options_for(&app, Some(1), WindowListing::Global),
+    ] {
+        for name in crate::server::option_catalog::WINDOW_OPTION_NAMES {
+            assert!(
+                listing
+                    .lines()
+                    .any(|l| l.starts_with(&format!("{} ", name))
+                        || l.starts_with(&format!("{}* ", name))),
+                "the listing dropped {}:\n{}",
+                name,
+                listing,
+            );
+        }
     }
 }
 

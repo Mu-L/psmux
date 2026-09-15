@@ -2597,9 +2597,16 @@ pub enum CtrlReq {
     },
     ShowOptions(mpsc::Sender<String>),
     ShowWindowOptions(mpsc::Sender<String>),
-    /// `show-options -w [-A] [-t <window>]`: the window option listing for one
-    /// resolved window. The bool asks for tmux's `*` inherited marker (#648).
-    ShowWindowOptionsFor(mpsc::Sender<String>, String, bool),
+    /// `show-options -w [-A] [-g] [-t <window>]`: the window option listing for
+    /// one resolved window.
+    ///
+    /// The third field says WHICH table to print, the question tmux answers in
+    /// `options_scope_from_flags` plus `cmd_show_options_all`: the window's own
+    /// values, those plus every inherited value with a `*` marker (`-A`), or the
+    /// global window table (`-g`). It used to be a bare "mark inherited" bool,
+    /// so `-g` was dropped on the floor and a plain `-w` printed every name
+    /// including the ones the window does not own (#648, #655).
+    ShowWindowOptionsFor(mpsc::Sender<String>, String, crate::server::options::WindowListing),
     SourceFile(String),
     /// Expand `#{...}` format variables against the live server state and send
     /// the result back: `(format_string, reply)`.

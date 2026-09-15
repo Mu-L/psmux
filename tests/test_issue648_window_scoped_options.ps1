@@ -31,6 +31,7 @@
 #     set -w -u -t s:zero remain-on-exit  -> s:zero inherits again
 #     set -wg remain-on-exit on           -> global on, s:zero still inherits
 #     set -p on a pane beats set -w on its window
+#       show -w -t s:one     -> the option is ABSENT, not resolved (#655)
 #
 # psmux reports the RESOLVED value where tmux prints a blank for an unset window
 # option, which is what tmux's own `show -wA -v` prints; libtmux and tmuxp probe
@@ -240,7 +241,10 @@ $lz = (Invoke-Psmux @('show-options', '-w', '-t', "${SESSION}:zero")).out
 $lo = (Invoke-Psmux @('show-options', '-w', '-t', "${SESSION}:one")).out
 if ($lz -match '(?m)^remain-on-exit on$') { Write-Pass "show -w -t zero lists remain-on-exit on" }
 else { Write-Fail "show -w -t zero: [$lz]" }
-if ($lo -match '(?m)^remain-on-exit off$') { Write-Pass "show -w -t one lists the inherited remain-on-exit off" }
+# #655 supersedes the original #648 line here: tmux prints NOTHING for an
+# option the window does not own, so the sibling's listing must not carry
+# remain-on-exit at all. The inherited value is what -A and -v report.
+if ($lo -notmatch '(?m)^remain-on-exit') { Write-Pass "show -w -t one omits the option it does not own (tmux parity, #655)" }
 else { Write-Fail "BUG #648: show -w -t one reported the other window's value: [$lo]" }
 
 $az = (Invoke-Psmux @('show-options', '-w', '-A', '-t', "${SESSION}:zero")).out
