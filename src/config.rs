@@ -1203,6 +1203,7 @@ pub fn parse_option_value(app: &mut AppState, key: &str, value: &str, _is_global
         "status-right" => app.status_right = value.to_string(),
         "mouse" => app.mouse_enabled = matches!(value, "on" | "true" | "1" | "yes"),
         "scroll-enter-copy-mode" => app.scroll_enter_copy_mode = matches!(value, "on" | "true" | "1" | "yes"),
+        "mouse-drag-enter-copy-mode" => app.mouse_drag_enter_copy_mode = matches!(value, "on" | "true" | "1" | "yes"),
         "pwsh-mouse-selection" => app.pwsh_mouse_selection = matches!(value, "on" | "true" | "1" | "yes"),
         "mouse-selection" => app.mouse_selection = matches!(value, "on" | "true" | "1" | "yes"),
         "mouse-selection-force" => app.mouse_selection_force = matches!(value, "on" | "true" | "1" | "yes"),
@@ -2703,6 +2704,10 @@ mod tests_issue145_source_file;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue193_scroll_enter_copy_mode.rs"]
 mod tests_issue193_scroll_enter_copy_mode;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_mouse_drag_enter_copy_mode.rs"]
+mod test_mouse_drag_enter_copy_mode;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue198_unbind_individual.rs"]
