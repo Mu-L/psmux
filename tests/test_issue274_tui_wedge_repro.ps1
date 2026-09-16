@@ -542,6 +542,32 @@ if (-not $tuiWedgeDetected) { Write-Pass "TUI client survived full 90s sustained
 # machine. Polling keeps the real signal (a wedge never produces the marker at
 # all) and reports how long a healthy round trip actually took, which is the
 # number worth having when this fails again.
+# What the pane actually holds when an echo does not arrive: the target's child
+# processes (is the flooding program still alive, ie did the interrupt land?)
+# and the last lines on screen. Without this the failure says only "no echo",
+# which is the symptom and not the cause; measured 2026-09-16, three runs failed
+# identically and the log could not say whether Ctrl+C had stopped the child.
+function Show-PaneDiagnostics {
+    param([string]$Target)
+    $panePid = 0
+    try { $panePid = [int](& $PSMUX display-message -t $Target -p '#{pane_pid}' 2>&1 | Out-String).Trim() } catch { }
+    $kids = @()
+    if ($panePid -gt 0) {
+        $q = [System.Collections.Queue]::new(); $q.Enqueue($panePid)
+        while ($q.Count -gt 0) {
+            $id = $q.Dequeue()
+            foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$id" -EA SilentlyContinue)) {
+                $kids += "$($c.Name):$($c.ProcessId)"; $q.Enqueue([int]$c.ProcessId)
+            }
+        }
+    }
+    $cmd = (& $PSMUX display-message -t $Target -p '#{pane_current_command}' 2>&1 | Out-String).Trim()
+    Write-Host ("  [DIAG] $Target pane_pid=$panePid current_command=$cmd children=" + $(if ($kids.Count) { $kids -join ',' } else { '<none>' })) -ForegroundColor DarkYellow
+    $cap = & $PSMUX capture-pane -t $Target -p 2>&1 | Out-String
+    ($cap -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 5) |
+        ForEach-Object { Write-Host "  [DIAG] | $_" -ForegroundColor DarkYellow }
+}
+
 function Wait-PaneMarker {
     param([string]$Target, [string]$Marker, [int]$TimeoutMs = 15000)
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -564,7 +590,7 @@ $markerE = "AFTER_SUSTAINED_$(Get-Random)"
 & $PSMUX send-keys -t "${SESSION}:2" "echo $markerE" Enter
 $hitE = Wait-PaneMarker -Target "${SESSION}:2" -Marker $markerE
 if ($hitE.Found) { Write-Pass "send-keys works after 90s sustained output (echo visible in $($hitE.Ms)ms)" }
-else { Write-Fail "send-keys FAILED after 90s sustained output (no echo within $($hitE.Ms)ms)" }
+else { Write-Fail "send-keys FAILED after 90s sustained output (no echo within $($hitE.Ms)ms)"; Show-PaneDiagnostics -Target "${SESSION}:2" }
 
 # [Test E4] Client kill + fresh attach after sustained
 Write-Host "`n[Test E4] Client kill + fresh attach after 90s sustained" -ForegroundColor Yellow
@@ -586,7 +612,7 @@ if ($finalProc.HasExited) {
     $hitFinal = Wait-PaneMarker -Target "${SESSION}:2" -Marker $markerFinal
     $capFinal = if ($hitFinal.Found) { $markerFinal } else { "" }
     if ($hitFinal.Found) { Write-Pass "send-keys to non-heavy pane works post-reattach (echo visible in $($hitFinal.Ms)ms)" }
-    else { Write-Fail "WEDGE: send-keys FAILED post-reattach (no echo within $($hitFinal.Ms)ms)" }
+    else { Write-Fail "WEDGE: send-keys FAILED post-reattach (no echo within $($hitFinal.Ms)ms)"; Show-PaneDiagnostics -Target "${SESSION}:2" }
 
     # Keystroke test in final fresh attach
     if (Test-Path $injectorExe) {
