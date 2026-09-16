@@ -903,8 +903,17 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     exit_copy_mode(app);
                 }
-                KeyCode::Char('g') => { scroll_to_top(app); }
-                KeyCode::Char('G') => { scroll_to_bottom(app); }
+                // history-top/bottom are the vi spellings in tmux
+                // (key-bindings.c: copy-mode-vi owns g/G); the emacs table
+                // spells them M-< / M->.  Leaving g/G ungated threw the view
+                // to the very top of the scrollback whenever a bare `g`
+                // arrived while the pane was in copy mode — which is easy to
+                // hit on a phone, where a thumb swipe is a wheel event that
+                // enters copy mode, and the next typed prompt letter is a `g`.
+                KeyCode::Char('g') if app.mode_keys != "emacs" => { scroll_to_top(app); }
+                KeyCode::Char('G') if app.mode_keys != "emacs" => { scroll_to_bottom(app); }
+                KeyCode::Char('<') if key.modifiers.contains(KeyModifiers::ALT) => { scroll_to_top(app); }
+                KeyCode::Char('>') if key.modifiers.contains(KeyModifiers::ALT) => { scroll_to_bottom(app); }
                 // Word motions: w = next word, b = prev word, e = end of word
                 KeyCode::Char('w') => { for _ in 0..copy_repeat { crate::copy_mode::move_word_forward(app); } }
                 KeyCode::Char('b') => { for _ in 0..copy_repeat { crate::copy_mode::move_word_backward(app); } }
@@ -2903,8 +2912,11 @@ fn handle_copy_mode_char(app: &mut AppState, c: char) -> io::Result<()> {
         'l' => { for _ in 0..n { move_copy_cursor(app, 1, 0); } }
         'k' => { for _ in 0..n { move_copy_cursor(app, 0, -1); } }
         'j' => { for _ in 0..n { move_copy_cursor(app, 0, 1); } }
-        'g' => { scroll_to_top(app); }
-        'G' => { scroll_to_bottom(app); }
+        // vi spellings only: emacs reaches history-top/bottom through M-< /
+        // M-> (a key, not a character) or a user binding, exactly as tmux
+        // does.  See the g/G note in handle_key.
+        'g' if app.mode_keys != "emacs" => { scroll_to_top(app); }
+        'G' if app.mode_keys != "emacs" => { scroll_to_bottom(app); }
         'w' => { for _ in 0..n { crate::copy_mode::move_word_forward(app); } }
         'b' => { for _ in 0..n { crate::copy_mode::move_word_backward(app); } }
         'e' => { for _ in 0..n { crate::copy_mode::move_word_end(app); } }
