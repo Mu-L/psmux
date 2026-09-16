@@ -380,6 +380,26 @@ fn effective_window_size(app: &AppState, window: &crate::types::Window) -> Optio
     }
 }
 
+/// Record that `client_id` just sent a request: `window-size latest` follows
+/// the client the user is actually using, not the one that happened to resize
+/// last.  Returns true when the window geometry changed (the caller then
+/// resizes the panes).
+///
+/// Only clients that reported a size can drive the geometry: one-shot CLI
+/// clients (`psmux ls`) and CONTROL clients send requests constantly and have
+/// no entry in `client_sizes`, so they are ignored.
+pub fn note_client_activity(app: &mut AppState, client_id: u64) -> bool {
+    if !app.client_sizes.contains_key(&client_id) {
+        return false;
+    }
+    if app.latest_client_id == Some(client_id) && app.latest_size_client_id == Some(client_id) {
+        return false; // already the latest: nothing to recompute
+    }
+    app.latest_client_id = Some(client_id);
+    app.latest_size_client_id = Some(client_id);
+    refresh_dynamic_window_sizes(app)
+}
+
 pub fn refresh_dynamic_window_sizes(app: &mut AppState) -> bool {
     let latest_size_is_live = app.latest_size_client_id.is_some_and(|client_id| {
         app.client_sizes.contains_key(&client_id)

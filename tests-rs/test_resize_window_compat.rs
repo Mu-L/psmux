@@ -262,3 +262,79 @@ fn leaving_manual_mode_without_clients_preserves_geometry() {
     assert_eq!(app.windows[0].window_size.as_deref(), Some("latest"));
     assert_eq!(app.windows[0].area, Rect::new(0, 0, 112, 36));
 }
+
+
+// ── `window-size latest` follows the client the user is active in ──
+//
+// Regression: a phone client (SSH/Terminus) narrowed the window when it
+// attached and the desktop never got it back. Typing and clicking did not
+// refresh the size choice at all, and the stale `latest_size_client_id`
+// (written only by `client-size`, i.e. a real resize) kept winning over the
+// client the user had gone back to. tmux keeps the most recently active
+// client at the head of `clients->latest`; `note_client_activity` is the
+// psmux equivalent of that.
+
+fn activity_app(window_size: &str) -> AppState {
+    let mut app = AppState::new("test".to_string());
+    app.windows.push(empty_window(3, "only", 120, 40));
+    app.window_indices = vec![0];
+    app.window_size = window_size.to_string();
+    // client 1 = desktop, client 2 = phone; the phone resized last
+    app.client_sizes.insert(1, (200, 50));
+    app.client_sizes.insert(2, (80, 24));
+    app.latest_client_id = Some(2);
+    app.latest_size_client_id = Some(2);
+    app.client_area = Rect::new(0, 0, 80, 24);
+    app.last_window_area = app.client_area;
+    assert!(refresh_dynamic_window_sizes(&mut app), "the first client size must reach the window");
+    app
+}
+
+#[test]
+fn latest_window_size_follows_the_active_client() {
+    let mut app = activity_app("latest");
+    assert!(note_client_activity(&mut app, 1), "activity from the desktop must resize");
+    assert_eq!((app.windows[0].area.width, app.windows[0].area.height), (200, 50));
+    assert_eq!(app.client_area.width, 200);
+    assert_eq!(app.latest_client_id, Some(1));
+    assert_eq!(app.latest_size_client_id, Some(1));
+}
+
+#[test]
+fn repeated_activity_from_the_same_client_is_a_no_op() {
+    let mut app = activity_app("latest");
+    assert!(note_client_activity(&mut app, 1));
+    assert!(!note_client_activity(&mut app, 1), "same client must not resize again");
+}
+
+#[test]
+fn activity_from_a_client_without_a_size_is_ignored() {
+    let mut app = activity_app("latest");
+    // One-shot CLI clients (`psmux ls`) and CONTROL clients send requests
+    // constantly and never report a size: they must not drive the geometry.
+    assert!(!note_client_activity(&mut app, 99));
+    assert_eq!(app.latest_size_client_id, Some(2));
+    assert_eq!(app.windows[0].area.width, 80);
+}
+
+#[test]
+fn largest_and_smallest_ignore_which_client_is_active() {
+    let mut app = activity_app("largest");
+    assert_eq!(app.windows[0].area.width, 200);
+    assert!(!note_client_activity(&mut app, 2), "largest keeps the largest size");
+
+    let mut app = activity_app("smallest");
+    assert_eq!(app.windows[0].area.width, 80);
+    assert!(!note_client_activity(&mut app, 1), "smallest keeps the smallest size");
+}
+
+#[test]
+fn phone_going_away_without_a_resize_still_restores_the_desktop() {
+    // The phone detaches (size entry removed) and the desktop types a key:
+    // the window must come back to the desktop size.
+    let mut app = activity_app("latest");
+    app.client_sizes.remove(&2);
+    app.windows[0].area = Rect::new(0, 0, 80, 24);
+    assert!(note_client_activity(&mut app, 1));
+    assert_eq!((app.windows[0].area.width, app.windows[0].area.height), (200, 50));
+}

@@ -1769,6 +1769,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         | CtrlReq::WindowDump(..)
                         | CtrlReq::WindowLayout(..)
                         | CtrlReq::PtyWake
+                        | CtrlReq::ClientActivity(_)
                     );
                     let is_temp_focus = matches!(&req, CtrlReq::FocusTargetTemp { .. });
                     let mut hook_event: Option<&str> = None;
@@ -2678,6 +2679,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     dump_state_seen_full.insert(dump_client_id);
                 }
                 CtrlReq::SendText(s) => { app.status_message = None; crate::input::stamp_interactive_text(&mut app); send_text_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
+                CtrlReq::ClientActivity(cid) => {
+                    // Typing, clicking, scrolling: this client is the one in
+                    // use, so `window-size latest` must size the window for
+                    // it.  The resize only runs when the geometry changes.
+                    if crate::resize_window::note_client_activity(&mut app, cid) {
+                        resize_all_panes(&mut app);
+                        state_dirty = true;
+                        meta_dirty = true;
+                    }
+                }
                 CtrlReq::PtyWake => { /* the wake itself is the whole point; the
                     PTY_DATA_READY swap above already set state_dirty. */ }
                 CtrlReq::SendKey(k) => { crate::pty_trace::mark("g", 0, k.as_bytes()); app.status_message = None; crate::input::stamp_interactive_key(&mut app, &k); send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
