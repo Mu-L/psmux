@@ -512,6 +512,20 @@ function Test-AuditWindowProtected {
     param($W)
     if ($script:AuditProtectHwnd.ContainsKey([long]$W.Handle)) { return $true }
     if ($script:AuditBaselineWins.ContainsKey([long]$W.Handle)) { return $true }
+    # A window owned by this runner's own ancestry is never ours to close, even
+    # when the handle is new. Pass 1 has always honoured $script:AuditOwnPids for
+    # PROCESSES and the header above promises the same for windows, but this
+    # function did not consult it, and the gap is reachable in the normal case:
+    # launching the runner from a Windows Terminal session opens a NEW tab inside
+    # the SAME WindowsTerminal.exe that hosts the caller, so its window handle is
+    # new while its owner is our own terminal. Measured 2026-09-16 12:37 in run
+    # 2026-09-16_12-24-28: "LEFTOVER-WINDOW test_perf_vs_terminals hwnd=24842416
+    # pid=5548 class=CASCADIA_HOSTING_WINDOW_CLASS title=[Administrator: cmd]",
+    # where pid 5548 was the Windows Terminal hosting the session that started
+    # the run, and pass 2 posted WM_CLOSE to it and then went looking for the
+    # "Close all" confirmation. Closing the terminal a sweep was launched from is
+    # exactly the incident this audit exists to prevent.
+    if ($script:AuditOwnPids.ContainsKey([int]$W.Pid)) { return $true }
     foreach ($t in $script:AuditProtectTitles) {
         if ($W.Title -and $W.Title.Contains($t)) { return $true }
     }

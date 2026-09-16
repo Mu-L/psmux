@@ -531,6 +531,30 @@ else { Write-Fail "Memory grew by ${memDelta}MB during sustained output" }
 
 if (-not $tuiWedgeDetected) { Write-Pass "TUI client survived full 90s sustained output" }
 
+# Wait for a marker to appear in a pane, polling instead of sleeping once.
+#
+# The claim these tests make is "the server is not wedged", not "the echo
+# completes within exactly two seconds". A single capture after a fixed sleep
+# turns any slow round trip into a WEDGE verdict, and window 1.1 is still
+# flooding at this point, so the shell's echo competes with a pane that never
+# stops producing output. Measured 2026-09-16: the same assertions scored 2
+# failures, then 0, then 1 across three runs of the unchanged suite on one
+# machine. Polling keeps the real signal (a wedge never produces the marker at
+# all) and reports how long a healthy round trip actually took, which is the
+# number worth having when this fails again.
+function Wait-PaneMarker {
+    param([string]$Target, [string]$Marker, [int]$TimeoutMs = 15000)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $cap = & $PSMUX capture-pane -t $Target -p 2>&1 | Out-String
+        if ($cap -match [regex]::Escape($Marker)) {
+            return @{ Found = $true; Ms = $sw.ElapsedMilliseconds }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return @{ Found = $false; Ms = $sw.ElapsedMilliseconds }
+}
+
 # [Test E3] send-keys still works after sustained period
 Write-Host "`n[Test E3] send-keys after 90s sustained output" -ForegroundColor Yellow
 # Stop heavy output in window 2 first
@@ -538,10 +562,9 @@ Write-Host "`n[Test E3] send-keys after 90s sustained output" -ForegroundColor Y
 Start-Sleep -Seconds 1
 $markerE = "AFTER_SUSTAINED_$(Get-Random)"
 & $PSMUX send-keys -t "${SESSION}:2" "echo $markerE" Enter
-Start-Sleep -Seconds 2
-$capE = & $PSMUX capture-pane -t "${SESSION}:2" -p 2>&1 | Out-String
-if ($capE -match $markerE) { Write-Pass "send-keys works after 90s sustained output" }
-else { Write-Fail "send-keys FAILED after 90s sustained output" }
+$hitE = Wait-PaneMarker -Target "${SESSION}:2" -Marker $markerE
+if ($hitE.Found) { Write-Pass "send-keys works after 90s sustained output (echo visible in $($hitE.Ms)ms)" }
+else { Write-Fail "send-keys FAILED after 90s sustained output (no echo within $($hitE.Ms)ms)" }
 
 # [Test E4] Client kill + fresh attach after sustained
 Write-Host "`n[Test E4] Client kill + fresh attach after 90s sustained" -ForegroundColor Yellow
@@ -560,10 +583,10 @@ if ($finalProc.HasExited) {
 
     $markerFinal = "FINAL_PROOF_$(Get-Random)"
     & $PSMUX send-keys -t "${SESSION}:2" "echo $markerFinal" Enter
-    Start-Sleep -Seconds 2
-    $capFinal = & $PSMUX capture-pane -t "${SESSION}:2" -p 2>&1 | Out-String
-    if ($capFinal -match $markerFinal) { Write-Pass "send-keys to non-heavy pane works post-reattach" }
-    else { Write-Fail "WEDGE: send-keys FAILED post-reattach" }
+    $hitFinal = Wait-PaneMarker -Target "${SESSION}:2" -Marker $markerFinal
+    $capFinal = if ($hitFinal.Found) { $markerFinal } else { "" }
+    if ($hitFinal.Found) { Write-Pass "send-keys to non-heavy pane works post-reattach (echo visible in $($hitFinal.Ms)ms)" }
+    else { Write-Fail "WEDGE: send-keys FAILED post-reattach (no echo within $($hitFinal.Ms)ms)" }
 
     # Keystroke test in final fresh attach
     if (Test-Path $injectorExe) {
