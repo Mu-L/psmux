@@ -234,18 +234,31 @@ if ($pidE -gt 0) {
     $hadMarker = Test-Path $marker
     Remove-Item $marker -Force -EA SilentlyContinue
     Write-Info "marker existed=$hadMarker, now removed (simulates a pre-#514 server)"
+    # Distinguish "a probe reaped it" from "it went away on its own". Removing
+    # the registry claim above is exactly the state a server self exits from in
+    # some paths, so a victim that is already gone BEFORE the first probe proves
+    # nothing about the reaper's polarity. Without this the failure said only
+    # "was reaped", which is ambiguous: this suite failed once in the sweep of
+    # 2026-09-16 and passed 3 of 3 standalone straight afterwards, and the log
+    # could not say which of the two had happened.
+    $diedBeforeAnyProbe = -not (Test-Alive $pidE)
+    if ($diedBeforeAnyProbe) {
+        Write-Info "victim exited after the registry claim was removed, before any probe ran"
+    }
     $survived = $true
+    $diedOnPass = 0
     for ($i = 1; $i -le 4; $i++) {
         Invoke-Probe
         Start-Sleep -Milliseconds 900
-        if (-not (Test-Alive $pidE)) { $survived = $false; break }
+        if (-not (Test-Alive $pidE)) { $survived = $false; $diedOnPass = $i; break }
     }
+    if (-not $survived) { Write-Info "victim gone after probe pass $diedOnPass (died before any probe: $diedBeforeAnyProbe)" }
     if ($hadMarker -and $survived) {
         Write-Pass "Marker-less untracked server survived all passes -> only marker-claimed servers are reapable"
     } elseif (-not $hadMarker) {
         Write-Fail "Live server never wrote an ownership marker (expected servers\$pidE)"
     } else {
-        Write-Fail "Marker-less server was reaped -> polarity fix not holding"
+        Write-Fail "Marker-less server was reaped -> polarity fix not holding (died before any probe: $diedBeforeAnyProbe, on pass: $diedOnPass)"
     }
     Stop-Process -Id $pidE -Force -EA SilentlyContinue
 } else {
