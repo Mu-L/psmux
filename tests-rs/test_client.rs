@@ -92,7 +92,8 @@ fn flush_paste_pend_ascii_sends_as_paste() {
     let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
     let mut stage2 = true;
     let mut cmds: Vec<String> = Vec::new();
-    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds);
+    let mut delivered: Option<(String, std::time::Instant)> = None;
+    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut delivered);
     assert_eq!(cmds.len(), 1);
     assert!(cmds[0].starts_with("send-paste "));
 }
@@ -106,7 +107,8 @@ fn flush_paste_pend_cjk_sends_as_text() {
     let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
     let mut stage2 = false;
     let mut cmds: Vec<String> = Vec::new();
-    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds);
+    let mut delivered: Option<(String, std::time::Instant)> = None;
+    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut delivered);
     // Each character should be sent as individual send-text
     assert!(cmds.len() > 1, "CJK should be sent as individual send-text commands");
     for cmd in &cmds {
@@ -122,7 +124,8 @@ fn flush_paste_pend_short_ascii_sends_as_text() {
     let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
     let mut stage2 = false;
     let mut cmds: Vec<String> = Vec::new();
-    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds);
+    let mut delivered: Option<(String, std::time::Instant)> = None;
+    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut delivered);
     assert_eq!(cmds.len(), 2);
     assert!(cmds[0].starts_with("send-text "));
     assert!(cmds[1].starts_with("send-text "));
@@ -707,4 +710,71 @@ fn paste_command_prompt_takes_precedence_over_other_overlays() {
     assert!(rename_buf.is_empty());
     assert!(pane_title_buf.is_empty());
     assert!(window_idx_buf.is_empty());
+}
+
+// ─── Duplicate paste read-back guard (a CJK paste landing twice) ───────────
+//
+// A short CJK clipboard paste is flushed as individual characters by the IME
+// heuristic of issue #91.  The Ctrl+V Release that follows then read the
+// clipboard and sent the same string again, so pasting a Chinese word landed in
+// the pane twice: once as one send-text per character and once as a send-paste.
+// These tests pin the guard that recognises such a read-back as a duplicate of
+// the text that already went out.
+
+#[cfg(windows)]
+fn delivered_burst(text: &str, age_ms: u64) -> (String, std::time::Instant) {
+    (
+        text.to_string(),
+        std::time::Instant::now() - std::time::Duration::from_millis(age_ms),
+    )
+}
+
+#[cfg(windows)]
+#[test]
+fn clipboard_read_back_of_a_just_delivered_burst_is_a_duplicate() {
+    let recent = delivered_burst("恭喜通关", 5);
+    assert!(duplicates_recent_paste("恭喜通关", recent_paste_delivery(Some(&recent))));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_different_clipboard_payload_is_never_dropped() {
+    let recent = delivered_burst("恭喜通关", 5);
+    assert!(!duplicates_recent_paste("恭喜通关！", recent_paste_delivery(Some(&recent))));
+    assert!(!duplicates_recent_paste("abc", recent_paste_delivery(Some(&recent))));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_read_back_after_the_window_is_not_a_duplicate() {
+    let recent = delivered_burst("恭喜通关", 400);
+    assert!(!duplicates_recent_paste("恭喜通关", recent_paste_delivery(Some(&recent))));
+}
+
+#[cfg(windows)]
+#[test]
+fn nothing_delivered_yet_is_not_a_duplicate() {
+    assert!(!duplicates_recent_paste("恭喜通关", recent_paste_delivery(None)));
+}
+
+#[cfg(windows)]
+#[test]
+fn an_empty_burst_never_matches() {
+    let recent = delivered_burst("", 5);
+    assert!(!duplicates_recent_paste("", recent_paste_delivery(Some(&recent))));
+}
+
+#[cfg(windows)]
+#[test]
+fn the_interrupt_flush_remembers_the_cjk_burst_it_delivered() {
+    let mut buf = String::from("恭喜通关");
+    let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
+    let mut stage2 = false;
+    let mut cmds: Vec<String> = Vec::new();
+    let mut slot: Option<(String, std::time::Instant)> = None;
+    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut slot);
+    assert!(cmds.iter().all(|c| c.starts_with("send-text ")),
+        "CJK bursts still go out as individual text (issue #91)");
+    assert!(duplicates_recent_paste("恭喜通关", recent_paste_delivery(slot.as_ref())),
+        "the delivered CJK burst must be remembered so the read-back is dropped");
 }
