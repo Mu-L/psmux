@@ -2450,9 +2450,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 let auto_rename =
                                     crate::server::options::win_flag(win, "automatic-rename", global_auto_rename);
                                 if !auto_rename && !allow_rename { continue; }
+                                let last_output = win.last_output_time;
                                 if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
                                     if p.dead { continue; }
-                                    if p.last_title_check.elapsed().as_millis() < 1000 { continue; }
+                                    // tmux names.c:66: no output since the last
+                                    // check means nothing to rename, so the
+                                    // process table walk is skipped. Without this
+                                    // the #658 idle floor made every attached
+                                    // client cost one walk per window per second.
+                                    if !helpers::window_name_check_due(last_output, p.last_title_check, 1000) { continue; }
                                     p.last_title_check = std::time::Instant::now();
                                     if p.child_pid.is_none() {
                                         p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);

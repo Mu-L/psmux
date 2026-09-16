@@ -361,6 +361,33 @@ pub(crate) fn list_windows_json_with_tabs(app: &AppState) -> io::Result<String> 
 }
 
 /// Sum data_version counters across all panes in the active window.
+/// Whether the automatic rename walk (a process table snapshot per window) is
+/// due for a pane, tmux `names.c:66` style: only when the window has produced
+/// output since the last check, and at most once per throttle interval.
+///
+/// The check runs inside the `dump-state` request handler, so before #658 it
+/// ran only when a client asked for a frame, which an idle client never did.
+/// The #658 idle floor makes an attached client ask once a second, and without
+/// this gate every one of those requests walked the process table for every
+/// window: the cross terminal gate measured server plus client idle CPU at
+/// 3.7 percent of a core against 0.78 the same morning on the build before the
+/// floor (sweep 2026-09-16_02-02-11, T7). tmux answers the same question with
+/// `PANE_CHANGED`: no output since the last check means nothing to rename.
+///
+/// `last_output` is the window's last output stamp (advanced by
+/// `check_window_activity`, which runs earlier in the same request), and
+/// `last_check` is the pane's stamp from the previous walk.
+pub(crate) fn window_name_check_due(
+    last_output: std::time::Instant,
+    last_check: std::time::Instant,
+    throttle_ms: u128,
+) -> bool {
+    if last_output <= last_check {
+        return false;
+    }
+    last_check.elapsed().as_millis() >= throttle_ms
+}
+
 pub(crate) fn combined_data_version(app: &AppState) -> u64 {
     let mut v = 0u64;
     fn walk(node: &Node, v: &mut u64) {
@@ -973,3 +1000,7 @@ mod tests_issue556_color_reply_order;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue559_monitor_silence.rs"]
 mod tests_issue559_monitor_silence;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue658_rename_walk_activity_gate.rs"]
+mod tests_issue658_rename_walk_activity_gate;
