@@ -67,3 +67,23 @@ fn is_a_boolean_option() {
     assert!(crate::server::options::is_boolean_option("mouse-drag-enter-copy-mode"));
     assert!(crate::server::options::missing_value_toggles("mouse-drag-enter-copy-mode"));
 }
+
+#[test]
+fn the_catalog_knows_it_so_set_u_can_restore_the_default() {
+    // `set -gu <option>` restores the catalog default (#619). Without an
+    // OptionDef the reset was a silent no-op: `set -g ... on` followed by
+    // `set -gu ...` left it on.
+    let def = crate::server::option_catalog::option_definition("mouse-drag-enter-copy-mode")
+        .expect("the option must be in the catalog");
+    assert_eq!(def.default, "off");
+
+    let mut app = mock_app();
+    crate::server::options::apply_set_option(&mut app, "mouse-drag-enter-copy-mode", "on", false)
+        .expect("apply_set_option must accept the option");
+    assert!(app.mouse_drag_enter_copy_mode);
+    crate::server::options::reset_option_to_default(&mut app, "mouse-drag-enter-copy-mode");
+    assert!(
+        !app.mouse_drag_enter_copy_mode,
+        "set -u must put the option back to its default"
+    );
+}

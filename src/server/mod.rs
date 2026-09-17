@@ -4801,6 +4801,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     output.push_str(&format!("escape-time {}\n", app.escape_time_ms));
                     output.push_str(&format!("mouse {}\n", if app.mouse_enabled { "on" } else { "off" }));
                     output.push_str(&format!("scroll-enter-copy-mode {}\n", if app.scroll_enter_copy_mode { "on" } else { "off" }));
+                    output.push_str(&format!("mouse-drag-enter-copy-mode {}\n", if app.mouse_drag_enter_copy_mode { "on" } else { "off" }));
                     output.push_str(&format!("pwsh-mouse-selection {}\n", if app.pwsh_mouse_selection { "on" } else { "off" }));
                     output.push_str(&format!("mouse-selection {}\n", if app.mouse_selection { "on" } else { "off" }));
                     output.push_str(&format!("mouse-selection-force {}\n", if app.mouse_selection_force { "on" } else { "off" }));
