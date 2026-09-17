@@ -589,6 +589,19 @@ Aliases are accepted for several of these: `Return` for `Enter`, `Esc` for `Esca
 `BSpace` for `Backspace`, `PPage` or `PgUp` for `PageUp`, `NPage` or `PgDn` for `PageDown`,
 `IC` for `Insert`, `DC` for `Delete`, `BackTab` for `BTab`.
 
+### Extended keys from the host terminal
+
+A host terminal that reports modified keys in the `CSI u` form (Windows Terminal with
+extended keys on, WezTerm, Kitty, xterm with `modifyOtherKeys`) is understood on both
+input paths, so `Shift+Enter`, `Ctrl+Enter` and the like reach a bound key or the pane
+as the key they are (#654). A `CSI u` that arrives inside a paste stays text.
+
+Known boundary: under Git Bash's mintty the psmux client runs behind Cygwin's
+pseudo console, and that conhost drops a `CSI u` it does not recognise before psmux
+sees it when virtual terminal input is off. Modified keys reported that way do not
+reach psmux there. This is a limitation of the host, not something psmux can recover;
+Windows Terminal and WezTerm are the hosts where extended keys are verified.
+
 A key name psmux cannot parse is never dropped silently. `psmux bind-key WheelUpPain ...` prints
 `unknown key: WheelUpPain` and exits 1, like tmux; the same line in a config file is reported in
 the boot summary and in `~/.psmux/config-warnings.log` (see [diagnostics.md](diagnostics.md)).
