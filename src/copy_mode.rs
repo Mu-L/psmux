@@ -461,6 +461,71 @@ pub fn scroll_copy_down(app: &mut AppState, lines: usize) {
     app.copy_scroll_offset = parser.screen().scrollback();
 }
 
+/// Copy-mode offset after the pane's retained history shrank by
+/// `filled_before - filled_after` lines: shift it by the number of lines the
+/// trim removed so the view stays on the same content, exactly like tmux's
+/// copy-mode resize handling.  `None` means the offset is no longer reachable
+/// at all and the caller must leave copy mode rather than strand the view.
+pub fn offset_after_trim(
+    offset_before: usize,
+    filled_before: usize,
+    filled_after: usize,
+) -> Option<usize> {
+    if filled_after >= filled_before {
+        return Some(offset_before); // nothing was trimmed
+    }
+    let shifted = offset_before.saturating_sub(filled_before - filled_after);
+    if shifted > filled_after {
+        None
+    } else {
+        Some(shifted)
+    }
+}
+
+/// Keep the copy-mode view anchored across a pane resize.
+///
+/// `copy_scroll_offset` counts lines above the live bottom, so a resize that
+/// trims retained scrollback (the vt100 screen reflows history, and a frozen
+/// copy-mode pane can report a much smaller history mid-resize) leaves it
+/// pointing past the oldest retained line.  The pane then renders at the very
+/// top, and the freeze/dump sync writes that clamped offset straight back, so
+/// the user stays pinned at the top until they press Esc.
+///
+/// Reproduced live with a phone client whose on-screen keyboard toggles the
+/// pane height: in mode=1 the offset went 3771 -> 4390 while the retained
+/// history fell to 508, then settled at scroll == history_size with the view
+/// stuck on line 1.
+pub fn reanchor_after_resize(app: &mut AppState, offset_before: usize, filled_before: usize) {
+    if !matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        return;
+    }
+    let shifted = {
+        let win = &mut app.windows[app.active_idx];
+        let p = match active_pane_mut(&mut win.root, &win.active_path) {
+            Some(p) => p,
+            None => return,
+        };
+        let mut parser = match p.term.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let filled_after = parser.screen().scrollback_filled();
+        match offset_after_trim(offset_before, filled_before, filled_after) {
+            Some(after) => {
+                parser.screen_mut().set_scrollback(after);
+                Some(after)
+            }
+            None => None,
+        }
+    };
+    match shifted {
+        Some(after) => app.copy_scroll_offset = after,
+        // Nothing left to anchor to: return to the live view instead of
+        // leaving the pane showing its oldest retained line.
+        None => exit_copy_mode(app),
+    }
+}
+
 pub fn scroll_to_top(app: &mut AppState) {
     let win = &mut app.windows[app.active_idx];
     let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return };
@@ -1896,6 +1961,10 @@ mod tests_issue443_blank_cell_capture;
 mod tests_capture_pane_fidelity;
 
 #[cfg(test)]
+#[cfg(test)]
+#[path = "../tests-rs/test_copy_mode_resize_reanchor.rs"]
+mod test_copy_mode_resize_reanchor;
+
 #[path = "../tests-rs/test_copy_cancel_stale_state.rs"]
 mod tests_copy_cancel_stale_state;
 
