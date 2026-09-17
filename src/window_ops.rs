@@ -3031,3 +3031,7 @@ mod test_issue645_rotate_geometry;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue657_wheel_nonshell_full_screen.rs"]
 mod test_issue657_wheel_nonshell_full_screen;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue669_border_status_mouse_rows.rs"]
+mod test_issue669_border_status_mouse_rows;
