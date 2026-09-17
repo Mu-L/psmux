@@ -187,6 +187,36 @@ impl Drop for Parked {
     }
 }
 #[cfg(windows)]
+/// Wait until `pid`'s own reading of its working directory agrees with `dir`.
+///
+/// The PEB walk behind that reading is racy for a process that has just been
+/// created: the header of this file measured the same effect on a booting warm
+/// spare (`peb_own=Some("C:\\")` on one sweep, `Some("C:\\Users")` three
+/// seconds later).  On a loaded CI runner `ping.exe` can still report the
+/// directory it was created in for a moment after `current_dir` was applied,
+/// which makes any test that asserts what happens "once the reading has moved"
+/// fail while nothing is wrong.  Wait for the move, and keep a deadline so a
+/// reading that never arrives still fails loudly instead of hanging.
+fn wait_for_cwd_reading(pid: u32, dir: &std::path::Path) {
+    let want = dir.to_string_lossy().into_owned();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let live = crate::platform::process_info::get_process_cwd(pid);
+        if live
+            .as_deref()
+            .map_or(false, |cwd| crate::util::same_dir(cwd, &want))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the parked process never reported {want:?} (last reading {live:?})"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(windows)]
 fn park_process_in(dir: &std::path::Path) -> Parked {
     let child = std::process::Command::new("ping.exe")
         .args(["-n", "60", "127.0.0.1"])
@@ -195,6 +225,7 @@ fn park_process_in(dir: &std::path::Path) -> Parked {
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn parked process");
+    wait_for_cwd_reading(child.id(), dir);
     Parked(child)
 }
 
