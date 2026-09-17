@@ -120,6 +120,15 @@ pub struct Screen {
     mouse_protocol_mode: MouseProtocolMode,
     mouse_protocol_encoding: MouseProtocolEncoding,
 
+    /// Which of DECSET 1005 and 1006 the application currently has ON, kept
+    /// apart from `mouse_protocol_encoding` because they are two independent
+    /// switches and the encoding is only one answer.  tmux stores them as two
+    /// bits of the pane's screen mode (`MODE_MOUSE_UTF8` 0x100 and
+    /// `MODE_MOUSE_SGR` 0x200, tmux.h:683) and reports each on its own through
+    /// `#{mouse_utf8_flag}` / `#{mouse_sgr_flag}` (format.c:2015, 1991), so an
+    /// application that turned both on has both flags set.  Issue #662.
+    mouse_encoding_flags: u8,
+
     /// Window title set by the application via OSC 0 or OSC 2.
     osc_title: String,
 
@@ -211,6 +220,7 @@ impl Screen {
             modes: 0,
             mouse_protocol_mode: MouseProtocolMode::default(),
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
+            mouse_encoding_flags: 0,
             osc_title: String::new(),
             osc7_path: None,
             osc94_progress: None,
@@ -807,6 +817,57 @@ impl Screen {
         self.mouse_protocol_encoding
     }
 
+    /// Is the application asking for mouse tracking at all?  tmux's
+    /// `#{mouse_any_flag}`, `wp->base.mode & ALL_MOUSE_MODES` where
+    /// `ALL_MOUSE_MODES` is `MODE_MOUSE_STANDARD|MODE_MOUSE_BUTTON|
+    /// MODE_MOUSE_ALL` (format.c:1952, tmux.h:698).  The reporting ENCODING
+    /// (1005/1006) is deliberately not part of it: an encoding on its own
+    /// reports nothing.
+    #[must_use]
+    pub fn mouse_any_flag(&self) -> bool {
+        self.mouse_protocol_mode != MouseProtocolMode::None
+    }
+
+    /// DECSET 1000, tmux's `#{mouse_standard_flag}` / `MODE_MOUSE_STANDARD`
+    /// (format.c:2003).  X10 tracking (DECSET 9) counts here too: tmux does
+    /// not implement 9 at all, this parser does, and it is the same
+    /// press-only report `1000` extends.
+    #[must_use]
+    pub fn mouse_standard_flag(&self) -> bool {
+        matches!(
+            self.mouse_protocol_mode,
+            MouseProtocolMode::Press | MouseProtocolMode::PressRelease
+        )
+    }
+
+    /// DECSET 1002, tmux's `#{mouse_button_flag}` / `MODE_MOUSE_BUTTON`
+    /// (format.c:1964): motion reported while a button is held.
+    #[must_use]
+    pub fn mouse_button_flag(&self) -> bool {
+        self.mouse_protocol_mode == MouseProtocolMode::ButtonMotion
+    }
+
+    /// DECSET 1003, tmux's `#{mouse_all_flag}` / `MODE_MOUSE_ALL`
+    /// (format.c:1940): motion reported with no button held.
+    #[must_use]
+    pub fn mouse_all_flag(&self) -> bool {
+        self.mouse_protocol_mode == MouseProtocolMode::AnyMotion
+    }
+
+    /// DECSET 1005, tmux's `#{mouse_utf8_flag}` / `MODE_MOUSE_UTF8`
+    /// (format.c:2015).
+    #[must_use]
+    pub fn mouse_utf8_flag(&self) -> bool {
+        self.mouse_encoding_flags & Self::ENCODING_UTF8 != 0
+    }
+
+    /// DECSET 1006, tmux's `#{mouse_sgr_flag}` / `MODE_MOUSE_SGR`
+    /// (format.c:1991).
+    #[must_use]
+    pub fn mouse_sgr_flag(&self) -> bool {
+        self.mouse_encoding_flags & Self::ENCODING_SGR != 0
+    }
+
     /// Returns the window title set via OSC 0 or OSC 2.
     #[must_use]
     pub fn title(&self) -> &str {
@@ -1154,19 +1215,48 @@ impl Screen {
         self.mouse_protocol_mode = mode;
     }
 
-    fn clear_mouse_mode(&mut self, mode: MouseProtocolMode) {
-        if self.mouse_protocol_mode == mode {
-            self.mouse_protocol_mode = MouseProtocolMode::default();
-        }
+    /// DECRST for a mouse tracking mode.  tmux turns the whole family off for
+    /// any of `1000`, `1001`, `1002` and `1003`
+    /// (`screen_write_mode_clear(sctx, ALL_MOUSE_MODES)`, input.c:1959), and
+    /// so does xterm: the three modes are one setting with three spellings,
+    /// so an application that enabled `1003` and disables with a bare
+    /// `ESC[?1000l` really is asking for the mouse to go quiet.  Matching only
+    /// the exact mode left such a pane reporting tracking that nobody wanted,
+    /// and `#{mouse_all_flag}` would have said so (#662).
+    fn clear_mouse_mode(&mut self, _mode: MouseProtocolMode) {
+        self.mouse_protocol_mode = MouseProtocolMode::default();
     }
 
     fn set_mouse_encoding(&mut self, encoding: MouseProtocolEncoding) {
+        self.mouse_encoding_flags |= Self::encoding_bit(encoding);
         self.mouse_protocol_encoding = encoding;
     }
 
     fn clear_mouse_encoding(&mut self, encoding: MouseProtocolEncoding) {
+        self.mouse_encoding_flags &= !Self::encoding_bit(encoding);
         if self.mouse_protocol_encoding == encoding {
-            self.mouse_protocol_encoding = MouseProtocolEncoding::default();
+            // Fall back to whichever of the two is still on rather than
+            // straight to the default: `1005h 1006h 1006l` leaves UTF-8
+            // reporting enabled, because `1005` was never withdrawn.
+            self.mouse_protocol_encoding =
+                if self.mouse_encoding_flags & Self::ENCODING_SGR != 0 {
+                    MouseProtocolEncoding::Sgr
+                } else if self.mouse_encoding_flags & Self::ENCODING_UTF8 != 0 {
+                    MouseProtocolEncoding::Utf8
+                } else {
+                    MouseProtocolEncoding::default()
+                };
+        }
+    }
+
+    const ENCODING_UTF8: u8 = 0b01;
+    const ENCODING_SGR: u8 = 0b10;
+
+    fn encoding_bit(encoding: MouseProtocolEncoding) -> u8 {
+        match encoding {
+            MouseProtocolEncoding::Utf8 => Self::ENCODING_UTF8,
+            MouseProtocolEncoding::Sgr => Self::ENCODING_SGR,
+            MouseProtocolEncoding::Default => 0,
         }
     }
 }

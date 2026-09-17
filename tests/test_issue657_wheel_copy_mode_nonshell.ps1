@@ -133,11 +133,12 @@ if (-not $clientUp) {
     & $PSMUX -L $NS send-keys -t $SESSION "& '$logChild' 80 '$childLog'" Enter 2>&1 | Out-Null
     Start-Sleep -Seconds 6
 
-    # NOTE: tmux's third WheelUpPane term, `#{mouse_any_flag}`, is not a psmux
-    # format variable yet (it renders empty), so the pane's "asked for nothing"
-    # state is asserted from what it IS: alternate_on is 0, the model app writes
-    # plain text and nothing else, and Layer 2 below shows the same wheel at the
-    # same moment reaching an application that did ask.
+    # NOTE: tmux's third WheelUpPane term, `#{mouse_any_flag}`, became a psmux
+    # format variable in #662; test_issue662_mouse_flag_formats.ps1 reads it
+    # directly.  Here the pane's "asked for nothing" state is still asserted
+    # from what it IS: alternate_on is 0, the model app writes plain text and
+    # nothing else, and Layer 2 below shows the same wheel at the same moment
+    # reaching an application that did ask.
     $fields = ((& $PSMUX -L $NS display-message -t $SESSION -p `
         '#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}|#{pane_current_command}|#{pane_in_mode}|#{alternate_on}') 2>&1).Trim() -split '\|'
     $fg = $fields[4]
