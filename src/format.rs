@@ -2005,6 +2005,36 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         }
         "alternate_saved_x" | "alternate_saved_y" => "0".into(),
 
+        // ── Mouse tracking flags (#662) ──
+        //
+        // tmux reads all six straight off the pane's own screen mode
+        // (format.c:1940-2026) and its default wheel binding is written in
+        // terms of them (key-bindings.c:510):
+        //
+        //   bind -n WheelUpPane { if -F '#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}' \
+        //       { send -M } { copy-mode -e } }
+        //
+        // psmux tracked the same state for its own wheel gate but never
+        // published it, so every one of these rendered empty and that binding
+        // line could only ever take its `copy-mode -e` branch.  They are read
+        // from the TARGET pane, not the active one, so `-t %N` and
+        // `list-panes -F` answer per pane the way tmux does.
+        "mouse_any_flag" | "mouse_standard_flag" | "mouse_button_flag"
+        | "mouse_all_flag" | "mouse_utf8_flag" | "mouse_sgr_flag" => {
+            let on = target_pane().and_then(|p| p.term.lock().ok()).map(|parser| {
+                let screen = parser.screen();
+                match var {
+                    "mouse_any_flag" => screen.mouse_any_flag(),
+                    "mouse_standard_flag" => screen.mouse_standard_flag(),
+                    "mouse_button_flag" => screen.mouse_button_flag(),
+                    "mouse_all_flag" => screen.mouse_all_flag(),
+                    "mouse_utf8_flag" => screen.mouse_utf8_flag(),
+                    _ => screen.mouse_sgr_flag(),
+                }
+            });
+            if on == Some(true) { "1".into() } else { "0".into() }
+        }
+
         // ── Misc ──
         "origin_flag" | "insert_flag" | "keypad_cursor_flag" | "keypad_flag" => "0".into(),
         "wrap_flag" => "1".into(),
