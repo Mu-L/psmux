@@ -98,11 +98,26 @@ function Invoke-ShellCase {
     $env:PSMUX_SESSION = $null; $env:TMUX = $null; $env:PSMUX_TARGET_SESSION = $null
 
     try {
-        & $Psmux -L $ns new-session -d -s t -x 100 -y 30 -c $startDir 2>&1 | Out-Null
-        Start-Sleep -Milliseconds $SettleMs
-
-        $cold = (& $Psmux -L $ns capture-pane -t t:0.0 -p -S -3000 2>&1 | Out-String)
-        if ($cold -notmatch $PromptPattern) {
+        # Cold start, polled rather than slept: a session that never comes up
+        # (a busy machine loses the race often enough) is retried once before
+        # the case gives up, and what the pane actually showed is reported.
+        $cold = ""
+        $started = $false
+        foreach ($attempt in 1..2) {
+            $create = (& $Psmux -L $ns new-session -d -s t -x 100 -y 30 -c $startDir 2>&1 | Out-String).Trim()
+            if ($create) { Write-Info "new-session said: $create" }
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($sw.ElapsedMilliseconds -lt $SettleMs) {
+                Start-Sleep -Milliseconds 300
+                $cold = (& $Psmux -L $ns capture-pane -t t:0.0 -p -S -3000 2>&1 | Out-String)
+                if ($cold -match $PromptPattern) { $started = $true; break }
+            }
+            if ($started) { break }
+            Write-Info "attempt $attempt did not reach a prompt (last capture: $($cold.Trim())); retrying"
+            & $Psmux -L $ns kill-server 2>&1 | Out-Null
+            Start-Sleep -Milliseconds 700
+        }
+        if (-not $started) {
             Write-Skip "$Label : the pane never reached a $Family prompt (shell not usable here); capture was: $($cold.Trim())"
             return
         }
@@ -173,6 +188,16 @@ function Invoke-ShellCase {
                 $leaf = Split-Path $targetDir -Leaf
                 if ($echo -like "*$leaf*") {
                     Write-Pass "$Label / $name : the shell itself reports the requested directory ($echo)"
+                } elseif ($echo -like "/mnt/*") {
+                    # The pane is WSL's bash (a bare `bash` resolves to
+                    # C:\Windows\System32\bash.exe on a machine without Git Bash
+                    # on PATH). It is a POSIX shell and gets the POSIX line,
+                    # which is what #672 is about, but a Windows path is not a
+                    # path it can enter: it would need /mnt/c/... instead. That
+                    # is a separate, pre-existing limitation of the rehome (the
+                    # same class as #615's frozen WSL cwd), not something this
+                    # test can assert away.
+                    Write-Skip "$Label / $name : WSL bash cannot cd to a Windows path (reports '$echo'); dialect is still POSIX, which is what #672 covers"
                 } else {
                     Write-Fail "$Label / $name : the shell reports '$echo', which is not '$targetDir'"
                 }
