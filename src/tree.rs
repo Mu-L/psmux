@@ -316,8 +316,12 @@ pub fn resize_window_panes(app: &mut AppState, window_index: usize, area: Rect) 
                             pixel_width: 0,
                             pixel_height: 0
                         });
-                        if let Ok(mut parser) = pane.term.lock() {
-                            parser.screen_mut().set_size(inner_height, inner_width);
+                        // Both screens: the visible one (a copy-mode snapshot
+                        // while copy mode is up) and the live one behind it.
+                        for term in pane.each_term() {
+                            if let Ok(mut parser) = term.lock() {
+                                parser.screen_mut().set_size(inner_height, inner_width);
+                            }
                         }
                         pane.last_rows = inner_height;
                         pane.last_cols = inner_width;
@@ -334,6 +338,29 @@ pub fn resize_window_panes(app: &mut AppState, window_index: usize, area: Rect) 
         }
     }
     
+    // A resize can trim retained scrollback. A copy-mode pane counts its view
+    // in lines above the live bottom, so remember what it was showing (offset
+    // plus the retained depth it was measured against) and re-anchor after the
+    // panes have their new size. Without this the view lands on the oldest
+    // retained line and stays there until Esc (see
+    // copy_mode::reanchor_after_resize).
+    // `copy_scroll_offset` and `reanchor_after_resize` both address the ACTIVE
+    // window's active pane, so only that window's resize may re-anchor: a
+    // background window resizing (resize_all_panes walks every window) would
+    // otherwise measure its own pane's retained depth and apply the shift to
+    // the pane the user is actually looking at.
+    let copy_view_before = if window_index == app.active_idx
+        && matches!(app.mode, crate::types::Mode::CopyMode | crate::types::Mode::CopySearch { .. })
+    {
+        let win = &app.windows[window_index];
+        active_pane(&win.root, &win.active_path).map(|p| {
+            let filled = p.term.lock().map(|t| t.screen().scrollback_filled()).unwrap_or(0);
+            (app.copy_scroll_offset, filled)
+        })
+    } else {
+        None
+    };
+
     let win = &mut app.windows[window_index];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, area, &mut rects);
@@ -354,6 +381,10 @@ pub fn resize_window_panes(app: &mut AppState, window_index: usize, area: Rect) 
     };
     let mut path = Vec::new();
     resize_node(&mut win.root, &rects, &mut path, border_status_rows, zoom_active_path.as_ref());
+
+    if let Some((offset_before, filled_before)) = copy_view_before {
+        crate::copy_mode::reanchor_after_resize(app, offset_before, filled_before);
+    }
 }
 
 /// Resize the active window. Its stored geometry is authoritative, including

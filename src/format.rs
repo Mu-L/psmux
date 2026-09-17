@@ -970,6 +970,7 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
         "mouse" => Some(if app.mouse_enabled { "on".into() } else { "off".into() }),
         "bold-is-bright" => Some(if app.bold_is_bright { "on".into() } else { "off".into() }),
         "scroll-enter-copy-mode" => Some(if app.scroll_enter_copy_mode { "on".into() } else { "off".into() }),
+        "mouse-drag-enter-copy-mode" => Some(if app.mouse_drag_enter_copy_mode { "on".into() } else { "off".into() }),
         "choose-tree-preview" => Some(if app.choose_tree_preview { "on".into() } else { "off".into() }),
         "mode-keys" => Some(app.mode_keys.clone()),
         "default-command" | "default-shell" => Some(if app.default_shell.is_empty() {
@@ -1963,6 +1964,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         "mouse" => if app.mouse_enabled { "on".into() } else { "off".into() },
         "bold-is-bright" => if app.bold_is_bright { "on".into() } else { "off".into() },
         "scroll-enter-copy-mode" => if app.scroll_enter_copy_mode { "on".into() } else { "off".into() },
+        "mouse-drag-enter-copy-mode" => if app.mouse_drag_enter_copy_mode { "on".into() } else { "off".into() },
         "choose-tree-preview" => if app.choose_tree_preview { "on".into() } else { "off".into() },
         "prefix" => format_key_binding(&app.prefix_key),
         "prefix2" => app.prefix2_key.as_ref().map(|k| format_key_binding(k)).unwrap_or_else(|| "none".to_string()),

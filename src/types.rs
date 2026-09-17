@@ -149,6 +149,17 @@ pub struct Pane {
     pub writer: Box<dyn std::io::Write + Send>,
     pub child: Box<dyn portable_pty::Child>,
     pub term: Arc<Mutex<vt100::Parser>>,
+    /// While copy mode displays this pane, `term` holds a frozen *snapshot* of
+    /// the screen and this holds the live parser, which the PTY reader keeps
+    /// feeding through its own `Arc` (see `Pane::enter_copy_snapshot`).
+    ///
+    /// Copy mode on a snapshot is what tmux does (`window_copy_init` copies the
+    /// pane's grid).  Without it the frozen view sits on the live grid, so rows
+    /// entering scrollback churn underneath the offset the user is anchored to;
+    /// once those rows are evicted the view is stranded on the oldest retained
+    /// line — psmux reproduced as `#{scroll_position} == #{history_size}` while
+    /// pi redrew, stuck until Esc.
+    pub live_term: Option<Arc<Mutex<vt100::Parser>>>,
     pub last_rows: u16,
     pub last_cols: u16,
     pub id: usize,
@@ -345,6 +356,67 @@ pub struct Pane {
     /// anywhere else because the user typed their own `cd` first, the live
     /// reading takes over permanently.
     pub cwd_hint: Option<CwdHint>,
+}
+
+impl Pane {
+    /// Display this pane through a copy-mode snapshot: `term` becomes a frozen
+    /// copy of the current screen and the live parser is parked in
+    /// `live_term`.  The PTY reader keeps feeding the live parser, so the
+    /// application keeps running while the user reads.
+    ///
+    /// Idempotent: a second call while a snapshot is installed does nothing.
+    pub fn enter_copy_snapshot(&mut self) {
+        if self.live_term.is_some() {
+            return;
+        }
+        let snapshot = match self.term.lock() {
+            Ok(term) => term.snapshot(),
+            // Poisoned mutex (reader thread panicked): stay on the live screen
+            // rather than dropping the pane's terminal.
+            Err(_) => return,
+        };
+        let live = Arc::clone(&self.term);
+        self.term = Arc::new(Mutex::new(snapshot));
+        self.live_term = Some(live);
+    }
+
+    /// Drop the snapshot and show the live screen again, with everything the
+    /// application printed while copy mode was up.  Idempotent.
+    pub fn leave_copy_snapshot(&mut self) {
+        if let Some(live) = self.live_term.take() {
+            self.term = live;
+        }
+    }
+
+    /// The parser holding the pane's **live** screen.
+    ///
+    /// While copy mode is up `term` is the frozen snapshot the user is
+    /// reading, and this is the parser the PTY reader keeps feeding.
+    /// Commands that inspect the pane itself rather than the copy-mode
+    /// view -- `capture-pane` and its `-e`/`-S`/`-E` variants, matching
+    /// tmux, whose capture reads `wp->base` and never the copy-mode
+    /// grid -- must go through here.  Outside copy mode it is `term`.
+    pub fn live_parser(&self) -> &Arc<Mutex<vt100::Parser>> {
+        self.live_term.as_ref().unwrap_or(&self.term)
+    }
+
+    /// The view parser plus, while a copy-mode snapshot is installed, the live
+    /// parser behind it.
+    ///
+    /// Anything that reconfigures the terminal (resize, `history-limit`,
+    /// `alternate-screen`) must reach both, or the live screen comes back with
+    /// a stale geometry the moment copy mode exits.
+    pub fn each_term(&self) -> impl Iterator<Item = &Arc<Mutex<vt100::Parser>>> {
+        std::iter::once(&self.term).chain(self.live_term.iter())
+    }
+
+    /// Mutable counterpart of [`Pane::each_term`].
+    pub fn for_each_term_mut<F: FnMut(&mut Arc<Mutex<vt100::Parser>>)>(&mut self, mut f: F) {
+        f(&mut self.term);
+        if let Some(live) = self.live_term.as_mut() {
+            f(live);
+        }
+    }
 }
 
 /// A pane's requested-but-not-yet-observed working directory. See
@@ -1104,6 +1176,12 @@ pub struct AppState {
     /// scroll-enter-copy-mode: when off, mouse scroll at a shell prompt does NOT
     /// auto-enter copy mode.  Default: on (tmux parity).
     pub scroll_enter_copy_mode: bool,
+    /// mouse-drag-enter-copy-mode: when on, dragging with the left button
+    /// in a pane that does not track the mouse enters copy mode and selects
+    /// there (tmux's MouseDragStart -> `copy-mode -M`) instead of painting
+    /// the client-side selection overlay.  Default: off (keep the
+    /// client-side selection, which copies on release).
+    pub mouse_drag_enter_copy_mode: bool,
     /// pwsh-mouse-selection: when on, client-side drag selection behaves like
     /// Windows 11 PowerShell — pane-aware clipping, no copy-on-release (copy
     /// only on right-click), word/line selection on double/triple-click.
@@ -2043,6 +2121,7 @@ impl AppState {
                 .map(|s| HostColors::from_spec(&s))
                 .filter(|hc| hc.has_any() || hc.dark.is_some()),
             scroll_enter_copy_mode: true,
+            mouse_drag_enter_copy_mode: false,
             pwsh_mouse_selection: false,
             mouse_selection: true,
             mouse_selection_force: false,
@@ -2329,6 +2408,15 @@ pub enum CtrlReq {
     /// so pty output reaches the render on the event rather than on a timer.
     /// See `wake_server_loop`.
     PtyWake,
+    /// A client sent a request that was not a bare pointer sample.
+    ///
+    /// `window-size latest` must follow the client the user is actually
+    /// using (tmux keeps the most recently active client at the head of
+    /// `clients->latest`).  Without this, typing and clicking never
+    /// refreshed the size choice, so a phone client that narrowed the
+    /// window kept it narrow after the user went back to the desktop
+    /// (only a real resize, `client-size`, ever updated it).
+    ClientActivity(u64),
     NewWindow(Option<String>, Option<String>, bool, Option<String>, Option<String>, bool, Vec<(String, String)>),  // cmd, name, detached, start_dir, title (-T), empty (-E), env (-e, #489)
     NewWindowPrint(Option<String>, Option<String>, bool, Option<String>, Option<String>, mpsc::Sender<String>, Option<String>, bool, Vec<(String, String)>),  // cmd, name, detached, start_dir, format, resp, title (-T), empty (-E), env (-e, #489)
     SplitWindow(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, mpsc::Sender<String>, Option<String>, Vec<(String, String)>, bool),  // kind, cmd, detached, start_dir, size (value, is_percent), error_resp, title (-T), env (-e, #489), zoom (-Z)

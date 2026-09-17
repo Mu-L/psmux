@@ -2419,6 +2419,96 @@ mod window_ops_tests {
     }
 
     #[test]
+    fn client_entered_copy_mode_drag_anchors_at_press_and_yanks() {
+        // mouse-drag-enter-copy-mode: the client sends `copy-enter`, replays
+        // the press at the button-down cell, then drags. The selection must
+        // anchor at the press cell (not at the pane cursor) and yank on
+        // release, then leave copy mode like every other mouse drag (#62).
+        let mut app = make_scrollback_app(true);
+        crate::copy_mode::enter_copy_mode(&mut app);
+        assert!(matches!(app.mode, Mode::CopyMode));
+
+        super::handle_pane_mouse(&mut app, 41, 0, 5, 2, true); // press at (col 5, row 2)
+        super::handle_pane_mouse(&mut app, 41, 32, 9, 3, true); // drag to (col 9, row 3)
+        assert_eq!(app.copy_anchor, Some((2, 5)), "anchor must be the press cell");
+
+        super::handle_pane_mouse(&mut app, 41, 0, 9, 3, false); // release
+        assert_eq!(app.paste_buffers.len(), 1, "release must yank the selection");
+        assert!(matches!(app.mode, Mode::Passthrough), "a mouse yank exits copy mode");
+    }
+
+    #[test]
+    fn emacs_mode_bare_g_does_not_jump_to_history_top() {
+        // tmux binds history-top to `g` in copy-mode-vi only; the emacs table
+        // uses M-<. An ungated `g` meant that any stray `g` — typing a prompt
+        // into a pane that was still in copy mode, e.g. after a thumb scroll on
+        // a phone — threw the view to the very top until the user pressed Esc.
+        let mut app = make_scrollback_app(true);
+        super::handle_pane_scroll(&mut app, 41, true, None);
+        assert!(matches!(app.mode, Mode::CopyMode));
+        let before = app.copy_scroll_offset;
+        app.mode_keys = "emacs".to_string();
+        crate::input::send_text_to_active(&mut app, "g").expect("send-text g");
+        assert_eq!(app.copy_scroll_offset, before, "emacs 'g' must not move the view");
+        assert!(matches!(app.mode, Mode::CopyMode), "emacs 'g' must stay in copy mode");
+    }
+
+    #[test]
+    fn vi_mode_bare_g_still_jumps_to_history_top() {
+        let mut app = make_scrollback_app(true);
+        super::handle_pane_scroll(&mut app, 41, true, None);
+        app.mode_keys = "vi".to_string();
+        crate::input::send_text_to_active(&mut app, "g").expect("send-text g");
+        assert!(
+            app.copy_scroll_offset > 20,
+            "vi 'g' must still reach history-top (got {})",
+            app.copy_scroll_offset
+        );
+    }
+
+    #[test]
+    fn emacs_mode_alt_less_than_jumps_to_history_top() {
+        let mut app = make_scrollback_app(true);
+        super::handle_pane_scroll(&mut app, 41, true, None);
+        app.mode_keys = "emacs".to_string();
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('<'),
+            crossterm::event::KeyModifiers::ALT,
+        );
+        crate::input::handle_key(&mut app, key).expect("handle_key M-<");
+        assert!(
+            app.copy_scroll_offset > 20,
+            "M-< must reach history-top in emacs mode (got {})",
+            app.copy_scroll_offset
+        );
+    }
+
+    #[test]
+    fn named_alt_less_than_reaches_history_top_in_both_tables() {
+        // Alt keys reach copy mode as NAMED keys (`send-key M-<`), not through
+        // handle_key's char arm, so the named dispatcher needs its own arm.
+        // Without it `send-keys M-<` was silently swallowed while `send-keys
+        // M-v` (page up) worked, measured on a 380 line scrollback.
+        for mode_keys in ["emacs", "vi"] {
+            let mut app = make_scrollback_app(true);
+            super::handle_pane_scroll(&mut app, 41, true, None);
+            app.mode_keys = mode_keys.to_string();
+            let before = app.copy_scroll_offset;
+            crate::input::send_key_to_active(&mut app, "M-<").expect("send-key M-<");
+            assert!(
+                app.copy_scroll_offset > before,
+                "M-< must reach history-top under mode-keys {mode_keys} (got {})",
+                app.copy_scroll_offset
+            );
+            crate::input::send_key_to_active(&mut app, "M->").expect("send-key M->");
+            assert_eq!(
+                app.copy_scroll_offset, 0,
+                "M-> must reach history-bottom under mode-keys {mode_keys}"
+            );
+        }
+    }
+
+    #[test]
     fn enter_copy_mode_preserves_direct_scrolled_view() {
         let mut app = make_scrollback_app(true);
         // scroll-enter-copy-mode off (#193): the wheel scrolls the pane's
@@ -2738,6 +2828,27 @@ pub fn break_pane_to_window(app: &mut AppState) {
     }
 }
 
+/// `clear-history`: drop the active pane's scrollback.
+///
+/// tmux (cmd-capture-pane.c:418) resets every mode on the pane first and then
+/// calls `grid_clear_history(wp->base.grid)`, i.e. the LIVE grid, with copy
+/// mode gone. That ordering is load bearing: while copy mode is up `pane.term`
+/// is the frozen snapshot, so clearing it would wipe the screen the user is
+/// reading and leave the live scrollback untouched.
+pub fn clear_active_pane_history(app: &mut AppState) {
+    if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        exit_copy_mode(app);
+    }
+    let history_limit = app.history_limit;
+    let win = &mut app.windows[app.active_idx];
+    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+        p.leave_copy_snapshot();
+        if let Ok(mut parser) = p.term.lock() {
+            *parser = vt100::Parser::new(p.last_rows, p.last_cols, history_limit);
+        }
+    }
+}
+
 pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn portable_pty::PtySystem>, workdir: Option<&str>, kill: bool, command: Option<&str>, empty: bool) -> io::Result<()> {
     // tmux semantics: without -k, respawn only works on dead panes.
     // With -k, kill the running process first and respawn.
@@ -2873,6 +2984,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     pane.writer = pty_writer;
     pane.child = child;
     pane.term = term;
+    pane.live_term = None;
     pane.data_version = data_version;
     pane.cursor_shape = cursor_shape;
     pane.bell_pending = bell_pending;
@@ -2961,6 +3073,7 @@ pub fn heal_respawn_pane(
     pane.writer = pty_writer;
     pane.child = child;
     pane.term = term;
+    pane.live_term = None;
     pane.data_version = data_version;
     pane.cursor_shape = cursor_shape;
     pane.bell_pending = bell_pending;

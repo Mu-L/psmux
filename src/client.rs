@@ -2406,6 +2406,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut synced_bindings: Vec<BindingEntry> = Vec::new();
     let mut defaults_suppressed: bool = false;
     let mut scroll_enter_copy_mode: bool = true;
+    // mouse-drag-enter-copy-mode (mirror of the server option): a drag
+    // enters copy mode instead of painting the client-side overlay.
+    let mut mouse_drag_enter_copy_mode: bool = false;
     // When false, Ctrl+V is forwarded to the child app instead of being
     // intercepted for paste detection.
     #[cfg(windows)]
@@ -2439,6 +2442,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // unconditionally; only the Windows code paths ever read it.
     #[allow(unused_variables)]
     let mut paste_suppress_until: Option<Instant> = None;
+    // The text of the last paste-shaped burst that already reached the pane,
+    // with the time it went out.  A Ctrl+V Release (or a late Event::Paste)
+    // must not deliver the same string a second time: a short CJK clipboard
+    // paste is flushed as individual characters by the IME heuristic (#91),
+    // and the clipboard read-back that follows hands the pane the same text
+    // again - that is the "pasted text appears twice" duplicate.  Declared on
+    // every platform so the read-back sites stay platform-agnostic; only the
+    // Windows paths ever populate it.
+    #[allow(unused_variables)]
+    let mut paste_burst_delivered: Option<(String, Instant)> = None;
 
     // Track whether a modified Enter Press was already handled this keypress
     // cycle.  WezTerm sends Shift+Enter as Release-only (no Press), so we
@@ -2658,6 +2671,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         /// copy-mode -u) are skipped so the key reaches the PTY (#284).
         #[serde(default = "default_scroll_enter_copy_mode")]
         scroll_enter_copy_mode: bool,
+        /// mouse-drag-enter-copy-mode option (mirror of the server-side
+        /// field). When true, a left-button drag in a pane that does not
+        /// track the mouse enters copy mode and selects there (tmux parity)
+        /// instead of painting the client-side selection overlay.
+        #[serde(default)]
+        mouse_drag_enter_copy_mode: bool,
         /// pwsh-mouse-selection option (mirror of server-side AppState field)
         #[serde(default)]
         pwsh_mouse_selection: bool,
@@ -2843,6 +2862,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     let mut copy_drag_last: Option<(i16, i16)> = None;    // last pane-relative (col, row) sent
     let mut copy_drag_repeat_at: Option<Instant> = None;  // next repeat due (armed only at an edge)
     const COPY_DRAG_REPEAT: Duration = Duration::from_millis(50);
+    // mouse-drag-enter-copy-mode: a press recorded here turns into a
+    // server-side copy-mode selection on the first drag of the gesture
+    // (pane_id, pane rect at press, pane-relative col, row).
+    let mut copy_mode_drag_pending: Option<(usize, Rect, i16, i16)> = None;
     // A click withheld from a mouse-aware pane while psmux determines whether
     // the gesture is a click or a selection drag: (pane_id, col, row).
     let mut deferred_left_click: Option<(usize, i16, i16)> = None;
@@ -3082,6 +3105,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             input_log("paste", &format!("paste CONFIRMED (top), sending {} chars as send-paste: {:?}",
                                 paste_pend.len(), &paste_pend.chars().take(200).collect::<String>()));
                         }
+                        record_paste_delivery(&mut paste_burst_delivered, &paste_pend);
                         let encoded = base64_encode(&paste_pend);
                         cmd_batch.push(format!("send-paste {}\n", encoded));
                         // Suppress clipboard-read fallback
@@ -3119,6 +3143,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         if input_log_enabled() {
                             input_log("paste", &format!("flush {} chars as normal (non-ASCII / IME detected)", paste_pend.len()));
                         }
+                        // A burst delivered as typing can still be a clipboard
+                        // paste (the Ctrl+V Release read-back would then paste
+                        // the same text twice), so remember what went out.
+                        record_paste_delivery(&mut paste_burst_delivered, &paste_pend);
                         for c in paste_pend.chars() {
                             match c {
                                 '\n' => { cmd_batch.push("send-key enter\n".into()); }
@@ -3141,6 +3169,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         if input_log_enabled() {
                             input_log("paste", &format!("flush {} chars as normal (< 3 in 20ms)", paste_pend.len()));
                         }
+                        // Even a 1-2 character burst can be a clipboard paste
+                        // ("ab" pasted twice is the same bug as a CJK word), so
+                        // remember it for the read-back check.
+                        record_paste_delivery(&mut paste_burst_delivered, &paste_pend);
                         for c in paste_pend.chars() {
                             match c {
                                 '\n' => { cmd_batch.push("send-key enter\n".into()); }
@@ -3173,6 +3205,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         if input_log_enabled() {
                             input_log("paste", &format!("stage2 timeout, sending {} chars as send-paste", paste_pend.len()));
                         }
+                        record_paste_delivery(&mut paste_burst_delivered, &paste_pend);
                         let encoded = base64_encode(&paste_pend);
                         cmd_batch.push(format!("send-paste {}\n", encoded));
                         paste_pend.clear();
@@ -3338,7 +3371,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     _ => false,
                                 };
                                 if !is_bufferable {
-                                    flush_paste_pend_as_text(&mut paste_pend, &mut paste_pend_start, &mut paste_stage2, &mut cmd_batch);
+                                    flush_paste_pend_as_text(&mut paste_pend, &mut paste_pend_start, &mut paste_stage2, &mut cmd_batch, &mut paste_burst_delivered);
                                 }
                             }
                         }
@@ -4934,6 +4967,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 {
                                     if let Some(text) = read_from_system_clipboard() {
                                         if !text.is_empty() {
+                                            record_paste_delivery(&mut paste_burst_delivered, &text);
                                             let encoded = base64_encode(&text);
                                             cmd_batch.push(format!("send-paste {}\n", encoded));
                                         }
@@ -5110,7 +5144,21 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             pane_renaming, &mut pane_title_buf,
                             window_idx_input, &mut window_idx_buf,
                         );
-                        if !consumed {
+                        let duplicate = !consumed && duplicates_recent_paste(
+                            &data,
+                            recent_paste_delivery(paste_burst_delivered.as_ref()),
+                        );
+                        if duplicate {
+                            // Windows crossterm can emit Event::Paste *and* the
+                            // per-character key events for one Ctrl+V.  When the
+                            // characters were delivered first, forwarding this
+                            // event too pastes the same text twice.
+                            if input_log_enabled() {
+                                input_log("paste", &format!(
+                                    "Event::Paste: dropping duplicate of {} char(s) already sent as characters",
+                                    data.len()));
+                            }
+                        } else if !consumed {
                             let encoded = base64_encode(&data);
                             cmd_batch.push(format!("send-paste {}\n", encoded));
                         }
@@ -5377,6 +5425,22 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                                     rsel_dragged = false;
                                                     selection_changed = true;
                                                 }
+                                                // mouse-drag-enter-copy-mode (tmux parity): the drag
+                                                // starts a server-side copy-mode selection, so undo the
+                                                // client-side selection armed above and remember
+                                                // where the button went down — the drag replays it
+                                                // so the selection anchors at the press cell.
+                                                if mouse_drag_enter_copy_mode && !pane_handles_mouse {
+                                                    copy_mode_drag_pending = Some((pane_id, pane_rect, rel_col, rel_row));
+                                                    rsel_start = None;
+                                                    rsel_end = None;
+                                                    rsel_pane_rect = None;
+                                                    rsel_pane_id = None;
+                                                    rsel_block = false;
+                                                    rsel_dragged = false;
+                                                    deferred_left_click = None;
+                                                    selection_changed = true;
+                                                }
                                                 } // end client-side selection gate (mouse-selection + per-pane wants_mouse)
                                             }
                                         } else {
@@ -5444,6 +5508,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     selection_changed = true;
                                     if let Some(text) = read_from_system_clipboard() {
                                         if !text.is_empty() {
+                                            record_paste_delivery(&mut paste_burst_delivered, &text);
                                             let encoded = base64_encode(&text);
                                             cmd_batch.push(format!("send-paste {}\n", encoded));
                                         }
@@ -5484,7 +5549,16 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                         cmd_batch.push(format!("split-sizes {} {}\n", path_str, sizes_str));
                                     }
                                 } else if rsel_start.is_none() || !client_mouse_selection {
-                                    if client_copy_mode {
+                                    if client_copy_mode || copy_mode_drag_pending.is_some() {
+                                        if let Some((pending_id, pending_rect, pending_col, pending_row)) = copy_mode_drag_pending.take() {
+                                            // First drag of the gesture: enter copy mode and
+                                            // replay the press so the selection anchors where
+                                            // the button went down, like tmux's
+                                            // MouseDragStart -> copy-mode -M.
+                                            cmd_batch.push("copy-enter\n".into());
+                                            cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n", pending_id, pending_col, pending_row));
+                                            copy_drag_pane = Some((pending_id, pending_rect));
+                                        }
                                         // Route the drag to the pane it started in (falling
                                         // back to the pane under the pointer) and send the
                                         // row UNCLAMPED: an out-of-range row tells the server
@@ -5712,6 +5786,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 }
                                 // The drag gesture is over in every branch above.
                                 copy_drag_pane = None;
+                                copy_mode_drag_pending = None;
                                 copy_drag_last = None;
                                 copy_drag_repeat_at = None;
                             }
@@ -5733,6 +5808,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     copy_drag_pane = None;
                                     copy_drag_last = None;
                                     copy_drag_repeat_at = None;
+                                    copy_mode_drag_pending = None;
                                 }
                                 // Detect border hover for visual preview
                                 let mut new_hover: Option<(u16, String, Rect)> = None;
@@ -5846,6 +5922,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                         "zero-latency flush {} char(s) as typing",
                         paste_pend.len()));
                 }
+                record_paste_delivery(&mut paste_burst_delivered, &paste_pend);
                 for c in paste_pend.chars() {
                     match c {
                         '\n' => { cmd_batch.push("send-key enter\n".into()); }
@@ -5876,6 +5953,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     input_log("paste", &format!("paste CONFIRMED (post-event), sending {} chars as send-paste: {:?}",
                         paste_pend.len(), &paste_pend.chars().take(200).collect::<String>()));
                 }
+                record_paste_delivery(&mut paste_burst_delivered, &paste_pend);
                 let encoded = base64_encode(&paste_pend);
                 cmd_batch.push(format!("send-paste {}\n", encoded));
                 paste_pend.clear();
@@ -5894,7 +5972,19 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 if !suppressed {
                     // No recent paste — read clipboard as fallback
                     if let Some(text) = read_from_system_clipboard() {
-                        if !text.is_empty() {
+                        if duplicates_recent_paste(
+                            &text,
+                            recent_paste_delivery(paste_burst_delivered.as_ref()),
+                        ) {
+                            // The same text already went out as a burst of
+                            // characters for this very Ctrl+V; reading the
+                            // clipboard again here is the duplicate paste.
+                            if input_log_enabled() {
+                                input_log("paste", &format!(
+                                    "paste CONFIRMED (no buffer): dropping read-back duplicate of {} char(s)",
+                                    text.len()));
+                            }
+                        } else if !text.is_empty() {
                             if input_log_enabled() {
                                 input_log("paste", &format!("paste CONFIRMED (no buffer), clipboard read len={}", text.len()));
                             }
@@ -6241,6 +6331,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         }
         defaults_suppressed = state.defaults_suppressed;
         scroll_enter_copy_mode = state.scroll_enter_copy_mode;
+        mouse_drag_enter_copy_mode = state.mouse_drag_enter_copy_mode;
         // Sync repeat-time from server
         repeat_time_ms = state.repeat_time;
         // Sync bold-is-bright (issue #425) into the console writer's atomic.
@@ -7911,6 +8002,7 @@ fn flush_paste_pend_as_text(
     paste_pend_start: &mut Option<Instant>,
     paste_stage2: &mut bool,
     cmd_batch: &mut Vec<String>,
+    delivered: &mut Option<(String, Instant)>,
 ) {
     if paste_pend.is_empty() {
         return;
@@ -7920,6 +8012,7 @@ fn flush_paste_pend_as_text(
     // wraps it in bracketed paste sequences (fixes nvim autoindent).
     // Non-ASCII buffers (IME input) are always flushed as normal text to
     // avoid the 300ms delay (fixes #91).
+    record_paste_delivery(delivered, paste_pend);
     let has_non_ascii = paste_pend.chars().any(|c| !c.is_ascii());
     if (*paste_stage2 || paste_pend.len() >= 3) && !has_non_ascii {
         let encoded = crate::util::base64_encode(paste_pend);
@@ -7982,6 +8075,43 @@ fn should_zero_latency_flush_paste_pend(
         return false;
     }
     paste_pend.len() <= 2
+}
+
+/// How long after a paste-shaped burst was delivered a clipboard read-back of
+/// the same text is treated as a duplicate of it.  The read-back fires from
+/// the Ctrl+V Release of the same gesture, so a few hundred milliseconds is
+/// generous, and keeping it short leaves deliberate repeat pastes alone.
+#[cfg(windows)]
+const PASTE_DUPLICATE_WINDOW: Duration = Duration::from_millis(300);
+
+/// True when `text` is the string a paste-shaped burst just delivered, so
+/// reading the clipboard now would paste it twice.
+///
+/// The content is compared, not just the timing: a *different* clipboard
+/// payload is never dropped, and a deliberate repeat paste still reaches the
+/// pane through its own burst of characters.
+#[cfg(windows)]
+fn duplicates_recent_paste(text: &str, recent: Option<(&str, Duration)>) -> bool {
+    match recent {
+        Some((delivered, age)) => {
+            !text.is_empty() && delivered == text && age < PASTE_DUPLICATE_WINDOW
+        }
+        None => false,
+    }
+}
+
+/// Remember that `text` just reached the pane as a paste-shaped burst.
+#[cfg(windows)]
+fn record_paste_delivery(slot: &mut Option<(String, Instant)>, text: &str) {
+    if !text.is_empty() {
+        *slot = Some((text.to_string(), Instant::now()));
+    }
+}
+
+/// The age of the last delivered burst, ready for `duplicates_recent_paste`.
+#[cfg(windows)]
+fn recent_paste_delivery(slot: Option<&(String, Instant)>) -> Option<(&str, Duration)> {
+    slot.map(|(text, at)| (text.as_str(), at.elapsed()))
 }
 
 /// Returns true if the buffer contains any non-ASCII characters (IME / CJK input).

@@ -65,7 +65,22 @@ function Get-CopyState([string]$Target) {
 }
 
 function Get-TopVisible([string]$Target) {
-    $lines = (& $PSMUX capture-pane -t $Target -p 2>&1 | Out-String) -split "`r?`n"
+    # Since copy mode runs on a snapshot of the pane grid (PR #671), a plain
+    # `capture-pane` answers with the pane's LIVE screen and never follows the
+    # copy-mode viewport. That is tmux's contract: cmd-capture-pane.c reads
+    # `wp->base`, and the copy-mode offset `oy` lives in the mode's own data,
+    # so tmux's capture-pane does not follow a scrolled copy-mode view either.
+    # To see what copy mode is SHOWING, ask for the history range it sits on:
+    # `#{scroll_position}` is how many lines above the live top the view is, so
+    # `-S -<scroll_position>` starts exactly at the view's top line.
+    $scroll = 0
+    $raw = (& $PSMUX display-message -t $Target -p '#{scroll_position}' 2>&1 | Out-String).Trim()
+    [void][int]::TryParse($raw, [ref]$scroll)
+    $lines = if ($scroll -gt 0) {
+        (& $PSMUX capture-pane -t $Target -p -S (-$scroll) 2>&1 | Out-String) -split "`r?`n"
+    } else {
+        (& $PSMUX capture-pane -t $Target -p 2>&1 | Out-String) -split "`r?`n"
+    }
     if ($lines.Count -gt 0) { return $lines[0].TrimEnd() }
     return ""
 }
