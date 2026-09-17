@@ -137,7 +137,18 @@ function Invoke-Wheel {
 }
 
 function Get-Mode($target) { (& $PSMUX display-message -t $target -p '#{pane_in_mode}' 2>&1).Trim() }
-function Get-Capture($target) { ((& $PSMUX capture-pane -t $target -p 2>&1) -join "`n") }
+# Since copy mode runs on a snapshot of the pane grid (PR #671), a plain
+# `capture-pane` answers with the pane's LIVE screen and never follows the
+# copy-mode viewport -- tmux's contract, whose capture reads `wp->base`
+# (cmd-capture-pane.c) and knows nothing about the mode's `oy`. To see what the
+# wheel actually scrolled, capture the history range the view is sitting on.
+function Get-Capture($target) {
+    $scroll = 0
+    $raw = (& $PSMUX display-message -t $target -p '#{scroll_position}' 2>&1 | Out-String).Trim()
+    [void][int]::TryParse($raw, [ref]$scroll)
+    if ($scroll -gt 0) { ((& $PSMUX capture-pane -t $target -p -S (-$scroll) 2>&1) -join "`n") }
+    else { ((& $PSMUX capture-pane -t $target -p 2>&1) -join "`n") }
+}
 
 Write-Host "`n=== Issue #621: a blocked stdin read must not change what the wheel does ===" -ForegroundColor Cyan
 
