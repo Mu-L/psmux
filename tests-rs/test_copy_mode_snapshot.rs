@@ -343,3 +343,40 @@ fn clear_history_leaves_copy_mode_and_clears_the_live_screen() {
         "the LIVE scrollback must be the one that got cleared"
     );
 }
+
+/// `#{history_size}` and `#{history_bytes}` answer from the LIVE grid even
+/// while copy mode shows a snapshot, as tmux's format_cb_history_size does
+/// (format.c: `ft->wp->base.grid->hsize`, never the copy-mode grid). A script
+/// polling the variable during copy mode must see history keep growing.
+#[test]
+fn history_size_reports_the_live_grid_while_copy_mode_shows_a_snapshot() {
+    let mut app = app_with_pane();
+    let live = view_term(&app);
+    feed(&live, "before", 0, 60);
+    let before = crate::format::expand_format("#{history_size}", &app)
+        .parse::<usize>()
+        .expect("history_size is a number");
+    assert!(before > 0, "the pane needs retained history before copy mode");
+
+    crate::copy_mode::enter_copy_mode(&mut app);
+    assert!(parked_live_term(&app).is_some(), "a snapshot must be installed");
+    let frozen = filled(&view_term(&app));
+    feed(&live, "arrived", 0, 60);
+
+    let during = crate::format::expand_format("#{history_size}", &app)
+        .parse::<usize>()
+        .expect("history_size is a number");
+    assert!(
+        during > before,
+        "history_size must follow the live grid in copy mode: before {before}, during {during}"
+    );
+    assert_eq!(
+        filled(&view_term(&app)),
+        frozen,
+        "the snapshot itself must not have grown"
+    );
+    let bytes = crate::format::expand_format("#{history_bytes}", &app)
+        .parse::<usize>()
+        .expect("history_bytes is a number");
+    assert!(bytes > 0, "history_bytes must read the live grid too");
+}

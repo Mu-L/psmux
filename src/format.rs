@@ -1976,9 +1976,12 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         // active pane's scrollback (the *retained* count), not the
         // configured maximum (#271).  Falls back to 0 when no active pane
         // is reachable, matching tmux's behaviour for empty buffers.
+        // It reads the LIVE grid even while copy mode shows a snapshot
+        // (PR #671), because tmux's format_cb_history_size answers from
+        // wp->base.grid->hsize whatever mode the pane is in.
         "history_size" => {
             if let Some(p) = active_pane(&win.root, &win.active_path) {
-                if let Ok(parser) = p.term.lock() {
+                if let Ok(parser) = p.live_parser().lock() {
                     return parser.screen().scrollback_filled().to_string();
                 }
             }
@@ -1991,7 +1994,7 @@ fn expand_var_inner(var: &str, app: &AppState, win_idx: usize) -> String {
         // rather than pane width, so it is worth reporting honestly.
         "history_bytes" => {
             if let Some(p) = active_pane(&win.root, &win.active_path) {
-                if let Ok(parser) = p.term.lock() {
+                if let Ok(parser) = p.live_parser().lock() {
                     return parser.screen().history_bytes().to_string();
                 }
             }
