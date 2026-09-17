@@ -4221,7 +4221,16 @@ match cmd {
             }
             break; // Non-persistent timeout or real error
         }
-        Ok(_) => {} // Continue processing
+        Ok(_) => {
+            // Any real request makes this client the latest one for
+            // `window-size latest` (tmux tracks the most recently active
+            // client).  A bare pointer sample is not user intent (#604), so
+            // hovering over a pane must not steal the size from the client
+            // the user is working in.
+            if !crate::client::is_bare_motion_cmd(&line) {
+                let _ = tx.send(CtrlReq::ClientActivity(client_id));
+            }
+        }
     }
 } // end command loop
 }

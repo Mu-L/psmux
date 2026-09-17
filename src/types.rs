@@ -2298,6 +2298,15 @@ pub enum CtrlReq {
     /// so pty output reaches the render on the event rather than on a timer.
     /// See `wake_server_loop`.
     PtyWake,
+    /// A client sent a request that was not a bare pointer sample.
+    ///
+    /// `window-size latest` must follow the client the user is actually
+    /// using (tmux keeps the most recently active client at the head of
+    /// `clients->latest`).  Without this, typing and clicking never
+    /// refreshed the size choice, so a phone client that narrowed the
+    /// window kept it narrow after the user went back to the desktop
+    /// (only a real resize, `client-size`, ever updated it).
+    ClientActivity(u64),
     NewWindow(Option<String>, Option<String>, bool, Option<String>, Option<String>, bool, Vec<(String, String)>),  // cmd, name, detached, start_dir, title (-T), empty (-E), env (-e, #489)
     NewWindowPrint(Option<String>, Option<String>, bool, Option<String>, Option<String>, mpsc::Sender<String>, Option<String>, bool, Vec<(String, String)>),  // cmd, name, detached, start_dir, format, resp, title (-T), empty (-E), env (-e, #489)
     SplitWindow(LayoutKind, Option<String>, bool, Option<String>, Option<(u16, bool)>, mpsc::Sender<String>, Option<String>, Vec<(String, String)>, bool),  // kind, cmd, detached, start_dir, size (value, is_percent), error_resp, title (-T), env (-e, #489), zoom (-Z)
