@@ -469,6 +469,12 @@ bind-key -n C-h if-shell -F "#{pane_at_left}" "send-keys C-h" "select-pane -L"
 | `#{socket_path}` | Path of the server's discovery files |
 | `#{history_size}` | Lines currently held in the pane's scrollback |
 | `#{alternate_on}` | `1` if the pane is on the alternate screen |
+| `#{mouse_any_flag}` | `1` if the pane has any mouse tracking mode on (DECSET 1000, 1002 or 1003) |
+| `#{mouse_standard_flag}` | `1` if the pane enabled normal tracking, DECSET 1000 (or X10 tracking, DECSET 9) |
+| `#{mouse_button_flag}` | `1` if the pane enabled button event tracking, DECSET 1002 |
+| `#{mouse_all_flag}` | `1` if the pane enabled any event tracking, DECSET 1003 |
+| `#{mouse_utf8_flag}` | `1` if the pane enabled UTF-8 mouse reporting, DECSET 1005 |
+| `#{mouse_sgr_flag}` | `1` if the pane enabled SGR mouse reporting, DECSET 1006 |
 | `#{current_file}` | Config file being parsed, during config parsing |
 
 ### Options as format variables
