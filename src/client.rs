@@ -415,6 +415,13 @@ pub(crate) fn build_osc8_overlay(runs: &[HyperlinkRun]) -> String {
     out
 }
 
+/// tmux ships a non-empty `pane-border-format`, so `set pane-border-status top`
+/// on its own still draws a label and still costs the pane a row.  Both the
+/// client's renderer and the server's mouse handlers substitute this when the
+/// option is unset, or the label gate skips and the reserved row goes
+/// unaccounted for (#414, #669).
+pub(crate) const DEFAULT_PANE_BORDER_FORMAT: &str = "#{pane_index} \"#{pane_title}\"";
+
 /// Content area of a pane after reserving the `pane-border-status` label row.
 /// Must match `render_layout_json`'s `inner`; the caret and every screen→cell
 /// mouse mapping route through this so they stay aligned with the content (#288).
@@ -6361,7 +6368,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             // when unset/empty (else the label gate skips and the border is blank) (#414).
             let border_format = match state.pane_border_format.as_deref() {
                 Some(s) if !s.is_empty() => s,
-                _ => "#{pane_index} \"#{pane_title}\"",
+                _ => DEFAULT_PANE_BORDER_FORMAT,
             };
             // Publish for the post-draw cursor and next frame's mouse handlers.
             client_border_status = border_status.to_string();

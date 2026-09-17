@@ -39,6 +39,63 @@ fn pane_inner_cell_0based(area: Rect, abs_x: u16, abs_y: u16) -> (i16, i16) {
     (col, row)
 }
 
+/// The row `pane-border-status` takes out of every pane's layout slot for its
+/// label, resolved once from the server's own options.
+///
+/// tmux never needs this: `layout_fix_panes` bakes the label row into
+/// `wp->yoff`/`wp->sy` once (layout.c), and then every mouse event — press,
+/// drag, release, motion, wheel — converts through the single `cmd_mouse_at`
+/// (cmd.c), so press and release cannot disagree.  psmux converts in two
+/// places instead: the client turns a screen cell into a pane cell with
+/// `client::pane_content_inner` before sending `pane-mouse`, while the verbs
+/// that carry RAW screen coordinates (`mouse-up`, `mouse-drag`, `mouse-down`,
+/// `mouse-move`, `scroll-up`/`scroll-down`) are converted here.  This side
+/// used to subtract the layout slot's top rather than the content's, so with
+/// `pane-border-status top` a press landed on the row under the pointer and
+/// the matching release and drag landed one row lower (#669).  Both sides now
+/// call the same helper.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct PaneLabelRow {
+    /// "top", "bottom" or "off" — already collapsed to the three cases
+    /// `pane_content_inner` distinguishes, so no option string is borrowed.
+    status: &'static str,
+}
+
+impl PaneLabelRow {
+    /// Resolve from the live options, including the #414 default: only an
+    /// explicitly emptied `pane-border-format` turns the label row off.
+    pub(crate) fn from_options(app: &AppState) -> Self {
+        let status = match app.user_options.get("pane-border-status").map(String::as_str) {
+            Some("top") => "top",
+            Some("bottom") => "bottom",
+            _ => "off",
+        };
+        let format_empty = matches!(
+            app.user_options.get("pane-border-format").map(String::as_str),
+            Some("")
+        );
+        Self { status: if format_empty { "off" } else { status } }
+    }
+
+    /// The pane's content rect inside its layout slot.
+    pub(crate) fn content(self, area: Rect) -> Rect {
+        crate::client::pane_content_inner(
+            area,
+            self.status,
+            crate::client::DEFAULT_PANE_BORDER_FORMAT,
+        )
+    }
+
+    /// Screen cell → 0-based content cell, the conversion the client performs
+    /// for `pane-mouse`.  The row is floored at 0 exactly as the client floors
+    /// it, so a click on the label row itself still reports the pane's first
+    /// content row rather than a negative one.
+    pub(crate) fn cell_0based(self, area: Rect, abs_x: u16, abs_y: u16) -> (i16, i16) {
+        let (col, row) = pane_inner_cell_0based(self.content(area), abs_x, abs_y);
+        (col, row.max(0))
+    }
+}
+
 /// Convert screen coordinates to 1-based pane-local coordinates.
 fn pane_inner_cell(area: Rect, abs_x: u16, abs_y: u16) -> (u16, u16) {
     let col = abs_x.saturating_sub(area.x) + 1;
@@ -1034,6 +1091,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
         }
     }
 
+    let label = PaneLabelRow::from_options(app);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -1052,7 +1110,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
     if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
         app.copy_anchor = None;
         if let Some(area) = active_area {
-            let (row, col) = copy_cell_for_area(area, x, y);
+            let (row, col) = copy_cell_for_area(label.content(area), x, y);
             app.copy_pos = Some((row, col));
             app.copy_mouse_down_cell = Some((row, col));
         }
@@ -1080,7 +1138,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
     // Forward left-click only when active pane wants mouse input.
     if !on_border {
         if let Some(area) = active_area {
-            let (col, row) = pane_inner_cell_0based(area, x, y);
+            let (col, row) = label.cell_0based(area, x, y);
             let win_name = win.name.clone();
             if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                 if pane_wants_click(active) {
@@ -1132,6 +1190,7 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
         return;
     }
 
+    let label = PaneLabelRow::from_options(app);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -1143,7 +1202,7 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
         let target = rects.iter()
             .find(|(_, area)| area.contains(ratatui::layout::Position { x, y }))
             .or_else(|| rects.iter().find(|(p, _)| *p == win.active_path))
-            .map(|(p, a)| (p.clone(), *a));
+            .map(|(p, a)| (p.clone(), label.content(*a)));
         if let Some((path, area)) = target {
             win.active_path = path;
             let (row, col) = copy_cell_for_area(area, x, y);
@@ -1176,7 +1235,7 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
     } else {
         // Forward drag only when active pane wants mouse input.
         if let Some(area) = rects.iter().find(|(path, _)| *path == win.active_path).map(|(_, a)| *a) {
-            let (col, row) = pane_inner_cell_0based(area, x, y);
+            let (col, row) = label.cell_0based(area, x, y);
             let win_name = win.name.clone();
             if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                 if pane_wants_click(active) {
@@ -1195,6 +1254,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         app.float_drag = None;
         return;
     }
+    let label = PaneLabelRow::from_options(app);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -1202,7 +1262,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
     if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
         if let Some((path, area)) = rects.iter().find(|(_, area)| area.contains(ratatui::layout::Position { x, y })) {
             win.active_path = path.clone();
-            let (row, col) = copy_cell_for_area(*area, x, y);
+            let (row, col) = copy_cell_for_area(label.content(*area), x, y);
             app.copy_pos = Some((row, col));
         }
         // If mouse-up is within 1 cell of mouse-down, it was a plain click
@@ -1248,7 +1308,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
 
     // Forward mouse release only when active pane wants mouse input.
     if let Some(area) = rects.iter().find(|(path, _)| *path == win.active_path).map(|(_, a)| *a) {
-        let (col, row) = pane_inner_cell_0based(area, x, y);
+        let (col, row) = label.cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
             if pane_wants_click(active) {
@@ -1262,11 +1322,12 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
 /// Forward a non-left mouse button press/release to the child.
 pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press: bool) {
     let (x, y) = map_client_coords(app, x, y);
+    let label = PaneLabelRow::from_options(app);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
     if let Some(area) = rects.iter().find(|(path, _)| *path == win.active_path).map(|(_, a)| *a) {
-        let (col, row) = pane_inner_cell_0based(area, x, y);
+        let (col, row) = label.cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
             if pane_wants_click(active) {
@@ -1316,6 +1377,7 @@ pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) -> bool {
     }
     app.last_hover_pos = Some((x, y));
 
+    let label = PaneLabelRow::from_options(app);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -1326,7 +1388,7 @@ pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) -> bool {
     mouse_log(&format!("remote_mouse_motion: x={} y={}", x, y));
 
     if let Some(area) = rects.iter().find(|(path, _)| *path == win.active_path).map(|(_, a)| *a) {
-        let (col, row) = pane_inner_cell_0based(area, x, y);
+        let (col, row) = label.cell_0based(area, x, y);
         let win_name = win.name.clone();
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
             if pane_wants_bare_motion(active) {
@@ -1430,8 +1492,9 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
     if child_in_alt_screen {
         // Forward scroll to child TUI app (alternate screen = real TUI)
         mouse_log("  -> forwarding scroll to child TUI (alt screen)");
+        let label = PaneLabelRow::from_options(app);
         let win = &mut app.windows[app.active_idx];
-        let (col, row) = target_area_opt.map_or((0, 0), |area| pane_inner_cell_0based(area, x, y));
+        let (col, row) = target_area_opt.map_or((0, 0), |area| label.cell_0based(area, x, y));
         let win_name = win.name.clone();
         if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
             inject_mouse_combined(p, col, row, sgr_btn, true,
@@ -2968,3 +3031,7 @@ mod test_issue645_rotate_geometry;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue657_wheel_nonshell_full_screen.rs"]
 mod test_issue657_wheel_nonshell_full_screen;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue669_border_status_mouse_rows.rs"]
+mod test_issue669_border_status_mouse_rows;
