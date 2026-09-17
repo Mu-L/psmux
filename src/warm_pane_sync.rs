@@ -337,3 +337,7 @@ mod test_warm_pane_sync;
 #[cfg(test)]
 #[path = "../tests-rs/test_warm_pool_depth.rs"]
 mod test_warm_pool_depth;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue661_warm_pool_depth.rs"]
+mod test_issue661_warm_pool_depth;

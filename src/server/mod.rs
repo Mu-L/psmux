@@ -1496,6 +1496,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // (see `pane::await_inflight_spare`). The loop borrows it back each tick.
     app.warm_refill_rx = Some(warm_done_rx);
     let mut last_warm_trim = Instant::now();
+    // #661: the pool's depth over time, not just at claim time. A claim line
+    // says what one creation found; only a periodic sample says whether the
+    // pool was drained the whole time or fell over in the last 40 ms. Written
+    // only under `PSMUX_WARM_TRACE`, four times a second.
+    let mut last_warm_depth_sample = Instant::now();
     // A frame this iteration owed to the next one: see `pty_batch_pending`.
     // While it is set the loop does not sleep before producing that frame, so
     // handing the push to the next iteration costs an iteration and not a
@@ -1554,6 +1559,22 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     trimmed, app.warm_pane.target
                 );
             }
+        }
+        // #661: depth trajectory. See `last_warm_depth_sample`.
+        if crate::warm_trace::enabled()
+            && last_warm_depth_sample.elapsed() >= Duration::from_millis(250)
+        {
+            last_warm_depth_sample = Instant::now();
+            let standby = app.is_warm_server();
+            crate::warm_trace!(
+                "pool: sample depth={} ready={} inflight={} target={} eff={} surging={}",
+                app.warm_pane.len(),
+                app.warm_pane.ready_len(),
+                app.warm_pane.inflight,
+                app.warm_pane.target,
+                app.warm_pane.effective_target(standby),
+                app.warm_pane.is_surging()
+            );
         }
         if last_registry_check.elapsed() >= Duration::from_secs(5) {
             last_registry_check = Instant::now();
