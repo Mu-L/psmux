@@ -305,3 +305,41 @@ fn capture_pane_reads_the_live_screen_while_copy_mode_shows_a_snapshot() {
         "the copy-mode view itself must stay frozen (got live content in the view)"
     );
 }
+
+/// `clear-history` must clear the pane's LIVE scrollback and leave copy mode,
+/// the way tmux does (cmd-capture-pane.c:418: `window_pane_reset_mode_all(wp)`
+/// then `grid_clear_history(wp->base.grid)`).
+///
+/// With the snapshot installed, `pane.term` is the frozen view, so a
+/// `clear-history` that clears `pane.term` wipes the screen the user is reading
+/// and leaves the live scrollback intact. Measured on the release binary before
+/// the fix: 502 retained lines, `#{history_size}` 0 while in copy mode, and 502
+/// again the moment copy mode was left, with `capture-pane -S -200` still
+/// returning 229 scrollback lines.
+#[test]
+fn clear_history_leaves_copy_mode_and_clears_the_live_screen() {
+    let mut app = app_with_pane();
+    let live = view_term(&app);
+    feed(&live, "before", 0, 400);
+    assert!(filled(&live) > 100, "the live pane needs a scrollback to clear");
+
+    crate::copy_mode::enter_copy_mode(&mut app);
+    assert!(matches!(app.mode, Mode::CopyMode), "must be in copy mode");
+    assert!(parked_live_term(&app).is_some(), "a snapshot must be installed");
+
+    crate::window_ops::clear_active_pane_history(&mut app);
+
+    assert!(
+        !matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }),
+        "clear-history must leave copy mode (tmux window_pane_reset_mode_all)"
+    );
+    assert!(
+        parked_live_term(&app).is_none(),
+        "the snapshot must be gone, so the pane shows its live screen again"
+    );
+    assert_eq!(
+        filled(&view_term(&app)),
+        0,
+        "the LIVE scrollback must be the one that got cleared"
+    );
+}

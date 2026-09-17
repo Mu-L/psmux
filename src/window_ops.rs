@@ -2765,6 +2765,27 @@ pub fn break_pane_to_window(app: &mut AppState) {
     }
 }
 
+/// `clear-history`: drop the active pane's scrollback.
+///
+/// tmux (cmd-capture-pane.c:418) resets every mode on the pane first and then
+/// calls `grid_clear_history(wp->base.grid)` — the LIVE grid, with copy mode
+/// gone. That ordering is load bearing here: while copy mode is up `pane.term`
+/// is the frozen snapshot, so clearing it would wipe the screen the user is
+/// reading and leave the live scrollback untouched.
+pub fn clear_active_pane_history(app: &mut AppState) {
+    if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        exit_copy_mode(app);
+    }
+    let history_limit = app.history_limit;
+    let win = &mut app.windows[app.active_idx];
+    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+        p.leave_copy_snapshot();
+        if let Ok(mut parser) = p.term.lock() {
+            *parser = vt100::Parser::new(p.last_rows, p.last_cols, history_limit);
+        }
+    }
+}
+
 pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn portable_pty::PtySystem>, workdir: Option<&str>, kill: bool, command: Option<&str>, empty: bool) -> io::Result<()> {
     // tmux semantics: without -k, respawn only works on dead panes.
     // With -k, kill the running process first and respawn.

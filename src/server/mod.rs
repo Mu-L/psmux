@@ -5885,12 +5885,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     move_copy_cursor(&mut app, 0, -20);
                 }
                 CtrlReq::ClearHistory => {
-                    let win = &mut app.windows[app.active_idx];
-                    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-                        if let Ok(mut parser) = p.term.lock() {
-                            *parser = vt100::Parser::new(p.last_rows, p.last_cols, app.history_limit);
-                        }
-                    }
+                    // Leaves copy mode first and clears the LIVE grid, the way
+                    // tmux does; see clear_active_pane_history.
+                    crate::window_ops::clear_active_pane_history(&mut app);
                 }
                 CtrlReq::SaveBuffer(path) => {
                     if let Some(content) = app.paste_buffers.first() {
