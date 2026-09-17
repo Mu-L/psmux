@@ -48,7 +48,21 @@ foreach ($pair in @(@($child,"mouse_echo_child.cs"),@($clickInj,"click_injector.
     if (-not (Test-Path $pair[0])) { Write-Host "FATAL: could not compile $($pair[1])" -ForegroundColor Red; exit 1 }
 }
 
-function Stop-Ns { & $PSMUX -L $NS kill-server 2>&1 | Out-Null; Start-Sleep -Milliseconds 700 }
+function Port-File {
+    Get-ChildItem $psmuxDir -Filter "*$S.port" -EA SilentlyContinue |
+        Where-Object { $_.Name -like "*$NS*" } | Select-Object -First 1
+}
+# Tear the namespace down and WAIT for its port file to go: a previous run's
+# server is still reaping while the next `new-session` runs, and the server
+# that loses that race exits after its first command has already been answered.
+function Stop-Ns {
+    & $PSMUX -L $NS kill-server 2>&1 | Out-Null
+    for ($i = 0; $i -lt 40; $i++) {
+        if (-not (Port-File)) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    Start-Sleep -Milliseconds 700
+}
 function LogCount { if (Test-Path $childLog) { (Get-Content $childLog).Count } else { 0 } }
 function New-Events([int]$before) {
     $all = if (Test-Path $childLog) { Get-Content $childLog } else { @() }
@@ -70,8 +84,7 @@ function New-Events([int]$before) {
 function Send-Tcp([string[]]$Cmds) {
     # One command per connection: the control protocol serves a single command
     # unless the client sends PERSISTENT after AUTH.
-    $pf = Get-ChildItem $psmuxDir -Filter "*$S.port" -EA SilentlyContinue |
-          Where-Object { $_.Name -like "*$NS*" } | Select-Object -First 1
+    $pf = Port-File
     if (-not $pf) { return "NOPORT" }
     $port = (Get-Content $pf.FullName -Raw).Trim()
     $key  = (Get-Content ($pf.FullName -replace '\.port$','.key') -Raw).Trim()
@@ -91,6 +104,22 @@ function Send-Tcp([string[]]$Cmds) {
     }
     return "sent"
 }
+# The child is started by typing its path at the pane's shell, so it is ready
+# only once that shell has reached a prompt AND the child has printed its
+# banner. Poll for the banner and retype once rather than guessing a sleep.
+function Wait-Child([string]$Cmd, [int]$Secs = 25) {
+    & $PSMUX -L $NS send-keys -t $S $Cmd Enter 2>&1 | Out-Null
+    $retried = $false
+    for ($i = 0; $i -lt ($Secs * 2); $i++) {
+        Start-Sleep -Milliseconds 500
+        if (((& $PSMUX -L $NS capture-pane -t $S -p 2>&1) | Out-String) -match 'MOUSE_ECHO_READY') { return $true }
+        if (-not $retried -and $i -eq $Secs) {
+            $retried = $true
+            & $PSMUX -L $NS send-keys -t $S $Cmd Enter 2>&1 | Out-Null
+        }
+    }
+    return $false
+}
 function Set-BorderStatus([string]$v) {
     if ($v -eq "off") { & $PSMUX -L $NS set-option -t $S pane-border-status off 2>&1 | Out-Null }
     else { & $PSMUX -L $NS set-option -t $S pane-border-status $v 2>&1 | Out-Null }
@@ -104,16 +133,17 @@ Stop-Ns
 Remove-Item $childLog -Force -EA SilentlyContinue
 $env:PSMUX_MOUSE_ECHO_LOG = $childLog
 & $PSMUX -L $NS new-session -d -s $S -x 80 -y 24 2>&1 | Out-Null
-Start-Sleep -Seconds 3
+for ($i = 0; $i -lt 60; $i++) { if (Port-File) { break }; Start-Sleep -Milliseconds 250 }
+if (-not (Port-File)) { Write-Fail "detached session $S did not come up in namespace $NS"; exit 1 }
+Start-Sleep -Seconds 2
 & $PSMUX -L $NS set-option -t $S -g mouse on 2>&1 | Out-Null
 $paneId = ((& $PSMUX -L $NS list-panes -t $S -F '#{pane_id}') | Select-Object -First 1).Trim()
 $paneNum = $paneId.TrimStart('%')
-& $PSMUX -L $NS send-keys -t $S "`$env:PSMUX_MOUSE_ECHO_LOG='$childLog'; & '$child'" Enter 2>&1 | Out-Null
-Start-Sleep -Seconds 5
-if (((& $PSMUX -L $NS capture-pane -t $S -p 2>&1) | Out-String) -match 'MOUSE_ECHO_READY') {
+if (Wait-Child "`$env:PSMUX_MOUSE_ECHO_LOG='$childLog'; & '$child'") {
     Write-Pass "mouse-reporting child is running in $paneId"
 } else {
     Write-Fail "mouse-reporting child did not start"
+    Write-Info ((& $PSMUX -L $NS capture-pane -t $S -p 2>&1) | Out-String)
     Stop-Ns
     exit 1
 }
@@ -198,9 +228,7 @@ if (-not $cli) {
     Start-Sleep -Seconds 4
     $cpid = [int]$cli.ProcessId
     Write-Info "attached client pid=$cpid"
-    & $PSMUX -L $NS send-keys -t $S "& '$child'" Enter 2>&1 | Out-Null
-    Start-Sleep -Seconds 5
-    if (((& $PSMUX -L $NS capture-pane -t $S -p 2>&1) | Out-String) -match 'MOUSE_ECHO_READY') {
+    if (Wait-Child "& '$child'") {
         Write-Pass "mouse-reporting child is running under the attached client"
 
         foreach ($st in @("off", "top", "bottom")) {
@@ -211,8 +239,8 @@ if (-not $cli) {
             & $clickInj $cpid 10 5 120 | Out-Null
             Start-Sleep -Milliseconds 1000
             $ev = New-Events $b
-            $press   = $ev | Where-Object { $_.Kind -eq 'M' -and $_.Btn -eq 0 } | Select-Object -First 1
-            $release = $ev | Where-Object { $_.Kind -eq 'm' } | Select-Object -First 1
+            $press   = $ev | Where-Object { $_.Kind -ceq 'M' -and $_.Btn -eq 0 } | Select-Object -First 1
+            $release = $ev | Where-Object { $_.Kind -ceq 'm' } | Select-Object -First 1
             if ($null -eq $press -or $null -eq $release) {
                 Write-Skip "$st : the injected click delivered no press/release pair (focus refused)"
             } elseif ($press.Row -eq $release.Row) {
@@ -226,9 +254,9 @@ if (-not $cli) {
             & $dragInj $cpid 10 5 10 6 2 60 150 | Out-Null
             Start-Sleep -Milliseconds 1400
             $ev = New-Events $b
-            $dpress  = $ev | Where-Object { $_.Kind -eq 'M' -and $_.Btn -eq 0 } | Select-Object -First 1
-            $motions = @($ev | Where-Object { $_.Kind -eq 'M' -and $_.Btn -eq 32 })
-            $drel    = $ev | Where-Object { $_.Kind -eq 'm' } | Select-Object -Last 1
+            $dpress  = $ev | Where-Object { $_.Kind -ceq 'M' -and $_.Btn -eq 0 } | Select-Object -First 1
+            $motions = @($ev | Where-Object { $_.Kind -ceq 'M' -and $_.Btn -eq 32 })
+            $drel    = $ev | Where-Object { $_.Kind -ceq 'm' } | Select-Object -Last 1
             if ($null -eq $dpress -or $motions.Count -eq 0) {
                 Write-Skip "$st : the injected drag delivered no press/motion (focus refused)"
             } else {
@@ -249,6 +277,7 @@ if (-not $cli) {
         }
     } else {
         Write-Fail "mouse-reporting child did not start under the attached client"
+        Write-Info ((& $PSMUX -L $NS capture-pane -t $S -p 2>&1) | Out-String)
     }
     Stop-Ns
     try { Stop-Process -Id $cpid -Force -EA SilentlyContinue } catch {}
