@@ -1075,7 +1075,18 @@ loop {
                 }
                 break; // Real error or non-persistent timeout
             }
-            Ok(_) => continue, // Process the new line
+            Ok(_) => {
+                // Same activity ping as the batching read at the bottom of
+                // this loop. An idle persistent client reaches its next
+                // command HERE (the 10 ms batching read has already timed
+                // out and cleared the line), so without this `window-size
+                // latest` would only follow commands that arrive inside the
+                // batching window.
+                if !crate::client::is_bare_motion_cmd(&line) {
+                    let _ = tx.send(CtrlReq::ClientActivity(client_id));
+                }
+                continue; // Process the new line
+            }
         }
     }
     
