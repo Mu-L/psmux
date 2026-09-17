@@ -625,9 +625,28 @@ impl WarmPool {
     /// Record that a creation wanted a spare. `satisfied` is false when no
     /// ready spare was available.
     ///
-    /// A surge opens only when a miss follows another claim within
-    /// [`WARM_BURST_WINDOW`]: one miss on its own is an isolated creation, not a
-    /// run, and over-reacting to it costs startup time for no benefit.
+    /// A surge opens only when the claim follows another claim within
+    /// [`WARM_BURST_WINDOW`]: one claim on its own is an isolated creation, not
+    /// a run, and over-reacting to it costs startup time for no benefit (a cold
+    /// `new-session` misses by definition).
+    ///
+    /// Given a run, three things open or hold the surge open, and #661 is the
+    /// third of them:
+    ///
+    ///  - a MISS: the run has already outrun the idle depth.
+    ///  - a claim that took the LAST READY spare. The next claim in this run is
+    ///    then certain to miss, and a spare takes ~400ms to become useful, so
+    ///    waiting for that miss to react guarantees one slow creation per burst.
+    ///  - the run CONTINUING while a surge is serving it. The surge used to
+    ///    decay from the last MISS, so a run the surge was serving well renewed
+    ///    nothing: five seconds after the single miss that opened it,
+    ///    [`WarmPool::trim_surplus`] killed six ready spares in the middle of a
+    ///    run of splits arriving every ~265ms, and the pool fell straight back
+    ///    to alternating one ready spare with none, ie the defect the pool
+    ///    exists to remove. The window now decays from the last CREATION, which
+    ///    is what [`WARM_SURGE_HOLD`] always described, so the surplus still
+    ///    comes back five seconds after the user stops creating panes and idle
+    ///    memory is unchanged.
     pub fn note_claim(&mut self, satisfied: bool) {
         let now = std::time::Instant::now();
         let following_another = self
@@ -635,7 +654,12 @@ impl WarmPool {
             .map(|t| now.saturating_duration_since(t) <= WARM_BURST_WINDOW)
             .unwrap_or(false);
         self.last_claim = Some(now);
-        if !satisfied && following_another {
+        if !following_another {
+            return;
+        }
+        // `ready_len` here is the pool AFTER this claim took its spare: the
+        // claim sites call this straight after `claim`.
+        if !satisfied || self.ready_len() == 0 || self.is_surging() {
             self.surge_until = Some(now + WARM_SURGE_HOLD);
         }
     }
@@ -647,6 +671,13 @@ impl WarmPool {
     #[cfg(test)]
     pub fn end_surge_for_test(&mut self) {
         self.surge_until = None;
+    }
+    /// Forget that a claim ever happened, so the next one is not read as part of
+    /// a run. Tests need this because the real gap is [`WARM_BURST_WINDOW`] and
+    /// a unit test must not sleep for a second and a half.
+    #[cfg(test)]
+    pub fn forget_last_claim_for_test(&mut self) {
+        self.last_claim = None;
     }
     /// How many spares the pool should be holding right now. `standby` caps a
     /// `__warm__` helper at one: it creates no windows of its own, so spares
