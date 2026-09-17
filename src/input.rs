@@ -3199,6 +3199,14 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             }
             "C-v" | "c-v" => { scroll_copy_down(app, 10); }
             "M-v" | "m-v" => { scroll_copy_up(app, 10); }
+            // history-top / history-bottom, the emacs spelling of vi's g/G
+            // (key-bindings.c:619 and :620).  Like M-x below, these reach
+            // copy mode as NAMED keys, so the `KeyCode::Char('<') + ALT` arm
+            // in handle_key never runs for them: without an arm here
+            // `send-key M-<` was silently swallowed, which is what a real
+            // Alt+< in an attached client sends.
+            "M-<" | "m-<" => { scroll_to_top(app); }
+            "M->" | "m->" => { scroll_to_bottom(app); }
             "M-f" | "m-f" => { crate::copy_mode::move_word_forward(app); }
             "M-b" | "m-b" => { crate::copy_mode::move_word_backward(app); }
             "M-w" | "m-w" => { yank_selection(app)?; exit_copy_mode(app); }

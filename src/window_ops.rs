@@ -2421,6 +2421,31 @@ mod window_ops_tests {
     }
 
     #[test]
+    fn named_alt_less_than_reaches_history_top_in_both_tables() {
+        // Alt keys reach copy mode as NAMED keys (`send-key M-<`), not through
+        // handle_key's char arm, so the named dispatcher needs its own arm.
+        // Without it `send-keys M-<` was silently swallowed while `send-keys
+        // M-v` (page up) worked, measured on a 380 line scrollback.
+        for mode_keys in ["emacs", "vi"] {
+            let mut app = make_scrollback_app(true);
+            super::handle_pane_scroll(&mut app, 41, true, None);
+            app.mode_keys = mode_keys.to_string();
+            let before = app.copy_scroll_offset;
+            crate::input::send_key_to_active(&mut app, "M-<").expect("send-key M-<");
+            assert!(
+                app.copy_scroll_offset > before,
+                "M-< must reach history-top under mode-keys {mode_keys} (got {})",
+                app.copy_scroll_offset
+            );
+            crate::input::send_key_to_active(&mut app, "M->").expect("send-key M->");
+            assert_eq!(
+                app.copy_scroll_offset, 0,
+                "M-> must reach history-bottom under mode-keys {mode_keys}"
+            );
+        }
+    }
+
+    #[test]
     fn enter_copy_mode_preserves_direct_scrolled_view() {
         let mut app = make_scrollback_app(true);
         // scroll-enter-copy-mode off (#193): the wheel scrolls the pane's
