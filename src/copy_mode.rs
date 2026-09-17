@@ -1961,10 +1961,10 @@ mod tests_issue443_blank_cell_capture;
 mod tests_capture_pane_fidelity;
 
 #[cfg(test)]
-#[cfg(test)]
 #[path = "../tests-rs/test_copy_mode_resize_reanchor.rs"]
 mod test_copy_mode_resize_reanchor;
 
+#[cfg(test)]
 #[path = "../tests-rs/test_copy_cancel_stale_state.rs"]
 mod tests_copy_cancel_stale_state;
 
