@@ -22,7 +22,8 @@
 # WHAT THIS SUITE PINS, from the pool's own trace rather than from timings alone
 #   * no spare is retired BETWEEN the first and the last creation of a run
 #   * the sampled depth never falls below the configured target mid run
-#   * no claim past the first two finds NO READY SPARE
+#   * no claim older than the leading edge window (1500 ms from the first
+#     claim, the time the surge's spares need to boot) finds NO READY SPARE
 #   * and the user visible numbers that follow from all three: how many splits
 #     are slow, and the max
 #
@@ -281,15 +282,29 @@ if ($depths.Count -lt 8) {
 
 # 3. no claim past the leading edge finds nothing ready.
 #
-# Three, because that is what a pool at its idle depth of two can owe: two
-# settled spares are handed out, and the third creation of a burst arrives
-# before any refill has finished starting. Everything after that is the surge's
-# job.
-Write-Test "no claim after the first three finds NO READY SPARE"
+# The leading edge is a window of TIME, not a count of claims. A pool at its
+# idle depth of two hands out its two settled spares, the surge opens on the
+# next claim, and the spares it starts need a shell boot (500 to 900 ms on this
+# machine) before they are ready. A claim that lands inside that window can
+# still find seven spares that are all warming (`depth=7 got_warming=true`) and
+# wait ~100 ms on one of them, which is the right call (the issue's own point:
+# a warming spare beats a cold spawn). Counting claims made the fourth claim of
+# a 250 ms run, arriving about one second in, fail on exactly that. The defect
+# this suite guards is a miss LATE in the run, after the surge's spares have
+# booted, which is what the mid run trim produced. So a miss is a failure only
+# once the run is older than the leading edge window measured from the first
+# claim of the run.
+$LeadingEdgeMs = 1500
+Write-Test "no claim older than ${LeadingEdgeMs}ms into the run finds NO READY SPARE"
 $claims = @($srv | Where-Object { $_ -match 'claim\(split\)' })
 $misses = @()
-for ($i = 0; $i -lt $claims.Count; $i++) {
-    if ($i -ge 3 -and $claims[$i] -match 'NO READY SPARE') { $misses += $claims[$i] }
+$firstClaimMs = $null
+foreach ($c in $claims) {
+    $m = [regex]::Match($c, '^\[\s*([0-9.]+)')
+    if (-not $m.Success) { continue }
+    $t = [double]$m.Groups[1].Value
+    if ($null -eq $firstClaimMs) { $firstClaimMs = $t }
+    if (($t - $firstClaimMs) -gt $LeadingEdgeMs -and $c -match 'NO READY SPARE') { $misses += $c }
 }
 if ($misses.Count -eq 0) {
     Write-Pass "$($claims.Count) claims, none past the leading edge missed"
