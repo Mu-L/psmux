@@ -2252,6 +2252,10 @@ fn collect_pane_ids(node: &Node, ids: &mut Vec<usize>) {
 mod tests;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue662_mouse_flag_formats.rs"]
+mod tests_issue662_mouse_flag_formats;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_issue272_format_shell_cache.rs"]
 mod tests_issue272_format_shell_cache;
 
