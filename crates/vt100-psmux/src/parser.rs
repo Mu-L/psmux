@@ -43,8 +43,6 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
         }
     }
 
-    /// Processes the contents of the given byte string, and updates the
-    /// in-memory terminal state.
     /// A copy of this parser's screen: same grid, same scrollback, same
     /// visible rows and cursor, with a fresh escape-sequence parser.
     ///
@@ -67,6 +65,8 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
         }
     }
 
+    /// Processes the contents of the given byte string, and updates the
+    /// in-memory terminal state.
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.screen, bytes);
     }
