@@ -563,7 +563,42 @@ function Show-PaneDiagnostics {
     }
     $cmd = (& $PSMUX display-message -t $Target -p '#{pane_current_command}' 2>&1 | Out-String).Trim()
     Write-Host ("  [DIAG] $Target pane_pid=$panePid current_command=$cmd children=" + $(if ($kids.Count) { $kids -join ',' } else { '<none>' })) -ForegroundColor DarkYellow
+
+    # Issue #668: when this fails, send-keys returns 0 and the server's ctrl_c
+    # trace is byte for byte the trace of a working interrupt, yet the child
+    # runs on. Two things decide that and neither is visible above.
+    #
+    # ConsoleFlags bit 0 is the process's "ignore Ctrl+C" state. It is what
+    # SetConsoleCtrlHandler(NULL, TRUE) and CREATE_NEW_PROCESS_GROUP set, it is
+    # INHERITED by children, and Windows offers no API to read it back, so a
+    # child that was born deaf to Ctrl+C is indistinguishable from a signal
+    # that was never delivered -- unless the bit is read out of the PEB.
+    #
+    # The screen counter is the child's own clock: the flood script numbers
+    # every line, so comparing the highest number here with a capture taken
+    # later says whether the child is wedged or simply never heard the signal.
+    # Investigated 2026-09-18: falsified the inherited-bit and the pane-backlog
+    # explanations on a machine where the failure had stopped reproducing, so
+    # the reading that settles it has to come from a run that fails.
+    $probe = "$env:TEMP\psmux_274_ctrlflags.exe"
+    $probeSrc = "$PSScriptRoot\ctrlflags.cs"
+    if ((-not (Test-Path $probe)) -and (Test-Path $probeSrc)) {
+        $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+        if (Test-Path $csc) { & $csc /nologo /optimize /out:$probe $probeSrc 2>&1 | Out-Null }
+    }
+    if (Test-Path $probe) {
+        $ids = @($panePid) + @($kids | ForEach-Object { [int]($_ -split ':')[1] })
+        foreach ($line in (& $probe @($ids | Where-Object { $_ -gt 0 }) 2>&1)) {
+            Write-Host "  [DIAG] ctrlflags $line" -ForegroundColor DarkYellow
+        }
+    }
+
     $cap = & $PSMUX capture-pane -t $Target -p 2>&1 | Out-String
+    $tick = -1
+    foreach ($m in [regex]::Matches($cap, 'Processing task (\d+)')) {
+        $v = [int]$m.Groups[1].Value; if ($v -gt $tick) { $tick = $v }
+    }
+    Write-Host "  [DIAG] $Target screen line counter=$tick (compare with the next diagnostic: a wedged child stops counting)" -ForegroundColor DarkYellow
     ($cap -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 5) |
         ForEach-Object { Write-Host "  [DIAG] | $_" -ForegroundColor DarkYellow }
 }
