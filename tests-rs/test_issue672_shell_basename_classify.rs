@@ -129,7 +129,7 @@ fn powershell_classifies_powershell_however_it_is_spelled() {
 }
 
 /// Nushell is not one of the families psmux writes a dialect for, so it keeps
-/// the platform default — docs/multi-shell.md says so, and says to turn warm
+/// the platform default: docs/multi-shell.md says so, and says to turn warm
 /// panes off if the injected line errors there. #672 is about SPELLING, not
 /// about which family a shell is in, so what is pinned here is that every
 /// spelling of nushell lands in the same place as every other: the fallback
