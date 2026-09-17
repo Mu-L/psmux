@@ -2742,6 +2742,112 @@ fn scan_cpr_query(data: &[u8]) -> bool {
     data.contains(&0x1b) && data.windows(CPR.len()).any(|w| w == CPR)
 }
 
+/// Issue #597: the terminal name and version psmux reports for XTVERSION
+/// (`CSI > q`, xterm's "what terminal are you?" round trip).
+///
+/// psmux presents a tmux identity to everything inside a pane: `$TMUX` and
+/// `$TMUX_PANE` are set, `psmux -V` prints `tmux <version>` first, and the
+/// command surface is tmux's.  Programs that key off XTVERSION are keying off
+/// the same identity, so the reply spells `tmux`, exactly like tmux's own
+/// `input_reply(ictx, 1, "\033P>|tmux %s\033\\", getversion())` (input.c
+/// INPUT_CSI_XDA).  `PSMUX_XTVERSION_NAME` overrides the name for anyone who
+/// would rather be announced as `psmux`.
+pub fn xtversion_reply() -> String {
+    let name = std::env::var("PSMUX_XTVERSION_NAME")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "tmux".to_string());
+    format!("\x1bP>|{} {}\x1b\\", name.trim(), crate::types::VERSION)
+}
+
+/// Returns true if `data` contains an XTVERSION query that deserves a reply.
+///
+/// The query is `CSI > Ps q`, and xterm only treats `Ps` of 0 (or an omitted
+/// `Ps`) as "report your version"; other values are cursor-style requests that
+/// must stay unanswered.  tmux applies the same rule -- `input_get(ictx, 0, 0,
+/// 0)` defaults an absent parameter to 0 and replies only for 0.
+///
+/// ConPTY answers DA1, DA2, DSR and DECRQM itself and never forwards them, but
+/// it does not know XTVERSION, so the query arrives in the pane's output stream
+/// verbatim and psmux is the only thing that can answer it.
+///
+/// Only matches whose final `q` lands at offset >= `min_end` count, so the
+/// boundary rescan below can ignore a query it already reported last batch.
+fn scan_xtversion_query_from(data: &[u8], min_end: usize) -> bool {
+    if !data.contains(&0x1b) { return false; }
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        if data[i] != 0x1b || data[i + 1] != b'[' || data[i + 2] != b'>' {
+            i += 1;
+            continue;
+        }
+        let params_start = i + 3;
+        let mut j = params_start;
+        while j < data.len() && (data[j].is_ascii_digit() || data[j] == b';') {
+            j += 1;
+        }
+        if j < data.len() && data[j] == b'q' && j >= min_end {
+            let params = &data[params_start..j];
+            let first = match params.iter().position(|&c| c == b';') {
+                Some(p) => &params[..p],
+                None => params,
+            };
+            if first.is_empty() || first.iter().all(|&c| c == b'0') {
+                return true;
+            }
+        }
+        i = params_start;
+    }
+    false
+}
+
+/// `scan_xtversion_query_from` over a whole batch.
+fn scan_xtversion_query(data: &[u8]) -> bool {
+    scan_xtversion_query_from(data, 0)
+}
+
+/// Detects an XTVERSION query split across two reads, the same way
+/// `CprScanner` does for ESC[6n.  The reader thread hands the scanner whatever
+/// one `read()` returned, so a query that straddles the boundary would
+/// otherwise go unanswered and the asking program would sit through its whole
+/// timeout.
+struct XtversionScanner {
+    tail: Vec<u8>,
+}
+
+impl XtversionScanner {
+    /// One less than the longest query worth carrying: `ESC [ > 0 q` is five
+    /// bytes, and a few more cover a parameter list such as `ESC [ > 0 ; 0 q`.
+    const KEEP: usize = 15;
+
+    fn new() -> Self {
+        Self { tail: Vec::with_capacity(Self::KEEP) }
+    }
+
+    fn scan(&mut self, batch: &[u8]) -> bool {
+        let mut hit = scan_xtversion_query(batch);
+        if !hit && !self.tail.is_empty() {
+            let mut boundary = self.tail.clone();
+            let tail_len = boundary.len();
+            boundary.extend_from_slice(&batch[..batch.len().min(Self::KEEP)]);
+            // Only a query whose final `q` lands in the new batch is new; one
+            // sitting entirely in the carried tail was answered last batch, and
+            // answering it twice would hand the asking program a second reply
+            // it never asked for.
+            hit = scan_xtversion_query_from(&boundary, tail_len);
+        }
+        if batch.len() >= Self::KEEP {
+            self.tail.clear();
+            self.tail.extend_from_slice(&batch[batch.len() - Self::KEEP..]);
+        } else {
+            self.tail.extend_from_slice(batch);
+            let excess = self.tail.len().saturating_sub(Self::KEEP);
+            self.tail.drain(..excess);
+        }
+        hit
+    }
+}
+
 /// Detects ESC[6n across batch boundaries. The parser thread scans output in
 /// coalesced batches; a cursor-position request split across two batches is
 /// invisible to the per-batch `scan_cpr_query` (no carry-over), so `cpr_pending`
@@ -2963,6 +3069,7 @@ pub fn spawn_reader_thread(
         let mut local = vec![0u8; 65536];
         let mut zero_reads: u32 = 0;
         let mut color_scanner = ColorQueryScanner::new();
+        let mut xtversion_scanner = XtversionScanner::new();
         loop {
             match reader.read(&mut local) {
                 Ok(n) if n > 0 => {
@@ -2994,6 +3101,23 @@ pub fn spawn_reader_thread(
                             // pipe path as delivery of record.
                             color_query_pending.fetch_or(color_query_bits, Ordering::AcqRel);
                             crate::types::COLOR_QUERY_PENDING.store(true, Ordering::Release);
+                        }
+                    }
+                    // Issue #597: answer XTVERSION (`CSI > q`) here too, for the
+                    // same reason the colour queries are answered off the read:
+                    // the asking program (Claude Code sends it three times at
+                    // startup, WezTerm and others send it once) gives the
+                    // terminal a short window and then decides it is talking to
+                    // something featureless.  The reply goes in as console
+                    // input rather than down the PTY writer because the ConPTY
+                    // is created with PSEUDOCONSOLE_WIN32_INPUT_MODE, where a
+                    // raw VT response wedges the Win32 input parser (issue
+                    // #313, see conpty_preemptive_dsr_response).
+                    if xtversion_scanner.scan(&local[..n]) {
+                        if let Some(pid) = child_pid {
+                            crate::platform::mouse_inject::send_vt_response(
+                                pid, &xtversion_reply(),
+                            );
                         }
                     }
                     // Append raw output to ring buffer for control mode %output.
@@ -3181,6 +3305,10 @@ pub fn spawn_reader_thread(
         }
     });
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue597_xtversion_reply.rs"]
+mod test_issue597_xtversion_reply;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue399_env_prefix.rs"]
