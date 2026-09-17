@@ -348,12 +348,71 @@ pub(crate) enum RehomeSyntax {
     Cmd,
 }
 
+/// The lowercased file stem of one program path: `C:\Program Files\Git\bin\bash.exe`
+/// and `bash` both reduce to `bash`.
+fn program_stem(program: &str) -> String {
+    std::path::Path::new(program)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase()
+}
+
+/// The rehome dialect a shell's basename implies, or `None` when psmux does
+/// not know the shell. The names are the ones `docs/multi-shell.md` documents.
+fn rehome_syntax_for_stem(stem: &str) -> Option<RehomeSyntax> {
+    if POSIX_SHELL_STEMS.contains(&stem) || matches!(stem, "ash" | "busybox" | "git-bash") {
+        // `git-bash` is Git Bash's GUI launcher; remap_git_bash_launcher
+        // rewrites it to the console `bash.exe` beside it when that file is
+        // there, and when it is not the launcher still names bash.
+        Some(RehomeSyntax::Posix)
+    } else if stem == "cmd" {
+        Some(RehomeSyntax::Cmd)
+    } else if stem == "pwsh" || stem == "powershell" {
+        Some(RehomeSyntax::PowerShell)
+    } else {
+        None
+    }
+}
+
+/// Read `value` as ONE program path and return its stem, for the case where
+/// `resolve_shell_program` could not resolve it.
+///
+/// That resolver identifies the program by looking it up on disk and on PATH,
+/// and only falls back to a quote-aware split when the lookup fails. So an
+/// UNQUOTED absolute path containing spaces classifies correctly on a machine
+/// where it exists and wrongly on one where it does not: the split turns
+/// `C:\Program Files\Git\bin\bash.exe` into the program `C:\Program` plus two
+/// arguments, and the dialect then comes from `Program` (#672). Which dialect
+/// a pane's shell speaks cannot depend on the filesystem, so when the resolved
+/// program names no shell psmux knows, the whole value is read as a single
+/// path instead.
+///
+/// Only when nothing in the value looks like an argument: a real command line
+/// such as `pwsh -File C:\x\bash.ps1` ends in a path of its own and must never
+/// be read this way.
+fn whole_value_program_stem(value: &str) -> Option<String> {
+    if value.contains('"') {
+        return None;
+    }
+    let mut tokens = value.split_whitespace();
+    tokens.next()?;
+    if tokens.any(|t| t.starts_with('-') || t.starts_with('/')) {
+        return None;
+    }
+    Some(program_stem(value))
+}
+
 /// Pick the rehome syntax from the shell that is actually running in the pane.
 ///
 /// `shell` is the configured `default-shell` (possibly a whole command line
 /// with arguments, possibly empty). Empty means psmux spawned its own default
 /// shell, which is pwsh/powershell on Windows and a POSIX shell elsewhere.
 /// An unrecognised program keeps the platform default rather than guessing.
+///
+/// The decision is made on the program's BASENAME, so every spelling of one
+/// shell agrees: bare name or absolute path, forward or backslashes, with or
+/// without `.exe`, any letter case, quoted, and with arguments (#672).
 pub(crate) fn rehome_syntax_for_shell(shell: &str) -> RehomeSyntax {
     let platform_default = if cfg!(windows) { RehomeSyntax::PowerShell } else { RehomeSyntax::Posix };
     let shell = shell.trim();
@@ -362,20 +421,18 @@ pub(crate) fn rehome_syntax_for_shell(shell: &str) -> RehomeSyntax {
     }
     let (program, _) = resolve_shell_program(shell);
     let program = remap_git_bash_launcher(program);
-    let stem = std::path::Path::new(&program)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(program.as_str())
-        .to_ascii_lowercase();
-    if POSIX_SHELL_STEMS.contains(&stem.as_str()) || stem == "ash" || stem == "busybox" {
-        RehomeSyntax::Posix
-    } else if stem == "cmd" {
-        RehomeSyntax::Cmd
-    } else if stem == "pwsh" || stem == "powershell" {
-        RehomeSyntax::PowerShell
-    } else {
-        platform_default
+    if let Some(syntax) = rehome_syntax_for_stem(&program_stem(&program)) {
+        return syntax;
     }
+    // The resolver named no shell psmux knows. Before falling back to the
+    // platform default, read the value as one path: that is what an unquoted
+    // Git Bash path does on a machine where it is not installed (#672).
+    if let Some(stem) = whole_value_program_stem(shell) {
+        if let Some(syntax) = rehome_syntax_for_stem(&stem) {
+            return syntax;
+        }
+    }
+    platform_default
 }
 
 /// Build the command injected to silently re-home a pane's shell to `dir`.
@@ -3370,6 +3427,10 @@ mod tests_dashdash_window_name;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue600_bash_rehome.rs"]
 mod tests_issue600_bash_rehome;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue672_shell_basename_classify.rs"]
+mod tests_issue672_shell_basename_classify;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue607_copy_mode_inherit.rs"]
