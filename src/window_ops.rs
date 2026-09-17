@@ -2768,8 +2768,8 @@ pub fn break_pane_to_window(app: &mut AppState) {
 /// `clear-history`: drop the active pane's scrollback.
 ///
 /// tmux (cmd-capture-pane.c:418) resets every mode on the pane first and then
-/// calls `grid_clear_history(wp->base.grid)` — the LIVE grid, with copy mode
-/// gone. That ordering is load bearing here: while copy mode is up `pane.term`
+/// calls `grid_clear_history(wp->base.grid)`, i.e. the LIVE grid, with copy
+/// mode gone. That ordering is load bearing: while copy mode is up `pane.term`
 /// is the frozen snapshot, so clearing it would wipe the screen the user is
 /// reading and leave the live scrollback untouched.
 pub fn clear_active_pane_history(app: &mut AppState) {
