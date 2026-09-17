@@ -18,6 +18,15 @@ pub fn emit_osc52<W: Write>(writer: &mut W, text: &str) {
 
 pub fn enter_copy_mode(app: &mut AppState) {
     app.mode = Mode::CopyMode;
+    // Copy mode reads a snapshot of the pane's screen (tmux's copy-mode grid):
+    // the application keeps running underneath, so new output can neither
+    // shift nor evict what the user is reading.
+    {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+            p.enter_copy_snapshot();
+        }
+    }
     // Start at the view currently on screen: with a direct-scrolled pane
     // (scroll-enter-copy-mode off, #193) the parser's scrollback is nonzero
     // while no copy state exists yet, and copy mode must keep that view —
@@ -64,9 +73,43 @@ pub fn exit_copy_mode(app: &mut AppState) {
         // Clear the pane-local copy state so re-entering this pane won't
         // restore a stale copy mode.
         p.copy_state = None;
+        // Show the live screen again first: `term` is the copy-mode snapshot
+        // while we are here, and it is the *live* parser that has to end up
+        // unscrolled (it may have been direct-scrolled when copy mode started,
+        // #193).
+        p.leave_copy_snapshot();
         if let Ok(mut parser) = p.term.lock() {
             parser.screen_mut().set_scrollback(0);
         }
+    }
+}
+
+/// Keep copy-mode snapshots in sync with the current mode.
+///
+/// Copy mode displays a snapshot of the active pane's screen (see
+/// `Pane::enter_copy_snapshot`).  Entering and leaving normally go through
+/// `enter_copy_mode` / `exit_copy_mode`, but those are not the only paths that
+/// change `app.mode` or move focus; a missed restore would leave a pane frozen
+/// on an old screen, and a missed snapshot would put copy mode back on the live
+/// grid.  This is the idempotent reconciliation, safe to call per frame:
+/// exactly the active pane holds a snapshot, exactly while copy mode is up.
+pub fn sync_copy_snapshot(app: &mut AppState) {
+    let want = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
+    let active_id = app
+        .windows
+        .get(app.active_idx)
+        .and_then(|w| active_pane(&w.root, &w.active_path))
+        .map(|p| p.id);
+    let active_idx = app.active_idx;
+    for (idx, win) in app.windows.iter_mut().enumerate() {
+        let is_active_window = idx == active_idx;
+        crate::tree::for_each_pane_mut(&mut win.root, &mut |p: &mut crate::types::Pane| {
+            if want && is_active_window && Some(p.id) == active_id {
+                p.enter_copy_snapshot();
+            } else {
+                p.leave_copy_snapshot();
+            }
+        });
     }
 }
 
@@ -627,7 +670,7 @@ pub fn paste_latest(app: &mut AppState) -> io::Result<()> {
 pub fn capture_active_pane(app: &mut AppState) -> io::Result<()> {
     let win = &mut app.windows[app.active_idx];
     let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(()) };
-    let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(()) };
+    let parser = match p.live_parser().lock() { Ok(g) => g, Err(_) => return Ok(()) };
     let screen = parser.screen();
     let mut text = String::new();
     for r in 0..p.last_rows {
@@ -693,7 +736,7 @@ pub fn capture_active_pane_text(app: &mut AppState, pane_id: Option<usize>, pres
     let (win_idx, path) = capture_target(app, pane_id);
     let win = &mut app.windows[win_idx];
     let p = match active_pane_mut(&mut win.root, &path) { Some(p) => p, None => return Ok(None) };
-    let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
+    let parser = match p.live_parser().lock() { Ok(g) => g, Err(_) => return Ok(None) };
     let screen = parser.screen();
     let mut text = String::new();
     for r in 0..p.last_rows {
@@ -1180,7 +1223,7 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
     let (win_idx, path) = capture_target(app, pane_id);
     let win = &mut app.windows[win_idx];
     let p = match active_pane_mut(&mut win.root, &path) { Some(p) => p, None => return Ok(None) };
-    let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
+    let mut parser = match p.live_parser().lock() { Ok(g) => g, Err(_) => return Ok(None) };
     let rows = p.last_rows;
     let cols = p.last_cols;
     let last_row = rows.saturating_sub(1) as i32;
@@ -1288,7 +1331,7 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
     let (win_idx, path) = capture_target(app, pane_id);
     let win = &mut app.windows[win_idx];
     let p = match active_pane_mut(&mut win.root, &path) { Some(p) => p, None => return Ok(None) };
-    let mut parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
+    let mut parser = match p.live_parser().lock() { Ok(g) => g, Err(_) => return Ok(None) };
     let rows = p.last_rows;
     let cols = p.last_cols;
     let last_row = rows.saturating_sub(1) as i32;
@@ -1894,6 +1937,10 @@ mod tests_issue443_blank_cell_capture;
 #[cfg(test)]
 #[path = "../tests-rs/test_capture_pane_fidelity.rs"]
 mod tests_capture_pane_fidelity;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_copy_mode_snapshot.rs"]
+mod test_copy_mode_snapshot;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_copy_cancel_stale_state.rs"]

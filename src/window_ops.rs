@@ -2810,6 +2810,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     pane.writer = pty_writer;
     pane.child = child;
     pane.term = term;
+    pane.live_term = None;
     pane.data_version = data_version;
     pane.cursor_shape = cursor_shape;
     pane.bell_pending = bell_pending;
@@ -2898,6 +2899,7 @@ pub fn heal_respawn_pane(
     pane.writer = pty_writer;
     pane.child = child;
     pane.term = term;
+    pane.live_term = None;
     pane.data_version = data_version;
     pane.cursor_shape = cursor_shape;
     pane.bell_pending = bell_pending;

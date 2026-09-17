@@ -57,6 +57,7 @@ psmux brings the tmux feature set to Windows natively: sessions that outlive the
 - Visual, line, and **rectangle selection** modes (`v`, `V`, `Ctrl+v`)
 - `/` and `?` search with `n`/`N` navigation, across the whole scrollback (an off screen match scrolls the view to it)
 - Copy mode is a property of the pane, as in tmux: new panes start live, and more than one pane can be in copy mode at once
+- **The view is a snapshot, as in tmux**: entering copy mode freezes the pane's grid, so output that keeps arriving cannot push the view down or evict the lines under the cursor. The live screen keeps running behind it, `capture-pane` (plain, `-S`/`-E`, `-e`) still answers with the live screen, and leaving copy mode reveals everything that arrived. While copy mode is active `#{history_size}` reports the frozen view's depth
 - `f`/`F`/`t`/`T` character find, `%` bracket matching, `{`/`}` paragraph jump
 - Named registers (`"a` through `"z`), count prefixes, word/WORD variants
 - Mouse drag-select copies to Windows clipboard on release and returns to the live view (tmux parity); dragging at the pane's first/last row auto-scrolls through scrollback

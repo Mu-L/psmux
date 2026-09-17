@@ -45,6 +45,28 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
 
     /// Processes the contents of the given byte string, and updates the
     /// in-memory terminal state.
+    /// A copy of this parser's screen: same grid, same scrollback, same
+    /// visible rows and cursor, with a fresh escape-sequence parser.
+    ///
+    /// psmux's copy mode reads one of these instead of the live screen, which
+    /// is how tmux's copy mode works (`window_copy_init` copies the pane's
+    /// grid).  The pane keeps running underneath the frozen view, so nothing
+    /// the application prints can shift, evict or re-anchor what the user is
+    /// reading, and leaving copy mode shows everything that arrived meanwhile.
+    #[must_use]
+    pub fn snapshot(&self) -> Self
+    where
+        CB: Default,
+    {
+        Self {
+            parser: vte::Parser::new(),
+            screen: crate::perform::WrappedScreen {
+                screen: self.screen.screen.clone(),
+                callbacks: CB::default(),
+            },
+        }
+    }
+
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.screen, bytes);
     }
