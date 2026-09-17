@@ -266,16 +266,20 @@ fn apply_patch_to_existing_panes(app: &mut AppState, patch: &WarmPanePatch) {
     fn walk(node: &mut Node, patch: &WarmPanePatch) {
         match node {
             Node::Leaf(p) => {
-                if let Ok(mut parser) = p.term.lock() {
-                    match patch {
-                        WarmPanePatch::HistoryLimit(n) => {
-                            if parser.screen().scrollback_len() != *n {
-                                parser.screen_mut().set_scrollback_len(*n);
+                // Reaches the live screen too while a copy-mode snapshot is in
+                // `term` (see `Pane::each_term`).
+                for term in p.each_term() {
+                    if let Ok(mut parser) = term.lock() {
+                        match patch {
+                            WarmPanePatch::HistoryLimit(n) => {
+                                if parser.screen().scrollback_len() != *n {
+                                    parser.screen_mut().set_scrollback_len(*n);
+                                }
                             }
-                        }
-                        WarmPanePatch::AllowAlternateScreen(allowed) => {
-                            if parser.screen().allow_alternate_screen() != *allowed {
-                                parser.screen_mut().set_allow_alternate_screen(*allowed);
+                            WarmPanePatch::AllowAlternateScreen(allowed) => {
+                                if parser.screen().allow_alternate_screen() != *allowed {
+                                    parser.screen_mut().set_allow_alternate_screen(*allowed);
+                                }
                             }
                         }
                     }

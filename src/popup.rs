@@ -191,7 +191,7 @@ pub fn create_popup_pane(
         // the server can answer ESC[6n queries for interactive popup shells (#351).
         cpr_pending,
         color_query_pending,
-        copy_state: None,
+        copy_state: None, live_term: None,
         pane_style: None,
         pane_options: Default::default(),
         squelch_until: None,
@@ -264,7 +264,7 @@ pub fn create_empty_pane(rows: u16, cols: u16, pane_id: usize) -> Option<Pane> {
         bell_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cpr_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         color_query_pending: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        copy_state: None,
+        copy_state: None, live_term: None,
         pane_style: None,
         pane_options: Default::default(),
         squelch_until: None,

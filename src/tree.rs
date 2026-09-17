@@ -316,8 +316,12 @@ pub fn resize_window_panes(app: &mut AppState, window_index: usize, area: Rect) 
                             pixel_width: 0,
                             pixel_height: 0
                         });
-                        if let Ok(mut parser) = pane.term.lock() {
-                            parser.screen_mut().set_size(inner_height, inner_width);
+                        // Both screens: the visible one (a copy-mode snapshot
+                        // while copy mode is up) and the live one behind it.
+                        for term in pane.each_term() {
+                            if let Ok(mut parser) = term.lock() {
+                                parser.screen_mut().set_size(inner_height, inner_width);
+                            }
                         }
                         pane.last_rows = inner_height;
                         pane.last_cols = inner_width;

@@ -2511,6 +2511,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                     }
+                    // Copy mode must be showing a snapshot of the active
+                    // pane's screen (tmux's copy-mode grid) and nothing else
+                    // may still hold one.  Cheap, idempotent, and the place
+                    // where every frame passes through.
+                    crate::copy_mode::sync_copy_snapshot(&mut app);
                     // Fast-path: nothing changed at all → 2-byte "NC" marker
                     // instead of cloning 50-100KB of JSON.
                     // Only allowed for persistent connections that already have
