@@ -27,8 +27,14 @@ $psmuxDir = "$env:USERPROFILE\.psmux"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 
+# Default to phase A alone. Unset, this file is picked up by the runner's glob
+# like any other suite, and the full set spends ninety seconds flooding before
+# it measures anything, which does not fit the runner's 240 s default. Phase A
+# still asserts the thing that matters (C-c interrupts a flooding pane child)
+# and finishes in well under a minute; the longer sets are for a bisect, where
+# the caller sets the variable deliberately.
 $PHASES = $env:PSMUX_I668_PHASE
-if (-not $PHASES) { $PHASES = "ABCDE" }
+if (-not $PHASES) { $PHASES = "A" }
 $PHASES = $PHASES.ToUpper()
 
 function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
