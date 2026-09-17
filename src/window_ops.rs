@@ -2375,6 +2375,52 @@ mod window_ops_tests {
     }
 
     #[test]
+    fn emacs_mode_bare_g_does_not_jump_to_history_top() {
+        // tmux binds history-top to `g` in copy-mode-vi only; the emacs table
+        // uses M-<. An ungated `g` meant that any stray `g` — typing a prompt
+        // into a pane that was still in copy mode, e.g. after a thumb scroll on
+        // a phone — threw the view to the very top until the user pressed Esc.
+        let mut app = make_scrollback_app(true);
+        super::handle_pane_scroll(&mut app, 41, true, None);
+        assert!(matches!(app.mode, Mode::CopyMode));
+        let before = app.copy_scroll_offset;
+        app.mode_keys = "emacs".to_string();
+        crate::input::send_text_to_active(&mut app, "g").expect("send-text g");
+        assert_eq!(app.copy_scroll_offset, before, "emacs 'g' must not move the view");
+        assert!(matches!(app.mode, Mode::CopyMode), "emacs 'g' must stay in copy mode");
+    }
+
+    #[test]
+    fn vi_mode_bare_g_still_jumps_to_history_top() {
+        let mut app = make_scrollback_app(true);
+        super::handle_pane_scroll(&mut app, 41, true, None);
+        app.mode_keys = "vi".to_string();
+        crate::input::send_text_to_active(&mut app, "g").expect("send-text g");
+        assert!(
+            app.copy_scroll_offset > 20,
+            "vi 'g' must still reach history-top (got {})",
+            app.copy_scroll_offset
+        );
+    }
+
+    #[test]
+    fn emacs_mode_alt_less_than_jumps_to_history_top() {
+        let mut app = make_scrollback_app(true);
+        super::handle_pane_scroll(&mut app, 41, true, None);
+        app.mode_keys = "emacs".to_string();
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('<'),
+            crossterm::event::KeyModifiers::ALT,
+        );
+        crate::input::handle_key(&mut app, key).expect("handle_key M-<");
+        assert!(
+            app.copy_scroll_offset > 20,
+            "M-< must reach history-top in emacs mode (got {})",
+            app.copy_scroll_offset
+        );
+    }
+
+    #[test]
     fn enter_copy_mode_preserves_direct_scrolled_view() {
         let mut app = make_scrollback_app(true);
         // scroll-enter-copy-mode off (#193): the wheel scrolls the pane's

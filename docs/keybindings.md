@@ -534,10 +534,16 @@ differently in its `copy-mode` and `copy-mode-vi` tables:
 | `Ctrl+e` | Scroll down one line | End of line |
 | `Ctrl+y` | Scroll up one line | Nothing |
 | `J` / `K` | Scroll down / up one line | Nothing |
+| `g` / `G` | History top / bottom | Nothing (use `M-<` / `M->`) |
 
 In vi mode `Ctrl+e` scrolls, so use `$` (or `End`) to reach the end of the line there. This is
 tmux's split: `copy-mode` binds `Ctrl+e` to end-of-line and leaves `Ctrl+y`, `J` and `K` unbound,
 while `copy-mode-vi` binds `Ctrl+e` and `J` to scroll down and `Ctrl+y` and `K` to scroll up.
+
+tmux spells history-top/history-bottom `g` / `G` in `copy-mode-vi` only; the `copy-mode` table
+uses `M-<` / `M->`. psmux used to answer a bare `g` in both tables, so a stray `g` - a prompt
+letter typed into a pane that was still in copy mode, say - threw the view to the top of the
+scrollback. `g` / `G` are now vi-only and `M-<` / `M->` work in both.
 
 These keys behave the same under both settings: `Ctrl+p` / `Ctrl+n` move the cursor up / down,
 `Ctrl+Up` / `Ctrl+Down` scroll one line, `Ctrl+a` goes to line start, `Alt+f` / `Alt+b` move by
