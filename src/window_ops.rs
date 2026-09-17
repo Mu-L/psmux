@@ -2356,6 +2356,25 @@ mod window_ops_tests {
     }
 
     #[test]
+    fn client_entered_copy_mode_drag_anchors_at_press_and_yanks() {
+        // mouse-drag-enter-copy-mode: the client sends `copy-enter`, replays
+        // the press at the button-down cell, then drags. The selection must
+        // anchor at the press cell (not at the pane cursor) and yank on
+        // release, then leave copy mode like every other mouse drag (#62).
+        let mut app = make_scrollback_app(true);
+        crate::copy_mode::enter_copy_mode(&mut app);
+        assert!(matches!(app.mode, Mode::CopyMode));
+
+        super::handle_pane_mouse(&mut app, 41, 0, 5, 2, true); // press at (col 5, row 2)
+        super::handle_pane_mouse(&mut app, 41, 32, 9, 3, true); // drag to (col 9, row 3)
+        assert_eq!(app.copy_anchor, Some((2, 5)), "anchor must be the press cell");
+
+        super::handle_pane_mouse(&mut app, 41, 0, 9, 3, false); // release
+        assert_eq!(app.paste_buffers.len(), 1, "release must yank the selection");
+        assert!(matches!(app.mode, Mode::Passthrough), "a mouse yank exits copy mode");
+    }
+
+    #[test]
     fn enter_copy_mode_preserves_direct_scrolled_view() {
         let mut app = make_scrollback_app(true);
         // scroll-enter-copy-mode off (#193): the wheel scrolls the pane's

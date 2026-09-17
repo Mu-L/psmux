@@ -1073,6 +1073,12 @@ pub struct AppState {
     /// scroll-enter-copy-mode: when off, mouse scroll at a shell prompt does NOT
     /// auto-enter copy mode.  Default: on (tmux parity).
     pub scroll_enter_copy_mode: bool,
+    /// mouse-drag-enter-copy-mode: when on, dragging with the left button
+    /// in a pane that does not track the mouse enters copy mode and selects
+    /// there (tmux's MouseDragStart -> `copy-mode -M`) instead of painting
+    /// the client-side selection overlay.  Default: off (keep the
+    /// client-side selection, which copies on release).
+    pub mouse_drag_enter_copy_mode: bool,
     /// pwsh-mouse-selection: when on, client-side drag selection behaves like
     /// Windows 11 PowerShell — pane-aware clipping, no copy-on-release (copy
     /// only on right-click), word/line selection on double/triple-click.
@@ -2012,6 +2018,7 @@ impl AppState {
                 .map(|s| HostColors::from_spec(&s))
                 .filter(|hc| hc.has_any() || hc.dark.is_some()),
             scroll_enter_copy_mode: true,
+            mouse_drag_enter_copy_mode: false,
             pwsh_mouse_selection: false,
             mouse_selection: true,
             mouse_selection_force: false,

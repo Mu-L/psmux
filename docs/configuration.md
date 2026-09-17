@@ -139,6 +139,7 @@ Details worth knowing:
 | `mouse-selection` | Bool | `on` | psmux's client-side drag selection. Set `off` to let in-pane TUI apps (opencode, nvim, etc.) handle their own mouse selection without psmux drawing on top |
 | `mouse-selection-force` | Bool | `off` | Keep psmux drag selection active in apps that request mouse tracking. Plain clicks are replayed to the app; drags are copied by psmux |
 | `scroll-enter-copy-mode` | Bool | `on` | Enter copy mode on mouse scroll (set `off` to disable) |
+| `mouse-drag-enter-copy-mode` | Bool | `off` | Enter copy mode and select there on a left-button drag in a pane that does not track the mouse (tmux's `MouseDragStart` → `copy-mode -M`) instead of the psmux client-side selection overlay |
 | `pwsh-mouse-selection` | Bool | `off` | tmux-like release-copy selection with word/line multi-click and pane-clipped extraction |
 | `paste-detection` | Bool | `on` | Detect Ctrl+V paste from console host and send as bracketed paste (set `off` to let Ctrl+V reach child apps like neovim) |
 | `choose-tree-preview` | Bool | `off` | Open `choose-session` / `choose-tree` pickers with the live preview pane already visible (saves pressing `p`). See [preview.md](preview.md) |
