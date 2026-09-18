@@ -2169,14 +2169,69 @@ type Connection = (std::net::TcpStream, std::sync::mpsc::Receiver<String>);
 
 /// Retry connecting up to 5 times: one immediate attempt, then up to 4 more
 /// with increasing backoff (500ms, 1s, 1.5s, 2s). Returns None if all fail.
+///
+/// Every attempt is traced under `PSMUX_CLIENT_DEBUG=1` (attempt number,
+/// elapsed milliseconds since the teardown was noticed, and the outcome), so a
+/// reconnect that lands late can be told apart from one that lands and is torn
+/// down again. Issue #675 turned on exactly that question and the log is the
+/// only place the answer lives: the client is a TUI, so stdout is unusable.
+/// Gated, so it costs nothing when the env is off.
 fn try_reconnect(addr: &str, key: &str) -> Option<Connection> {
+    let started = Instant::now();
+    let logging = client_log_enabled();
+    if logging {
+        client_log(
+            "reconnect",
+            &format!("pid={} begin addr={}", std::process::id(), addr),
+        );
+    }
     for attempt in 0..5u64 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(attempt * 500));
         }
-        if let Ok(result) = establish_connection(addr, key) {
-            return Some(result);
+        let attempt_started = Instant::now();
+        match establish_connection(addr, key) {
+            Ok(result) => {
+                if logging {
+                    client_log(
+                        "reconnect",
+                        &format!(
+                            "pid={} attempt {}/5 CONNECTED in {}ms (total {}ms)",
+                            std::process::id(),
+                            attempt + 1,
+                            attempt_started.elapsed().as_millis(),
+                            started.elapsed().as_millis()
+                        ),
+                    );
+                }
+                return Some(result);
+            }
+            Err(e) => {
+                if logging {
+                    client_log(
+                        "reconnect",
+                        &format!(
+                            "pid={} attempt {}/5 failed in {}ms (total {}ms): {}",
+                            std::process::id(),
+                            attempt + 1,
+                            attempt_started.elapsed().as_millis(),
+                            started.elapsed().as_millis(),
+                            e
+                        ),
+                    );
+                }
+            }
         }
+    }
+    if logging {
+        client_log(
+            "reconnect",
+            &format!(
+                "pid={} GAVE UP after 5 attempts in {}ms, client will exit",
+                std::process::id(),
+                started.elapsed().as_millis()
+            ),
+        );
     }
     None
 }
@@ -2938,6 +2993,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         if let Some(ref rx) = reconnect_pending {
             if let Ok(result) = rx.try_recv() {
                 reconnect_pending = None;
+                if client_log_enabled() {
+                    client_log("reconnect", &format!(
+                        "pid={} result applied: {} (quit={})",
+                        std::process::id(),
+                        if result.is_some() { "reattached" } else { "gave up" },
+                        quit));
+                }
                 if let Some((new_writer, new_rx)) = result {
                     if !quit {
                         // Normal reconnect: apply fresh writer + frame channel.
@@ -3037,8 +3099,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     // shutdown_persistent_streams), treat the disconnect as intentional
                     // and quit immediately instead of burning 5 s of reconnect backoff.
                     if !quit && !std::path::Path::new(&path).exists() {
+                        if client_log_enabled() {
+                            client_log("reconnect", &format!(
+                                "pid={} connection dropped and the port file is gone: intentional, quitting",
+                                std::process::id()));
+                        }
                         quit = true;
                     } else if reconnect_pending.is_none() && !quit {
+                        if client_log_enabled() {
+                            client_log("reconnect", &format!(
+                                "pid={} connection dropped, spawning reconnect thread",
+                                std::process::id()));
+                        }
                         let addr_c = addr.clone();
                         let key_c = session_key.clone();
                         let (rtx, rrx) = std::sync::mpsc::channel();
