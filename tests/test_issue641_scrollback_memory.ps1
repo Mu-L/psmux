@@ -356,7 +356,11 @@ if (-not $ready) {
     # Copy mode reads by absolute column and must not fault past a short row.
     Pmux copy-mode -t "i641_read" | Out-Null
     Pmux send-keys -t "i641_read" -X history-top | Out-Null
-    $cmView = (Pmux capture-pane -p -t "i641_read") -join "`n"
+    # Since PR #671 copy mode scrolls a snapshot and a plain capture-pane answers
+    # with the LIVE screen (tmux reads wp->base), so the view is read through its
+    # own offset: the region that starts scroll_position lines above the bottom.
+    $cmPos = [int]((Pmux display-message -p -t "i641_read" '#{scroll_position}') -join '').Trim()
+    $cmView = (Pmux capture-pane -p -t "i641_read" -S "-$cmPos" -E "-$([Math]::Max(0, $cmPos - 9))") -join "`n"
     Pmux send-keys -t "i641_read" -X select-line | Out-Null
     Pmux send-keys -t "i641_read" -X copy-selection-and-cancel | Out-Null
     Start-Sleep -Milliseconds 400
