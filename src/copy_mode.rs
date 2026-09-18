@@ -98,11 +98,11 @@ pub fn exit_copy_mode(app: &mut AppState) {
 /// copies the grid of whichever `window_pane` enters the mode and that copy
 /// lives on the pane until the mode is dismissed, focused or not.  psmux keeps
 /// the live copy cursor in `AppState`, so the focused pane's mode is
-/// `app.mode` and every other pane's is parked in its own `copy_state` (#607)
-/// — the same split `#{pane_in_mode}` answers from.  Gating this on the active
-/// pane of the active window (as PR #671 did) meant a pane put into copy mode
-/// with `copy-mode -t` lost its snapshot on the very next frame and its own
-/// output went back to pushing the view (#673).
+/// `app.mode` and every other pane's is parked in its own `copy_state` (#607),
+/// which is the same split `#{pane_in_mode}` answers from.  Gating this on the
+/// active pane of the active window (as PR #671 did) meant a pane put into
+/// copy mode with `copy-mode -t` lost its snapshot on the very next frame, and
+/// its own output went back to pushing the view (#673).
 pub fn sync_copy_snapshot(app: &mut AppState) {
     let focused_in_copy = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
     let active_id = app
