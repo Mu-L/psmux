@@ -92,8 +92,8 @@ fn flush_paste_pend_ascii_sends_as_paste() {
     let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
     let mut stage2 = true;
     let mut cmds: Vec<String> = Vec::new();
-    let mut delivered: Option<(String, std::time::Instant)> = None;
-    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut delivered);
+    let mut gesture = PasteGesture::default();
+    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut gesture);
     assert_eq!(cmds.len(), 1);
     assert!(cmds[0].starts_with("send-paste "));
 }
@@ -107,8 +107,8 @@ fn flush_paste_pend_cjk_sends_as_text() {
     let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
     let mut stage2 = false;
     let mut cmds: Vec<String> = Vec::new();
-    let mut delivered: Option<(String, std::time::Instant)> = None;
-    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut delivered);
+    let mut gesture = PasteGesture::default();
+    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut gesture);
     // Each character should be sent as individual send-text
     assert!(cmds.len() > 1, "CJK should be sent as individual send-text commands");
     for cmd in &cmds {
@@ -124,8 +124,8 @@ fn flush_paste_pend_short_ascii_sends_as_text() {
     let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
     let mut stage2 = false;
     let mut cmds: Vec<String> = Vec::new();
-    let mut delivered: Option<(String, std::time::Instant)> = None;
-    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut delivered);
+    let mut gesture = PasteGesture::default();
+    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut gesture);
     assert_eq!(cmds.len(), 2);
     assert!(cmds[0].starts_with("send-text "));
     assert!(cmds[1].starts_with("send-text "));
@@ -712,14 +712,16 @@ fn paste_command_prompt_takes_precedence_over_other_overlays() {
     assert!(window_idx_buf.is_empty());
 }
 
-// ─── Duplicate paste read-back guard (a CJK paste landing twice) ───────────
+// ─── Duplicate paste read-back guard ───────────────────────────────────────
 //
-// A short CJK clipboard paste is flushed as individual characters by the IME
-// heuristic of issue #91.  The Ctrl+V Release that follows then read the
-// clipboard and sent the same string again, so pasting a Chinese word landed in
-// the pane twice: once as one send-text per character and once as a send-paste.
-// These tests pin the guard that recognises such a read-back as a duplicate of
-// the text that already went out.
+// The console host injects a clipboard paste as character events and crossterm
+// can emit Event::Paste for the very same keystroke, so the client has more than
+// one source for one paste, and the Ctrl+V Release fallback reads the clipboard
+// as well.  What was forwarded therefore has to be remembered per gesture, since
+// a paste can be split: `C2单元格应显示` arrives as `C2` (flushed immediately as
+// typing by the zero-latency path) and then the CJK part (flushed as typing by
+// the IME heuristic of issue #91), so the forwarded text is only a fragment of
+// the clipboard and comparing the two misses.
 
 #[cfg(windows)]
 fn delivered_burst(text: &str, age_ms: u64) -> (String, std::time::Instant) {
@@ -731,50 +733,104 @@ fn delivered_burst(text: &str, age_ms: u64) -> (String, std::time::Instant) {
 
 #[cfg(windows)]
 #[test]
-fn clipboard_read_back_of_a_just_delivered_burst_is_a_duplicate() {
+fn a_fragmented_paste_gesture_blocks_the_read_back_of_the_whole_text() {
+    let mut gesture = PasteGesture::default();
+    gesture.start();
+    gesture.record("C2");
+    gesture.record("单元格应显示");
+    // Only the last fragment is remembered, so the content comparison alone
+    // cannot see that this is the paste the clipboard still holds.
+    assert!(!duplicates_recent_paste("C2单元格应显示", gesture.recent()));
+    assert!(gesture.blocks("C2单元格应显示"));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_fragmented_ascii_formula_blocks_the_read_back_too() {
+    // Reported the same way as the CJK case: `=(B3-B2)/B2` split by the
+    // zero-latency flush (`=` first) and then forwarded as a paste.
+    let mut gesture = PasteGesture::default();
+    gesture.start();
+    gesture.record("=");
+    gesture.record("(B3-B2)/B2");
+    assert!(!duplicates_recent_paste("=(B3-B2)/B2", gesture.recent()));
+    assert!(gesture.blocks("=(B3-B2)/B2"));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_gesture_that_forwarded_characters_blocks_the_read_back() {
+    let mut gesture = PasteGesture::default();
+    gesture.record("abc");
+    assert!(gesture.blocks("abc"));
+    // The host injected this paste; reading the clipboard now would add a
+    // second copy of text the pane already has.
+    assert!(gesture.blocks("abd"));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_fresh_gesture_starts_clean() {
+    let mut gesture = PasteGesture::default();
+    gesture.record("abc");
+    gesture.start();
+    assert!(!gesture.blocks("abc"));
+    assert!(!gesture.blocks("xyz"));
+}
+
+#[cfg(windows)]
+#[test]
+fn finishing_a_gesture_forgets_what_it_delivered() {
+    let mut gesture = PasteGesture::default();
+    gesture.record("abc");
+    gesture.finish();
+    assert!(!gesture.blocks("abc"));
+}
+
+#[cfg(windows)]
+#[test]
+fn nothing_delivered_is_never_a_duplicate() {
+    let gesture = PasteGesture::default();
+    assert!(!gesture.blocks("恭喜通关"));
+    assert!(!gesture.blocks(""));
+}
+
+#[cfg(windows)]
+#[test]
+fn an_empty_delivery_is_not_a_delivery() {
+    let mut gesture = PasteGesture::default();
+    gesture.record("");
+    assert!(!gesture.injected);
+    assert!(!gesture.blocks("abc"));
+}
+
+#[cfg(windows)]
+#[test]
+fn the_same_text_after_the_window_does_not_block_a_read_back() {
+    let mut gesture = PasteGesture::default();
+    gesture.delivered = Some(delivered_burst("恭喜通关", 400));
+    assert!(!gesture.blocks("恭喜通关"));
+}
+
+#[cfg(windows)]
+#[test]
+fn the_content_check_still_matches_an_identical_burst() {
     let recent = delivered_burst("恭喜通关", 5);
-    assert!(duplicates_recent_paste("恭喜通关", recent_paste_delivery(Some(&recent))));
+    assert!(duplicates_recent_paste("恭喜通关", Some((recent.0.as_str(), recent.1.elapsed()))));
+    assert!(!duplicates_recent_paste("恭喜通关！", Some((recent.0.as_str(), recent.1.elapsed()))));
 }
 
 #[cfg(windows)]
 #[test]
-fn a_different_clipboard_payload_is_never_dropped() {
-    let recent = delivered_burst("恭喜通关", 5);
-    assert!(!duplicates_recent_paste("恭喜通关！", recent_paste_delivery(Some(&recent))));
-    assert!(!duplicates_recent_paste("abc", recent_paste_delivery(Some(&recent))));
-}
-
-#[cfg(windows)]
-#[test]
-fn a_read_back_after_the_window_is_not_a_duplicate() {
-    let recent = delivered_burst("恭喜通关", 400);
-    assert!(!duplicates_recent_paste("恭喜通关", recent_paste_delivery(Some(&recent))));
-}
-
-#[cfg(windows)]
-#[test]
-fn nothing_delivered_yet_is_not_a_duplicate() {
-    assert!(!duplicates_recent_paste("恭喜通关", recent_paste_delivery(None)));
-}
-
-#[cfg(windows)]
-#[test]
-fn an_empty_burst_never_matches() {
-    let recent = delivered_burst("", 5);
-    assert!(!duplicates_recent_paste("", recent_paste_delivery(Some(&recent))));
-}
-
-#[cfg(windows)]
-#[test]
-fn the_interrupt_flush_remembers_the_cjk_burst_it_delivered() {
+fn the_interrupt_flush_records_on_the_gesture() {
     let mut buf = String::from("恭喜通关");
     let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
     let mut stage2 = false;
     let mut cmds: Vec<String> = Vec::new();
-    let mut slot: Option<(String, std::time::Instant)> = None;
-    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut slot);
+    let mut gesture = PasteGesture::default();
+    flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds, &mut gesture);
     assert!(cmds.iter().all(|c| c.starts_with("send-text ")),
         "CJK bursts still go out as individual text (issue #91)");
-    assert!(duplicates_recent_paste("恭喜通关", recent_paste_delivery(slot.as_ref())),
+    assert!(gesture.blocks("恭喜通关"),
         "the delivered CJK burst must be remembered so the read-back is dropped");
 }
