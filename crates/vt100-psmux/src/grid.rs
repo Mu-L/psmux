@@ -261,15 +261,17 @@ impl Grid {
     /// point of the compaction in `scroll_up` (issue #641).  This is what
     /// `#{history_bytes}` reports, matching tmux's field of the same name.
     /// A retained row is shared with every snapshot taken of this grid, so this
-    /// is what the history costs once, not once per reader (issue #673).
+    /// is what the history costs once, not once per reader (issue #673).  The
+    /// reference counts in front of a shared row are not counted, just as tmux
+    /// counts the line struct and its cells and never the allocator's own
+    /// bookkeeping, which keeps a fully blank compacted row cheaper than one
+    /// cell (issue #641).
     pub fn history_bytes(&self) -> usize {
         let cell = std::mem::size_of::<crate::Cell>();
-        // The two reference counts in front of a shared row.
-        let shared = 2 * std::mem::size_of::<usize>();
         let row = std::mem::size_of::<crate::row::Row>();
         self.scrollback
             .iter()
-            .map(|r| shared + row + r.stored_cells() * cell)
+            .map(|r| row + r.stored_cells() * cell)
             .sum()
     }
 
