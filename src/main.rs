@@ -1802,23 +1802,33 @@ fn run_main() -> io::Result<()> {
                                         Some(ref p) => format!(" -e {}", crate::util::quote_arg(p)),
                                         None => String::new(),
                                     };
+                                    // -n makes the window name part of the claim
+                                    // itself (#674). It used to be a separate
+                                    // rename-window sent after the OK, with its
+                                    // result discarded: the session was visible
+                                    // under the standby's pool name until it
+                                    // landed, and when it did not land at all the
+                                    // window kept the pool name with
+                                    // automatic-rename still on and the rename
+                                    // walk then named it after the shell.
+                                    let name_flag = match window_name {
+                                        Some(ref wn) => format!(" -n {}", crate::util::quote_arg(wn)),
+                                        None => String::new(),
+                                    };
                                     let claim_cmd = if let Some(ref cwd) = client_cwd {
-                                        format!("claim-session {} {} -p {}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio), env_flag)
+                                        format!("claim-session {} {} -p {}{}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(cwd), crate::util::quote_arg(&claim_prio), env_flag, name_flag)
                                     } else {
-                                        format!("claim-session {} -p {}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio), env_flag)
+                                        format!("claim-session {} -p {}{}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio), env_flag, name_flag)
                                     };
                                     match crate::session::send_auth_cmd_response(
                                         &warm_addr, &warm_key,
                                         claim_cmd.as_bytes(),
                                     ) {
                                         Ok(resp) if resp.contains("OK") => {
-                                            if let Some(ref wn) = window_name {
-                                                let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
-                                                let _ = crate::session::send_auth_cmd(
-                                                    &warm_addr, &new_key,
-                                                    format!("rename-window {}\n", crate::util::quote_arg(wn)).as_bytes(),
-                                                );
-                                            }
+                                            // The window name is already in place:
+                                            // it rode along on the claim above and
+                                            // the server applied it before this OK
+                                            // (#674).
                                             // Apply -e environment variables to the claimed warm session
                                             if !env_vars.is_empty() {
                                                 let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();

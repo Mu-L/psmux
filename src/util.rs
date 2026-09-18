@@ -406,6 +406,16 @@ pub struct ClaimArgs {
     pub priority: Option<String>,
     /// `-e`: file holding the claiming client's environment block (#659).
     pub env_file: Option<String>,
+    /// `-n`: the `new-session -n NAME` window name (#674).
+    ///
+    /// The name belongs to the claim itself, not to a follow up request.
+    /// tmux names the initial window and turns `automatic-rename` off for it
+    /// before the session is ever visible (cmd-new-session.c), and psmux's
+    /// cold spawn path does the same. Carrying it here is what makes the warm
+    /// path match: a claim that answers OK has already applied the name, so
+    /// nothing can be observed under the standby's pool name and no second
+    /// request can fail and leave the name lost.
+    pub window_name: Option<String>,
 }
 
 /// Split a `claim-session` line into its positionals and its flags.
@@ -427,6 +437,11 @@ pub fn parse_claim_args_full(args: &[&str]) -> ClaimArgs {
         }
         if a == "-e" {
             parsed.env_file = args.get(i + 1).map(|s| (*s).to_string());
+            i += 2;
+            continue;
+        }
+        if a == "-n" {
+            parsed.window_name = args.get(i + 1).map(|s| (*s).to_string());
             i += 2;
             continue;
         }

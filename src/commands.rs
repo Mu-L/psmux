@@ -2406,19 +2406,23 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                                     // user is sitting in, not on the standby's stale
                                     // one (#608).
                                     let claim_prio = crate::platform::claim_priority_arg();
-                                    let claim_cmd = format!("claim-session {} -p {}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio));
+                                    // -n rides on the claim, same as the CLI path
+                                    // (#674): the standby applies it before it
+                                    // answers, so the session is never seen under
+                                    // the pool's window name and nothing has to
+                                    // succeed afterwards for the name to stick.
+                                    let name_flag = match window_name {
+                                        Some(ref wn) => format!(" -n {}", crate::util::quote_arg(wn)),
+                                        None => String::new(),
+                                    };
+                                    let claim_cmd = format!("claim-session {} -p {}{}\n", crate::util::quote_arg(&name), crate::util::quote_arg(&claim_prio), name_flag);
                                     match crate::session::send_auth_cmd_response(
                                         &warm_addr, &warm_key,
                                         claim_cmd.as_bytes(),
                                     ) {
                                         Ok(resp) if resp.contains("OK") => {
-                                            if let Some(ref wn) = window_name {
-                                                let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
-                                                let _ = crate::session::send_auth_cmd(
-                                                    &warm_addr, &new_key,
-                                                    format!("rename-window {}\n", crate::util::quote_arg(wn)).as_bytes(),
-                                                );
-                                            }
+                                            // The window name arrived with the claim
+                                            // and is already applied (#674).
                                             // Apply -e environment variables to the claimed warm session
                                             if !env_vars.is_empty() {
                                                 let new_key = crate::session::read_session_key(&port_file_base).unwrap_or_default();
