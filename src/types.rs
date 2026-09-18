@@ -2612,7 +2612,7 @@ pub enum CtrlReq {
     /// The window name is there for the third instance of the same rule (#674):
     /// `new-session -n NAME` names the initial window and disables
     /// automatic-rename for it before the session exists, so applying it inside
-    /// this claim - before the OK - is the only way the warm path can match the
+    /// this claim, before the OK, is the only way the warm path can match the
     /// cold one. A follow up `rename-window` was observably not equivalent: it
     /// left the session visible under the standby's pool name, and lost the
     /// name entirely whenever that second request did not land.

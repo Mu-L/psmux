@@ -6,7 +6,7 @@
 // the claim by a separate `rename-window` whose result the CLI discarded, so
 // the claimed session was observable under the standby's pool name, and any
 // claim whose follow up request did not land kept that pool name with
-// `manual_rename` false - which is what let the automatic rename walk name the
+// `manual_rename` false, which is what let the automatic rename walk name the
 // window after its shell and produced the sweep's `0:pwsh` where the rig had
 // asked for `0:main`.
 //
@@ -19,7 +19,7 @@
 //
 //   * the wire carries `-n`, and its value never slides into a positional
 //     (the client cwd is optional, so a stray positional would be read as the
-//     directory - the same trap `-p` and `-e` are written against)
+//     directory, the same trap `-p` and `-e` are written against)
 //   * a claim line without `-n` parses exactly as it did before
 //   * applying the name sets `manual_rename` with it, so `automatic-rename`
 //     reads `off` for that window immediately, which is the state the claim
@@ -94,7 +94,7 @@ fn claim_line_carries_the_window_name_alongside_cwd_priority_and_env() {
 fn a_window_name_is_never_mistaken_for_the_client_cwd() {
     // The cwd is optional. Before -n was a known flag its value was not
     // consumed as a pair, so `claim-session S -n main` handed the server
-    // "main" as positional 1 - the directory.
+    // "main" as positional 1, the directory.
     let parsed = wire("claim-session S -n main");
     assert_eq!(parsed.positionals, vec!["S"]);
     assert_eq!(parsed.window_name.as_deref(), Some("main"));

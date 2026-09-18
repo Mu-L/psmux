@@ -984,9 +984,9 @@ pub(crate) fn nc_allowed(i: NcInputs) -> bool {
 ///
 /// Both paths that can produce a session call this: the cold spawn, where it
 /// runs before the server loop starts, and the warm claim, where it runs inside
-/// the claim before its OK (#674). They used to differ - the claim wire carried
+/// the claim before its OK (#674). They used to differ: the claim wire carried
 /// no name at all and the CLI followed the claim with a separate
-/// `rename-window` whose result it discarded - so a claimed session was briefly
+/// `rename-window` whose result it discarded, so a claimed session was briefly
 /// visible under the standby's pool name, and when that second request did not
 /// land the window kept the pool name with `manual_rename` false and the next
 /// rename walk named it after the shell. One function, called on both paths, is
@@ -3912,9 +3912,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // The `new-session -n NAME` window name is applied FIRST,
                     // before the beacon files below and long before the OK
                     // (#674). The standby's window is still carrying the pool
-                    // name at this instant, and every observer - a client
+                    // name at this instant, and every observer, whether a client
                     // polling for the .port file, the rename walk, a status
-                    // redraw - reaches this server through the same control
+                    // redraw, reaches this server through the same control
                     // channel this arm is running on, so naming the window
                     // here means the session is never observable under any
                     // name but the one that was asked for. It also removes the
