@@ -117,13 +117,31 @@ function NameOf($base) {
     if (-not $p -or -not $k) { return $null }
     try { return ((OneShot $p $k @('list-windows -F "#{window_name}"')) -join ' ').Trim() } catch { return $null }
 }
-function WaitWarm([int]$ms = 20000) {
+$script:Nudge = 0
+function PollWarm([int]$ms) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $ms) {
         if (Test-Path (Join-Path $DATA "$($NS)____warm__.port")) { return $true }
         Start-Sleep -Milliseconds 25
     }
     return $false
+}
+# The pool only refills when a session is created or claimed, so a rig that
+# refuses to create a session until a standby exists can wait forever: under
+# load the replenish can lose its advisory spawn lock (the holder is stale for
+# 20 s) and nothing else ever asks for a standby. Clear a stale lock in this
+# rig's own private root and create one throwaway session, which is what asks
+# the pool to refill, then wait again.
+function WaitWarm([int]$ms = 12000) {
+    if (PollWarm $ms) { return $true }
+    $lock = Join-Path $DATA "$($NS)____warm__.spawnlock"
+    if (Test-Path $lock) { Remove-Item -LiteralPath $lock -Force -EA SilentlyContinue }
+    $script:Nudge++
+    $n = "nudge$($script:Nudge)"
+    & $PSMUX -L $NS new-session -d -s $n 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 400
+    & $PSMUX -L $NS kill-session -t $n 2>&1 | Out-Null
+    return (PollWarm $ms)
 }
 function Cleanup {
     & $PSMUX -L $NS kill-server 2>&1 | Out-Null
