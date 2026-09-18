@@ -3146,7 +3146,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
             }
         }
-        if quit && !got_frame { break; }
+        if quit && !got_frame {
+            if reconnect_log_enabled() {
+                reconnect_log(&format!(
+                    "main loop leaving on quit (reconnect pending={})",
+                    reconnect_pending.is_some()));
+            }
+            break;
+        }
 
         // ── STEP 1: Poll events with adaptive timeout ────────────────────
         let since_dump = last_dump_time.elapsed().as_millis() as u64;
@@ -3318,7 +3325,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         }
 
         {
-            let mut _pending_evt = input.read_timeout(Duration::from_millis(poll_ms))?;
+            // This `?` ends the client: the error travels out of run_remote and
+            // the process exits, printing to a terminal that is being torn down
+            // and leaving no trace anywhere. Issue #675 is what that looks like
+            // from outside, a client that reconnects in a millisecond and is
+            // simply gone a moment later, with the reconnect result still
+            // sitting unapplied in its channel. Say what the error was before
+            // letting it go.
+            let mut _pending_evt = match input.read_timeout(Duration::from_millis(poll_ms)) {
+                Ok(v) => v,
+                Err(e) => {
+                    crate::debug_log::reconnect_log(&format!(
+                        "input wait FAILED, client is exiting: kind={:?} err={}",
+                        e.kind(), e
+                    ));
+                    return Err(e);
+                }
+            };
             if crate::pty_trace::on() && matches!(_pending_evt, Some(Event::Key(_))) {
                 crate::pty_trace::mark_plain("k", poll_ms as usize);
             }
