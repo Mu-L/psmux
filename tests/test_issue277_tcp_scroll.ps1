@@ -115,18 +115,20 @@ Write-Host "`n[Test 3] pane-scroll down in copy mode -> scrolls content" -Foregr
 Send-TcpCommand -Session $SESSION -Command "pane-scroll 0 up" | Out-Null
 Start-Sleep -Seconds 1
 
-# Capture in copy mode
-$capCopy1 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+# The copy mode view is observed through #{scroll_position}, not a plain
+# capture-pane: since PR #671 copy mode scrolls a snapshot of the grid and
+# capture-pane answers with the LIVE screen, as tmux's capture reads wp->base.
+$posCopy1 = [int](& $PSMUX display-message -t $SESSION -p '#{scroll_position}' 2>&1 | Out-String).Trim()
 
 # Scroll down
 Send-TcpCommand -Session $SESSION -Command "pane-scroll 0 down" | Out-Null
 Start-Sleep -Seconds 1
 
-$capCopy2 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-if ($capCopy2 -ne $capCopy1) {
-    Write-Pass "pane-scroll down changed content in copy mode"
+$posCopy2 = [int](& $PSMUX display-message -t $SESSION -p '#{scroll_position}' 2>&1 | Out-String).Trim()
+if ($posCopy2 -lt $posCopy1) {
+    Write-Pass "pane-scroll down moved the copy mode view toward the bottom ($posCopy1 -> $posCopy2)"
 } else {
-    Write-Fail "pane-scroll down had no effect in copy mode"
+    Write-Fail "pane-scroll down had no effect in copy mode (scroll_position $posCopy1 -> $posCopy2)"
 }
 
 # Exit copy mode -- ONLY if still in it.  Scrolling up 3 then back down 3
