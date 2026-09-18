@@ -10,7 +10,20 @@ pub struct Grid {
     scroll_bottom: u16,
     origin_mode: bool,
     saved_origin_mode: bool,
-    scrollback: std::collections::VecDeque<crate::row::Row>,
+    /// Retained history, shared copy on write.
+    ///
+    /// A row becomes history exactly once, is compacted on the way in
+    /// (`scroll_up`, issue #641) and is never written to again, so every copy
+    /// of this grid can read the same allocation.  That is what makes psmux's
+    /// copy mode snapshot (`Parser::snapshot`, issue #673) cost the visible
+    /// screen rather than the whole scrollback: a 50000 line history used to
+    /// be deep copied on every entry into copy mode, 186 MB of private bytes
+    /// measured at 200 columns.
+    ///
+    /// Anything that ever needs to CHANGE a retained row must take its own
+    /// copy first (`std::sync::Arc::make_mut`), or it would rewrite history
+    /// under every snapshot that still holds it.
+    scrollback: std::collections::VecDeque<std::sync::Arc<crate::row::Row>>,
     scrollback_len: usize,
     scrollback_offset: usize,
     /// Copy-mode freeze (psmux issue #494): when set, the visible region is
@@ -143,6 +156,7 @@ impl Grid {
         let rows_len = self.rows.len();
         self.scrollback
             .iter()
+            .map(std::sync::Arc::as_ref)
             .skip(scrollback_len - self.scrollback_offset)
             // when scrollback_offset > rows_len (e.g. rows = 3,
             // scrollback_len = 10, offset = 9) the skip(10 - 9)
@@ -225,12 +239,16 @@ impl Grid {
     /// blank columns are not stored and so do not count, which is the whole
     /// point of the compaction in `scroll_up` (issue #641).  This is what
     /// `#{history_bytes}` reports, matching tmux's field of the same name.
+    /// A retained row is shared with every snapshot taken of this grid, so this
+    /// is what the history costs once, not once per reader (issue #673).
     pub fn history_bytes(&self) -> usize {
         let cell = std::mem::size_of::<crate::Cell>();
+        // The two reference counts in front of a shared row.
+        let shared = 2 * std::mem::size_of::<usize>();
         let row = std::mem::size_of::<crate::row::Row>();
         self.scrollback
             .iter()
-            .map(|r| row + r.stored_cells() * cell)
+            .map(|r| shared + row + r.stored_cells() * cell)
             .sum()
     }
 
@@ -258,7 +276,7 @@ impl Grid {
         // padding before it becomes resident for the life of the history
         // (issue #641).
         row.compact();
-        self.scrollback.push_back(row);
+        self.scrollback.push_back(std::sync::Arc::new(row));
         while self.scrollback.len() > self.scrollback_len {
             self.scrollback.pop_front();
         }
@@ -643,7 +661,7 @@ impl Grid {
                 // to the allocator.  tmux does the same in
                 // `grid_scroll_history` (grid.c:508).
                 removed.compact();
-                self.scrollback.push_back(removed);
+                self.scrollback.push_back(std::sync::Arc::new(removed));
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
                 }

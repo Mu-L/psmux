@@ -24,8 +24,6 @@
 // compile against the pre fix tree, where the rows sit inline in the deque and
 // every address differs.
 
-use super::*;
-
 /// A parser holding `lines` rows of history behind a small visible screen.
 fn parser_with_history(lines: usize, scrollback_len: usize) -> crate::Parser {
     let mut parser = crate::Parser::new(5, 40, scrollback_len);

@@ -84,27 +84,40 @@ pub fn exit_copy_mode(app: &mut AppState) {
     }
 }
 
-/// Keep copy-mode snapshots in sync with the current mode.
+/// Keep copy-mode snapshots in sync with the modes the panes are in.
 ///
-/// Copy mode displays a snapshot of the active pane's screen (see
+/// Copy mode displays a snapshot of the pane's screen (see
 /// `Pane::enter_copy_snapshot`).  Entering and leaving normally go through
 /// `enter_copy_mode` / `exit_copy_mode`, but those are not the only paths that
 /// change `app.mode` or move focus; a missed restore would leave a pane frozen
 /// on an old screen, and a missed snapshot would put copy mode back on the live
 /// grid.  This is the idempotent reconciliation, safe to call per frame:
-/// exactly the active pane holds a snapshot, exactly while copy mode is up.
+/// every pane in copy mode holds a snapshot, exactly while it is in copy mode.
+///
+/// A mode belongs to ONE pane, as it does in tmux, where `window_copy_init`
+/// copies the grid of whichever `window_pane` enters the mode and that copy
+/// lives on the pane until the mode is dismissed, focused or not.  psmux keeps
+/// the live copy cursor in `AppState`, so the focused pane's mode is
+/// `app.mode` and every other pane's is parked in its own `copy_state` (#607)
+/// — the same split `#{pane_in_mode}` answers from.  Gating this on the active
+/// pane of the active window (as PR #671 did) meant a pane put into copy mode
+/// with `copy-mode -t` lost its snapshot on the very next frame and its own
+/// output went back to pushing the view (#673).
 pub fn sync_copy_snapshot(app: &mut AppState) {
-    let want = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
+    let focused_in_copy = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
     let active_id = app
         .windows
         .get(app.active_idx)
         .and_then(|w| active_pane(&w.root, &w.active_path))
         .map(|p| p.id);
-    let active_idx = app.active_idx;
-    for (idx, win) in app.windows.iter_mut().enumerate() {
-        let is_active_window = idx == active_idx;
+    for win in app.windows.iter_mut() {
         crate::tree::for_each_pane_mut(&mut win.root, &mut |p: &mut crate::types::Pane| {
-            if want && is_active_window && Some(p.id) == active_id {
+            let want = if Some(p.id) == active_id {
+                focused_in_copy
+            } else {
+                p.copy_state.is_some()
+            };
+            if want {
                 p.enter_copy_snapshot();
             } else {
                 p.leave_copy_snapshot();
