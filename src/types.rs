@@ -2597,7 +2597,8 @@ pub enum CtrlReq {
     RenameSession(String),
     /// Claim a warm server: rename session + send response so CLI knows it's done.
     /// Fields: session name, optional client CWD, optional client priority,
-    /// optional path to the client's environment block, response sender.
+    /// optional path to the client's environment block, optional initial
+    /// window name, response sender.
     ///
     /// The priority rides along for the same reason the CWD does (#608): a warm
     /// standby was spawned ahead of time, in an environment that predates the
@@ -2607,7 +2608,15 @@ pub enum CtrlReq {
     /// The environment file is the general case of that same problem (#659):
     /// a cold spawned server inherits the client's whole environment block, so
     /// a claimed standby has to be handed it too or it stays poisoned for life.
-    ClaimSession(String, Option<String>, Option<String>, Option<String>, mpsc::Sender<String>),
+    ///
+    /// The window name is there for the third instance of the same rule (#674):
+    /// `new-session -n NAME` names the initial window and disables
+    /// automatic-rename for it before the session exists, so applying it inside
+    /// this claim - before the OK - is the only way the warm path can match the
+    /// cold one. A follow up `rename-window` was observably not equivalent: it
+    /// left the session visible under the standby's pool name, and lost the
+    /// name entirely whenever that second request did not land.
+    ClaimSession(String, Option<String>, Option<String>, Option<String>, Option<String>, mpsc::Sender<String>),
     SwapPane(String),
     /// swap-pane -t <target>: swap the active pane with the pane identified by
     /// (target, pane_is_id).  When `pane_is_id` is true the value is a pane id

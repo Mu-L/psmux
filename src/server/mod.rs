@@ -975,6 +975,42 @@ pub(crate) fn nc_allowed(i: NcInputs) -> bool {
         && i.seen_full_frame
 }
 
+/// Apply a `new-session -n NAME` window name to the session's initial window.
+///
+/// Setting `manual_rename = true` alongside the name is the whole point
+/// (issue #266): it is what implicitly turns `automatic-rename` off for that
+/// window, so the rename walk never renames it after its shell. tmux does both
+/// in cmd-new-session.c, before the session is linked and visible.
+///
+/// Both paths that can produce a session call this: the cold spawn, where it
+/// runs before the server loop starts, and the warm claim, where it runs inside
+/// the claim before its OK (#674). They used to differ - the claim wire carried
+/// no name at all and the CLI followed the claim with a separate
+/// `rename-window` whose result it discarded - so a claimed session was briefly
+/// visible under the standby's pool name, and when that second request did not
+/// land the window kept the pool name with `manual_rename` false and the next
+/// rename walk named it after the shell. One function, called on both paths, is
+/// what keeps them from drifting apart again.
+///
+/// Returns whether a name was applied, so a caller that has to decide something
+/// else (the claim logs it) does not re-derive it.
+pub(crate) fn apply_initial_window_name(app: &mut AppState, window_name: Option<&str>) -> bool {
+    match window_name {
+        Some(raw) => {
+            let n = crate::util::clean_name(raw);
+            match app.windows.last_mut() {
+                Some(w) => {
+                    w.name = n;
+                    w.manual_rename = true;
+                    true
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>, env_vars: Vec<(String, String)>) -> io::Result<()> {
     crate::startup_trace::mark("srv.entry");
     // Write crash info to a log file when stderr is unavailable (detached server)
@@ -1388,10 +1424,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // is critical (issue #266) — it implicitly disables automatic-rename for
     // the initial window of a `new-session -n NAME`, matching tmux semantics
     // and the two later `-n` paths in this file (lines ~789, ~812).
-    if let Some(n) = window_name {
-        let n = crate::util::clean_name(&n);
-        app.windows.last_mut().map(|w| { w.name = n; w.manual_rename = true; });
-    }
+    apply_initial_window_name(&mut app, window_name.as_deref());
     // The pool is filled by the background spawner from the server loop
     // below; nothing is spawned on this path any more, so `new-session`
     // returns without waiting on a spare shell it does not itself need.
@@ -3861,7 +3894,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
                     hook_event = Some("after-rename-session");
                 }
-                CtrlReq::ClaimSession(name, client_cwd, client_priority, client_env_file, resp) => {
+                CtrlReq::ClaimSession(name, client_cwd, client_priority, client_env_file, client_window_name, resp) => {
                     // Guard against clobbering an already-claimed session. Under
                     // rapid `new-session`, a stale __warm__.port (or OS ephemeral
                     // port reuse) can route a claim to a server that has ALREADY
@@ -3876,6 +3909,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = resp.send("ERR: not a warm server (already claimed)\n".to_string());
                     } else {
                     warm_debug(&format!("CLAIM ACCEPT: __warm__ (port={:?}) -> '{}'", app.control_port, name));
+                    // The `new-session -n NAME` window name is applied FIRST,
+                    // before the beacon files below and long before the OK
+                    // (#674). The standby's window is still carrying the pool
+                    // name at this instant, and every observer - a client
+                    // polling for the .port file, the rename walk, a status
+                    // redraw - reaches this server through the same control
+                    // channel this arm is running on, so naming the window
+                    // here means the session is never observable under any
+                    // name but the one that was asked for. It also removes the
+                    // failure the issue was filed for: the name no longer
+                    // depends on a second request landing afterwards.
+                    if apply_initial_window_name(&mut app, client_window_name.as_deref()) {
+                        warm_debug(&format!("CLAIM: window name -> '{}' (automatic-rename off)", app.windows.last().map(|w| w.name.as_str()).unwrap_or("")));
+                    }
                     // Same as RenameSession but with a synchronous response
                     // so the CLI knows the rename completed before attaching.
                     let old_path = crate::paths::port_file(&app.port_file_base());
@@ -7478,3 +7525,7 @@ mod test_issue459_warm_single_instance;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue658_nc_decision.rs"]
 mod test_issue658_nc_decision;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue674_claim_window_name.rs"]
+mod test_issue674_claim_window_name;
