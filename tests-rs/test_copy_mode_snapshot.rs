@@ -31,7 +31,7 @@ fn tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
 
 /// One window, one proxy pane: a real `Pane` with a real vt100 parser, but no
 /// child process behind it (the pane mirrors a TCP stream nobody writes to).
-fn app_with_pane() -> AppState {
+pub(crate) fn app_with_pane() -> AppState {
     let mut app = AppState::new("copysnap".to_string());
     app.window_base_index = 0;
     app.pane_base_index = 0;
@@ -82,20 +82,20 @@ fn app_with_pane() -> AppState {
     app
 }
 
-fn pane_of(app: &AppState) -> Option<&crate::types::Pane> {
+pub(crate) fn pane_of(app: &AppState) -> Option<&crate::types::Pane> {
     let win = app.windows.get(app.active_idx)?;
     crate::tree::active_pane(&win.root, &win.active_path)
 }
 
-fn view_term(app: &AppState) -> std::sync::Arc<std::sync::Mutex<vt100::Parser>> {
+pub(crate) fn view_term(app: &AppState) -> std::sync::Arc<std::sync::Mutex<vt100::Parser>> {
     pane_of(app).expect("active pane").term.clone()
 }
 
-fn parked_live_term(app: &AppState) -> Option<std::sync::Arc<std::sync::Mutex<vt100::Parser>>> {
+pub(crate) fn parked_live_term(app: &AppState) -> Option<std::sync::Arc<std::sync::Mutex<vt100::Parser>>> {
     pane_of(app).expect("active pane").live_term.clone()
 }
 
-fn feed(term: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, prefix: &str, from: usize, to: usize) {
+pub(crate) fn feed(term: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, prefix: &str, from: usize, to: usize) {
     if let Ok(mut parser) = term.lock() {
         for i in from..to {
             parser.process(format!("{prefix} {i}\r\n").as_bytes());
@@ -103,7 +103,7 @@ fn feed(term: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>, prefix: &str, fr
     }
 }
 
-fn filled(term: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>) -> usize {
+pub(crate) fn filled(term: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>) -> usize {
     term.lock().map(|p| p.screen().scrollback_filled()).unwrap_or(0)
 }
 

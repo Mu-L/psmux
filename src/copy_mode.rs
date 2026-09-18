@@ -507,22 +507,22 @@ pub fn scroll_copy_down(app: &mut AppState, lines: usize) {
 /// Copy-mode offset after the pane's retained history shrank by
 /// `filled_before - filled_after` lines: shift it by the number of lines the
 /// trim removed so the view stays on the same content, exactly like tmux's
-/// copy-mode resize handling.  `None` means the offset is no longer reachable
-/// at all and the caller must leave copy mode rather than strand the view.
+/// `window_copy_resize` (window-copy.c).  An offset that would land past the
+/// oldest retained line is clamped to that line: tmux pre-clamps `oy` to the
+/// history size and re-derives it after the reflow, so the view lands on the
+/// top of what is retained and copy mode stays up.  It never leaves copy
+/// mode on a resize, and neither does psmux.
 pub fn offset_after_trim(
     offset_before: usize,
     filled_before: usize,
     filled_after: usize,
-) -> Option<usize> {
+) -> usize {
     if filled_after >= filled_before {
-        return Some(offset_before); // nothing was trimmed
+        return offset_before; // nothing was trimmed
     }
-    let shifted = offset_before.saturating_sub(filled_before - filled_after);
-    if shifted > filled_after {
-        None
-    } else {
-        Some(shifted)
-    }
+    offset_before
+        .saturating_sub(filled_before - filled_after)
+        .min(filled_after)
 }
 
 /// Keep the copy-mode view anchored across a pane resize.
@@ -542,7 +542,7 @@ pub fn reanchor_after_resize(app: &mut AppState, offset_before: usize, filled_be
     if !matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
         return;
     }
-    let shifted = {
+    let after = {
         let win = &mut app.windows[app.active_idx];
         let p = match active_pane_mut(&mut win.root, &win.active_path) {
             Some(p) => p,
@@ -553,20 +553,15 @@ pub fn reanchor_after_resize(app: &mut AppState, offset_before: usize, filled_be
             Err(_) => return,
         };
         let filled_after = parser.screen().scrollback_filled();
-        match offset_after_trim(offset_before, filled_before, filled_after) {
-            Some(after) => {
-                parser.screen_mut().set_scrollback(after);
-                Some(after)
-            }
-            None => None,
-        }
+        let after = offset_after_trim(offset_before, filled_before, filled_after);
+        parser.screen_mut().set_scrollback(after);
+        after
     };
-    match shifted {
-        Some(after) => app.copy_scroll_offset = after,
-        // Nothing left to anchor to: return to the live view instead of
-        // leaving the pane showing its oldest retained line.
-        None => exit_copy_mode(app),
-    }
+    // tmux parity: a resize never leaves copy mode. When the old offset can
+    // no longer be reached the view sits on the oldest retained line, which
+    // is where tmux's window_copy_resize lands too, and the user scrolls on
+    // from there.
+    app.copy_scroll_offset = after;
 }
 
 pub fn scroll_to_top(app: &mut AppState) {
