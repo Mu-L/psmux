@@ -18,7 +18,8 @@ use crate::rendering::{
 use crate::style::{map_color, parse_tmux_style_components};
 use crate::config::{parse_key_string, normalize_key_for_binding};
 use crate::clipboard::{copy_to_system_clipboard, read_from_system_clipboard};
-use crate::debug_log::{client_log, client_log_enabled, input_log, input_log_enabled};
+use crate::debug_log::{client_log, client_log_enabled, input_log, input_log_enabled,
+    reconnect_log, reconnect_log_enabled};
 use crate::layout::RowRunsJson;
 use crate::tree::split_with_gaps;
 use crate::pane_border::PaneBorderIndicators;
@@ -2178,12 +2179,9 @@ type Connection = (std::net::TcpStream, std::sync::mpsc::Receiver<String>);
 /// Gated, so it costs nothing when the env is off.
 fn try_reconnect(addr: &str, key: &str) -> Option<Connection> {
     let started = Instant::now();
-    let logging = client_log_enabled();
+    let logging = reconnect_log_enabled();
     if logging {
-        client_log(
-            "reconnect",
-            &format!("pid={} begin addr={}", std::process::id(), addr),
-        );
+        reconnect_log(&format!("begin addr={}", addr));
     }
     for attempt in 0..5u64 {
         if attempt > 0 {
@@ -2193,45 +2191,33 @@ fn try_reconnect(addr: &str, key: &str) -> Option<Connection> {
         match establish_connection(addr, key) {
             Ok(result) => {
                 if logging {
-                    client_log(
-                        "reconnect",
-                        &format!(
-                            "pid={} attempt {}/5 CONNECTED in {}ms (total {}ms)",
-                            std::process::id(),
-                            attempt + 1,
-                            attempt_started.elapsed().as_millis(),
-                            started.elapsed().as_millis()
-                        ),
-                    );
+                    reconnect_log(&format!(
+                        "attempt {}/5 CONNECTED in {}ms (total {}ms)",
+                        attempt + 1,
+                        attempt_started.elapsed().as_millis(),
+                        started.elapsed().as_millis()
+                    ));
                 }
                 return Some(result);
             }
             Err(e) => {
                 if logging {
-                    client_log(
-                        "reconnect",
-                        &format!(
-                            "pid={} attempt {}/5 failed in {}ms (total {}ms): {}",
-                            std::process::id(),
-                            attempt + 1,
-                            attempt_started.elapsed().as_millis(),
-                            started.elapsed().as_millis(),
-                            e
-                        ),
-                    );
+                    reconnect_log(&format!(
+                        "attempt {}/5 failed in {}ms (total {}ms): {}",
+                        attempt + 1,
+                        attempt_started.elapsed().as_millis(),
+                        started.elapsed().as_millis(),
+                        e
+                    ));
                 }
             }
         }
     }
     if logging {
-        client_log(
-            "reconnect",
-            &format!(
-                "pid={} GAVE UP after 5 attempts in {}ms, client will exit",
-                std::process::id(),
-                started.elapsed().as_millis()
-            ),
-        );
+        reconnect_log(&format!(
+            "GAVE UP after 5 attempts in {}ms, client will exit",
+            started.elapsed().as_millis()
+        ));
     }
     None
 }
@@ -2993,10 +2979,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         if let Some(ref rx) = reconnect_pending {
             if let Ok(result) = rx.try_recv() {
                 reconnect_pending = None;
-                if client_log_enabled() {
-                    client_log("reconnect", &format!(
-                        "pid={} result applied: {} (quit={})",
-                        std::process::id(),
+                if reconnect_log_enabled() {
+                    reconnect_log(&format!(
+                        "result applied: {} (quit={})",
                         if result.is_some() { "reattached" } else { "gave up" },
                         quit));
                 }
@@ -3099,17 +3084,13 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     // shutdown_persistent_streams), treat the disconnect as intentional
                     // and quit immediately instead of burning 5 s of reconnect backoff.
                     if !quit && !std::path::Path::new(&path).exists() {
-                        if client_log_enabled() {
-                            client_log("reconnect", &format!(
-                                "pid={} connection dropped and the port file is gone: intentional, quitting",
-                                std::process::id()));
+                        if reconnect_log_enabled() {
+                            reconnect_log("connection dropped and the port file is gone: intentional, quitting");
                         }
                         quit = true;
                     } else if reconnect_pending.is_none() && !quit {
-                        if client_log_enabled() {
-                            client_log("reconnect", &format!(
-                                "pid={} connection dropped, spawning reconnect thread",
-                                std::process::id()));
+                        if reconnect_log_enabled() {
+                            reconnect_log("connection dropped, spawning reconnect thread");
                         }
                         let addr_c = addr.clone();
                         let key_c = session_key.clone();

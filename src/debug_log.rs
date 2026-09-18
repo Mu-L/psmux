@@ -9,6 +9,7 @@
 //! | Variable               | Log file                          | Description                          |
 //! |------------------------|-----------------------------------|--------------------------------------|
 //! | `PSMUX_CLIENT_DEBUG=1` | `~/.psmux/client_debug.log`       | Client TUI rendering, draw, status   |
+//! | `PSMUX_CLIENT_DEBUG=1` | `~/.psmux/client_reconnect.log`   | Client reconnect attempts (appended) |
 //! | `PSMUX_STYLE_DEBUG=1`  | `~/.psmux/style_debug.log`        | Style/theme parsing, inline styles   |/// | `PSMUX_INPUT_DEBUG=1`  | `~/.psmux/input_debug.log`        | Every crossterm event + console mode |//! | `PSMUX_MOUSE_DEBUG=1`  | `~/.psmux/mouse_debug.log`        | Mouse injection (existing)           |
 //! | `PSMUX_SSH_DEBUG=1`    | `~/.psmux/ssh_input.log`          | SSH input handling (existing)        |
 //! | `PSMUX_LATENCY_LOG=1`  | `~/.psmux/latency.log`            | Keypress-to-render latency (existing)|
@@ -98,6 +99,54 @@ pub fn client_log(component: &str, msg: &str) {
 /// Returns `true` if client debug logging is active.
 pub fn client_log_enabled() -> bool {
     CLIENT_LOG.lock().ok().map_or(false, |g| g.is_some())
+}
+
+// ─── Client reconnect log ───────────────────────────────────────────────────
+
+/// Client reconnect trace, gated by the same `PSMUX_CLIENT_DEBUG=1`.
+///
+/// Separate from `client_debug.log`, and **appended** rather than truncated,
+/// because a reconnect is exactly the event a truncating log cannot record.
+/// `client_debug.log` is opened fresh by every attach client, so the client
+/// whose reconnect is under investigation has its trace erased by the next
+/// client to attach. Issue #434's own suite proves the point: the client that
+/// survives a writer teardown in Test 1 is followed by thirty churn clients in
+/// Test 3, and by the time anyone reads the log nothing of Test 1 is left.
+///
+/// Every line carries the pid, so interleaved clients stay tellable apart.
+static RECONNECT_LOG: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| {
+    if !env_enabled("PSMUX_CLIENT_DEBUG") { return Mutex::new(None); }
+    let dir = psmux_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{}/client_reconnect.log", dir))
+        .ok();
+    Mutex::new(f)
+});
+
+static RECONNECT_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+const RECONNECT_LOG_CAP: u32 = 2000;
+
+/// Log a client reconnect message. No-op unless `PSMUX_CLIENT_DEBUG=1`.
+pub fn reconnect_log(msg: &str) {
+    let n = RECONNECT_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if n >= RECONNECT_LOG_CAP {
+        return;
+    }
+    if let Ok(mut guard) = RECONNECT_LOG.lock() {
+        if let Some(ref mut f) = *guard {
+            let _ = writeln!(f, "[{}][reconnect][pid {}] {}",
+                chrono::Local::now().format("%H:%M:%S%.3f"), std::process::id(), msg);
+            let _ = f.flush();
+        }
+    }
+}
+
+/// Returns `true` if client reconnect logging is active.
+pub fn reconnect_log_enabled() -> bool {
+    RECONNECT_LOG.lock().ok().map_or(false, |g| g.is_some())
 }
 
 // ─── Raw pane byte log ──────────────────────────────────────────────────────
