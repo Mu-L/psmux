@@ -24,6 +24,13 @@
 // compile against the pre fix tree, where the rows sit inline in the deque and
 // every address differs.
 
+/// The text of one row, used to compare an indexed read with a walked one.
+fn row_text(row: &crate::row::Row) -> String {
+    let mut out = String::new();
+    row.write_contents(&mut out, 0, 80, false);
+    out
+}
+
 /// A parser holding `lines` rows of history behind a small visible screen.
 fn parser_with_history(lines: usize, scrollback_len: usize) -> crate::Parser {
     let mut parser = crate::Parser::new(5, 40, scrollback_len);
@@ -144,6 +151,65 @@ fn the_visible_rows_are_a_private_copy() {
     assert!(
         !visible_text(&snapshot).contains("OVERWRITTEN"),
         "the snapshot must not show what was drawn after it was taken"
+    );
+}
+
+/// Reading the visible region row by row is what `capture-pane -S` does, and it
+/// must stay a direct index into the history.
+///
+/// Handing the shared rows out through an iterator adaptor cost that its O(1)
+/// `nth`, which turned a capture over a 50000 line history into a quadratic
+/// walk: the real server answered `capture-pane -p -S -1000` in 363 ms before
+/// and then timed out entirely. This walks a deep history the way a capture
+/// does and pins the answers against the iterator.
+#[test]
+fn every_visible_row_is_reachable_by_index_without_walking_the_history() {
+    let mut parser = crate::Parser::new(24, 80, 60000);
+    for i in 0..20000 {
+        parser.process(format!("line {i}\r\n").as_bytes());
+    }
+
+    for offset in [0usize, 1, 23, 24, 25, 1000, 19000] {
+        parser.screen_mut().set_scrollback(offset);
+        let walked: Vec<String> = parser
+            .screen()
+            .grid()
+            .visible_rows()
+            .map(row_text)
+            .collect();
+        let indexed: Vec<String> = (0..walked.len() as u16)
+            .map(|r| {
+                parser
+                    .screen()
+                    .grid()
+                    .visible_row(r)
+                    .map(row_text)
+                    .unwrap_or_else(|| panic!("row {r} missing at offset {offset}"))
+            })
+            .collect();
+        assert_eq!(
+            indexed, walked,
+            "indexed reads must answer exactly what the iterator yields at offset {offset}"
+        );
+    }
+
+    // A capture of the whole history, one row at a time, the way the server
+    // serialises it. On the quadratic path this does not finish in minutes.
+    parser.screen_mut().set_scrollback(19000);
+    let started = std::time::Instant::now();
+    let mut seen = 0usize;
+    for _ in 0..500 {
+        for r in 0..24u16 {
+            if parser.screen().grid().visible_row(r).is_some() {
+                seen += 1;
+            }
+        }
+    }
+    assert_eq!(seen, 500 * 24);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "reading {seen} rows out of a deep history took {:?}: the read is walking the scrollback",
+        started.elapsed()
     );
 }
 

@@ -154,15 +154,18 @@ impl Grid {
     pub fn visible_rows(&self) -> impl Iterator<Item = &crate::row::Row> {
         let scrollback_len = self.scrollback.len();
         let rows_len = self.rows.len();
+        // The `map` that hands out the shared rows comes AFTER the `skip`, so
+        // the skip still lands on the deque's own fast path instead of stepping
+        // through the history one row at a time.
         self.scrollback
             .iter()
-            .map(std::sync::Arc::as_ref)
             .skip(scrollback_len - self.scrollback_offset)
             // when scrollback_offset > rows_len (e.g. rows = 3,
             // scrollback_len = 10, offset = 9) the skip(10 - 9)
             // will take 9 rows instead of 3. we need to set
             // the upper bound to rows_len (e.g. 3)
             .take(rows_len)
+            .map(|r| &**r)
             // same for rows_len - scrollback_offset (e.g. 3 - 9).
             // it'll panic with overflow. we have to saturate the subtraction.
             .chain(
@@ -182,8 +185,26 @@ impl Grid {
         self.rows.iter_mut()
     }
 
+    /// The `row`th row of the visible region, indexed rather than walked.
+    ///
+    /// This is the same sequence `visible_rows` yields, and it has to stay O(1):
+    /// `capture-pane -S` asks for one row at a time, so a linear walk per row
+    /// turns a 50000 line history into a quadratic read.  (Handing the shared
+    /// scrollback rows out through a `map` adaptor did exactly that, and a
+    /// capture that took 363 ms started timing out.)
     pub fn visible_row(&self, row: u16) -> Option<&crate::row::Row> {
-        self.visible_rows().nth(usize::from(row))
+        let row = usize::from(row);
+        let rows_len = self.rows.len();
+        if row >= rows_len {
+            return None;
+        }
+        let from_scrollback = self.scrollback_offset.min(rows_len);
+        if row < from_scrollback {
+            let start = self.scrollback.len() - self.scrollback_offset;
+            self.scrollback.get(start + row).map(|r| &**r)
+        } else {
+            self.rows.get(row - from_scrollback)
+        }
     }
 
     pub fn drawing_row(&self, row: u16) -> Option<&crate::row::Row> {
