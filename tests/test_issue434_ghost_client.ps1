@@ -13,8 +13,14 @@
 # client's socket reader and force the writer-only teardown path.
 
 $ErrorActionPreference = "Continue"
-$PSMUX = (Get-Command psmux -EA Stop).Source
-$dir = "$env:USERPROFILE\.psmux"
+# Set PSMUX_TEST_BIN to exercise a binary that is not the installed one (a
+# worktree build, say), and PSMUX_DATA_DIR to keep the sessions this suite
+# creates out of the shared data root. Both follow the convention the rest of
+# the tree already uses, and together they let this suite run beside a live
+# psmux without touching it. src/paths.rs psmux_dir() reads PSMUX_DATA_DIR with
+# no trailing separator, so trim one here too.
+$PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
+$dir = if ($env:PSMUX_DATA_DIR) { $env:PSMUX_DATA_DIR.TrimEnd('\', '/') } else { "$env:USERPROFILE\.psmux" }
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 function Write-Pass($m){ Write-Host "  [PASS] $m" -ForegroundColor Green; $script:TestsPassed++ }
@@ -78,11 +84,66 @@ for ($i=0; $i -lt 12; $i++) {
 if (-not $desync) { Write-Pass "no ghost/desync during writer teardown (counter tracks registry)" }
 else { Write-Fail "GHOST/DESYNC: attached=0 while a real client record lingers" }
 
-# reconnect after resume must yield a counted client again
+# Reconnect after resume must yield a counted client again.
+#
+# POLLED, not a fixed sleep (issue #675). The flood is still running when the
+# client resumes, so the reconnect competes with it: the client has to drain
+# the frames buffered in its socket, notice EOF, reconnect and have the server
+# process `client-attach` on a main loop that is busy pumping the flood. A
+# fixed 3 s sleep sampled that race once and read 0 on a loaded machine.
+#
+# The poll also records the whole timeline, which separates the two ways this
+# can fail: a reconnect that simply lands LATE (counter goes 0 -> 1 and stays),
+# versus one that lands and is torn down AGAIN by the writer path (counter
+# reaches 1 and drops back to 0). The timeline is printed on failure so the
+# next occurrence says which it was without needing a rerun. Pair it with
+# PSMUX_CLIENT_DEBUG=1, which appends every reconnect attempt to
+# ~/.psmux/client_reconnect.log with its elapsed time and outcome; that file
+# is appended rather than truncated precisely so Test 3's churn clients cannot
+# erase what Test 1's client recorded.
 & $susp $p.Id resume | Out-Null
-Start-Sleep -Seconds 3
-if ((Attached $S) -eq "1" -and (RealClientCount $S) -ge 1) { Write-Pass "client reconnected & counted after resume" }
-else { Write-Fail "reconnect failed (attached=$(Attached $S), clients=$(RealClientCount $S))" }
+$rcT0 = Get-Date
+$rcTimeline = @()
+$rcFirstOk = $null
+$rcDrops = 0
+$rcWasOk = $false
+$rcPolls = 0
+while (((Get-Date) - $rcT0).TotalSeconds -lt 10) {
+  $a = Attached $S; $rc = RealClientCount $S
+  $rcPolls++
+  $ms = [int]((Get-Date) - $rcT0).TotalMilliseconds
+  $rcTimeline += "${ms}ms a=$a c=$rc"
+  $ok = ($a -eq "1" -and $rc -ge 1)
+  if ($ok -and -not $rcFirstOk) { $rcFirstOk = $ms }
+  if ($rcWasOk -and -not $ok) { $rcDrops++ }
+  $rcWasOk = $ok
+  if ($ok -and $ms -ge 1000) { break }   # stable for at least one extra poll
+  Start-Sleep -Milliseconds 100
+}
+if ($rcFirstOk -ne $null -and $rcWasOk) {
+  Write-Pass "client reconnected & counted after resume (after ${rcFirstOk}ms, $rcPolls polls, $rcDrops drops)"
+} else {
+  $rcClientAlive = [bool](Get-Process -Id $p.Id -EA SilentlyContinue)
+  Write-Fail "reconnect failed (attached=$(Attached $S), clients=$(RealClientCount $S)) after $rcPolls polls over 10s; firstOk=$(if ($rcFirstOk -ne $null) { "${rcFirstOk}ms" } else { 'NEVER' }) drops=$rcDrops clientProcessAlive=$rcClientAlive"
+  Write-Host "  [timeline] $($rcTimeline -join ' | ')" -ForegroundColor DarkGray
+  if ($rcDrops -gt 0) {
+    Write-Host "  [diagnosis] the client DID reattach and was torn down again -> writer path teardown of a live client" -ForegroundColor DarkGray
+  } else {
+    Write-Host "  [diagnosis] the client never reattached inside 10s -> the reconnect never completed" -ForegroundColor DarkGray
+  }
+  $rcLog = "$dir\client_reconnect.log"
+  if (Test-Path $rcLog) {
+    Write-Host "  [client_reconnect.log, last 20 lines]" -ForegroundColor DarkGray
+    Get-Content $rcLog -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+  } else {
+    Write-Host "  [client_reconnect.log absent; rerun with PSMUX_CLIENT_DEBUG=1 to capture the attempts]" -ForegroundColor DarkGray
+  }
+  $crash = Get-ChildItem "$dir\client_crash.*.log" -EA SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if ($crash) {
+    Write-Host "  [client panicked: $($crash.Name)]" -ForegroundColor DarkGray
+    Get-Content $crash.FullName -TotalCount 25 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+  }
+}
 Stop-Process -Id $p.Id -Force -EA SilentlyContinue
 Cleanup $S
 

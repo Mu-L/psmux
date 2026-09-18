@@ -18,7 +18,8 @@ use crate::rendering::{
 use crate::style::{map_color, parse_tmux_style_components};
 use crate::config::{parse_key_string, normalize_key_for_binding};
 use crate::clipboard::{copy_to_system_clipboard, read_from_system_clipboard};
-use crate::debug_log::{client_log, client_log_enabled, input_log, input_log_enabled};
+use crate::debug_log::{client_log, client_log_enabled, input_log, input_log_enabled,
+    reconnect_log, reconnect_log_enabled};
 use crate::layout::RowRunsJson;
 use crate::tree::split_with_gaps;
 use crate::pane_border::PaneBorderIndicators;
@@ -2081,8 +2082,19 @@ fn establish_connection_with_timeout(
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "auth failed"));
     }
 
-    let _ = writer.write_all(b"PERSISTENT\n");
-    let _ = writer.write_all(b"client-attach\n");
+    // These two lines are what make the server COUNT this client, so a silent
+    // failure here produces a connection that looks established from the
+    // client's side and does not exist from the server's (issue #675). The
+    // results were discarded; now they are at least reported when the reconnect
+    // trace is on.
+    let persistent_res = writer.write_all(b"PERSISTENT\n");
+    let attach_res = writer.write_all(b"client-attach\n");
+    if (persistent_res.is_err() || attach_res.is_err()) && crate::debug_log::reconnect_log_enabled() {
+        crate::debug_log::reconnect_log(&format!(
+            "handshake write FAILED: persistent={:?} client-attach={:?}",
+            persistent_res.err(), attach_res.err()
+        ));
+    }
     // Report the session this client came FROM, so the server can answer
     // `switch-client -l` from this client's own history rather than from a
     // machine-wide file (issue #566). This MUST follow client-attach: that is
@@ -2169,16 +2181,86 @@ type Connection = (std::net::TcpStream, std::sync::mpsc::Receiver<String>);
 
 /// Retry connecting up to 5 times: one immediate attempt, then up to 4 more
 /// with increasing backoff (500ms, 1s, 1.5s, 2s). Returns None if all fail.
+///
+/// Every attempt is traced under `PSMUX_CLIENT_DEBUG=1` (attempt number,
+/// elapsed milliseconds since the teardown was noticed, and the outcome), so a
+/// reconnect that lands late can be told apart from one that lands and is torn
+/// down again. Issue #675 turned on exactly that question and the log is the
+/// only place the answer lives: the client is a TUI, so stdout is unusable.
+/// Gated, so it costs nothing when the env is off.
 fn try_reconnect(addr: &str, key: &str) -> Option<Connection> {
+    let started = Instant::now();
+    let logging = reconnect_log_enabled();
+    if logging {
+        reconnect_log(&format!("begin addr={}", addr));
+    }
     for attempt in 0..5u64 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_millis(attempt * 500));
         }
-        if let Ok(result) = establish_connection(addr, key) {
-            return Some(result);
+        let attempt_started = Instant::now();
+        match establish_connection(addr, key) {
+            Ok(result) => {
+                if logging {
+                    reconnect_log(&format!(
+                        "attempt {}/5 CONNECTED in {}ms (total {}ms)",
+                        attempt + 1,
+                        attempt_started.elapsed().as_millis(),
+                        started.elapsed().as_millis()
+                    ));
+                }
+                return Some(result);
+            }
+            Err(e) => {
+                if logging {
+                    reconnect_log(&format!(
+                        "attempt {}/5 failed in {}ms (total {}ms): {}",
+                        attempt + 1,
+                        attempt_started.elapsed().as_millis(),
+                        started.elapsed().as_millis(),
+                        e
+                    ));
+                }
+            }
         }
     }
+    if logging {
+        reconnect_log(&format!(
+            "GAVE UP after 5 attempts in {}ms, client will exit",
+            started.elapsed().as_millis()
+        ));
+    }
     None
+}
+
+/// Write a client panic to `~/.psmux/client_crash.<pid>.log` with a backtrace.
+///
+/// The server has had one of these since issue #204; the client never did, and
+/// a client's stderr is the last thing anyone can read: it owns a terminal that
+/// is being torn down as the process dies, and in a test it is a minimised
+/// window that closes with the panic still on it. The result is that a client
+/// which dies mid session leaves exactly the same evidence as one that was
+/// killed, namely none.
+///
+/// Issue #675 is that ambiguity in practice: a reconnect that connects in a
+/// millisecond and is then never applied looks identical whether the main loop
+/// stalled or the process died on the spot. The file is per pid, so the thirty
+/// churn clients of the #434 suite cannot overwrite each other, and it is
+/// written only when a panic actually happens.
+fn install_client_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let path = crate::paths::psmux_dir_file(&format!("client_crash.{}.log", std::process::id()));
+        let bt = std::backtrace::Backtrace::force_capture();
+        let _ = std::fs::write(
+            &path,
+            format!(
+                "psmux client pid {} panicked at {}\n\n{info}\n\nBacktrace:\n{bt}",
+                std::process::id(),
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            ),
+        );
+        crate::debug_log::reconnect_log("CLIENT PANIC, see client_crash log");
+    }));
 }
 
 /// tmux's wording for an attach that cannot reach its session, verbatim:
@@ -2203,6 +2285,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // this process, including the input poll below, rounds up to the default
     // 15.6ms tick. See src/timer_res.rs.
     crate::timer_res::set_high(true);
+    install_client_panic_hook();
     crate::startup_trace::mark("cli.attach");
     let name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let path = crate::paths::port_file(&name);
@@ -2938,6 +3021,12 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         if let Some(ref rx) = reconnect_pending {
             if let Ok(result) = rx.try_recv() {
                 reconnect_pending = None;
+                if reconnect_log_enabled() {
+                    reconnect_log(&format!(
+                        "result applied: {} (quit={})",
+                        if result.is_some() { "reattached" } else { "gave up" },
+                        quit));
+                }
                 if let Some((new_writer, new_rx)) = result {
                     if !quit {
                         // Normal reconnect: apply fresh writer + frame channel.
@@ -3037,8 +3126,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     // shutdown_persistent_streams), treat the disconnect as intentional
                     // and quit immediately instead of burning 5 s of reconnect backoff.
                     if !quit && !std::path::Path::new(&path).exists() {
+                        if reconnect_log_enabled() {
+                            reconnect_log("connection dropped and the port file is gone: intentional, quitting");
+                        }
                         quit = true;
                     } else if reconnect_pending.is_none() && !quit {
+                        if reconnect_log_enabled() {
+                            reconnect_log("connection dropped, spawning reconnect thread");
+                        }
                         let addr_c = addr.clone();
                         let key_c = session_key.clone();
                         let (rtx, rrx) = std::sync::mpsc::channel();
@@ -3051,7 +3146,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
             }
         }
-        if quit && !got_frame { break; }
+        if quit && !got_frame {
+            if reconnect_log_enabled() {
+                reconnect_log(&format!(
+                    "main loop leaving on quit (reconnect pending={})",
+                    reconnect_pending.is_some()));
+            }
+            break;
+        }
 
         // ── STEP 1: Poll events with adaptive timeout ────────────────────
         let since_dump = last_dump_time.elapsed().as_millis() as u64;
@@ -3223,7 +3325,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         }
 
         {
-            let mut _pending_evt = input.read_timeout(Duration::from_millis(poll_ms))?;
+            // This `?` ends the client: the error travels out of run_remote and
+            // the process exits, printing to a terminal that is being torn down
+            // and leaving no trace anywhere. Issue #675 is what that looks like
+            // from outside, a client that reconnects in a millisecond and is
+            // simply gone a moment later, with the reconnect result still
+            // sitting unapplied in its channel. Say what the error was before
+            // letting it go.
+            let mut _pending_evt = match input.read_timeout(Duration::from_millis(poll_ms)) {
+                Ok(v) => v,
+                Err(e) => {
+                    crate::debug_log::reconnect_log(&format!(
+                        "input wait FAILED, client is exiting: kind={:?} err={}",
+                        e.kind(), e
+                    ));
+                    return Err(e);
+                }
+            };
             if crate::pty_trace::on() && matches!(_pending_evt, Some(Event::Key(_))) {
                 crate::pty_trace::mark_plain("k", poll_ms as usize);
             }
