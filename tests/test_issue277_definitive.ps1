@@ -178,22 +178,26 @@ Start-Sleep -Milliseconds 500
 # ============================================================
 Write-Host "`n[Test 4] scroll-down in copy mode with mouse-selection OFF" -ForegroundColor Yellow
 
-# Enter copy mode first
+# Enter copy mode first. The copy mode view is observed through
+# #{scroll_position}, not through a plain capture-pane: since PR #671 copy mode
+# scrolls a snapshot of the grid and capture-pane answers with the LIVE screen,
+# exactly as tmux's capture reads wp->base, so a plain capture no longer moves
+# with the view.
 Send-TcpCommand -Session $SESSION -Command "pane-scroll 0 up" | Out-Null
 Start-Sleep -Seconds 1
 
-$cap1 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+$pos1 = [int](Get-PaneFormat '#{scroll_position}')
 
 # Scroll down
 Send-TcpCommand -Session $SESSION -Command "pane-scroll 0 down" | Out-Null
 Start-Sleep -Seconds 1
 
-$cap2 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+$pos2 = [int](Get-PaneFormat '#{scroll_position}')
 
-if ($cap2 -ne $cap1) {
-    Write-Pass "scroll-down changed content in copy mode (mouse-selection OFF)"
+if ($pos2 -lt $pos1) {
+    Write-Pass "scroll-down moved the copy mode view toward the bottom ($pos1 -> $pos2, mouse-selection OFF)"
 } else {
-    Write-Fail "scroll-down had NO effect in copy mode (mouse-selection OFF)"
+    Write-Fail "scroll-down had NO effect in copy mode (scroll_position $pos1 -> $pos2, mouse-selection OFF)"
 }
 
 & $PSMUX send-keys -t $SESSION "q" 2>&1 | Out-Null
@@ -206,7 +210,7 @@ Write-Host "`n[Test 5] Rapid pane-scroll (5x up) with mouse-selection OFF" -Fore
 
 Send-TcpCommand -Session $SESSION -Command "pane-scroll 0 up" | Out-Null
 Start-Sleep -Milliseconds 200
-$cap1 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+$pos1 = [int](Get-PaneFormat '#{scroll_position}')
 
 for ($i = 0; $i -lt 4; $i++) {
     Send-TcpCommand -Session $SESSION -Command "pane-scroll 0 up" | Out-Null
@@ -214,11 +218,11 @@ for ($i = 0; $i -lt 4; $i++) {
 }
 Start-Sleep -Milliseconds 500
 
-$cap2 = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
-if ($cap2 -ne $cap1) {
-    Write-Pass "Rapid scroll changed content (copy mode + mouse-selection OFF)"
+$pos2 = [int](Get-PaneFormat '#{scroll_position}')
+if ($pos2 -gt $pos1) {
+    Write-Pass "Rapid scroll moved the copy mode view further into history ($pos1 -> $pos2, mouse-selection OFF)"
 } else {
-    Write-Fail "Rapid scroll had NO effect (copy mode + mouse-selection OFF)"
+    Write-Fail "Rapid scroll had NO effect (scroll_position $pos1 -> $pos2, copy mode + mouse-selection OFF)"
 }
 
 & $PSMUX send-keys -t $SESSION "q" 2>&1 | Out-Null
