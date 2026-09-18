@@ -124,7 +124,11 @@ if ($rcFirstOk -ne $null -and $rcWasOk) {
   Write-Pass "client reconnected & counted after resume (after ${rcFirstOk}ms, $rcPolls polls, $rcDrops drops)"
 } else {
   $rcClientAlive = [bool](Get-Process -Id $p.Id -EA SilentlyContinue)
-  Write-Fail "reconnect failed (attached=$(Attached $S), clients=$(RealClientCount $S)) after $rcPolls polls over 10s; firstOk=$(if ($rcFirstOk -ne $null) { "${rcFirstOk}ms" } else { 'NEVER' }) drops=$rcDrops clientProcessAlive=$rcClientAlive"
+  # The exit code names who ended the client (issue #675): 1 is a
+  # TerminateProcess from psmux's own kill guard, 0xC000013A is the console
+  # closing on it, -1 is Stop-Process, 0 is a normal return from run_remote.
+  $rcExit = if ($rcClientAlive) { "alive" } else { try { $p.WaitForExit(1000) | Out-Null; ("0x{0:X8} ({0})" -f $p.ExitCode) } catch { "unknown" } }
+  Write-Fail "reconnect failed (attached=$(Attached $S), clients=$(RealClientCount $S)) after $rcPolls polls over 10s; firstOk=$(if ($rcFirstOk -ne $null) { "${rcFirstOk}ms" } else { 'NEVER' }) drops=$rcDrops clientProcessAlive=$rcClientAlive clientExitCode=$rcExit"
   Write-Host "  [timeline] $($rcTimeline -join ' | ')" -ForegroundColor DarkGray
   if ($rcDrops -gt 0) {
     Write-Host "  [diagnosis] the client DID reattach and was torn down again -> writer path teardown of a live client" -ForegroundColor DarkGray

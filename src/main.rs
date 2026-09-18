@@ -5250,6 +5250,13 @@ fn run_main() -> io::Result<()> {
     // Loop to handle session switching without spawning new processes
     let result = loop {
         let result = run_remote(&mut terminal, &input);
+        if crate::debug_log::reconnect_log_enabled() {
+            crate::debug_log::reconnect_log(&format!(
+                "run_remote returned {} (switch pending={})",
+                match &result { Ok(()) => "Ok".to_string(), Err(e) => format!("Err: {}", e) },
+                env::var("PSMUX_SWITCH_TO").is_ok()
+            ));
+        }
         
         // Check if we should switch to another session
         if let Ok(switch_to) = env::var("PSMUX_SWITCH_TO") {
