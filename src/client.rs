@@ -2179,6 +2179,60 @@ fn establish_connection_with_timeout(
 /// A live connection: write half + incoming-frame channel.
 type Connection = (std::net::TcpStream, std::sync::mpsc::Receiver<String>);
 
+/// The one answer to a connection that has gone away, whoever notices first.
+///
+/// Two things can notice: the reader thread, whose exit closes the frame
+/// channel, and the main loop itself, when a write to the old socket fails.
+/// They used to answer differently. The reader spawned the reconnect; the
+/// writer broke out of the main loop, which returned Ok and ended the process
+/// with exit code 0, reconnect thread and all. Whether that happened depended
+/// on whether the server's close arrived as a reset before the loop's next
+/// write (an unread request on the server side at close time turns its FIN
+/// into a RST), which is why the #434 suite lost its client in two rounds of
+/// thirty under load and never in a quiet run (issue #675).
+///
+/// The rules, in order: a detach already under way (`quit`) needs nothing; a
+/// missing port file means the server left on purpose and the client quits
+/// too; a reconnect already in flight is waited for; otherwise one is started.
+/// A failed write while the reconnect is pending is therefore not an exit, it
+/// is the stale socket being stale, and the loop carries on until the result
+/// is applied (a new writer) or the reconnect gives up (which sets `quit`).
+fn on_connection_lost(
+    reconnect_pending: &mut Option<std::sync::mpsc::Receiver<Option<Connection>>>,
+    quit: &mut bool,
+    port_file: &str,
+    addr: &str,
+    key: &str,
+    why: &str,
+) {
+    if *quit {
+        return;
+    }
+    if !std::path::Path::new(port_file).exists() {
+        if reconnect_log_enabled() {
+            reconnect_log(&format!("{} and the port file is gone: intentional, quitting", why));
+        }
+        *quit = true;
+        return;
+    }
+    if reconnect_pending.is_some() {
+        if reconnect_log_enabled() {
+            reconnect_log(&format!("{}, reconnect already pending, waiting for it", why));
+        }
+        return;
+    }
+    if reconnect_log_enabled() {
+        reconnect_log(&format!("{}, spawning reconnect thread", why));
+    }
+    let addr_c = addr.to_string();
+    let key_c = key.to_string();
+    let (rtx, rrx) = std::sync::mpsc::channel();
+    *reconnect_pending = Some(rrx);
+    std::thread::spawn(move || {
+        let _ = rtx.send(try_reconnect(&addr_c, &key_c));
+    });
+}
+
 /// Retry connecting up to 5 times: one immediate attempt, then up to 4 more
 /// with increasing backoff (500ms, 1s, 1.5s, 2s). Returns None if all fail.
 ///
@@ -2263,6 +2317,41 @@ fn install_client_panic_hook() {
     }));
 }
 
+/// Log a console control event (Ctrl+C, Ctrl+Break, window close, logoff,
+/// shutdown) before the default handler ends the process. Issue #675: a
+/// client that dies with none of its own exit paths logged is either killed
+/// from outside or told to close by its console, and only a handler can tell
+/// which. Registered only under `PSMUX_CLIENT_DEBUG=1`; it returns FALSE so
+/// the default behaviour is unchanged.
+#[cfg(windows)]
+fn install_console_ctrl_trace() {
+    if !reconnect_log_enabled() {
+        return;
+    }
+    type HandlerRoutine = unsafe extern "system" fn(u32) -> i32;
+    extern "system" {
+        fn SetConsoleCtrlHandler(handler: Option<HandlerRoutine>, add: i32) -> i32;
+    }
+    unsafe extern "system" fn trace(ctrl_type: u32) -> i32 {
+        let name = match ctrl_type {
+            0 => "CTRL_C_EVENT",
+            1 => "CTRL_BREAK_EVENT",
+            2 => "CTRL_CLOSE_EVENT",
+            5 => "CTRL_LOGOFF_EVENT",
+            6 => "CTRL_SHUTDOWN_EVENT",
+            _ => "UNKNOWN",
+        };
+        reconnect_log(&format!("console control event {} ({}), default handling follows", ctrl_type, name));
+        0
+    }
+    unsafe {
+        SetConsoleCtrlHandler(Some(trace), 1);
+    }
+}
+
+#[cfg(not(windows))]
+fn install_console_ctrl_trace() {}
+
 /// tmux's wording for an attach that cannot reach its session, verbatim:
 /// `can't find session: NAME`, which `main` prints as `psmux: <msg>` and exits
 /// 1. `-L` namespaces are stored on disk as `<ns>__<session>`; the attach gate
@@ -2286,6 +2375,20 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // 15.6ms tick. See src/timer_res.rs.
     crate::timer_res::set_high(true);
     install_client_panic_hook();
+    // Issue #675: a client that vanished after a successful reconnect left no
+    // trace of HOW it left. This guard logs every internal return of
+    // run_remote (a `?`, a break, an unwind); an external TerminateProcess
+    // never runs it, which is exactly the distinction the investigation needs.
+    struct ReturnTrace;
+    impl Drop for ReturnTrace {
+        fn drop(&mut self) {
+            if reconnect_log_enabled() {
+                reconnect_log(&format!("run_remote returning (panicking={})", std::thread::panicking()));
+            }
+        }
+    }
+    let _return_trace = ReturnTrace;
+    install_console_ctrl_trace();
     crate::startup_trace::mark("cli.attach");
     let name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let path = crate::paths::port_file(&name);
@@ -3125,23 +3228,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                     // file (all clean-shutdown paths do this before calling
                     // shutdown_persistent_streams), treat the disconnect as intentional
                     // and quit immediately instead of burning 5 s of reconnect backoff.
-                    if !quit && !std::path::Path::new(&path).exists() {
-                        if reconnect_log_enabled() {
-                            reconnect_log("connection dropped and the port file is gone: intentional, quitting");
-                        }
-                        quit = true;
-                    } else if reconnect_pending.is_none() && !quit {
-                        if reconnect_log_enabled() {
-                            reconnect_log("connection dropped, spawning reconnect thread");
-                        }
-                        let addr_c = addr.clone();
-                        let key_c = session_key.clone();
-                        let (rtx, rrx) = std::sync::mpsc::channel();
-                        reconnect_pending = Some(rrx);
-                        std::thread::spawn(move || {
-                            let _ = rtx.send(try_reconnect(&addr_c, &key_c));
-                        });
-                    }
+                    on_connection_lost(&mut reconnect_pending, &mut quit, &path, &addr, &session_key, "connection dropped");
                     break;
                 }
             }
@@ -6135,7 +6222,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 last_sent_size = new_size;
                 size_changed = true;
                 if writer.write_all(format!("client-size {} {}\n", new_size.0, new_size.1).as_bytes()).is_err() {
-                    break; // Connection lost
+                    // Not an exit (issue #675): the socket is stale, the
+                    // reconnect owns what happens next.
+                    on_connection_lost(&mut reconnect_pending, &mut quit, &path, &addr, &session_key, "client-size write failed");
                 }
                 // Re-send mouse-enable on resize — the terminal may reset
                 // mouse reporting after a window size change.  A resize is
@@ -6230,9 +6319,18 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // ensures we don't re-request faster than ~100fps when typing.
         let overlays_active = command_input || renaming || pane_renaming || tree_chooser || buffer_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
         let should_dump = should_request_dump(force_dump, size_changed, typing_active, since_dump);
-        if should_dump && !dump_in_flight {
-            if writer.write_all(b"dump-state\n").is_err() { break; }
-            if writer.flush().is_err() { break; }
+        // A failed request here is NOT the end of the client (issue #675).
+        // The reader thread may have just noticed the same drop and started a
+        // reconnect; breaking out returned Ok from run_remote and the process
+        // exited 0 with that reconnect still in flight. The stale socket is
+        // handed to the same handler and the loop keeps going until the
+        // reconnect is applied or gives up.
+        let dump_request_ok = should_dump && !dump_in_flight
+            && !(writer.write_all(b"dump-state\n").is_err() || writer.flush().is_err());
+        if should_dump && !dump_in_flight && !dump_request_ok {
+            on_connection_lost(&mut reconnect_pending, &mut quit, &path, &addr, &session_key, "dump-state write failed");
+        }
+        if dump_request_ok {
             dump_in_flight = true;
             dump_flight_start = Instant::now();
             // The force is SPENT here, on the request it asked for, not at the
@@ -8516,3 +8614,7 @@ mod test_prefix_dot_move_window;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue658_idle_dump_floor.rs"]
 mod test_issue658_idle_dump_floor;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue675_stale_writer.rs"]
+mod test_issue675_stale_writer;
