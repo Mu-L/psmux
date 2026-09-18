@@ -272,16 +272,35 @@ fn sync_copy_freeze(app: &mut AppState, in_copy_mode: bool) {
             }
             Node::Leaf(p) => {
                 let freeze = target.map_or(false, |t| t == path.as_slice());
+                // A pane that is in copy mode without holding focus reads its
+                // OWN snapshot (#673) at its OWN parked position, the way a
+                // tmux pane keeps the mode screen it was left on.  Returning
+                // it to offset 0 with the live panes would throw away where
+                // its reader was.
+                // `live_term` is the authority on who is really in copy mode
+                // right now: `sync_copy_snapshot` installs a snapshot for
+                // exactly those panes, so a pane reading its live screen is
+                // never pinned here.
+                let parked = if freeze || p.live_term.is_none() {
+                    None
+                } else {
+                    p.copy_state.as_ref().map(|s| s.scroll_offset)
+                };
                 if let Ok(mut parser) = p.term.lock() {
                     if parser.screen().frozen() != freeze {
                         parser.screen_mut().set_frozen(freeze);
-                        if !freeze {
+                        if !freeze && parked.is_none() {
                             // Leaving the frozen state must return the pane
                             // to the LIVE view: the freeze auto-bumped the
                             // parser scrollback offset, and any offset > 0
                             // keeps anchoring on its own, which would pin
                             // the view at the copy-mode content forever.
                             parser.screen_mut().set_scrollback(0);
+                        }
+                    }
+                    if let Some(offset) = parked {
+                        if parser.screen().scrollback() != offset {
+                            parser.screen_mut().set_scrollback(offset);
                         }
                     }
                     if freeze { synced = Some(parser.screen().scrollback()); }
