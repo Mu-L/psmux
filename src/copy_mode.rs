@@ -2013,3 +2013,7 @@ mod tests_copy_cancel_stale_state;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue612_copy_search_scrollback.rs"]
 mod tests_issue612_copy_search_scrollback;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue673_copy_snapshot_per_pane.rs"]
+mod test_issue673_copy_snapshot_per_pane;

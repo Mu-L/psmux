@@ -823,3 +823,7 @@ pub struct Pos {
     pub row: u16,
     pub col: u16,
 }
+
+#[cfg(test)]
+#[path = "../../../tests-rs/test_issue673_scrollback_cow.rs"]
+mod test_issue673_scrollback_cow;
