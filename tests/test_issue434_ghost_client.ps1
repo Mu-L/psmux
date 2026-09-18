@@ -123,7 +123,8 @@ while (((Get-Date) - $rcT0).TotalSeconds -lt 10) {
 if ($rcFirstOk -ne $null -and $rcWasOk) {
   Write-Pass "client reconnected & counted after resume (after ${rcFirstOk}ms, $rcPolls polls, $rcDrops drops)"
 } else {
-  Write-Fail "reconnect failed (attached=$(Attached $S), clients=$(RealClientCount $S)) after $rcPolls polls over 10s; firstOk=$(if ($rcFirstOk -ne $null) { "${rcFirstOk}ms" } else { 'NEVER' }) drops=$rcDrops"
+  $rcClientAlive = [bool](Get-Process -Id $p.Id -EA SilentlyContinue)
+  Write-Fail "reconnect failed (attached=$(Attached $S), clients=$(RealClientCount $S)) after $rcPolls polls over 10s; firstOk=$(if ($rcFirstOk -ne $null) { "${rcFirstOk}ms" } else { 'NEVER' }) drops=$rcDrops clientProcessAlive=$rcClientAlive"
   Write-Host "  [timeline] $($rcTimeline -join ' | ')" -ForegroundColor DarkGray
   if ($rcDrops -gt 0) {
     Write-Host "  [diagnosis] the client DID reattach and was torn down again -> writer path teardown of a live client" -ForegroundColor DarkGray
@@ -136,6 +137,11 @@ if ($rcFirstOk -ne $null -and $rcWasOk) {
     Get-Content $rcLog -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
   } else {
     Write-Host "  [client_reconnect.log absent; rerun with PSMUX_CLIENT_DEBUG=1 to capture the attempts]" -ForegroundColor DarkGray
+  }
+  $crash = Get-ChildItem "$dir\client_crash.*.log" -EA SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if ($crash) {
+    Write-Host "  [client panicked: $($crash.Name)]" -ForegroundColor DarkGray
+    Get-Content $crash.FullName -TotalCount 25 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
   }
 }
 Stop-Process -Id $p.Id -Force -EA SilentlyContinue

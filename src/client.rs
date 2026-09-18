@@ -2082,8 +2082,19 @@ fn establish_connection_with_timeout(
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "auth failed"));
     }
 
-    let _ = writer.write_all(b"PERSISTENT\n");
-    let _ = writer.write_all(b"client-attach\n");
+    // These two lines are what make the server COUNT this client, so a silent
+    // failure here produces a connection that looks established from the
+    // client's side and does not exist from the server's (issue #675). The
+    // results were discarded; now they are at least reported when the reconnect
+    // trace is on.
+    let persistent_res = writer.write_all(b"PERSISTENT\n");
+    let attach_res = writer.write_all(b"client-attach\n");
+    if (persistent_res.is_err() || attach_res.is_err()) && crate::debug_log::reconnect_log_enabled() {
+        crate::debug_log::reconnect_log(&format!(
+            "handshake write FAILED: persistent={:?} client-attach={:?}",
+            persistent_res.err(), attach_res.err()
+        ));
+    }
     // Report the session this client came FROM, so the server can answer
     // `switch-client -l` from this client's own history rather than from a
     // machine-wide file (issue #566). This MUST follow client-attach: that is
@@ -2222,6 +2233,36 @@ fn try_reconnect(addr: &str, key: &str) -> Option<Connection> {
     None
 }
 
+/// Write a client panic to `~/.psmux/client_crash.<pid>.log` with a backtrace.
+///
+/// The server has had one of these since issue #204; the client never did, and
+/// a client's stderr is the last thing anyone can read: it owns a terminal that
+/// is being torn down as the process dies, and in a test it is a minimised
+/// window that closes with the panic still on it. The result is that a client
+/// which dies mid session leaves exactly the same evidence as one that was
+/// killed, namely none.
+///
+/// Issue #675 is that ambiguity in practice: a reconnect that connects in a
+/// millisecond and is then never applied looks identical whether the main loop
+/// stalled or the process died on the spot. The file is per pid, so the thirty
+/// churn clients of the #434 suite cannot overwrite each other, and it is
+/// written only when a panic actually happens.
+fn install_client_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let path = crate::paths::psmux_dir_file(&format!("client_crash.{}.log", std::process::id()));
+        let bt = std::backtrace::Backtrace::force_capture();
+        let _ = std::fs::write(
+            &path,
+            format!(
+                "psmux client pid {} panicked at {}\n\n{info}\n\nBacktrace:\n{bt}",
+                std::process::id(),
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            ),
+        );
+        crate::debug_log::reconnect_log("CLIENT PANIC, see client_crash log");
+    }));
+}
+
 /// tmux's wording for an attach that cannot reach its session, verbatim:
 /// `can't find session: NAME`, which `main` prints as `psmux: <msg>` and exits
 /// 1. `-L` namespaces are stored on disk as `<ns>__<session>`; the attach gate
@@ -2244,6 +2285,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // this process, including the input poll below, rounds up to the default
     // 15.6ms tick. See src/timer_res.rs.
     crate::timer_res::set_high(true);
+    install_client_panic_hook();
     crate::startup_trace::mark("cli.attach");
     let name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let path = crate::paths::port_file(&name);
