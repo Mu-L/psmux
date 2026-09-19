@@ -345,3 +345,7 @@ mod test_warm_pool_depth;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue661_warm_pool_depth.rs"]
 mod test_issue661_warm_pool_depth;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_id_monotonic_claim.rs"]
+mod test_pane_id_monotonic_claim;

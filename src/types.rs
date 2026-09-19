@@ -675,6 +675,24 @@ impl WarmPool {
         // ready in id order. Ten splits in a row came out
         // %2 %3 %4 %5 %12 %9 %11 %6 %7 %8.
         let wp = self.spares.pop_front();
+        if let Some(ref w) = wp {
+            // Handing this id out puts every lower id in the past, exactly as a
+            // cold spawn taking `next_pane_id` does, so record it as issued.
+            //
+            // The pool is sorted and this took its front, so normally the id
+            // handed out IS the lowest outstanding one and this changes
+            // nothing. It matters when the pool ran dry: refills are spawned
+            // concurrently and land in whatever order the OS finishes them, so
+            // a claim that waited for an in flight spare can be handed the
+            // FIRST one to land rather than the lowest, and the lower ids are
+            // still on their way. Without this they landed afterwards, passed
+            // `push` because the floor had never moved, and were handed to the
+            // next creation: a burst of five new windows came out
+            // `%2 %3 %4 %11 %9`. `set_issued_floor` was only ever called on the
+            // cold spawn path, which is the one case where no spare is handed
+            // out at all.
+            self.note_issued(w.pane_id);
+        }
         let was_ready = wp.as_ref().map(|w| w.ready).unwrap_or(false);
         (wp, was_ready)
     }
@@ -817,6 +835,19 @@ impl WarmPool {
             .position(|w| w.pane_id > wp.pane_id)
             .unwrap_or(self.spares.len());
         self.spares.insert(at, wp);
+    }
+    /// Record that `id` has been handed out, so every spare below it is refused
+    /// on arrival by [`WarmPool::push`].
+    ///
+    /// Raises the floor and nothing else. The pooled spares are left alone on
+    /// purpose: this is called from [`WarmPool::claim`], which has just taken
+    /// the front of a pool kept sorted by id, so nothing below what it handed
+    /// out is still in there. The caller that needs the pooled spares dropped
+    /// too is [`WarmPool::set_issued_floor`].
+    fn note_issued(&mut self, id: usize) {
+        if id > self.issued_floor {
+            self.issued_floor = id;
+        }
     }
     /// Refuse every spare below `id` from now on, and drop the pooled ones.
     /// Called by a creation that is about to allocate `id` for itself because no
