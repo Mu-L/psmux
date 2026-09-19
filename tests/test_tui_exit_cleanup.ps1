@@ -309,18 +309,55 @@ if ($opencodePath) {
     #
     # So this checks what psmux owes: either the session is up and fully usable,
     # or it is gone cleanly with nothing wedged behind it.
-    psmux has-session -t tui_oc 2>$null
-    $ocAlive = ($LASTEXITCODE -eq 0)
+    # A returned prompt is owed only by a run whose shell survived: when
+    # opencode's teardown takes the shell early there is never a prompt to see,
+    # and that run is held to the teardown contract below instead. Recorded here
+    # against the capture Wait-ShellBack already made, reported with the rest of
+    # the "still usable" checks once it is known which outcome this run took.
+    $hasOcPrompt = $capOC -match 'PS [A-Z]:\\'
 
-    if ($ocAlive) {
-        $hasOcPrompt = $capOC -match 'PS [A-Z]:\\'
-        Add-Result "opencode Ctrl+C: shell prompt visible" $hasOcPrompt
+    # Which of the two acceptable outcomes this run takes is NOT decidable from
+    # one has-session sample, because the session is still settling for seconds
+    # after the prompt comes back. Measured on 2026-09-19, four rounds of each
+    # app in an isolated namespace, polled every 200 ms:
+    #
+    #   opencode  prompt back at ~250 ms, shell PROCESS and session both gone at
+    #             7.3 to 7.7 s, 4 of 4
+    #   pstop     prompt back at ~240 ms, both still alive at the end of the
+    #             window, 4 of 4
+    #
+    # and psmux's decision is identical for both, the same three lines under
+    # PSMUX_MOUSE_DEBUG=1 ending in "raw-mode non-shell foreground: deliver raw
+    # 0x03, skip CTRL_C_EVENT". So psmux writes one byte and broadcasts nothing;
+    # the seven second teardown that takes the shell belongs to opencode, and
+    # psmux ending a session whose last pane's child exited is correct tmux
+    # behaviour.
+    #
+    # The old code sampled has-session once, right after the prompt returned,
+    # and committed to the "still usable" branch. When the teardown landed in
+    # the second that followed, every command ran against a server that was gone
+    # and two assertions failed on output that could never appear (the sweep of
+    # 2026-09-19 and 2 of 3 reruns). Nothing is pre-committed now: the usable
+    # checks run and are abandoned the moment the session goes, and a run that
+    # loses its shell is held to the teardown contract instead.
+    function Test-OcAlive {
+        psmux has-session -t tui_oc 2>$null
+        return ($LASTEXITCODE -eq 0)
+    }
 
+    $ocGone = -not (Test-OcAlive)
+    $ocUsable = @(@{ n = "opencode Ctrl+C: shell prompt visible"; p = [bool]$hasOcPrompt })
+
+    if (-not $ocGone) {
         psmux send-keys -t tui_oc "echo oc_test_ok" Enter
         Start-Sleep -Seconds 1
-        $capOC2 = psmux capture-pane -t tui_oc -p 2>&1 | Out-String
-        Add-Result "opencode Ctrl+C: typing works" ($capOC2 -match 'oc_test_ok')
+        if (Test-OcAlive) {
+            $capOC2 = psmux capture-pane -t tui_oc -p 2>&1 | Out-String
+            $ocUsable += @{ n = "opencode Ctrl+C: typing works"; p = [bool]($capOC2 -match 'oc_test_ok') }
+        } else { $ocGone = $true }
+    }
 
+    if (-not $ocGone) {
         psmux send-keys -t tui_oc "echo oc_RST" ""
         Start-Sleep -Milliseconds 500
         psmux send-keys -t tui_oc Left Left Left ""
@@ -329,10 +366,26 @@ if ($opencodePath) {
         Start-Sleep -Milliseconds 500
         psmux send-keys -t tui_oc Enter
         Start-Sleep -Seconds 1
-        $capOC3 = psmux capture-pane -t tui_oc -p 2>&1 | Out-String
-        Add-Result "opencode Ctrl+C: arrow keys work" ($capOC3 -match 'oc_VRST')
+        if (Test-OcAlive) {
+            $capOC3 = psmux capture-pane -t tui_oc -p 2>&1 | Out-String
+            $ocUsable += @{ n = "opencode Ctrl+C: arrow keys work"; p = [bool]($capOC3 -match 'oc_VRST') }
+        } else { $ocGone = $true }
+    }
+
+    if (-not $ocGone) {
+        # The session outlived the whole group: it owes a working pane.
+        foreach ($chk in $ocUsable) { Add-Result $chk.n $chk.p }
     } else {
-        $ocPortLeft = Test-Path "$env:USERPROFILE\.psmux\tui_oc.port"
+        Write-Host "  [INFO] opencode's teardown took the shell with it; holding psmux to the clean teardown contract instead"
+        # The port file is removed as the server shuts down, so give that a
+        # moment rather than racing it: has-session failing only means the
+        # server has stopped answering.
+        $ocPortLeft = $true
+        for ($i = 0; $i -lt 20; $i++) {
+            $ocPortLeft = Test-Path "$env:USERPROFILE\.psmux\tui_oc.port"
+            if (-not $ocPortLeft) { break }
+            Start-Sleep -Milliseconds 250
+        }
         Add-Result "opencode Ctrl+C: shell exited, session torn down with no stale port file" (-not $ocPortLeft)
 
         psmux new-session -d -s tui_oc2 -x 120 -y 30 2>$null
@@ -446,18 +499,28 @@ if ($pstopPath -and $opencodePath) {
     # about opencode. What psmux owes is checked instead: if the session is still
     # up it must be fully usable, and if the shell exited the session must be gone
     # CLEANLY rather than left wedged or half alive.
-    psmux has-session -t tui_combo 2>$null
-    $comboAlive = ($LASTEXITCODE -eq 0)
+    # Not pre-committed, for the reason measured in Group 4: opencode's teardown
+    # lands about seven seconds after the interrupt, so a single has-session
+    # sample here can read true and then false a second later.
+    function Test-ComboAlive {
+        psmux has-session -t tui_combo 2>$null
+        return ($LASTEXITCODE -eq 0)
+    }
 
-    if ($comboAlive) {
+    $comboGone = -not (Test-ComboAlive)
+    $comboUsable = @()
+
+    if (-not $comboGone) {
         psmux send-keys -t tui_combo "echo combo_test_ok" Enter
         Start-Sleep -Seconds 2
-        $capC = psmux capture-pane -t tui_combo -p 2>&1 | Out-String
-        Add-Result "Combo test: typing works" ($capC -match 'combo_test_ok')
+        if (Test-ComboAlive) {
+            $capC = psmux capture-pane -t tui_combo -p 2>&1 | Out-String
+            $comboUsable += @{ n = "Combo test: typing works"; p = [bool]($capC -match 'combo_test_ok') }
+            $comboUsable += @{ n = "Combo test: no garbled text"; p = -not [bool]($capC -match '\[\d{2,};[\d;]+[Mm]') }
+        } else { $comboGone = $true }
+    }
 
-        $hasCGarbage = $capC -match '\[\d{2,};[\d;]+[Mm]'
-        Add-Result "Combo test: no garbled text" (-not $hasCGarbage)
-
+    if (-not $comboGone) {
         psmux send-keys -t tui_combo "echo combo_ABC" ""
         Start-Sleep -Milliseconds 500
         psmux send-keys -t tui_combo Left Left Left ""
@@ -466,13 +529,25 @@ if ($pstopPath -and $opencodePath) {
         Start-Sleep -Milliseconds 500
         psmux send-keys -t tui_combo Enter
         Start-Sleep -Seconds 1
-        $capC2 = psmux capture-pane -t tui_combo -p 2>&1 | Out-String
-        Add-Result "Combo test: arrow keys work" ($capC2 -match 'combo_XABC')
+        if (Test-ComboAlive) {
+            $capC2 = psmux capture-pane -t tui_combo -p 2>&1 | Out-String
+            $comboUsable += @{ n = "Combo test: arrow keys work"; p = [bool]($capC2 -match 'combo_XABC') }
+        } else { $comboGone = $true }
+    }
+
+    if (-not $comboGone) {
+        foreach ($chk in $comboUsable) { Add-Result $chk.n $chk.p }
     } else {
         # The shell exited. psmux must have torn the session down completely: no
         # port file left claiming a live server, and a brand new session must
         # still start and work, proving nothing was left wedged.
-        $portLeft = Test-Path "$env:USERPROFILE\.psmux\tui_combo.port"
+        Write-Host "  [INFO] opencode's teardown took the shell with it; holding psmux to the clean teardown contract instead"
+        $portLeft = $true
+        for ($i = 0; $i -lt 20; $i++) {
+            $portLeft = Test-Path "$env:USERPROFILE\.psmux\tui_combo.port"
+            if (-not $portLeft) { break }
+            Start-Sleep -Milliseconds 250
+        }
         Add-Result "Combo test: shell exited, session torn down with no stale port file" (-not $portLeft)
 
         psmux new-session -d -s tui_combo2 -x 120 -y 30 2>$null
