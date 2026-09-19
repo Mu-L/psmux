@@ -173,6 +173,12 @@ $session = "issue99_test4"
 & $PSMUX new-session -d -s $session 2>&1 | Out-Null
 Start-Sleep -Seconds 3
 
+# Window 0 first, so an asymmetry between the session's own pane and the one
+# new-window creates is visible rather than inferred.
+$w0cmd = (& $PSMUX display-message -t $session -p '#{pane_current_command}' 2>&1) | Out-String
+$w0shell = (& $PSMUX show-options -g -v default-shell -t $session 2>&1) | Out-String
+Write-Info "  window 0 pane_current_command: $($w0cmd.Trim()) (default-shell '$($w0shell.Trim())')"
+
 # Create a second window
 & $PSMUX new-window -t $session 2>&1 | Out-Null
 Start-Sleep -Seconds 5
@@ -192,8 +198,10 @@ if ($cmd.Trim() -match "bash") {
         Start-Sleep -Milliseconds 500
     }
     if ($capOut -match "BASH_CHECK_\d") {
+        Write-Info "  BASH_VERSION echo appeared after $($sw99.ElapsedMilliseconds)ms"
         Write-Pass "New window runs bash (verified via BASH_VERSION, pane_current_command=$($cmd.Trim()))"
     } else {
+        Write-Info "  BASH_VERSION echo never appeared within $($sw99.ElapsedMilliseconds)ms; last pane lines: $(($capOut -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 3) -join ' / ')"
         Write-Fail "New window not running bash (got: $($cmd.Trim()))"
     }
 }
