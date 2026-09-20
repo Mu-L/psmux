@@ -338,3 +338,42 @@ fn phone_going_away_without_a_resize_still_restores_the_desktop() {
     assert!(note_client_activity(&mut app, 1));
     assert_eq!((app.windows[0].area.width, app.windows[0].area.height), (200, 50));
 }
+
+// ── `window-size latest` must not follow a client's idle poll ──
+//
+// Regression: the server pinged `ClientActivity` for every command line a
+// persistent client sent, `dump-state` included. Two clients of different
+// sizes poll once a second each, so every poll moved "latest" to the *other*
+// client, `refresh_dynamic_window_sizes` resized every pane on the flip, and
+// the pane's full-screen program repainted its whole screen. The user saw it
+// as the pane flickering whenever the program was idle and a second
+// (SSH/Termius) client was attached; with only one client attached its own
+// poll left "latest" where it already was and nothing resized, which is why
+// disconnecting the phone made it stop. `is_client_poll_cmd` is what the two
+// activity pings in `server::connection` consult, next to the #604 exclusion
+// for bare pointer motion.
+
+#[test]
+fn the_frame_poll_is_not_user_activity() {
+    use crate::client::is_client_poll_cmd;
+    assert!(is_client_poll_cmd("dump-state"));
+    assert!(is_client_poll_cmd("dump-state\n"));
+    assert!(is_client_poll_cmd("  dump-state  "));
+}
+
+#[test]
+fn real_user_requests_still_count_as_activity() {
+    use crate::client::is_client_poll_cmd;
+    for cmd in [
+        "send-key a\n",
+        "send-text 35\n",
+        "pane-mouse 4 0 12 3 M\n",  // click
+        "pane-mouse 4 32 12 3 M\n", // drag
+        "pane-mouse 4 35 12 3 M\n", // hover: excluded by #604, not here
+        "client-size 200 50\n",     // a real resize
+        "copy-mode\n",
+        "refresh-client\n",
+    ] {
+        assert!(!is_client_poll_cmd(cmd), "{cmd:?} is user intent");
+    }
+}

@@ -1082,7 +1082,9 @@ loop {
                 // out and cleared the line), so without this `window-size
                 // latest` would only follow commands that arrive inside the
                 // batching window.
-                if !crate::client::is_bare_motion_cmd(&line) {
+                if !crate::client::is_bare_motion_cmd(&line)
+                    && !crate::client::is_client_poll_cmd(&line)
+                {
                     let _ = tx.send(CtrlReq::ClientActivity(client_id));
                 }
                 continue; // Process the new line
@@ -4239,8 +4241,13 @@ match cmd {
             // `window-size latest` (tmux tracks the most recently active
             // client).  A bare pointer sample is not user intent (#604), so
             // hovering over a pane must not steal the size from the client
-            // the user is working in.
-            if !crate::client::is_bare_motion_cmd(&line) {
+            // the user is working in; neither is the client's frame poll,
+            // which runs once a second while idle — two clients of different
+            // sizes polling in turn resized every pane twice a second and made
+            // the pane's program repaint, which read as a flicker.
+            if !crate::client::is_bare_motion_cmd(&line)
+                && !crate::client::is_client_poll_cmd(&line)
+            {
                 let _ = tx.send(CtrlReq::ClientActivity(client_id));
             }
         }

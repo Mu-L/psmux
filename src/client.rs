@@ -753,6 +753,20 @@ pub(crate) fn is_bare_motion_cmd(cmd: &str) -> bool {
     fields.next() == Some("35")
 }
 
+/// Commands a persistent client sends on a timer rather than because the user
+/// did something. `window-size latest` follows "the client the user is
+/// actually using", so a poll must not move the window to that client: with
+/// two clients of different sizes attached, each one's idle `dump-state` (once
+/// a second, ten times a second while typing) flipped the latest client back
+/// and forth, `refresh_dynamic_window_sizes` resized every pane on each flip,
+/// and that resize made the full-screen program in the pane repaint its whole
+/// screen. The user saw it as the pane flickering whenever the program was
+/// idle and a second client (the SSH/Termius one) was attached. See the
+/// activity ping in `server::connection`.
+pub(crate) fn is_client_poll_cmd(cmd: &str) -> bool {
+    cmd.trim() == "dump-state"
+}
+
 fn client_selection_owns_drag(
     mouse_selection: bool,
     mouse_selection_force: bool,
