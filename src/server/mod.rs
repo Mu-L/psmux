@@ -269,28 +269,84 @@ impl Drop for WarmSpawnLock {
     }
 }
 
+/// How long a warm-spawn lock whose holder cannot be identified is respected.
+/// Only reachable for a lock written by a build that recorded no usable holder,
+/// or one whose body cannot be read: an identifiable holder is settled by
+/// liveness instead, which is both faster and exact.
+const WARM_SPAWN_LOCK_MAX_AGE: Duration = Duration::from_secs(20);
+
+/// Is `path` older than `max`? Unreadable metadata counts as "not old", so an
+/// unknown lock is respected rather than stolen.
+fn lock_older_than(path: &std::path::Path, max: Duration) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|age| age > max)
+        .unwrap_or(false)
+}
+
+/// May this warm-spawn lock be taken from whoever wrote it?
+///
+/// The lock names its holder, so the question "is a spawn really in progress"
+/// has an exact answer: is that process still there. A spawn takes
+/// milliseconds, so a lock whose holder is gone was left behind by a process
+/// that died mid spawn, and respecting it only keeps the standby missing.
+///
+/// Judging that by the file's AGE alone was issue #677. A lock naming a pid
+/// that does not exist blocked the spawn for the full window, and because
+/// nothing retried afterwards the standby then stayed missing until the user
+/// happened to create another session: measured with a lock naming a dead pid,
+/// no standby appeared in 12 s, none after a further 25 s of waiting, and one
+/// appeared instantly on the next creation once the age rule finally allowed it.
+fn warm_spawn_lock_is_abandoned(path: &std::path::Path) -> bool {
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return lock_older_than(path, WARM_SPAWN_LOCK_MAX_AGE);
+    };
+    let Some((pid, creation)) = crate::session::parse_pid_file_contents(&body) else {
+        return lock_older_than(path, WARM_SPAWN_LOCK_MAX_AGE);
+    };
+    if !crate::platform::process_is_alive(pid) {
+        return true;
+    }
+    // The pid is live, but a pid is reused: only the recorded creation time
+    // settles that it is the SAME process. A mismatch means the holder is gone
+    // and something unrelated now owns that number.
+    if let Some(expected) = creation {
+        if !crate::session::confirms_identity(
+            crate::platform::process_kill::process_creation_time(pid),
+            expected,
+        ) {
+            return true;
+        }
+    }
+    // A live, confirmed holder is spawning right now. Respect it, but not for
+    // ever: a holder wedged mid spawn must not hold the standby hostage.
+    lock_older_than(path, WARM_SPAWN_LOCK_MAX_AGE)
+}
+
 /// Acquire the warm-spawn lock guarding the check->spawn window in
 /// `spawn_warm_server`. Returns `Some(guard)` when this caller owns the lock and
 /// may proceed to spawn, or `None` when another spawn is already in progress (in
-/// which case the caller must NOT spawn). A lock file older than 20s is treated
-/// as abandoned (its owner died mid-spawn) and stolen.
+/// which case the caller must NOT spawn). A lock left behind by a holder that is
+/// no longer running is stolen at once; see `warm_spawn_lock_is_abandoned`.
 fn acquire_warm_spawn_lock(lock_path: &str) -> Option<WarmSpawnLock> {
     use std::io::Write as _;
     let path = std::path::PathBuf::from(lock_path);
     for _ in 0..2 {
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut f) => {
-                let _ = write!(f, "{}", std::process::id());
+                // Record the holder the way the session registry records a
+                // server, so the next caller can ask whether it is still alive
+                // rather than wait out a timeout for a process that has gone.
+                let pid = std::process::id();
+                let creation =
+                    crate::platform::process_kill::process_creation_time(pid).unwrap_or(0);
+                let _ = write!(f, "{}", crate::session::format_pid_file_contents(pid, creation));
                 return Some(WarmSpawnLock(path));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = std::fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
-                    .map(|age| age > std::time::Duration::from_secs(20))
-                    .unwrap_or(false);
-                if stale {
+                if warm_spawn_lock_is_abandoned(&path) {
                     let _ = std::fs::remove_file(&path);
                     continue;
                 }
@@ -300,6 +356,49 @@ fn acquire_warm_spawn_lock(lock_path: &str) -> Option<WarmSpawnLock> {
         }
     }
     None
+}
+
+/// The registry base name of the standby for this server's namespace.
+///
+/// One function so the spawner and the health check below cannot disagree
+/// about which files describe the standby.
+fn warm_base_name(app: &AppState) -> String {
+    match app.socket_name {
+        Some(ref sn) => format!("{}____warm__", sn),
+        None => "__warm__".to_string(),
+    }
+}
+
+/// How often a running server checks that a standby still exists.
+const WARM_STANDBY_CHECK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Put a standby back if there is not one.
+///
+/// `spawn_warm_server` was only ever called from two places, a server starting
+/// up and a claim being answered, and nothing retried. So a standby that died
+/// (killed, crashed, taken with a machine that slept) stayed dead until the
+/// user happened to create another session, and `new-session` silently went
+/// back to paying a cold spawn every time. Measured for issue #677: with a
+/// live server sitting beside it, no standby came back in 90 s.
+///
+/// Cheap in the case that matters, which is the one where nothing is wrong:
+/// the standby's pid anchor is one small file read, and only a reading of
+/// "gone" pays for the spawn path. That path does its own checks before
+/// spawning anything, so calling it on a false alarm costs a lock file and a
+/// probe rather than a second standby.
+fn ensure_warm_standby(app: &AppState) {
+    if !should_spawn_warm_server(app) {
+        return;
+    }
+    // Some(true) is a live standby and the end of it. Some(false) is
+    // definitively dead. None means there is no anchor to read, which is what
+    // a standby that was never started looks like too, so both fall through to
+    // the spawner rather than being assumed healthy.
+    if crate::session::registry_pid_anchor_alive(&warm_base_name(app)) == Some(true) {
+        return;
+    }
+    warm_debug("periodic check: no live standby -- respawning");
+    spawn_warm_server(app);
 }
 
 /// Spawn a standby "warm server" process that pre-loads config + shell.
@@ -314,11 +413,7 @@ fn spawn_warm_server(app: &AppState) {
         return;
     }
     // Skip if a warm server already exists
-    let warm_base = if let Some(ref sn) = app.socket_name {
-        format!("{}____warm__", sn)
-    } else {
-        "__warm__".to_string()
-    };
+    let warm_base = warm_base_name(app);
     let warm_port_path = crate::paths::port_file(&warm_base);
     warm_debug(&format!("spawn_warm_server entry base={} port_exists={}", warm_base, std::path::Path::new(&warm_port_path).exists()));
     // Serialize the check->spawn window: without this, two callers can both see
@@ -1487,6 +1582,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let mut last_client_activity = Instant::now();
 
     let mut last_registry_check = Instant::now();
+    // Staggered off the registry tick so the two file passes do not land on the
+    // same iteration.
+    let mut last_warm_standby_check = Instant::now();
 
     // #559: alert detection (activity/bell/monitor-silence) used to run only
     // inside DumpState handling and the server-push path, both of which need a
@@ -1612,6 +1710,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         if last_registry_check.elapsed() >= Duration::from_secs(5) {
             last_registry_check = Instant::now();
             ensure_session_registry_files(&app);
+        }
+        // A standby that died used to stay dead until the next session was
+        // created, which quietly turned every `new-session` back into a cold
+        // spawn (#677).
+        if last_warm_standby_check.elapsed() >= WARM_STANDBY_CHECK_INTERVAL {
+            last_warm_standby_check = Instant::now();
+            ensure_warm_standby(&app);
         }
 
         // Adaptive timeout: ramps from 1ms (active typing/echo) through
@@ -7529,3 +7634,7 @@ mod test_issue658_nc_decision;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue674_claim_window_name.rs"]
 mod test_issue674_claim_window_name;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue677_warm_spawn_lock.rs"]
+mod test_issue677_warm_spawn_lock;
