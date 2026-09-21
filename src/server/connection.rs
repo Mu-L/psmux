@@ -4243,7 +4243,7 @@ match cmd {
             // client).  A bare pointer sample is not user intent (#604), so
             // hovering over a pane must not steal the size from the client
             // the user is working in; neither is the client's frame poll,
-            // which runs once a second while idle — two clients of different
+            // which runs once a second while idle: two clients of different
             // sizes polling in turn resized every pane twice a second and made
             // the pane's program repaint, which read as a flicker. Nor is a
             // client reporting that its terminal LOST focus: tmux counts
