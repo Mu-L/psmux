@@ -776,8 +776,20 @@ fn x11_rgb((r, g, b): (u8, u8, u8)) -> String {
 ///   * Complete OSC replies written to the pseudoconsole input pipe are
 ///     consumed by ConPTY before the child sees them, so they are injected
 ///     as console KEY_EVENT records via WriteConsoleInputW instead
-///     (`send_vt_response`), falling back to the pipe if injection fails
-///     (e.g. no child pid, or non-Windows where the pipe is not filtered).
+///     (`send_vt_response`).
+///
+/// When injection fails on Windows the OSC reply is LOST, and since #597 the
+/// code says so rather than writing it to the pipe anyway.  A reporter on
+/// 19045 whose injection was failing saw the colour replies never arrive and
+/// read the pipe write as a fallback that was also broken.  Measured on 26200
+/// with the `PSMUX_FAKE_INJECT_FAIL` seam and again with a plain write to a
+/// live pane's input pipe: a `PLAIN` payload and a CSI reply arrive byte for
+/// byte, a complete OSC arrives as nothing at all, and a DCS arrives as a bare
+/// `ESC` with its body eaten.  So the pipe was never a second channel for an
+/// OSC on this platform, and for a DCS it is worse than none: a lone `ESC` is
+/// an Escape keypress to whatever is reading the pane.  The pipe write is kept
+/// only where it is the sole channel and is known to work: no child pid, and
+/// non-Windows, where nothing filters the pipe.
 ///
 /// ConPTY also consumes the OSC 10;?/11;? QUERIES on the output path, so they
 /// normally never reach psmux.  Applications that need the full picture
@@ -801,10 +813,36 @@ pub(crate) fn answer_color_queries(
     if let Some(pid) = child_pid {
         delivered = crate::platform::mouse_inject::send_vt_response(pid, &osc);
     }
-    if !delivered {
-        let _ = writer.write_all(osc.as_bytes());
-        let _ = writer.flush();
+    if delivered { return; }
+    match osc_delivery_fallback(child_pid.is_some()) {
+        OscFallback::Pipe => {
+            let _ = writer.write_all(osc.as_bytes());
+            let _ = writer.flush();
+        }
+        OscFallback::Lost => {
+            crate::platform::mouse_inject::log_lost_reply(child_pid, "OSC colour", osc.len());
+        }
     }
+}
+
+/// What to do with an OSC reply that console injection could not deliver.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum OscFallback {
+    /// Write it to the pane's input pipe: the only channel there is, and one
+    /// that carries an OSC everywhere except in front of a ConPTY.
+    Pipe,
+    /// Nothing left to try.  ConPTY consumes an OSC written to a pane's input
+    /// pipe (measured), so writing it there would deliver nothing and can leak
+    /// a stray control byte into the pane.  Say it was lost instead.
+    Lost,
+}
+
+/// Issue #597: pick the fallback for an OSC reply injection could not deliver.
+///
+/// `had_pid` is false when psmux never learned the pane child's process id, in
+/// which case injection was never attempted and the pipe is all there is.
+pub(crate) fn osc_delivery_fallback(had_pid: bool) -> OscFallback {
+    if cfg!(windows) && had_pid { OscFallback::Lost } else { OscFallback::Pipe }
 }
 
 /// Build the reply strings for a color-query bitmask: the CSI scheme reply

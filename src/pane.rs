@@ -3170,10 +3170,24 @@ pub fn spawn_reader_thread(
                     // is created with PSEUDOCONSOLE_WIN32_INPUT_MODE, where a
                     // raw VT response wedges the Win32 input parser (issue
                     // #313, see conpty_preemptive_dsr_response).
+                    //
+                    // No pipe fallback here, decided by measurement rather
+                    // than by symmetry with the colour path (issue #597): a
+                    // DCS written to a live pane's input pipe on build 26200
+                    // arrives as a bare ESC with its body eaten, so a fallback
+                    // would deliver no reply AND hand the pane a spurious
+                    // Escape keypress.  A failed injection is logged instead.
                     if xtversion_scanner.scan(&local[..n]) {
-                        if let Some(pid) = child_pid {
-                            crate::platform::mouse_inject::send_vt_response(
-                                pid, &xtversion_reply(),
+                        let reply = xtversion_reply();
+                        let delivered = match child_pid {
+                            Some(pid) => crate::platform::mouse_inject::send_vt_response(
+                                pid, &reply,
+                            ),
+                            None => false,
+                        };
+                        if !delivered {
+                            crate::platform::mouse_inject::log_lost_reply(
+                                child_pid, "XTVERSION", reply.len(),
                             );
                         }
                     }
