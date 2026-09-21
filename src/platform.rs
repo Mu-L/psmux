@@ -1041,6 +1041,8 @@ pub mod mouse_inject {
         fn CloseHandle(handle: isize) -> i32;
         fn GetProcessId(process: isize) -> u32;
         fn GetLastError() -> u32;
+        fn GetConsoleProcessList(process_list: *mut u32, count: u32) -> u32;
+        fn GetCurrentProcessId() -> u32;
     }
 
     /// Console input mode flags
@@ -1049,9 +1051,8 @@ pub mod mouse_inject {
     const ENABLE_QUICK_EDIT_MODE: u32     = 0x0040;
     const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
 
-    #[inline]
-    fn debug_log(msg: &str) {
-        // Write to mouse_debug.log when PSMUX_MOUSE_DEBUG=1 is set.
+    /// True when `PSMUX_MOUSE_DEBUG=1` asked for the injection log.  Read once.
+    pub(crate) fn debug_enabled() -> bool {
         use std::sync::atomic::{AtomicBool, Ordering};
         static CHECKED: AtomicBool = AtomicBool::new(false);
         static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -1060,13 +1061,301 @@ pub mod mouse_inject {
             let on = std::env::var("PSMUX_MOUSE_DEBUG").map_or(false, |v| v == "1" || v == "true");
             ENABLED.store(on, Ordering::Relaxed);
         }
-        if !ENABLED.load(Ordering::Relaxed) { return; }
+        ENABLED.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn debug_log(msg: &str) {
+        // Write to mouse_debug.log when PSMUX_MOUSE_DEBUG=1 is set.
+        if !debug_enabled() { return; }
 
         let path = format!("{}/mouse_debug.log", crate::paths::psmux_dir());
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
             use std::io::Write;
             let _ = writeln!(f, "[platform] {}", msg);
         }
+    }
+
+    /// A process id no process will ever have, used by the fault seam below.
+    /// Windows hands out ids in multiples of four well below this.
+    const NONEXISTENT_PID: u32 = u32::MAX - 3;
+
+    /// Diagnostic seam (issue #597): `PSMUX_FAKE_INJECT_FAIL=1` points every
+    /// console attach in this module at a process id that does not exist, so
+    /// the attach fails for real, on a host where injection otherwise works.
+    ///
+    /// Aiming it at a bogus id rather than returning early on purpose: the
+    /// detach still happens, the failure report is still assembled, and the
+    /// callers still take their real failure branch, so this exercises the
+    /// whole path a reporter is living with instead of a shortcut past it.
+    /// Read once.
+    fn fake_inject_fail() -> bool {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static CHECKED: AtomicBool = AtomicBool::new(false);
+        static ON: AtomicBool = AtomicBool::new(false);
+        if !CHECKED.swap(true, Ordering::Relaxed) {
+            let on = std::env::var("PSMUX_FAKE_INJECT_FAIL")
+                .map_or(false, |v| v == "1" || v == "true");
+            ON.store(on, Ordering::Relaxed);
+        }
+        ON.load(Ordering::Relaxed)
+    }
+
+    /// What this process is attached to right now: the console window handle
+    /// (zero for a pseudoconsole, which has no window, and for no console at
+    /// all) and the pids sharing that console.
+    ///
+    /// `GetConsoleProcessList` returns 0 with a last error set when the caller
+    /// holds no console, and a count LARGER than the buffer when the console
+    /// has more clients than fit, in which case nothing is written.  Both are
+    /// reported rather than smoothed over, because "detached" and "attached to
+    /// a crowded console" are the two answers this is here to tell apart.
+    unsafe fn console_attachment() -> String {
+        let win = GetConsoleWindow();
+        let mut pids = [0u32; 16];
+        let n = GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32);
+        let err = GetLastError();
+        if n == 0 {
+            return format!("window=0x{:X} clients=NONE(err={})", win, err);
+        }
+        if n as usize > pids.len() {
+            return format!("window=0x{:X} clients={}(too many to list)", win, n);
+        }
+        let list: Vec<String> = pids[..n as usize].iter().map(|p| p.to_string()).collect();
+        format!("window=0x{:X} clients=[{}]", win, list.join(","))
+    }
+
+    /// Elevation and integrity level of a process, as a short field for the
+    /// failure report.  An integrity mismatch between the server and the pane
+    /// child is one of the states that makes `AttachConsole` refuse.
+    fn token_level(pid: u32) -> String {
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const TOKEN_QUERY: u32 = 0x0008;
+        const TOKEN_ELEVATION: u32 = 20;
+        const TOKEN_INTEGRITY_LEVEL: u32 = 25;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        }
+        #[link(name = "advapi32")]
+        extern "system" {
+            fn OpenProcessToken(process: isize, access: u32, token: *mut isize) -> i32;
+            fn GetTokenInformation(
+                token: isize,
+                class: u32,
+                info: *mut c_void,
+                len: u32,
+                ret_len: *mut u32,
+            ) -> i32;
+            fn GetSidSubAuthorityCount(sid: *mut c_void) -> *mut u8;
+            fn GetSidSubAuthority(sid: *mut c_void, index: u32) -> *mut u32;
+        }
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h == 0 { return format!("token=UNREADABLE(err={})", GetLastError()); }
+            let mut tok: isize = 0;
+            if OpenProcessToken(h, TOKEN_QUERY, &mut tok) == 0 {
+                let e = GetLastError();
+                CloseHandle(h);
+                return format!("token=DENIED(err={})", e);
+            }
+            let mut elevated: u32 = 0;
+            let mut got: u32 = 0;
+            let _ = GetTokenInformation(
+                tok, TOKEN_ELEVATION,
+                &mut elevated as *mut u32 as *mut c_void, 4, &mut got,
+            );
+            // TOKEN_MANDATORY_LABEL is a SID_AND_ATTRIBUTES whose first field is
+            // a SID pointer; the last sub authority is the integrity RID
+            // (0x1000 low, 0x2000 medium, 0x3000 high, 0x4000 system).
+            let mut buf = [0u8; 64];
+            let mut rid: u32 = 0;
+            if GetTokenInformation(
+                tok, TOKEN_INTEGRITY_LEVEL,
+                buf.as_mut_ptr() as *mut c_void, buf.len() as u32, &mut got,
+            ) != 0 {
+                let sid = *(buf.as_ptr() as *const *mut c_void);
+                if !sid.is_null() {
+                    let count = *GetSidSubAuthorityCount(sid);
+                    if count > 0 {
+                        rid = *GetSidSubAuthority(sid, (count - 1) as u32);
+                    }
+                }
+            }
+            CloseHandle(tok);
+            CloseHandle(h);
+            format!("elevated={} integrity=0x{:X}", elevated != 0, rid)
+        }
+    }
+
+    /// Spell out what this `AttachConsole` error code means, because the number
+    /// on its own is what a bug report carries and the meanings point at very
+    /// different causes.
+    fn attach_error_meaning(err: u32) -> &'static str {
+        match err {
+            5 => "ERROR_ACCESS_DENIED: the caller is still attached to a console, or the target console refuses this caller (integrity or session mismatch)",
+            6 => "ERROR_INVALID_HANDLE: that process exists but has no console",
+            87 => "ERROR_INVALID_PARAMETER: no process with that id",
+            _ => "see the Windows system error list",
+        }
+    }
+
+    /// Parent pid of `pid`, from a Toolhelp snapshot.  Only walked when a
+    /// failure report is actually being written.
+    fn parent_of(pid: u32) -> Option<u32> {
+        #[repr(C)]
+        struct PROCESSENTRY32W {
+            dw_size: u32,
+            cnt_usage: u32,
+            th32_process_id: u32,
+            th32_default_heap_id: usize,
+            th32_module_id: u32,
+            cnt_threads: u32,
+            th32_parent_process_id: u32,
+            pc_pri_class_base: i32,
+            dw_flags: u32,
+            sz_exe_file: [u16; 260],
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> isize;
+            fn Process32FirstW(snap: isize, entry: *mut PROCESSENTRY32W) -> i32;
+            fn Process32NextW(snap: isize, entry: *mut PROCESSENTRY32W) -> i32;
+        }
+        const TH32CS_SNAPPROCESS: u32 = 0x00000002;
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE || snap == 0 { return None; }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dw_size = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut found = None;
+            if Process32FirstW(snap, &mut e) != 0 {
+                loop {
+                    if e.th32_process_id == pid {
+                        found = Some(e.th32_parent_process_id);
+                        break;
+                    }
+                    if Process32NextW(snap, &mut e) == 0 { break; }
+                }
+            }
+            CloseHandle(snap);
+            found
+        }
+    }
+
+    /// Everything that can explain a refused attach, on one line.
+    ///
+    /// Built only when the attach has already failed and `PSMUX_MOUSE_DEBUG=1`
+    /// is on, so the process walks and token reads here never touch a hot path.
+    unsafe fn attach_failure_report(
+        site: &str,
+        child_pid: u32,
+        before: &str,
+        freed: i32,
+        free_err: u32,
+        err1: u32,
+        retry: Option<(i32, u32, u32)>,
+    ) -> String {
+        let me = GetCurrentProcessId();
+        let after = console_attachment();
+        let alive = crate::platform::process_is_alive(child_pid);
+        let name = crate::platform::process_info::get_process_name_or_snapshot(child_pid)
+            .unwrap_or_else(|| "?".to_string());
+        let parent = parent_of(child_pid)
+            .map(|p| format!("{} ({})", p,
+                crate::platform::process_info::get_process_name_or_snapshot(p)
+                    .unwrap_or_else(|| "?".to_string())))
+            .unwrap_or_else(|| "?".to_string());
+        let retry_text = match retry {
+            Some((f2, fe2, e2)) => format!(
+                " retry: FreeConsole ok={} err={} AttachConsole err={} ({})",
+                f2 != 0, fe2, e2, attach_error_meaning(e2)
+            ),
+            None => String::new(),
+        };
+        format!(
+            "{site}: AttachConsole({child_pid}) FAILED err={err1} | {meaning} \
+             | server pid={me} {server_token} \
+             | console before FreeConsole: {before} \
+             | FreeConsole ok={freed_ok} err={free_err} \
+             | console after: {after} \
+             | target alive={alive} image={name} parent={parent} {target_token} \
+             | os build={build}{retry_text}",
+            meaning = attach_error_meaning(err1),
+            server_token = token_level(me),
+            freed_ok = freed != 0,
+            target_token = token_level(child_pid),
+            build = crate::ssh_input::windows_build_number()
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        )
+    }
+
+    /// Detach this process from whatever console it holds, then attach to the
+    /// one `child_pid` is on.  Returns true when the attach took.
+    ///
+    /// Every injection below opens with this pair.  It used to be written out
+    /// at each site with `FreeConsole`'s result thrown away, which is why issue
+    /// #597 could not be taken further from a report: a reporter on 19045 saw
+    /// `AttachConsole FAILED err=5` on the first attempt of a server's life and
+    /// never a success, and `err=5` means either "the caller still holds a
+    /// console" or "this console refuses this caller", two very different
+    /// causes that the log could not tell apart.
+    ///
+    /// So the detach is now checked, a denied attach is retried once behind a
+    /// second detach (the only thing that can turn "still attached" into a
+    /// success), and a final failure writes one line naming every state that
+    /// produces this error.  The report is assembled only when the attach has
+    /// already failed and the debug log is on.
+    unsafe fn free_and_attach(child_pid: u32, site: &str) -> bool {
+        let target = if fake_inject_fail() {
+            debug_log(&format!(
+                "{}: PSMUX_FAKE_INJECT_FAIL=1, aiming at {} instead of {}",
+                site, NONEXISTENT_PID, child_pid
+            ));
+            NONEXISTENT_PID
+        } else {
+            child_pid
+        };
+        let before = if debug_enabled() { console_attachment() } else { String::new() };
+        let freed = FreeConsole();
+        let free_err = GetLastError();
+
+        if AttachConsole(target) != 0 { return true; }
+        let child_pid = target;
+        let err1 = GetLastError();
+
+        if err1 == 5 {
+            // Still attached is the documented meaning, and a second detach is
+            // one syscall.  If that rescues it, the log says so, because a
+            // reporter needs to know the difference between a race this heals
+            // and a console that will never accept us.
+            let freed2 = FreeConsole();
+            let free_err2 = GetLastError();
+            if AttachConsole(child_pid) != 0 {
+                debug_log(&format!(
+                    "{}: AttachConsole({}) was denied, then succeeded after a second FreeConsole \
+                     (first ok={} err={}, second ok={} err={})",
+                    site, child_pid, freed != 0, free_err, freed2 != 0, free_err2
+                ));
+                return true;
+            }
+            let err2 = GetLastError();
+            if debug_enabled() {
+                debug_log(&attach_failure_report(
+                    site, child_pid, &before, freed, free_err, err1,
+                    Some((freed2, free_err2, err2)),
+                ));
+            }
+            return false;
+        }
+
+        if debug_enabled() {
+            debug_log(&attach_failure_report(
+                site, child_pid, &before, freed, free_err, err1, None,
+            ));
+        }
+        false
     }
 
     /// Extract the process ID from a portable_pty::Child trait object.
@@ -1092,10 +1381,7 @@ pub mod mouse_inject {
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = GetConsoleWindow() != 0;
-            FreeConsole();
-
-            if AttachConsole(child_pid) == 0 {
-                debug_log(&format!("query_vti_enabled: AttachConsole({}) FAILED", child_pid));
+            if !free_and_attach(child_pid, "query_vti_enabled") {
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return None;
             }
@@ -1164,10 +1450,7 @@ pub mod mouse_inject {
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = GetConsoleWindow() != 0;
-            FreeConsole();
-
-            if AttachConsole(child_pid) == 0 {
-                debug_log(&format!("ensure_vti_enabled: AttachConsole({}) FAILED", child_pid));
+            if !free_and_attach(child_pid, "ensure_vti_enabled") {
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
             }
@@ -1255,13 +1538,8 @@ pub mod mouse_inject {
             // Check if we currently own a console (app mode yes, server mode no after first call)
             let had_console = reattach && GetConsoleWindow() != 0;
 
-            // Detach from current console (no-op if already detached)
-            FreeConsole();
-
-            // Attach to child's pseudo-console
-            if AttachConsole(child_pid) == 0 {
-                let err = GetLastError();
-                debug_log(&format!("send_mouse_event: AttachConsole({}) FAILED err={}", child_pid, err));
+            // Detach from the current console and attach to the child's.
+            if !free_and_attach(child_pid, "send_mouse_event") {
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
             }
@@ -1368,10 +1646,7 @@ pub mod mouse_inject {
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = GetConsoleWindow() != 0;
-            FreeConsole();
-
-            if AttachConsole(child_pid) == 0 {
-                debug_log(&format!("query_console_input_mode: AttachConsole({}) FAILED", child_pid));
+            if !free_and_attach(child_pid, "query_console_input_mode") {
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return None;
             }
@@ -1435,9 +1710,7 @@ pub mod mouse_inject {
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = GetConsoleWindow() != 0;
-            FreeConsole();
-
-            if AttachConsole(child_pid) == 0 {
+            if !free_and_attach(child_pid, "send_vt_sequence") {
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
             }
@@ -1570,24 +1843,32 @@ pub mod mouse_inject {
         }
     }
 
-    /// Inject bracketed paste text into a child process's console input buffer.
+    /// Issue #473: deliver a VT response string (XTVERSION, the OSC 4/10/11
+    /// colour replies, anything psmux has to answer a pane's own query with)
+    /// into that child's console input buffer as KEY_EVENT records.
     ///
-    /// Sends `\x1b[200~` + text + `\x1b[201~` as KEY_EVENT records via
-    /// WriteConsoleInputW, bypassing ConPTY's VT input parser entirely.
-    /// ConPTY strips bracketed paste sequences written to the PTY master pipe,
-    /// so this direct injection is the only way to deliver them to the child.
+    /// ConPTY consumes a complete OSC sequence written to the pseudoconsole
+    /// input pipe before the child can read it, so `pane.writer` cannot carry
+    /// these replies; `WriteConsoleInputW` bypasses ConPTY's VT input parser
+    /// entirely.  The pane is also created with `PSEUDOCONSOLE_WIN32_INPUT_MODE`,
+    /// where a raw VT response wedges the win32 input parser (issue #313), which
+    /// is the second reason the pipe is not an option here.
     ///
-    /// The text is encoded as UTF-16 for proper Unicode support (file paths
-    /// may contain non-ASCII characters).
-    pub fn send_bracketed_paste(child_pid: u32, text: &str, bracket: bool) -> bool {
+    /// The text is encoded as UTF-16 so a reply carrying non-ASCII survives, and
+    /// a bare `\n` becomes `\r` because that is what the console input buffer
+    /// means by a line break.  A VT response contains neither, but this is also
+    /// the transport a future paste would use, so the normalisation stays.
+    ///
+    /// Named for what it does since #597: it was `send_bracketed_paste(pid,
+    /// text, bracket)` with exactly one caller that always passed
+    /// `bracket = false`, so the paste brackets were dead code and the name put
+    /// "paste" in front of every injected reply in the debug log, which sent a
+    /// reporter looking at the paste path for a mouse and XTVERSION problem.
+    pub fn send_vt_response(child_pid: u32, text: &str) -> bool {
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = GetConsoleWindow() != 0;
-            FreeConsole();
-
-            if AttachConsole(child_pid) == 0 {
-                let err = GetLastError();
-                debug_log(&format!("send_bracketed_paste: AttachConsole({}) FAILED err={}", child_pid, err));
+            if !free_and_attach(child_pid, "send_vt_response") {
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
             }
@@ -1608,7 +1889,7 @@ pub mod mouse_inject {
 
             if handle == INVALID_HANDLE || handle == 0 {
                 let err = GetLastError();
-                debug_log(&format!("send_bracketed_paste: CreateFileW(CONIN$) FAILED err={}", err));
+                debug_log(&format!("send_vt_response: CreateFileW(CONIN$) FAILED err={}", err));
                 FreeConsole();
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
@@ -1634,18 +1915,9 @@ pub mod mouse_inject {
                 event: KEY_EVENT_RECORD,
             }
 
-            // Build bracket-open, text, bracket-close as UTF-16 chars
-            let bracket_open: &[u8] = b"\x1b[200~";
-            let bracket_close: &[u8] = b"\x1b[201~";
-
             // Collect all UTF-16 code units to send
             let mut chars: Vec<u16> = Vec::new();
-            if bracket {
-                for &b in bracket_open {
-                    chars.push(b as u16);
-                }
-            }
-            // Encode paste text as UTF-16, normalizing \n → \r for the
+            // Encode the reply as UTF-16, normalizing \n → \r for the
             // console input buffer (Windows apps expect CR for line breaks;
             // PSReadLine and other readline implementations treat \r as Enter).
             let mut prev_cr = false;
@@ -1664,11 +1936,6 @@ pub mod mouse_inject {
                 let encoded = c.encode_utf16(&mut buf);
                 for &unit in encoded.iter() {
                     chars.push(unit);
-                }
-            }
-            if bracket {
-                for &b in bracket_close {
-                    chars.push(b as u16);
                 }
             }
 
@@ -1731,8 +1998,8 @@ pub mod mouse_inject {
                 }
             }
 
-            debug_log(&format!("send_bracketed_paste: pid={} bracket={} text_len={} records={} written={} ok={}",
-                child_pid, bracket, text.len(), records.len(), offset, last_result != 0));
+            debug_log(&format!("send_vt_response: pid={} text_len={} records={} written={} ok={}",
+                child_pid, text.len(), records.len(), offset, last_result != 0));
 
             CloseHandle(handle);
             FreeConsole();
@@ -1744,17 +2011,21 @@ pub mod mouse_inject {
         }
     }
 
-    /// Issue #473: deliver a VT response string (e.g. OSC color-query replies)
-    /// into a child's console input buffer via WriteConsoleInputW.
+    /// Issue #597: record a reply psmux had to answer a pane's query with and
+    /// could not deliver.
     ///
-    /// ConPTY consumes complete OSC sequences written to the pseudoconsole
-    /// input pipe before the child can read them, so `pane.writer` cannot
-    /// carry OSC 4/10/11 replies.  Injecting the bytes as KEY_EVENT records
-    /// bypasses ConPTY's VT input filter entirely — the same transport that
-    /// makes bracketed paste work (`send_bracketed_paste`), which this reuses
-    /// without the paste brackets.
-    pub fn send_vt_response(child_pid: u32, text: &str) -> bool {
-        send_bracketed_paste(child_pid, text, false)
+    /// A reply that cannot be injected is lost on Windows, because the pane's
+    /// input pipe does not carry an OSC or a DCS past ConPTY (measured).  It
+    /// used to vanish with nothing in the log, which is how a reporter spent a
+    /// week on the wrong half of the problem.  One line under
+    /// `PSMUX_MOUSE_DEBUG=1` now names the pane, the kind and the size.
+    pub fn log_lost_reply(child_pid: Option<u32>, kind: &str, len: usize) {
+        debug_log(&format!(
+            "{} reply LOST: {} bytes for pid={:?} could not be injected, and \
+             ConPTY consumes a reply of this shape written to the pane input \
+             pipe, so there is no second channel on this platform",
+            kind, len, child_pid
+        ));
     }
 
     /// Send a CTRL_C_EVENT to all processes on the child's console.
@@ -1856,8 +2127,7 @@ pub mod mouse_inject {
             let _console_guard = portable_pty::console_state_lock();
             unsafe {
                 let had_console = GetConsoleWindow() != 0;
-                FreeConsole();
-                if AttachConsole(child_pid) == 0 {
+                if !free_and_attach(child_pid, "strip_processed_input") {
                     if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                     return;
                 }
@@ -1970,13 +2240,9 @@ pub mod mouse_inject {
         unsafe {
             let had_console = reattach && GetConsoleWindow() != 0;
 
-            FreeConsole();
-
             log(&format!("called: pid={} reattach={} had_console={}", child_pid, reattach, had_console));
 
-            if AttachConsole(child_pid) == 0 {
-                let err = GetLastError();
-                log(&format!("AttachConsole({}) FAILED err={}", child_pid, err));
+            if !free_and_attach(child_pid, "ctrl_c") {
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
             }
@@ -2255,13 +2521,9 @@ pub mod mouse_inject {
         unsafe {
             let had_console = reattach && GetConsoleWindow() != 0;
 
-            FreeConsole();
-
             log(&format!("called: pid={} reattach={} had_console={}", child_pid, reattach, had_console));
 
-            if AttachConsole(child_pid) == 0 {
-                let err = GetLastError();
-                log(&format!("AttachConsole({}) FAILED err={}", child_pid, err));
+            if !free_and_attach(child_pid, "ctrl_break") {
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
             }
@@ -2338,10 +2600,7 @@ pub mod mouse_inject {
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = GetConsoleWindow() != 0;
-            FreeConsole();
-
-            if AttachConsole(child_pid) == 0 {
-                debug_log(&format!("send_modified_key_event: AttachConsole({}) FAILED", child_pid));
+            if !free_and_attach(child_pid, "send_modified_key_event") {
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
             }
@@ -2470,10 +2729,7 @@ pub mod mouse_inject {
         let _console_guard = portable_pty::console_state_lock();
         unsafe {
             let had_console = GetConsoleWindow() != 0;
-            FreeConsole();
-
-            if AttachConsole(child_pid) == 0 {
-                debug_log(&format!("send_modified_enter_event: AttachConsole({}) FAILED", child_pid));
+            if !free_and_attach(child_pid, "send_modified_enter_event") {
                 if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                 return false;
             }
@@ -2612,8 +2868,8 @@ pub mod mouse_inject {
     pub fn send_ctrl_break_event(_pid: u32, _reattach: bool) -> bool { false }
     pub fn query_mouse_input_enabled(_pid: u32) -> Option<bool> { None }
     pub fn query_console_input_mode(_pid: u32) -> Option<u32> { None }
-    pub fn send_bracketed_paste(_pid: u32, _text: &str, _bracket: bool) -> bool { false }
     pub fn send_vt_response(_pid: u32, _text: &str) -> bool { false }
+    pub fn log_lost_reply(_pid: Option<u32>, _kind: &str, _len: usize) {}
     pub fn send_modified_key_event(_pid: u32, _ch: char, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
     pub fn send_alt_key_event(_pid: u32, _ch: char) -> bool { false }
     pub fn send_modified_enter_event(_pid: u32, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
