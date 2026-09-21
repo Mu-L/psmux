@@ -1084,6 +1084,7 @@ loop {
                 // batching window.
                 if !crate::client::is_bare_motion_cmd(&line)
                     && !crate::client::is_client_poll_cmd(&line)
+                    && !crate::client::is_focus_loss_cmd(&line)
                 {
                     let _ = tx.send(CtrlReq::ClientActivity(client_id));
                 }
@@ -4244,9 +4245,13 @@ match cmd {
             // the user is working in; neither is the client's frame poll,
             // which runs once a second while idle — two clients of different
             // sizes polling in turn resized every pane twice a second and made
-            // the pane's program repaint, which read as a flicker.
+            // the pane's program repaint, which read as a flicker. Nor is a
+            // client reporting that its terminal LOST focus: tmux counts
+            // focus-in and filters focus-out out by name, because the window
+            // the user just left is the last one that should take the size.
             if !crate::client::is_bare_motion_cmd(&line)
                 && !crate::client::is_client_poll_cmd(&line)
+                && !crate::client::is_focus_loss_cmd(&line)
             {
                 let _ = tx.send(CtrlReq::ClientActivity(client_id));
             }
