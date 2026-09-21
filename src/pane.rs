@@ -3158,6 +3158,17 @@ pub fn spawn_reader_thread(
                             // pipe path as delivery of record.
                             color_query_pending.fetch_or(color_query_bits, Ordering::AcqRel);
                             crate::types::COLOR_QUERY_PENDING.store(true, Ordering::Release);
+                            // The server loop drains these bits only on a pass
+                            // that saw pane data, and the parser thread has
+                            // usually announced THIS read already: it wakes the
+                            // loop within its coalescing wait, while a refused
+                            // attach above can take longer than that.  The loop
+                            // then finds nothing pending, and a program blocked
+                            // on the reply prints nothing more to trigger
+                            // another pass, so the pipe reply never went out
+                            // (issue #597).  Ask for the pass ourselves.
+                            crate::types::PTY_DATA_READY.store(true, Ordering::Release);
+                            crate::types::wake_server_loop();
                         }
                     }
                     // Issue #597: answer XTVERSION (`CSI > q`) here too, for the
