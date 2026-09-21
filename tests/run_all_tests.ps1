@@ -638,6 +638,10 @@ function Invoke-LeftoverAudit {
                 Write-AuditLine ("  not killing {0} pid={1} by design; its window is closed instead" -f $p.Name, $procId)
                 continue
             }
+            if (-not (Test-KillTargetSafe -TargetPid $procId -Reason "leftover audit, $Suite, $why")) {
+                Write-AuditLine ("  REFUSED to end pid={0}: the kill ledger says it is this runner or one of its ancestors" -f $procId)
+                continue
+            }
             try {
                 Stop-Process -Id $procId -Force -ErrorAction Stop
                 $killed += $procId
@@ -745,6 +749,34 @@ try {
         [void][PsmuxWinAudit]::SetTitle("psmux FULL test suite - run $script:RunId")
     }
 } catch { }
+
+# ── Forensics: who we are, what we kill, and a witness outside our own tree ──
+# See tests\run_forensics.ps1 for the measurements behind this. Short version:
+# issue #680 lost two runs to something that ended the whole tree with nothing
+# written anywhere, and the only two mechanisms that reproduce that signature
+# (a job object closing on us, a tree kill aimed at an ancestor) are both
+# TerminateProcess, so nothing inside this process can ever record them. The
+# identity file says in advance whether we are sitting in such a job, the kill
+# ledger refuses to be one of those mechanisms ourselves, and the watchdog is
+# the only thing that will still be alive to describe the next occurrence.
+try {
+    . (Join-Path $PSScriptRoot 'run_forensics.ps1')
+    Initialize-RunForensics -RunDir $script:RunDir -RunId $script:RunId
+} catch {
+    Write-Log "Forensics did not load: $_"
+    Write-Host "  (forensics did not load: $_)" -ForegroundColor DarkYellow
+}
+# Never let a missing forensics file change how the run behaves: without it the
+# ledger is simply absent and every kill is allowed, exactly as before.
+if (-not (Get-Command Test-KillTargetSafe -ErrorAction SilentlyContinue)) {
+    function Test-KillTargetSafe { param([int]$TargetPid, [string]$Reason, [switch]$Tree) return $true }
+}
+if (-not (Get-Command Write-KillNote -ErrorAction SilentlyContinue)) {
+    function Write-KillNote { param([string]$Message) }
+}
+if (-not (Get-Command Complete-RunForensics -ErrorAction SilentlyContinue)) {
+    function Complete-RunForensics { param([string]$Status) }
+}
 
 # ── Desktop baseline + spawn attribution watcher ──────────────────────────────
 # The baseline is the set of console windows that existed BEFORE the run. Nothing
@@ -923,6 +955,11 @@ function Clean-Server {
     # If no psmux processes exist there is nothing to tear down; just clear files.
     $alive = @(Get-Process psmux -ErrorAction SilentlyContinue)
     if ($alive.Count -gt 0) {
+        # Image name kills, and only ever of psmux. Recorded so the ledger shows
+        # what the runner was doing in the seconds around a disappearance: run
+        # 2026-09-20_00-19-17 died inside this very function, between "Queuing
+        # test_newsession_flags" and "START test_newsession_flags".
+        Write-KillNote ("CLEAN-SERVER killing {0} psmux process(es) by image name: {1}" -f $alive.Count, (($alive | ForEach-Object { $_.Id }) -join ','))
         # Gracefully ask all servers to exit, but BOUNDED: a wedged server must not
         # hang the runner (the old unbounded `& $PSMUX kill-server` could block forever).
         try {
@@ -1066,8 +1103,9 @@ function Run-TestFile {
             Write-Host "`n  [ABORT] Stop requested ($script:AbortReason). Killing $baseName process tree." -ForegroundColor Yellow
             Write-Log "ABORT $baseName - stop requested ($script:AbortReason), killing process tree"
             if ($inJob) {
+                Write-KillNote ("JOBKILL abort suite={0} assigned pid={1}" -f $baseName, $proc.Id)
                 [PsmuxTestJob]::Kill($job)
-            } else {
+            } elseif (Test-KillTargetSafe -TargetPid $proc.Id -Reason "abort teardown of $baseName" -Tree) {
                 & taskkill /F /T /PID $proc.Id 2>&1 | Out-Null
             }
             try { $proc.WaitForExit(5000) | Out-Null } catch {}
@@ -1092,8 +1130,9 @@ function Run-TestFile {
             Write-Host "  [TIMEOUT] Killing $baseName process tree after ${timeoutSec}s" -ForegroundColor Red
             Write-Log "TIMEOUT $baseName after ${timeoutSec}s, killing process tree"
             if ($inJob) {
+                Write-KillNote ("JOBKILL timeout suite={0} assigned pid={1}" -f $baseName, $proc.Id)
                 [PsmuxTestJob]::Kill($job)   # kills every descendant, even orphans
-            } else {
+            } elseif (Test-KillTargetSafe -TargetPid $proc.Id -Reason "timeout teardown of $baseName after ${timeoutSec}s" -Tree) {
                 # Fallback: taskkill the tree if job-object assignment failed
                 & taskkill /F /T /PID $proc.Id 2>&1 | Out-Null
             }
@@ -1104,7 +1143,10 @@ function Run-TestFile {
             $exitCode = $proc.ExitCode
             # Suite finished: reap anything it left behind (leaked children would
             # otherwise accumulate across 541 suites and poison later tests)
-            if ($inJob) { [PsmuxTestJob]::Kill($job) }
+            if ($inJob) {
+                Write-KillNote ("JOBKILL completion suite={0} assigned pid={1} exit={2}" -f $baseName, $proc.Id, $exitCode)
+                [PsmuxTestJob]::Kill($job)
+            }
         }
         $sw.Stop()
 
@@ -1210,6 +1252,7 @@ Write-Host ""
 $suiteIndex = 0
 $script:RunAborted = $false
 $script:NotRunCount = 0
+try {
 foreach ($testFile in $allTests) {
     $suiteIndex++
 
@@ -1286,6 +1329,15 @@ foreach ($testFile in $allTests) {
 
     Show-ProgressDashboard -Current $suiteIndex -Total $totalSuites -SuiteName $testFile.BaseName -Status $result.Status
 }
+} catch {
+    # A terminating error in the loop is a death the runner CAN describe, so it
+    # says so and marks the run ended. That keeps the watchdog's snapshot for the
+    # one case nobody can describe from the inside.
+    Write-Log "FATAL in the suite loop: $_"
+    Write-Host "  FATAL: $_" -ForegroundColor Red
+    Complete-RunForensics -Status "fatal: $_"
+    throw
+}
 
 # ── Final cleanup ──
 # Runs on the abort path too: this is what stops an interrupted run from leaving
@@ -1301,9 +1353,16 @@ Remove-Item $script:StopFile -Force -ErrorAction SilentlyContinue
 # by image name, because another session's pwsh is not ours to end.
 if ($script:SpawnWatcher) {
     try { [System.IO.File]::WriteAllText($script:CurrentSuiteFile, '<run finished>') } catch { }
-    try { Stop-Process -Id $script:SpawnWatcher.Id -Force -ErrorAction Stop } catch { }
+    if (Test-KillTargetSafe -TargetPid $script:SpawnWatcher.Id -Reason 'end of run, stopping the spawn watcher we started') {
+        try { Stop-Process -Id $script:SpawnWatcher.Id -Force -ErrorAction Stop } catch { }
+    }
     Write-Log "Spawn watcher pid $($script:SpawnWatcher.Id) stopped"
 }
+
+# The run reached its own end. The watchdog reads this and leaves quietly; a run
+# that disappears without it is the event #680 is about, and the watchdog will
+# say so in runner_vanished.log.
+Complete-RunForensics -Status $(if ($script:RunAborted) { "interrupted ($script:AbortReason)" } else { 'finished' })
 
 # Final desktop reconciliation: anything left that was not in the baseline is
 # reported by handle, so a stuck window is visible in the summary rather than
