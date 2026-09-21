@@ -1148,6 +1148,10 @@ mod tests_issue537_popup_attach;
 mod tests_nested_client_color_query;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue597_reply_fallback.rs"]
+mod tests_issue597_reply_fallback;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_deps_base64_parity.rs"]
 mod tests_deps_base64_parity;
 

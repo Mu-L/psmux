@@ -123,6 +123,20 @@ class QueryProbe {
             new string[] { "DECRQM_2026", "\x1b[?2026$p" },
             new string[] { "DECRQM_1006", "\x1b[?1006$p" },
             new string[] { "XTGETTCAP_TN", "\x1bP+q544e\x1b\\" },
+            // Issue #597 follow up: the colour queries a reporter on 19045
+            // measured as 0 bytes.  psmux answers these from server/helpers.rs
+            // (issue #473/#556) when they reach it, so a 0 here says either the
+            // ConPTY host ate the QUERY on the way out or the reply could not be
+            // delivered, and the mouse debug log tells those two apart.
+            new string[] { "OSC_FG", "\x1b]10;?\x1b\\" },
+            new string[] { "OSC_BG", "\x1b]11;?\x1b\\" },
+            new string[] { "OSC_COLOR1", "\x1b]4;1;?\x1b\\" },
+            // The light/dark scheme query psmux answers with a CSI reply rather
+            // than an OSC one.  CSI is documented to survive a plain write to
+            // the pane's input pipe where OSC does not, so this is the control
+            // that tells "psmux could not deliver" apart from "ConPTY ate an
+            // OSC reply on the pipe".
+            new string[] { "CSI_SCHEME", "\x1b[?996n" },
         };
 
         foreach (string[] q in queries) {

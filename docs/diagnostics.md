@@ -5,9 +5,10 @@ nowhere for an error message to land on screen, so psmux writes what it knows to
 This page lists every diagnostic file psmux can produce, the environment variables that turn the
 optional ones on, and what to attach when you file a bug report.
 
-Everything on this page is read only observation, with one exception called out where it appears:
-`PSMUX_FAKE_WIN_BUILD` moves psmux onto a different branch on purpose, so that a platform specific
-path can be reproduced on a machine that is not that platform.
+Everything on this page is read only observation, with two exceptions called out where they
+appear: `PSMUX_FAKE_WIN_BUILD` moves psmux onto a different branch on purpose, and
+`PSMUX_FAKE_INJECT_FAIL` makes a Windows call fail on purpose, both so that a path you cannot
+otherwise reach on your machine can be reproduced on it.
 
 ## Debug Logging
 
@@ -23,7 +24,7 @@ your disk.
 | `PSMUX_INPUT_DEBUG=1` | `~/.psmux/input_debug.log` | Every input event plus the console mode in effect when it arrived |
 | `PSMUX_SERVER_DEBUG=1` | `~/.psmux/server_debug.log` | Server side request tracing and session switching |
 | `PSMUX_SESSION_DEBUG=1` | `~/.psmux/session_debug.log` | Session registry scans and stale port cleanup |
-| `PSMUX_MOUSE_DEBUG=1` | `~/.psmux/mouse_debug.log` | Mouse injection, screen to pane coordinate mapping, and the wheel gate's decision per notch (which mouse protocol the pane holds and who enabled it) |
+| `PSMUX_MOUSE_DEBUG=1` | `~/.psmux/mouse_debug.log` | Mouse injection, screen to pane coordinate mapping, the wheel gate's decision per notch (which mouse protocol the pane holds and who enabled it), every reply psmux injects into a pane, and a full console state report whenever an injection cannot attach to a pane |
 | `PSMUX_SSH_DEBUG=1` | `~/.psmux/ssh_input.log` | SSH escape sequence decoding into Win32 input records |
 | `PSMUX_LATENCY_LOG=1` | `~/.psmux/latency.log` | Keypress to render latency, measured client side |
 | `PSMUX_PANE_RAW=1` | `~/.psmux/pane_raw.bin` | The raw byte stream a pane's child wrote, before psmux's VT parser touched it. The file to read when a colour, a mode switch or a mouse DECSET seems to be missing: it shows what the program (and conhost, which echoes console mode changes into the same stream as `ESC [ ? 1003 ; 1006 h` / `l`) actually emitted |
@@ -89,6 +90,68 @@ a mouse path your conhost was not built for. Set it while reproducing a report, 
 must be set on the **server** process to affect a pane, so kill the server first and add
 `$env:PSMUX_NO_WARM = "1"` so that a warm server spawned earlier, without your setting, does not
 answer instead.
+
+### Reading an Injection Failure
+
+Some things psmux sends a pane cannot go down the pane's input pipe, because the ConPTY host in
+front of the pane consumes them: the XTVERSION and OSC colour replies psmux answers a program's
+own questions with, a Win32 mouse record, a Ctrl+C. Those are written straight into the pane's
+console input buffer instead, and to do that the server has to briefly leave its own console and
+join the pane's, with `FreeConsole` followed by `AttachConsole`.
+
+When that attach is refused, nothing psmux injects reaches the pane, and the symptom is broad and
+confusing: a program's terminal probes go unanswered, the wheel does nothing, colours come out
+wrong. `PSMUX_MOUSE_DEBUG=1` writes one line per attempt, and on a refusal a full report:
+
+```
+[platform] send_vt_response: AttachConsole(18572) FAILED err=5 | ERROR_ACCESS_DENIED: the caller is
+  still attached to a console, or the target console refuses this caller (integrity or session
+  mismatch) | server pid=37420 elevated=false integrity=0x2000 | console before FreeConsole:
+  window=0x1080BAA clients=[37420] | FreeConsole ok=true err=6 | console after: window=0x0
+  clients=NONE(err=6) | target alive=true image=pwsh.exe parent=37420 (psmux.exe) elevated=false
+  integrity=0x2000 | os build=19045 | retry: FreeConsole ok=true err=6 AttachConsole err=5 (...)
+```
+
+Read it in this order:
+
+- **`console after`** is the field that splits the two meanings of `err=5`. `window=0x0` with
+  `clients=NONE` means the server really did let go of its console, so a refusal is the pane's
+  console turning the server away. Anything else means the detach did not take, and the server was
+  still attached when it asked.
+- **`FreeConsole ok=`** says whether the detach itself reported success. `err=6` alongside
+  `ok=true` is normal: `FreeConsole` leaves a stale error code behind when it succeeds.
+- **`integrity=`** on the two processes should match. `0x2000` is a normal session, `0x3000` is
+  elevated. A server and a pane child at different levels is a refusal that no retry can fix.
+- **`target alive=false`** means the pane's program had already exited, which is benign.
+- **`retry:`** appears only for `err=5`, and shows the second attempt psmux makes behind another
+  detach. If the retry succeeds there is no report at all, only a one line note saying so.
+
+A healthy pane logs successes instead, one per reply:
+
+```
+[platform] send_vt_response: pid=36960 text_len=16 records=16 written=16 ok=true
+```
+
+And a reply that could not be delivered is named rather than dropped in silence:
+
+```
+[platform] XTVERSION reply LOST: 16 bytes for pid=Some(40776) could not be injected ...
+```
+
+### The Injection Failure Seam
+
+| Variable | What it does |
+|---|---|
+| `PSMUX_FAKE_INJECT_FAIL=1` | Points every console attach at a process id that does not exist, so injection fails for real |
+
+The report above is unreachable on a host where injection works, which is most of them. This
+variable makes it reachable: the detach still happens, the attach fails for real, the failure
+report is written and every caller takes its real failure branch, so you see exactly what a pane
+looks like when psmux cannot reach it.
+
+This is diagnostic only, and while it is set a pane gets no XTVERSION reply, no OSC colour reply,
+no injected mouse record and no Ctrl+C injection. Set it on the **server** process, with
+`$env:PSMUX_NO_WARM = "1"` and a killed server first, reproduce, then clear it.
 
 ## Always On Diagnostic Files
 
