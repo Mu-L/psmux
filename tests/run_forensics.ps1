@@ -289,6 +289,13 @@ function Initialize-RunForensics {
     if ($inJob -and $flags -match 'KILL_ON_JOB_CLOSE') {
         Write-Forensic "job WARNING this run is inside a job object that KILLS ON CLOSE: whoever holds that job handle can end this whole tree instantly, with nothing written anywhere" $script:ForensicIdentity
         Write-Host "  [FORENSICS] this run is inside a KILL_ON_JOB_CLOSE job object; the run dies if that handle closes" -ForegroundColor DarkYellow
+    } elseif ($inJob) {
+        # Worth saying out loud even when the innermost job looks harmless.
+        # QueryInformationJobObject can only describe the job a process is
+        # directly in, so an OUTER job that kills on close is invisible from
+        # here, and a run launched from a shell that lives inside one ends the
+        # moment that shell's owner goes away.
+        Write-Host "  [FORENSICS] this run is inside a job object; if an OUTER job kills on close, the run ends when its owner does" -ForegroundColor DarkGray
     }
     Write-Forensic "job note nested jobs hide the outer ones, so flags above describe the INNERMOST job only" $script:ForensicIdentity
 
