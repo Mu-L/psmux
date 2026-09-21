@@ -517,6 +517,123 @@ pub fn scroll_copy_down(app: &mut AppState, lines: usize) {
     app.copy_scroll_offset = parser.screen().scrollback();
 }
 
+/// The pane height every copy-mode page motion measures itself against.
+///
+/// One place for the `active_pane` lookup that the page keys, the
+/// `send-keys -X` verbs and `copy-mode -u` each used to spell out with their
+/// own invented fallback (10, 20 and 24 in three different files). None when
+/// there is no active pane to measure, and a caller that cannot measure a pane
+/// has nothing to scroll either: `scroll_pane_scrollback` returns on the same
+/// lookup.
+pub fn active_pane_rows(app: &AppState) -> Option<u16> {
+    app.windows
+        .get(app.active_idx)
+        .and_then(|w| active_pane(&w.root, &w.active_path))
+        .map(|p| p.last_rows)
+}
+
+/// Lines one page motion moves in a pane `height` rows tall.
+///
+/// tmux computes this in exactly one place, `window_copy_pageup1` and its
+/// `window_copy_pagedown1` twin (window-copy.c:767-773 and :825-831 at tag
+/// 3.7c, :723-729 and :781-787 at 3.6a):
+///
+/// ```c
+/// n = 1;
+/// if (screen_size_y(s) > 2) {
+///         if (half_page)
+///                 n = screen_size_y(s) / 2;
+///         else
+///                 n = screen_size_y(s) - 2;
+/// }
+/// ```
+///
+/// A full page is the height minus two lines, a half page is half the height,
+/// and a pane of two rows or fewer moves a single line so the view cannot get
+/// stuck or jump the whole buffer.
+pub fn page_lines(height: u16, half_page: bool) -> usize {
+    if height <= 2 {
+        return 1;
+    }
+    let n = if half_page { height / 2 } else { height - 2 };
+    n.max(1) as usize
+}
+
+/// The scroll offset the active pane's parser actually holds.
+///
+/// `app.copy_scroll_offset` mirrors it, but `sync_copy_freeze` (layout.rs)
+/// rewrites that field every frame, so a page motion that straddles a frame
+/// boundary has to ask the parser itself.
+fn active_pane_scroll_offset(app: &AppState) -> usize {
+    app.windows
+        .get(app.active_idx)
+        .and_then(|w| active_pane(&w.root, &w.active_path))
+        .and_then(|p| p.term.lock().ok().map(|t| t.screen().scrollback()))
+        .unwrap_or(app.copy_scroll_offset)
+}
+
+/// Scroll the copy-mode view one page, or one half page, like tmux's
+/// `window_copy_pageup1` / `window_copy_pagedown1`.
+///
+/// The view moves and the cursor keeps the screen row it is on.  The cursor
+/// only moves when the history end clamps the scroll: tmux then shifts the
+/// cursor row by the whole page amount, clamped to the top row going up
+/// (window-copy.c:775-782) and to the last row going down (:833-840), which is
+/// what lets repeated page-ups reach the first line of the history.
+pub fn page_scroll(app: &mut AppState, up: bool, half_page: bool) {
+    let rows = match active_pane_rows(app) { Some(r) => r, None => return };
+    let n = page_lines(rows, half_page);
+    let before = active_pane_scroll_offset(app);
+    if up {
+        scroll_copy_up(app, n);
+    } else {
+        scroll_copy_down(app, n);
+    }
+    let after = app.copy_scroll_offset;
+    let moved = if up { after.saturating_sub(before) } else { before.saturating_sub(after) };
+    if moved >= n {
+        return; // the view absorbed the whole page, so the cursor stays put
+    }
+    let (r, c) = match get_copy_pos(app) { Some(p) => p, None => return };
+    let n16 = n.min(u16::MAX as usize) as u16;
+    let nr = if up {
+        r.saturating_sub(n16)
+    } else {
+        r.saturating_add(n16).min(rows.saturating_sub(1))
+    };
+    app.copy_pos = Some((nr, c));
+}
+
+/// `rectangle-toggle`: flip block selection on or off, tmux's
+/// `window_copy_cmd_rectangle_toggle`.
+///
+/// One definition for every route that reaches it, because they had drifted:
+/// the `-X rectangle-toggle` verb and `v` toggled, while `C-v` on the
+/// pre-server dispatcher only ever switched block selection ON, so a second
+/// press could not switch it back off.
+pub fn toggle_rectangle(app: &mut AppState) {
+    app.copy_selection_mode = match app.copy_selection_mode {
+        crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
+        _ => crate::types::SelectionMode::Rect,
+    };
+}
+
+/// `copy-mode -u`: enter copy mode and scroll up one page.
+///
+/// tmux runs the same page motion the `page-up` key does, not a full screen:
+/// cmd-copy-mode.c:99-100 calls `window_copy_pageup(wp, 0)`.
+///
+/// Returns false when `scroll-enter-copy-mode` is off, leaving copy mode
+/// untouched so the caller can forward PageUp to the pane instead (#284).
+pub fn enter_copy_mode_page_up(app: &mut AppState) -> bool {
+    if !app.scroll_enter_copy_mode {
+        return false;
+    }
+    enter_copy_mode(app);
+    page_scroll(app, true, false);
+    true
+}
+
 /// Copy-mode offset after the pane's retained history shrank by
 /// `filled_before - filled_after` lines: shift it by the number of lines the
 /// trim removed so the view stays on the same content, exactly like tmux's

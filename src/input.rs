@@ -6,7 +6,7 @@ use portable_pty::native_pty_system;
 use ratatui::prelude::*;
 
 use crate::types::{AppState, Mode, FocusDir, LayoutKind, Node, Pane};
-use crate::tree::{active_pane, active_pane_mut, compute_rects, path_exists};
+use crate::tree::{active_pane_mut, compute_rects, path_exists};
 use crate::pane::{create_window, split_active};
 use crate::commands::{execute_action, execute_command_prompt, execute_command_string};
 use crate::config::normalize_key_for_binding;
@@ -843,28 +843,22 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Up | KeyCode::Char('k') => { for _ in 0..copy_repeat { move_copy_cursor(app, 0, -1); } }
                 KeyCode::Down | KeyCode::Char('j') => { for _ in 0..copy_repeat { move_copy_cursor(app, 0, 1); } }
                 // Page scroll: C-b / PageUp = page up, C-f / PageDown = page down
-                KeyCode::PageUp => { scroll_copy_up(app, 10); }
-                KeyCode::PageDown => { scroll_copy_down(app, 10); }
+                KeyCode::PageUp => { crate::copy_mode::page_scroll(app, true, false); }
+                KeyCode::PageDown => { crate::copy_mode::page_scroll(app, false, false); }
                 KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if app.mode_keys == "emacs" { move_copy_cursor(app, -1, 0); }
-                    else { scroll_copy_up(app, 10); }
+                    else { crate::copy_mode::page_scroll(app, true, false); }
                 }
                 KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if app.mode_keys == "emacs" { move_copy_cursor(app, 1, 0); }
-                    else { scroll_copy_down(app, 10); }
+                    else { crate::copy_mode::page_scroll(app, false, false); }
                 }
                 // Half-page scroll: C-u / C-d
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let half = app.windows.get(app.active_idx)
-                        .and_then(|w| active_pane(&w.root, &w.active_path))
-                        .map(|p| (p.last_rows / 2) as usize).unwrap_or(10);
-                    scroll_copy_up(app, half);
+                    crate::copy_mode::page_scroll(app, true, true);
                 }
                 KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let half = app.windows.get(app.active_idx)
-                        .and_then(|w| active_pane(&w.root, &w.active_path))
-                        .map(|p| (p.last_rows / 2) as usize).unwrap_or(10);
-                    scroll_copy_down(app, half);
+                    crate::copy_mode::page_scroll(app, false, true);
                 }
                 // Emacs copy-mode keys (must be before unqualified char matches).
                 // tmux binds C-p/C-n in the copy-mode table to cursor-up/cursor-down,
@@ -888,7 +882,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if app.mode_keys != "emacs" { for _ in 0..copy_repeat { scroll_copy_up(app, 1); } }
                 }
-                KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => { scroll_copy_up(app, 10); }
+                KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => { crate::copy_mode::page_scroll(app, true, false); }
                 KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => { crate::copy_mode::move_word_forward(app); }
                 KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => { crate::copy_mode::move_word_backward(app); }
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::ALT) => { yank_selection(app)?; exit_copy_mode(app); }
@@ -960,19 +954,19 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Home => { crate::copy_mode::move_to_line_start(app); }
                 KeyCode::End => { crate::copy_mode::move_to_line_end(app); }
                 KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // vi: toggle rectangle selection, emacs: page down
+                    // vi: toggle rectangle selection (key-bindings.c:652),
+                    // emacs: page down (key-bindings.c:575).  A toggle, not a
+                    // one way switch: tmux runs the same rectangle-toggle
+                    // command the `v` key and the `-X` verb run.
                     if app.mode_keys == "emacs" {
-                        scroll_copy_down(app, 10);
+                        crate::copy_mode::page_scroll(app, false, false);
                     } else {
-                        app.copy_selection_mode = crate::types::SelectionMode::Rect;
+                        crate::copy_mode::toggle_rectangle(app);
                     }
                 }
                 KeyCode::Char('v') => {
                     // tmux parity #62: rectangle-toggle (not begin-selection)
-                    app.copy_selection_mode = match app.copy_selection_mode {
-                        crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
-                        _ => crate::types::SelectionMode::Rect,
-                    };
+                    crate::copy_mode::toggle_rectangle(app);
                 }
                 KeyCode::Char('V') => {
                     // Start line-wise selection (vi visual-line mode)
@@ -3137,6 +3131,13 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 }
             }
         }
+        // A numeric prefix typed before one of these keys repeats the motion,
+        // and ANY key consumes the pending count so it cannot leak into the
+        // next one.  tmux runs the whole motion `wme->prefix` times
+        // (window-copy.c:2254 for page-up, :1791 for halfpage-up), and
+        // `handle_key` has done this since #413 while this route never did:
+        // `3` then `C-b` paged once and then moved the NEXT motion three lines.
+        let copy_repeat = app.copy_count.take().unwrap_or(1);
         match k {
             "esc" | "q" => {
                 exit_copy_mode(app);
@@ -3157,33 +3158,37 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     app.copy_selection_mode = crate::types::SelectionMode::Char;
                 }
             }
-            "up" => { move_copy_cursor(app, 0, -1); }
-            "down" => { move_copy_cursor(app, 0, 1); }
-            "pageup" => { scroll_copy_up(app, 10); }
-            "pagedown" => { scroll_copy_down(app, 10); }
-            "left" => { move_copy_cursor(app, -1, 0); }
-            "right" => { move_copy_cursor(app, 1, 0); }
+            "up" => { for _ in 0..copy_repeat { move_copy_cursor(app, 0, -1); } }
+            "down" => { for _ in 0..copy_repeat { move_copy_cursor(app, 0, 1); } }
+            "pageup" => { for _ in 0..copy_repeat { crate::copy_mode::page_scroll(app, true, false); } }
+            "pagedown" => { for _ in 0..copy_repeat { crate::copy_mode::page_scroll(app, false, false); } }
+            "left" => { for _ in 0..copy_repeat { move_copy_cursor(app, -1, 0); } }
+            "right" => { for _ in 0..copy_repeat { move_copy_cursor(app, 1, 0); } }
             "home" => { crate::copy_mode::move_to_line_start(app); }
             "end" => { crate::copy_mode::move_to_line_end(app); }
             "C-b" | "c-b" => {
-                if app.mode_keys == "emacs" { move_copy_cursor(app, -1, 0); }
-                else { scroll_copy_up(app, 10); }
+                for _ in 0..copy_repeat {
+                    if app.mode_keys == "emacs" { move_copy_cursor(app, -1, 0); }
+                    else { crate::copy_mode::page_scroll(app, true, false); }
+                }
             }
             "C-f" | "c-f" => {
-                if app.mode_keys == "emacs" { move_copy_cursor(app, 1, 0); }
-                else { scroll_copy_down(app, 10); }
+                for _ in 0..copy_repeat {
+                    if app.mode_keys == "emacs" { move_copy_cursor(app, 1, 0); }
+                    else { crate::copy_mode::page_scroll(app, false, false); }
+                }
             }
             // tmux copy-mode C-p/C-n are cursor motions (key-bindings.c:571/:572),
             // and copy-mode-vi does not bind them at all. psmux keeps them active in
             // both mode-keys tables, but as CURSOR motion, matching tmux (#596).
-            "C-n" | "c-n" => { move_copy_cursor(app, 0, 1); }
-            "C-p" | "c-p" => { move_copy_cursor(app, 0, -1); }
+            "C-n" | "c-n" => { for _ in 0..copy_repeat { move_copy_cursor(app, 0, 1); } }
+            "C-p" | "c-p" => { for _ in 0..copy_repeat { move_copy_cursor(app, 0, -1); } }
             // Ctrl+Up / Ctrl+Down scroll the viewport one line without moving the
             // cursor. tmux binds these in BOTH copy-mode (key-bindings.c:635/:636)
             // and copy-mode-vi (:727/:728); psmux had no arm at all, so a real
             // Ctrl+Arrow in copy mode was silently swallowed (#596).
-            "C-Up" | "c-up" | "C-up" => { scroll_copy_up(app, 1); }
-            "C-Down" | "c-down" | "C-down" => { scroll_copy_down(app, 1); }
+            "C-Up" | "c-up" | "C-up" => { for _ in 0..copy_repeat { scroll_copy_up(app, 1); } }
+            "C-Down" | "c-down" | "C-down" => { for _ in 0..copy_repeat { scroll_copy_down(app, 1); } }
             "C-a" | "c-a" => { crate::copy_mode::move_to_line_start(app); }
             // The one place the two tmux copy tables really disagree: copy-mode
             // binds C-e to end-of-line and leaves C-y unbound, copy-mode-vi binds
@@ -3192,13 +3197,25 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             // the end of a line (#596).
             "C-e" | "c-e" => {
                 if app.mode_keys == "emacs" { crate::copy_mode::move_to_line_end(app); }
-                else { scroll_copy_down(app, 1); }
+                else { for _ in 0..copy_repeat { scroll_copy_down(app, 1); } }
             }
             "C-y" | "c-y" => {
-                if app.mode_keys != "emacs" { scroll_copy_up(app, 1); }
+                if app.mode_keys != "emacs" { for _ in 0..copy_repeat { scroll_copy_up(app, 1); } }
             }
-            "C-v" | "c-v" => { scroll_copy_down(app, 10); }
-            "M-v" | "m-v" => { scroll_copy_up(app, 10); }
+            // The copy-mode-vi table binds C-v to rectangle-toggle
+            // (key-bindings.c:652 in 3.7c); only the emacs copy-mode table
+            // pages down with it (:575).  This route had no mode-keys branch
+            // at all, so a vi user's C-v paged down and block selection was
+            // unreachable from the keyboard.
+            // rectangle-toggle takes no count in tmux
+            // (window_copy_cmd_rectangle_toggle has no `np` loop), so only the
+            // emacs page motion repeats here.
+            "C-v" | "c-v" => {
+                if app.mode_keys == "emacs" {
+                    for _ in 0..copy_repeat { crate::copy_mode::page_scroll(app, false, false); }
+                } else { crate::copy_mode::toggle_rectangle(app); }
+            }
+            "M-v" | "m-v" => { for _ in 0..copy_repeat { crate::copy_mode::page_scroll(app, true, false); } }
             // history-top / history-bottom, the emacs spelling of vi's g/G
             // (key-bindings.c:619 and :620).  Like M-x below, these reach
             // copy mode as NAMED keys, so the `KeyCode::Char('<') + ALT` arm
@@ -3207,8 +3224,8 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             // Alt+< in an attached client sends.
             "M-<" | "m-<" => { scroll_to_top(app); }
             "M->" | "m->" => { scroll_to_bottom(app); }
-            "M-f" | "m-f" => { crate::copy_mode::move_word_forward(app); }
-            "M-b" | "m-b" => { crate::copy_mode::move_word_backward(app); }
+            "M-f" | "m-f" => { for _ in 0..copy_repeat { crate::copy_mode::move_word_forward(app); } }
+            "M-b" | "m-b" => { for _ in 0..copy_repeat { crate::copy_mode::move_word_backward(app); } }
             "M-w" | "m-w" => { yank_selection(app)?; exit_copy_mode(app); }
             // jump-to-mark (#498). Alt keys reach copy mode as named keys via
             // `send-key M-x`, not through the char table, so this is the arm
@@ -3230,18 +3247,8 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     app.copy_pos = Some((r, c));
                 }
             }
-            "C-u" | "c-u" => {
-                let half = app.windows.get(app.active_idx)
-                    .and_then(|w| active_pane(&w.root, &w.active_path))
-                    .map(|p| (p.last_rows / 2) as usize).unwrap_or(10);
-                scroll_copy_up(app, half);
-            }
-            "C-d" | "c-d" => {
-                let half = app.windows.get(app.active_idx)
-                    .and_then(|w| active_pane(&w.root, &w.active_path))
-                    .map(|p| (p.last_rows / 2) as usize).unwrap_or(10);
-                scroll_copy_down(app, half);
-            }
+            "C-u" | "c-u" => { for _ in 0..copy_repeat { crate::copy_mode::page_scroll(app, true, true); } }
+            "C-d" | "c-d" => { for _ in 0..copy_repeat { crate::copy_mode::page_scroll(app, false, true); } }
             _ => {}
         }
         return Ok(());
@@ -3544,6 +3551,14 @@ mod tests_copy_mode_key_tables;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue596_copy_scroll_keys.rs"]
 mod tests_issue596_copy_scroll_keys;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue681_copy_page_scroll.rs"]
+mod tests_issue681_copy_page_scroll;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue681_copy_key_table.rs"]
+mod tests_issue681_copy_key_table;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue610_ctrl_backspace.rs"]

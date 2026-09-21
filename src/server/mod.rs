@@ -2942,12 +2942,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::PrefixEnd => { app.client_prefix_active = false; state_dirty = true; }
                 CtrlReq::CopyEnter => { enter_copy_mode(&mut app); hook_event = Some("pane-mode-changed"); }
                 CtrlReq::CopyEnterPageUp => {
-                    if app.scroll_enter_copy_mode {
-                        enter_copy_mode(&mut app);
-                        let half = app.windows.get(app.active_idx)
-                            .and_then(|w| active_pane(&w.root, &w.active_path))
-                            .map(|p| p.last_rows as usize).unwrap_or(20);
-                        scroll_copy_up(&mut app, half);
+                    if crate::copy_mode::enter_copy_mode_page_up(&mut app) {
                         hook_event = Some("pane-mode-changed");
                     } else {
                         // scroll-enter-copy-mode is off: forward PageUp to the
@@ -2966,10 +2961,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("pane-mode-changed");
                 }
                 CtrlReq::CopyRectToggle => {
-                    app.copy_selection_mode = match app.copy_selection_mode {
-                        crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
-                        _ => crate::types::SelectionMode::Rect,
-                    };
+                    crate::copy_mode::toggle_rectangle(&mut app);
                 }
                 CtrlReq::ClientSize(cid, w, h) => { 
                     app.client_sizes.insert(cid, (w, h));
@@ -3437,10 +3429,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                         "rectangle-toggle" => {
-                            app.copy_selection_mode = match app.copy_selection_mode {
-                                crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
-                                _ => crate::types::SelectionMode::Rect,
-                            };
+                            crate::copy_mode::toggle_rectangle(&mut app);
                         }
                         "copy-selection" => {
                             let _ = yank_selection(&mut app);
@@ -3507,20 +3496,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "bottom-line" => { crate::copy_mode::move_to_screen_bottom(&mut app); }
                         "history-top" => { crate::copy_mode::scroll_to_top(&mut app); }
                         "history-bottom" => { crate::copy_mode::scroll_to_bottom(&mut app); }
-                        "halfpage-up" => {
-                            let half = app.windows.get(app.active_idx)
-                                .and_then(|w| active_pane(&w.root, &w.active_path))
-                                .map(|p| (p.last_rows / 2) as usize).unwrap_or(10);
-                            scroll_copy_up(&mut app, half);
-                        }
-                        "halfpage-down" => {
-                            let half = app.windows.get(app.active_idx)
-                                .and_then(|w| active_pane(&w.root, &w.active_path))
-                                .map(|p| (p.last_rows / 2) as usize).unwrap_or(10);
-                            scroll_copy_down(&mut app, half);
-                        }
-                        "page-up" => { scroll_copy_up(&mut app, 20); }
-                        "page-down" => { scroll_copy_down(&mut app, 20); }
+                        "halfpage-up" => { crate::copy_mode::page_scroll(&mut app, true, true); }
+                        "halfpage-down" => { crate::copy_mode::page_scroll(&mut app, false, true); }
+                        "page-up" => { crate::copy_mode::page_scroll(&mut app, true, false); }
+                        "page-down" => { crate::copy_mode::page_scroll(&mut app, false, false); }
                         "scroll-up" => { scroll_copy_up(&mut app, 1); }
                         "scroll-down" => { scroll_copy_down(&mut app, 1); }
                         "scroll-middle" => { crate::copy_mode::scroll_middle(&mut app); }
@@ -6054,8 +6033,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::CopyModePageUp => {
+                    // Same motion as `copy-mode -u`: enter copy mode and scroll
+                    // up one page.  This used to move the cursor 20 rows, which
+                    // is neither a page nor anything tmux does.
                     enter_copy_mode(&mut app);
-                    move_copy_cursor(&mut app, 0, -20);
+                    crate::copy_mode::page_scroll(&mut app, true, false);
                 }
                 CtrlReq::ClearHistory => {
                     // Leaves copy mode first and clears the LIVE grid, the way
