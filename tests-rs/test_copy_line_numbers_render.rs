@@ -166,8 +166,8 @@ fn gutter_shifts_content_right() {
             );
         }).unwrap();
         let buf = term.backend().buffer().clone();
-        let aw = buf.area.width as usize;
-        buf.content[0 * aw + gw].symbol().chars().next()
+        // Row 0, so the cell index is the column itself.
+        buf.content[gw].symbol().chars().next()
     };
     assert_eq!(gutters_and_content, Some('X'), "content must begin right after the {}-col gutter", gw);
 }
