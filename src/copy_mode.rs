@@ -604,6 +604,20 @@ pub fn page_scroll(app: &mut AppState, up: bool, half_page: bool) {
     app.copy_pos = Some((nr, c));
 }
 
+/// `rectangle-toggle`: flip block selection on or off, tmux's
+/// `window_copy_cmd_rectangle_toggle`.
+///
+/// One definition for every route that reaches it, because they had drifted:
+/// the `-X rectangle-toggle` verb and `v` toggled, while `C-v` on the
+/// pre-server dispatcher only ever switched block selection ON, so a second
+/// press could not switch it back off.
+pub fn toggle_rectangle(app: &mut AppState) {
+    app.copy_selection_mode = match app.copy_selection_mode {
+        crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
+        _ => crate::types::SelectionMode::Rect,
+    };
+}
+
 /// `copy-mode -u`: enter copy mode and scroll up one page.
 ///
 /// tmux runs the same page motion the `page-up` key does, not a full screen:

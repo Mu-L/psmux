@@ -2961,10 +2961,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("pane-mode-changed");
                 }
                 CtrlReq::CopyRectToggle => {
-                    app.copy_selection_mode = match app.copy_selection_mode {
-                        crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
-                        _ => crate::types::SelectionMode::Rect,
-                    };
+                    crate::copy_mode::toggle_rectangle(&mut app);
                 }
                 CtrlReq::ClientSize(cid, w, h) => { 
                     app.client_sizes.insert(cid, (w, h));
@@ -3432,10 +3429,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                         "rectangle-toggle" => {
-                            app.copy_selection_mode = match app.copy_selection_mode {
-                                crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
-                                _ => crate::types::SelectionMode::Rect,
-                            };
+                            crate::copy_mode::toggle_rectangle(&mut app);
                         }
                         "copy-selection" => {
                             let _ = yank_selection(&mut app);

@@ -954,19 +954,19 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Home => { crate::copy_mode::move_to_line_start(app); }
                 KeyCode::End => { crate::copy_mode::move_to_line_end(app); }
                 KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // vi: toggle rectangle selection, emacs: page down
+                    // vi: toggle rectangle selection (key-bindings.c:652),
+                    // emacs: page down (key-bindings.c:575).  A toggle, not a
+                    // one way switch: tmux runs the same rectangle-toggle
+                    // command the `v` key and the `-X` verb run.
                     if app.mode_keys == "emacs" {
                         crate::copy_mode::page_scroll(app, false, false);
                     } else {
-                        app.copy_selection_mode = crate::types::SelectionMode::Rect;
+                        crate::copy_mode::toggle_rectangle(app);
                     }
                 }
                 KeyCode::Char('v') => {
                     // tmux parity #62: rectangle-toggle (not begin-selection)
-                    app.copy_selection_mode = match app.copy_selection_mode {
-                        crate::types::SelectionMode::Rect => crate::types::SelectionMode::Char,
-                        _ => crate::types::SelectionMode::Rect,
-                    };
+                    crate::copy_mode::toggle_rectangle(app);
                 }
                 KeyCode::Char('V') => {
                     // Start line-wise selection (vi visual-line mode)
@@ -3191,7 +3191,15 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             "C-y" | "c-y" => {
                 if app.mode_keys != "emacs" { scroll_copy_up(app, 1); }
             }
-            "C-v" | "c-v" => { crate::copy_mode::page_scroll(app, false, false); }
+            // The copy-mode-vi table binds C-v to rectangle-toggle
+            // (key-bindings.c:652 in 3.7c); only the emacs copy-mode table
+            // pages down with it (:575).  This route had no mode-keys branch
+            // at all, so a vi user's C-v paged down and block selection was
+            // unreachable from the keyboard.
+            "C-v" | "c-v" => {
+                if app.mode_keys == "emacs" { crate::copy_mode::page_scroll(app, false, false); }
+                else { crate::copy_mode::toggle_rectangle(app); }
+            }
             "M-v" | "m-v" => { crate::copy_mode::page_scroll(app, true, false); }
             // history-top / history-bottom, the emacs spelling of vi's g/G
             // (key-bindings.c:619 and :620).  Like M-x below, these reach
@@ -3532,6 +3540,10 @@ mod tests_issue596_copy_scroll_keys;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue681_copy_page_scroll.rs"]
 mod tests_issue681_copy_page_scroll;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue681_copy_key_table.rs"]
+mod tests_issue681_copy_key_table;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue610_ctrl_backspace.rs"]
