@@ -33,8 +33,73 @@ fn exempt(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Two options do not live in `AppState` at all: `cursor-style` and
+/// `cursor-blink` are read straight out of the process environment
+/// (`PSMUX_CURSOR_STYLE` / `PSMUX_CURSOR_BLINK`, server/options.rs), because
+/// that is how the value reaches the renderer. So "what a fresh AppState
+/// reports" for them is really "what this machine happens to export", and the
+/// test measured the developer's shell rather than psmux: with
+/// `PSMUX_CURSOR_STYLE=default` exported it failed with catalog `bar` against
+/// a fresh AppState of `default`, on a tree with no defect in it. A test that
+/// passes or fails on an environment variable it never set is not testing the
+/// catalog.
+///
+/// `set -g cursor-style` calls `env::set_var`, so a sibling test in the same
+/// binary can do it too. The fix covers both: take the shared env lock (the
+/// one every env-touching test in this crate must hold) and read these
+/// options with the variables removed, which is the state the catalog default
+/// actually describes. Restored on the way out, panic or not, so nothing else
+/// in the process notices.
+struct PristineCursorEnv {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<String>)>,
+}
+
+impl PristineCursorEnv {
+    fn take() -> Self {
+        let lock = crate::util::lock_test_env();
+        let saved = ["PSMUX_CURSOR_STYLE", "PSMUX_CURSOR_BLINK"]
+            .into_iter()
+            .map(|name| {
+                let previous = std::env::var(name).ok();
+                std::env::remove_var(name);
+                (name, previous)
+            })
+            .collect();
+        Self { _lock: lock, saved }
+    }
+}
+
+impl Drop for PristineCursorEnv {
+    fn drop(&mut self) {
+        for (name, previous) in &self.saved {
+            match previous {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
+/// The environment must not be able to decide this test's verdict.
+#[test]
+fn env_backed_options_report_their_catalog_default_on_any_machine() {
+    let _pristine = PristineCursorEnv::take();
+    let app = fresh_app();
+    for name in ["cursor-style", "cursor-blink"] {
+        let catalog = default_for(name).unwrap_or_else(|| panic!("{name} must be in the catalog"));
+        assert_eq!(
+            get_option_value(&app, name),
+            catalog,
+            "{name} is read from the process environment, so its default must be \
+             what psmux falls back to with the variable unset",
+        );
+    }
+}
+
 #[test]
 fn every_catalog_default_matches_a_fresh_appstate() {
+    let _pristine = PristineCursorEnv::take();
     let app = fresh_app();
     let mut mismatches: Vec<String> = Vec::new();
     let mut compared = 0usize;

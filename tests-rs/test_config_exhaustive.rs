@@ -18,9 +18,15 @@
 use crate::types::AppState;
 use crate::config::{parse_config_content, parse_config_line};
 use crate::commands::execute_command_string;
-use std::sync::Mutex;
-
-static ENV_MUTEX: Mutex<()> = Mutex::new(());
+/// The process environment has exactly one owner across the whole test binary,
+/// and it is `crate::util::lock_test_env`. A second, file-local mutex only
+/// serialises this file against itself, so the three cursor tests below could
+/// still set `PSMUX_CURSOR_STYLE` while a test in another file was reading it,
+/// which is how `every_catalog_default_matches_a_fresh_appstate` could see a
+/// cursor style nobody configured.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::util::lock_test_env()
+}
 
 fn mock_app() -> AppState {
     AppState::new("config-test".to_string())
@@ -2366,7 +2372,7 @@ fn config_multiple_command_aliases() {
 
 #[test]
 fn config_cursor_style_sets_env() {
-    let _lock = ENV_MUTEX.lock().unwrap();
+    let _lock = env_lock();
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g cursor-style block\n");
     assert_eq!(std::env::var("PSMUX_CURSOR_STYLE").unwrap(), "block");
@@ -2376,7 +2382,7 @@ fn config_cursor_style_sets_env() {
 
 #[test]
 fn config_cursor_blink_on() {
-    let _lock = ENV_MUTEX.lock().unwrap();
+    let _lock = env_lock();
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g cursor-blink on\n");
     assert_eq!(std::env::var("PSMUX_CURSOR_BLINK").unwrap(), "1");
@@ -2385,7 +2391,7 @@ fn config_cursor_blink_on() {
 
 #[test]
 fn config_cursor_blink_off() {
-    let _lock = ENV_MUTEX.lock().unwrap();
+    let _lock = env_lock();
     let mut app = mock_app();
     parse_config_content(&mut app, "set -g cursor-blink off\n");
     assert_eq!(std::env::var("PSMUX_CURSOR_BLINK").unwrap(), "0");

@@ -753,6 +753,39 @@ pub(crate) fn is_bare_motion_cmd(cmd: &str) -> bool {
     fields.next() == Some("35")
 }
 
+/// Commands a persistent client sends on a timer rather than because the user
+/// did something. `window-size latest` follows "the client the user is
+/// actually using", so a poll must not move the window to that client: with
+/// two clients of different sizes attached, each one's idle `dump-state` (once
+/// a second, ten times a second while typing) flipped the latest client back
+/// and forth, `refresh_dynamic_window_sizes` resized every pane on each flip,
+/// and that resize made the full-screen program in the pane repaint its whole
+/// screen. The user saw it as the pane flickering whenever the program was
+/// idle and a second client (the SSH/Termius one) was attached. See the
+/// activity ping in `server::connection`.
+pub(crate) fn is_client_poll_cmd(cmd: &str) -> bool {
+    cmd.trim() == "dump-state"
+}
+
+/// The one key tmux refuses to count as activity.
+///
+/// tmux updates the latest client at the `out:` label of its key callback,
+/// guarded by `key != KEYC_FOCUS_OUT` (server-client.c:1653). Focus IN is
+/// therefore activity and focus OUT deliberately is not, which is the only
+/// sensible reading: the terminal the user just moved away from is the last
+/// one that should be handed the window.
+///
+/// psmux reports both as ordinary command lines, so they pinged
+/// `ClientActivity` like anything else. Measured with a 120x40 client and a
+/// 60x20 client attached under `window-size latest`: typing in the 120x40 one
+/// sized the window 120x40, then the 60x20 client merely losing focus pulled
+/// it to 60x20. Every pane was resized and the program inside repainted, the
+/// same visible cost as the idle poll above, triggered by alt-tabbing away
+/// from the second terminal.
+pub(crate) fn is_focus_loss_cmd(cmd: &str) -> bool {
+    cmd.trim() == "focus-out"
+}
+
 fn client_selection_owns_drag(
     mouse_selection: bool,
     mouse_selection_force: bool,

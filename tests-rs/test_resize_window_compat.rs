@@ -338,3 +338,102 @@ fn phone_going_away_without_a_resize_still_restores_the_desktop() {
     assert!(note_client_activity(&mut app, 1));
     assert_eq!((app.windows[0].area.width, app.windows[0].area.height), (200, 50));
 }
+
+// ── `window-size latest` must not follow a client's idle poll ──
+//
+// Regression: the server pinged `ClientActivity` for every command line a
+// persistent client sent, `dump-state` included. Two clients of different
+// sizes poll once a second each, so every poll moved "latest" to the *other*
+// client, `refresh_dynamic_window_sizes` resized every pane on the flip, and
+// the pane's full-screen program repainted its whole screen. The user saw it
+// as the pane flickering whenever the program was idle and a second
+// (SSH/Termius) client was attached; with only one client attached its own
+// poll left "latest" where it already was and nothing resized, which is why
+// disconnecting the phone made it stop. `is_client_poll_cmd` is what the two
+// activity pings in `server::connection` consult, next to the #604 exclusion
+// for bare pointer motion.
+
+#[test]
+fn the_frame_poll_is_not_user_activity() {
+    use crate::client::is_client_poll_cmd;
+    assert!(is_client_poll_cmd("dump-state"));
+    assert!(is_client_poll_cmd("dump-state\n"));
+    assert!(is_client_poll_cmd("  dump-state  "));
+}
+
+#[test]
+fn real_user_requests_still_count_as_activity() {
+    use crate::client::is_client_poll_cmd;
+    for cmd in [
+        "send-key a\n",
+        "send-text 35\n",
+        "pane-mouse 4 0 12 3 M\n",  // click
+        "pane-mouse 4 32 12 3 M\n", // drag
+        "pane-mouse 4 35 12 3 M\n", // hover: excluded by #604, not here
+        "client-size 200 50\n",     // a real resize
+        "copy-mode\n",
+        "refresh-client\n",
+    ] {
+        assert!(!is_client_poll_cmd(cmd), "{cmd:?} is user intent");
+    }
+}
+
+// ── losing focus is the one key tmux refuses to count ──
+//
+// tmux updates the latest client at the `out:` label of its key callback under
+// `key != KEYC_FOCUS_OUT` (server-client.c:1653): focus-IN is activity,
+// focus-OUT is filtered out by name. psmux's client reports both as ordinary
+// command lines, so `focus-out` pinged ClientActivity and the terminal the
+// user had just alt-tabbed AWAY from took the window. Measured with a 120x40
+// and a 60x20 client under `window-size latest`: typing in the 120x40 client
+// sized the window 120x40, then `focus-out` from the idle 60x20 client pulled
+// it to 60x20 and resized every pane. Same visible cost as the idle poll,
+// different trigger.
+
+#[test]
+fn losing_focus_is_not_user_activity() {
+    use crate::client::is_focus_loss_cmd;
+    assert!(is_focus_loss_cmd("focus-out"));
+    assert!(is_focus_loss_cmd("focus-out\n"));
+    assert!(is_focus_loss_cmd("  focus-out  "));
+}
+
+#[test]
+fn gaining_focus_and_real_requests_still_count_as_activity() {
+    use crate::client::is_focus_loss_cmd;
+    for cmd in [
+        "focus-in\n", // tmux DOES make this client the latest
+        "send-key a\n",
+        "pane-mouse 4 0 12 3 M\n",
+        "client-size 200 50\n",
+        "dump-state\n", // a poll, excluded by is_client_poll_cmd instead
+        "refresh-client\n",
+    ] {
+        assert!(!is_focus_loss_cmd(cmd), "{cmd:?} must not be read as focus loss");
+    }
+}
+
+/// The two exclusions together are exactly what the activity ping in
+/// `server::connection` asks, so assert the composed predicate rather than
+/// leaving the call sites untested.
+#[test]
+fn the_activity_ping_excludes_polls_and_focus_loss_only() {
+    use crate::client::{is_bare_motion_cmd, is_client_poll_cmd, is_focus_loss_cmd};
+    let pings = |line: &str| {
+        !is_bare_motion_cmd(line) && !is_client_poll_cmd(line) && !is_focus_loss_cmd(line)
+    };
+    for silent in ["dump-state\n", "focus-out\n", "pane-mouse 4 35 12 3 M\n"] {
+        assert!(!pings(silent), "{silent:?} must not move `window-size latest`");
+    }
+    for intent in [
+        "send-key a\n",
+        "send-text 35\n",
+        "focus-in\n",
+        "client-size 200 50\n",
+        "pane-mouse 4 0 12 3 M\n",
+        "copy-mode\n",
+        "new-window\n",
+    ] {
+        assert!(pings(intent), "{intent:?} must move `window-size latest`");
+    }
+}
