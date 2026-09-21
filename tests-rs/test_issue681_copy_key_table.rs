@@ -1,13 +1,20 @@
-// Issue #681, the first mismatch listed under "Not covered here": the copy-mode
-// key table on the LIVE route disagreed with tmux on `C-v`.
+// Issue #681, the two mismatches listed under "Not covered here": the copy-mode
+// key table on the LIVE route disagreed with tmux on `C-v`, and it ignored a
+// numeric prefix instead of repeating the motion.
 //
-// The copy-mode-vi table binds it to rectangle-toggle (key-bindings.c:652 in
-// 3.7c, and again at :705 for `v`); only the emacs copy-mode table pages down
-// with it (:575).  `input::send_key_to_active` had no mode-keys branch at all,
-// so a vi user's `C-v` paged down and block selection could not be reached from
-// the keyboard.  `input::handle_key` did branch, but its vi arm SET block
-// selection rather than toggling it, so a second press could not switch it
-// back off.
+// 1. `C-v`.  The copy-mode-vi table binds it to rectangle-toggle
+//    (key-bindings.c:652 in 3.7c, and again at :705 for `v`); only the emacs
+//    copy-mode table pages down with it (:575).  `input::send_key_to_active`
+//    had no mode-keys branch at all, so a vi user's `C-v` paged down and block
+//    selection could not be reached from the keyboard.  `input::handle_key`
+//    did branch, but its vi arm SET block selection rather than toggling it,
+//    so a second press could not switch it back off.
+//
+// 2. A numeric prefix.  tmux repeats the whole motion `wme->prefix` times
+//    (window-copy.c:2254 for page-up, :1791 for halfpage-up).  The live route
+//    never read `copy_count`, so `3` then `C-b` paged once AND left the 3
+//    pending, which the next motion then silently spent: a plain `k` after it
+//    moved three rows.
 //
 // The tests drive the REAL functions over a real PTY-backed pane tree (no psmux
 // server and no session is created). Registered from src/input.rs.
@@ -233,4 +240,77 @@ fn both_dispatchers_agree_on_ctrl_v() {
             "mode-keys {mode_keys}: handle_key and send_key_to_active must agree on C-v"
         );
     }
+}
+
+// ══════════════ a numeric prefix repeats the motion and is consumed ══════════════
+
+/// Type a digit the way the CLI and the attached client both deliver it: as
+/// text, through `send_text_to_active`, which is what feeds `copy_count`.
+fn type_count(app: &mut AppState, digits: &str) {
+    crate::input::send_text_to_active(app, digits).unwrap();
+}
+
+#[test]
+fn live_numeric_prefix_repeats_a_page_motion() {
+    // window-copy.c:2254: `for (; np != 0; np--) window_copy_pageup1(wme, 0);`
+    let mut app = copy_app("vi");
+    type_count(&mut app, "3");
+    assert_eq!(app.copy_count, Some(3), "the digit must be collected, not typed into the pane");
+
+    crate::input::send_key_to_active(&mut app, "C-b").unwrap();
+    assert_eq!(offset(&app), 3 * PAGE, "3 then C-b must page up three times");
+    assert_eq!(app.copy_count, None, "the count must be spent");
+}
+
+#[test]
+fn live_numeric_prefix_repeats_a_half_page_motion() {
+    // window-copy.c:1791 does the same for halfpage-up.
+    let mut app = copy_app("vi");
+    type_count(&mut app, "2");
+    crate::input::send_key_to_active(&mut app, "C-u").unwrap();
+    assert_eq!(offset(&app), 2 * usize::from(ROWS / 2), "2 then C-u must move two half pages");
+}
+
+#[test]
+fn live_numeric_prefix_does_not_leak_into_the_next_key() {
+    // The bug: C-b ignored the count AND left it pending, so the next motion
+    // spent it.  A plain `k` after `3 C-b` moved three rows instead of one.
+    let mut app = copy_app("vi");
+    type_count(&mut app, "3");
+    crate::input::send_key_to_active(&mut app, "C-b").unwrap();
+    let r0 = row(&app);
+
+    crate::input::send_text_to_active(&mut app, "k").unwrap();
+    assert_eq!(row(&app), r0 - 1, "the next key must move one row, the count was already spent");
+}
+
+#[test]
+fn live_numeric_prefix_is_consumed_by_a_key_that_takes_no_count() {
+    // Any key consumes the pending count in tmux, so it cannot survive to be
+    // spent by a later motion.
+    let mut app = copy_app("vi");
+    type_count(&mut app, "4");
+    crate::input::send_key_to_active(&mut app, "home").unwrap();
+    assert_eq!(app.copy_count, None, "a non repeating key still spends the count");
+
+    crate::input::send_text_to_active(&mut app, "k").unwrap();
+    assert_eq!(row(&app), ROWS / 2 - 1, "so the following motion moves exactly one row");
+}
+
+#[test]
+fn live_numeric_prefix_repeats_a_cursor_motion() {
+    let mut app = copy_app("vi");
+    let r0 = row(&app);
+    type_count(&mut app, "5");
+    crate::input::send_key_to_active(&mut app, "up").unwrap();
+    assert_eq!(row(&app), r0 - 5, "5 then Up must move five rows");
+}
+
+#[test]
+fn live_page_keys_are_unchanged_without_a_prefix() {
+    // The default of one keeps every existing single press exactly where #681
+    // put it.
+    let mut app = copy_app("vi");
+    crate::input::send_key_to_active(&mut app, "C-b").unwrap();
+    assert_eq!(offset(&app), PAGE, "a bare C-b still moves exactly one page");
 }
