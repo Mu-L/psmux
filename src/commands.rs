@@ -7,7 +7,7 @@ use std::io::Write;
 use crate::types::{AppState, Mode, Action, FocusDir, LayoutKind, MenuItem, Menu, Node};
 use crate::tree::{compute_rects, kill_all_children, get_active_pane_id};
 use crate::pane::{create_window, split_active, kill_active_pane};
-use crate::copy_mode::{enter_copy_mode, scroll_copy_up, switch_with_copy_save, paste_latest,
+use crate::copy_mode::{enter_copy_mode, switch_with_copy_save, paste_latest,
     capture_active_pane, save_latest_buffer};
 use crate::session::{send_control_to_port, list_all_sessions_tree};
 use crate::window_ops::{toggle_zoom, unzoom_if_zoomed};
@@ -1294,12 +1294,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         }
         "copy-mode" => {
             if parts.iter().any(|a| *a == "-u") {
-                if app.scroll_enter_copy_mode {
-                    enter_copy_mode(app);
-                    let half = app.windows.get(app.active_idx)
-                        .and_then(|w| crate::tree::active_pane(&w.root, &w.active_path))
-                        .map(|p| p.last_rows as usize).unwrap_or(20);
-                    scroll_copy_up(app, half);
+                if crate::copy_mode::enter_copy_mode_page_up(app) {
+                    // entered copy mode and paged up
                 } else {
                     // scroll-enter-copy-mode off: forward PageUp to PTY (#284)
                     if let Some(win) = app.windows.get_mut(app.active_idx) {

@@ -412,6 +412,11 @@ stays put, use the scrolling keys below.
 | `z` | Centre the cursor line in the pane (scroll-middle) |
 | `r` | Toggle following live output (see below) |
 
+A full page is the pane height minus two lines and a half page is half the pane height, the same
+amounts tmux uses (`window_copy_pageup1` in `window-copy.c`). A pane two rows tall or shorter moves
+one line. The view moves and the cursor stays on its row, except at the top or bottom of the
+history, where the cursor is pulled along so repeated presses reach the first or last line.
+
 `r` is a psmux extension with no tmux equivalent. Copy mode normally anchors the view so new output
 cannot shift the text under your cursor. `r` releases that anchor, so the pane follows live output
 again and jumps to the bottom of the history. Press `r` again to re-anchor.
