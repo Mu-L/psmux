@@ -744,7 +744,6 @@ pub fn yank_selection(app: &mut AppState) -> io::Result<()> {
         (pos.1, anchor.1)
     };
 
-
     // Read all selected rows by adjusting scrollback as needed.
     // At scrollback S, row R shows absolute line (R - S).
     // To read absolute line L: row = L + S, needs 0 <= L + S < rows.

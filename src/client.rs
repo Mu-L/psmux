@@ -1704,7 +1704,8 @@ pub(crate) fn recolor_border_junctions(
     }
 }
 
-fn border_cell_touches_rect(x: u16, y: u16, rect: Rect) -> bool {    let right = rect.x.saturating_add(rect.width);
+fn border_cell_touches_rect(x: u16, y: u16, rect: Rect) -> bool {
+    let right = rect.x.saturating_add(rect.width);
     let bottom = rect.y.saturating_add(rect.height);
     let left_of_rect = x.checked_add(1) == Some(rect.x);
     let above_rect = y.checked_add(1) == Some(rect.y);
