@@ -5,8 +5,7 @@
 //!
 //!   * `PSMUX_GIT_HASH`      — short commit hash (e.g. `f179849`), or `unknown`
 //!   * `PSMUX_GIT_HASH_FULL` — full 40-char commit hash, or `unknown`
-//!   * `PSMUX_GIT_DIRTY`     — `true` if the working tree had uncommitted
-//!                             changes at build time, otherwise `false`
+//!   * `PSMUX_GIT_DIRTY`     — `true` if the working tree had uncommitted changes at build time, otherwise `false`
 //!   * `PSMUX_GIT_DATE`      — commit date (YYYY-MM-DD), or `unknown`
 //!
 //! Git may be unavailable (for example when the crate is built from a
