@@ -161,6 +161,13 @@ pub fn prefer_app_execution_alias(resolved: String) -> String {
 /// attaching over SSH into a graceful degrade instead (issue #167 class).
 pub fn cached_shell() -> Option<&'static str> {
     CACHED_SHELL_PATH.get_or_init(|| {
+        // tmux seeds `default-shell` from $SHELL before anything else
+        // (tmux.c getshell(), gated by checkshell()). An explicit SHELL is the
+        // user's choice, so it wins over the pwsh > powershell > cmd walk and
+        // over the SSH store guard below (#683).
+        if let Some(from_env) = shell_from_env() {
+            return Some(from_env);
+        }
         let resolved = which::which("pwsh").ok()
             .or_else(|| which::which("powershell").ok())
             .or_else(|| which::which("cmd").ok())
@@ -184,6 +191,60 @@ pub fn cached_shell() -> Option<&'static str> {
         }
         resolved
     }).as_deref()
+}
+
+/// The shell named by the SHELL environment variable, if it is one psmux can
+/// actually spawn (#683).
+///
+/// tmux's `checkshell()` (tmux.c) accepts $SHELL only when it is an absolute
+/// path, executable, and not tmux itself (`areshell()`). The Windows reading of
+/// that rule: an absolute path must exist and carry an executable extension; a
+/// bare name (`powershell`, `nu`, `wsl`) is resolved on PATH the same way the
+/// `default-shell` option already accepts one; anything else, and in particular
+/// the POSIX style `/usr/bin/bash` Git Bash exports, is not a Windows shell and
+/// is ignored so the pwsh > powershell > cmd walk stays in charge.
+pub fn shell_from_env() -> Option<String> {
+    shell_from_env_value(std::env::var("SHELL").ok()?.as_str())
+}
+
+/// `shell_from_env` over an explicit value, so the rule is unit testable
+/// without touching the process environment.
+pub fn shell_from_env_value(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(value);
+    let resolved = if path.is_absolute() {
+        if !path.is_file() {
+            return None;
+        }
+        value.to_string()
+    } else if value.contains(['/', '\\']) {
+        // `/usr/bin/bash`, `./sh`, `bin\sh.exe`: not an absolute Windows path.
+        return None;
+    } else {
+        which::which(value).ok()?.to_string_lossy().into_owned()
+    };
+    let resolved_path = std::path::Path::new(&resolved);
+    let ext = resolved_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    // CreateProcess can start these directly; a `.ps1` or an extensionless
+    // file cannot be a shell here, just as a non executable fails X_OK.
+    if !matches!(ext.as_str(), "exe" | "com" | "bat" | "cmd") {
+        return None;
+    }
+    // areshell(): tmux refuses to use itself as the shell.
+    let stem = resolved_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(stem.as_str(), "psmux" | "tmux" | "pmux") {
+        return None;
+    }
+    Some(prefer_app_execution_alias(resolved))
 }
 
 /// Strip the explicit-argv marker from a command string for naming purposes.
@@ -3596,3 +3657,7 @@ mod tests_issue630_conpty_cwd_pin;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue615_warm_claim_cwd_hint.rs"]
 mod tests_issue615_warm_claim_cwd_hint;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue683_shell_env.rs"]
+mod tests_issue683_shell_env;

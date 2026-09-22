@@ -699,6 +699,17 @@ function Get-SuiteTimeout {
     return $DefaultTimeoutSec
 }
 
+# ── Environment pin ──
+# Since #683 psmux seeds default-shell from SHELL the way tmux does. A runner
+# started from Git Bash inherits SHELL=C:\Program Files\Git\bin\bash.exe (MSYS
+# rewrites it for Windows children), which would turn every suite's default
+# pane into bash. The suites are written for the pwsh default; the SHELL cases
+# themselves live in test_issue683_shell_env_default_shell.ps1 and set their own.
+if ($env:SHELL) {
+    Write-Host "Clearing inherited SHELL='$($env:SHELL)' for the run" -ForegroundColor DarkYellow
+    Remove-Item env:SHELL -ErrorAction SilentlyContinue
+}
+
 # ── Binary discovery ──
 $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\release\psmux.exe" -ErrorAction SilentlyContinue).Path
 if (-not $PSMUX) { $PSMUX = (Resolve-Path "$PSScriptRoot\..\target\debug\psmux.exe" -ErrorAction SilentlyContinue).Path }

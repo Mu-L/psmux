@@ -57,7 +57,18 @@ bind-key -T prefix v split-window -v
 
 ## Choosing a Shell
 
-psmux launches **PowerShell 7 (pwsh)** by default. You can change this:
+psmux launches **PowerShell 7 (pwsh)** by default, whatever shell you typed `psmux` into.
+Like tmux, it does not look at the launching shell; it looks at the environment. If the
+`SHELL` environment variable names a shell psmux can start (an absolute path to an
+`.exe`, `.cmd`, `.bat` or `.com` that exists, or a bare name such as `powershell` that
+resolves on `PATH`), that shell becomes the initial `default-shell`, exactly as tmux seeds
+`default-shell` from `$SHELL`. A `SHELL` that is not a Windows path, does not exist, or
+points at psmux itself is ignored and the usual walk (`pwsh`, then `powershell`, then
+`cmd`) applies. One consequence worth knowing: a login Git Bash (the Windows Terminal
+Git Bash profile runs `bash.exe -i -l`) hands Windows children
+`SHELL=C:\Program Files\Git\usr\bin\bash.exe`, so `psmux` typed into that tab opens bash
+panes, just as tmux would. Setting `default-shell` in your config overrides both. You can
+change this:
 
 ```tmux
 # Use cmd.exe
@@ -170,7 +181,7 @@ Details worth knowing:
 | `exit-empty` | Bool | `on` | Exit server when all windows closed |
 | `set-titles` | Bool | `off` | Update terminal title |
 | `set-titles-string` | Str | | Terminal title format |
-| `default-shell` | Str | `pwsh` | Shell to launch |
+| `default-shell` | Str | `$SHELL` if usable, else `pwsh` | Shell to launch (then `powershell`, then `cmd`) |
 | `default-command` | Str | | Alias for default-shell |
 | `word-separators` | Str | `" -_@"` | Copy-mode word delimiters |
 | `activity-action` | Str | `other` | Action on window activity: `any`, `none`, `current`, `other` |

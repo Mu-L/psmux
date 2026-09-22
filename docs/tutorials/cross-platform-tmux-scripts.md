@@ -286,7 +286,7 @@ Inside the pane, `$TMUX_PANE` is the current pane id (`%1`), which is what `tmux
 |---------|--------------------|------------------|--------------------------|
 | Binary name | `tmux` | `tmux`, `psmux` or `pmux` | Call `tmux` |
 | Version check | `tmux 3.x` | `tmux 3.3.8` | Parse `tmux -V` as usual |
-| Default shell in panes | `$SHELL` | `pwsh` (then `powershell`, then `cmd`) | Set `default-shell` or send shell neutral commands |
+| Default shell in panes | `$SHELL` | `SHELL` when it names a usable Windows executable, else `pwsh` (then `powershell`, then `cmd`) | Set `default-shell` or send shell neutral commands |
 | `run-shell` / `if-shell` interpreter | `sh -c` | `pwsh -NoProfile -Command` | Keep commands shell neutral, or branch with `if-shell 'Get-Command pwsh'` |
 | Paths from `#{pane_current_path}` | POSIX | Windows (`C:\...`) | `cygpath -u` in Git Bash when needed |
 | `pipe-pane` sink path | POSIX | Windows path | `cygpath -w "$TEMP"` in Git Bash |
