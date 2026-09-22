@@ -1109,9 +1109,11 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
 
     if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
         app.copy_anchor = None;
+        app.copy_pos_published = None;
         if let Some(area) = active_area {
             let (row, col) = copy_cell_for_area(label.content(area), x, y);
             app.copy_pos = Some((row, col));
+            app.copy_pos_scroll_offset = app.copy_scroll_offset;
             app.copy_mouse_down_cell = Some((row, col));
         }
         return;
@@ -1217,6 +1219,11 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
                 app.copy_selection_mode = crate::types::SelectionMode::Char;
             }
             app.copy_pos = Some((row, col));
+            // The endpoint's own offset, recorded before the edge scroll below
+            // moves the view: it is what makes this screen row mean a content
+            // line.  Without it a drag that hit an edge copied a different
+            // range than the one that was painted.
+            app.copy_pos_scroll_offset = app.copy_scroll_offset;
             // tmux parity (#62): dragging on/past the pane's first or last
             // row scrolls the view so the selection continues into scrollback.
             if y <= area.y {
@@ -1260,23 +1267,47 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
     compute_rects(&win.root, app.last_window_area, &mut rects);
 
     if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        // The release cell, kept for the #199 click guard only.  It must not
+        // become the selection endpoint: tmux's `window_copy_drag_release`
+        // only clears the drag state, and the cursor moves on drag or
+        // bare-motion events alone, so the endpoint stays whatever the last
+        // drag left.  Taking the release cell here yanked a character the user
+        // never saw highlighted (see `handle_pane_mouse`).
+        let mut release_cell = None;
         if let Some((path, area)) = rects.iter().find(|(_, area)| area.contains(ratatui::layout::Position { x, y })) {
             win.active_path = path.clone();
-            let (row, col) = copy_cell_for_area(label.content(*area), x, y);
-            app.copy_pos = Some((row, col));
+            release_cell = Some(copy_cell_for_area(label.content(*area), x, y));
+            // Only a release with no drag endpoint of its own may position the
+            // cursor — a press that belonged to another pane, or that arrived
+            // before copy mode opened (#669).  Once a drag has anchored a
+            // selection, the endpoint is the last drag cell.
+            if app.copy_anchor.is_none() {
+                app.copy_pos = release_cell;
+            }
         }
         // If mouse-up is within 1 cell of mouse-down, it was a plain click
         // (any anchor set by jittery drag events is spurious). Clear it. (#199)
         // Mouse jitter during a click can shift the cursor by 1 cell.
         let click_origin = app.copy_mouse_down_cell.take();
-        if let (Some((dr, dc)), Some((ur, uc))) = (click_origin, app.copy_pos) {
+        if let (Some((dr, dc)), Some((ur, uc))) = (click_origin, release_cell.or(app.copy_pos)) {
             let row_diff = (dr as i32 - ur as i32).unsigned_abs();
             let col_diff = (dc as i32 - uc as i32).unsigned_abs();
             if row_diff <= 1 && col_diff <= 1 {
                 app.copy_anchor = None;
                 app.copy_pos = Some((dr, dc)); // snap to the original click position
+                app.copy_pos_scroll_offset = app.copy_scroll_offset;
                 return;
             }
+        }
+        // Raw clients (mouse-down/drag/up) forward the terminal's reports
+        // verbatim and cannot re-report what they painted, so a slip reported
+        // together with the release — a phone's coarse last report, coalesced
+        // motion — is dropped here by falling back to the endpoint of the last
+        // frame: no frame carried that cell, so it was never highlighted.  The
+        // release cell itself never extends the selection either way.
+        if let Some(published) = app.copy_pos_published {
+            app.copy_pos = Some(published);
+            app.copy_pos_scroll_offset = app.copy_scroll_offset;
         }
         // Auto-yank if a real selection exists, else clear the stale anchor.
         // Compare CONTENT positions (screen row minus the scroll offset it
@@ -1285,7 +1316,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
         // while the selection spans many scrolled lines.
         if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
             let a_abs = a.0 as i64 - app.copy_anchor_scroll_offset as i64;
-            let p_abs = p.0 as i64 - app.copy_scroll_offset as i64;
+            let p_abs = p.0 as i64 - app.copy_pos_scroll_offset as i64;
             if (a_abs, a.1) != (p_abs, p.1) {
                 let _ = yank_selection(app);
             }
@@ -1566,7 +1597,12 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // Left press: position cursor, clear selection
             app.copy_anchor = None;
             app.copy_pos = Some((r, c));
+            app.copy_pos_scroll_offset = app.copy_scroll_offset;
             app.copy_mouse_down_cell = Some((r, c));
+            // A new gesture starts with nothing published; a frame that carries
+            // this selection publishes its endpoint for the raw mouse release
+            // to fall back on (see `sync_copy_freeze`).
+            app.copy_pos_published = None;
         } else if button == 32 {
             // Left drag: extend selection, but ignore same-cell micro-jitter
             // (#199) — only while the RAW coordinates are still inside the
@@ -1584,6 +1620,10 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
                 app.copy_selection_mode = crate::types::SelectionMode::Char;
             }
             app.copy_pos = Some((r, c));
+            // Recorded BEFORE the edge auto-scroll below: the endpoint's own
+            // view offset is what makes its screen row mean a content line
+            // (see `copy_pos_scroll_offset`).
+            app.copy_pos_scroll_offset = app.copy_scroll_offset;
             // tmux parity (#62): dragging on/past the pane's first or last
             // row scrolls the view so the selection keeps growing into
             // scrollback; speed rises with distance past the edge.  The
@@ -1602,18 +1642,47 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
                 scroll_copy_down(app, 1 + ((row - max_r) as usize / 2).min(4));
             }
         } else if button == 0 && !press {
-            // Left release: finalize position
-            app.copy_pos = Some((r, c));
-            // If close to the original click, treat as click (no selection) (#199)
+            // Left release: finalize the drag.  The endpoint is NOT moved to
+            // the release cell.  tmux's `window_copy_drag_release` only clears
+            // the drag state; the copy-mode cursor is moved by drag
+            // (`window_copy_drag_update`) and bare-motion
+            // (`window_copy_move_mouse`) events alone.
+            //
+            // Taking the release cell yanks a character the user never saw
+            // selected: the highlight is painted from `copy_pos` (the last
+            // drag cell) and `exit_copy_mode` clears it in this same call,
+            // before any dump can paint the release cell.  So a terminal that
+            // reports the button release one cell past its last motion sample
+            // — a fast flick, coalesced motion, a phone or SSH client —
+            // copied a cell that was never highlighted.  Keeping the last drag
+            // cell is by construction exactly what was last painted.
+            //
+            // The release cell is still what the #199 click guard compares
+            // against (`r`/`c`), so a press/release pair within one cell stays
+            // a click.  A release with no drag endpoint of its own (a press
+            // that belonged to another pane, or that arrived before copy mode
+            // opened, #669) may still position the cursor.
+            if app.copy_anchor.is_none() {
+                app.copy_pos = Some((r, c));
+                app.copy_pos_scroll_offset = app.copy_scroll_offset;
+            }
             if let Some((dr, dc)) = app.copy_mouse_down_cell.take() {
                 if (dr as i32 - r as i32).unsigned_abs() <= 1
                     && (dc as i32 - c as i32).unsigned_abs() <= 1
                 {
                     app.copy_anchor = None;
                     app.copy_pos = Some((dr, dc));
+                    app.copy_pos_scroll_offset = app.copy_scroll_offset;
                     return;
                 }
             }
+            // The endpoint is the newest drag the client reported, and it is
+            // not second-guessed here: only the client knows which cell it
+            // painted, and a client whose last motion never made it to the
+            // screen re-reports the cell it did paint immediately before this
+            // release (`copy_release_repin`, client.rs).  The release itself
+            // never moves the endpoint.
+            //
             // Auto-yank if a real selection exists.  Compare CONTENT
             // positions (screen row minus the scroll offset it was recorded
             // at, as yank_selection does), not screen cells: edge
@@ -1621,7 +1690,7 @@ pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i1
             // while the selection spans many scrolled lines.
             if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
                 let a_abs = a.0 as i64 - app.copy_anchor_scroll_offset as i64;
-                let p_abs = p.0 as i64 - app.copy_scroll_offset as i64;
+                let p_abs = p.0 as i64 - app.copy_pos_scroll_offset as i64;
                 if (a_abs, a.1) != (p_abs, p.1) {
                     let _ = yank_selection(app);
                 }
@@ -1724,9 +1793,13 @@ pub fn copy_drag_begin(app: &mut AppState, pane_id: usize, anchor_col: i16, anch
         crate::types::SelectionMode::Char
     };
     app.copy_pos = Some((row.clamp(0, max_r) as u16, col.clamp(0, max_c) as u16));
+    app.copy_pos_scroll_offset = app.copy_scroll_offset;
     // A drag is in progress, not a click: the release must yank, never
     // snap back through the #199 click guard.
     app.copy_mouse_down_cell = None;
+    // This gesture's selection has not been published to the client yet; the
+    // next frame that carries it publishes the endpoint the release yanks to.
+    app.copy_pos_published = None;
     // The handoff fires with the pointer at/past an edge — start scrolling
     // immediately so the selection keeps growing (the bottom edge only
     // moves when the view was scrolled back; at offset 0 it is a no-op).
@@ -2379,13 +2452,19 @@ mod window_ops_tests {
 
         // A drag journey that ends exactly where it started: up to the top
         // edge (scrolls one line), down to the bottom edge (scrolls back),
-        // release on the anchor's content position.  Nothing is selected,
+        // then back onto the anchor's content position.  Nothing is selected,
         // but the drag still ends — tmux's copy-pipe-and-cancel cancels
         // copy mode either way, it never leaves the user stranded there.
+        //
+        // The return to the anchor is a DRAG, not the release: the endpoint
+        // follows drag/motion events only (tmux's window_copy_drag_release
+        // just clears the drag state), so the release cell cannot stand in
+        // for the motion that brought the pointer back.
         super::handle_pane_mouse(&mut app, 41, 0, 5, 2, true);
         super::handle_pane_mouse(&mut app, 41, 32, 5, 0, true);
         super::handle_pane_mouse(&mut app, 41, 32, 5, 7, true);
         assert_eq!(app.copy_scroll_offset, base, "the two edge scrolls must cancel out");
+        super::handle_pane_mouse(&mut app, 41, 32, 5, 2, true); // back onto the anchor
         super::handle_pane_mouse(&mut app, 41, 0, 5, 2, false);
         assert!(app.paste_buffers.is_empty(), "an empty selection must not yank");
         assert!(matches!(app.mode, Mode::Passthrough), "an empty drag must still exit copy mode");
@@ -2435,6 +2514,148 @@ mod window_ops_tests {
         super::handle_pane_mouse(&mut app, 41, 0, 9, 3, false); // release
         assert_eq!(app.paste_buffers.len(), 1, "release must yank the selection");
         assert!(matches!(app.mode, Mode::Passthrough), "a mouse yank exits copy mode");
+    }
+
+    /// Yank a single-row drag on the pane-mouse protocol, releasing on
+    /// `release_col` after dragging only as far as column 9.
+    fn yank_drag_released_at(release_col: i16) -> String {
+        let mut app = make_scrollback_app(true);
+        crate::copy_mode::enter_copy_mode(&mut app);
+        super::handle_pane_mouse(&mut app, 41, 0, 5, 2, true); // press at (col 5, row 2)
+        super::handle_pane_mouse(&mut app, 41, 32, 9, 2, true); // last drag: (col 9, row 2)
+        super::handle_pane_mouse(&mut app, 41, 0, release_col, 2, false);
+        assert!(
+            matches!(app.mode, Mode::Passthrough),
+            "the release must still finalize the drag"
+        );
+        app.paste_buffers
+            .first()
+            .cloned()
+            .expect("a real drag must yank on release")
+    }
+
+    #[test]
+    fn a_release_past_the_last_drag_must_not_extend_the_selection() {
+        // The copied text used to come out one character longer than the
+        // highlighted selection.  The endpoint is painted from `copy_pos`, the
+        // last DRAG cell, and `exit_copy_mode` clears it in the same call as
+        // the yank — so a release cell that trailed the last motion sample was
+        // never highlighted, yet still landed in the buffer.  tmux's
+        // `window_copy_drag_release` only clears the drag state (parity: the
+        // endpoint follows drag and bare-motion events, never the release).
+        let dragged_to = yank_drag_released_at(9);
+        let released_one_past = yank_drag_released_at(10);
+        assert_eq!(
+            released_one_past, dragged_to,
+            "a release cell the drag never reported must not be selected"
+        );
+        assert_eq!(dragged_to, "ry-75", "the drag must select exactly cols 5..=9");
+
+        // The other direction: a release that pulls back is not a retraction
+        // either (col 7 is two cells off the press, so this stays a drag and
+        // not a #199 click).  Retractions arrive as drag events, which do
+        // move the endpoint.
+        assert_eq!(
+            yank_drag_released_at(7), dragged_to,
+            "the release may not shrink the selection either"
+        );
+    }
+
+    #[test]
+    fn a_legacy_mouse_up_past_the_last_drag_must_not_extend_the_selection() {
+        // Same bug on the screen-coordinate protocol (mouse-down/drag/up x y),
+        // which converts the release against the pane's content rect itself.
+        fn yank_up_at(release_x: u16) -> String {
+            let mut app = make_scrollback_app(true);
+            crate::copy_mode::enter_copy_mode(&mut app);
+            super::remote_mouse_down(&mut app, 5, 2);
+            super::remote_mouse_drag(&mut app, 9, 2);
+            super::remote_mouse_up(&mut app, release_x, 2);
+            app.paste_buffers
+                .first()
+                .cloned()
+                .expect("a real drag must yank on release")
+        }
+        assert_eq!(
+            yank_up_at(10),
+            yank_up_at(9),
+            "a release past the last drag must not add a character"
+        );
+    }
+
+    /// The client re-reports the endpoint it painted just before a release
+    /// (`copy_release_repin`, client.rs).  A motion can reach the server — and
+    /// be written into a frame — and still never reach the screen, because the
+    /// release is handled before that frame is drawn: the highlight ends on
+    /// the previous cell while the server's frame says otherwise.  Only the
+    /// client can tell the two apart, so its re-pin is what the yank follows.
+    ///
+    /// This is the reported bug: highlight ends on `.` (col 4 here), the
+    /// buffer ends on the `9` after it (col 5).
+    #[test]
+    fn a_release_after_a_client_repin_yanks_the_painted_cell() {
+        let mut app = make_scrollback_app(true);
+        crate::copy_mode::enter_copy_mode(&mut app);
+        super::handle_pane_mouse(&mut app, 41, 0, 0, 2, true); // press at col 0
+        super::handle_pane_mouse(&mut app, 41, 32, 4, 2, true); // drag to col 4
+        let _ = crate::layout::dump_layout_json(&mut app).expect("a frame"); // painted: cols 0..=4
+        super::handle_pane_mouse(&mut app, 41, 32, 5, 2, true); // the slip
+        let _ = crate::layout::dump_layout_json(&mut app).expect("a frame"); // written, never drawn
+        super::handle_pane_mouse(&mut app, 41, 32, 4, 2, true); // re-pin: what the client painted
+        super::handle_pane_mouse(&mut app, 41, 0, 5, 2, false); // release
+        assert_eq!(
+            app.paste_buffers.first().map(String::as_str),
+            Some("histo"),
+            "the copy must match the highlight, not the cell the frame carried"
+        );
+    }
+
+    /// Control for the test above: with no re-pin the newest drag stands, even
+    /// when no frame carried it — which is exactly why the client has to send
+    /// one.  Pinned so the reason for `copy_release_repin` cannot be dropped
+    /// silently on this side.
+    #[test]
+    fn a_release_without_a_repin_follows_the_last_drag() {
+        let mut app = make_scrollback_app(true);
+        crate::copy_mode::enter_copy_mode(&mut app);
+        super::handle_pane_mouse(&mut app, 41, 0, 0, 2, true);
+        super::handle_pane_mouse(&mut app, 41, 32, 4, 2, true);
+        let _ = crate::layout::dump_layout_json(&mut app).expect("a frame");
+        super::handle_pane_mouse(&mut app, 41, 32, 5, 2, true);
+        let _ = crate::layout::dump_layout_json(&mut app).expect("a frame");
+        super::handle_pane_mouse(&mut app, 41, 0, 5, 2, false);
+        assert_eq!(
+            app.paste_buffers.first().map(String::as_str),
+            Some("histor"),
+            "without a re-pin the newest drag stands"
+        );
+    }
+
+    /// The raw protocol has no client that can say what it painted, so the
+    /// same-batch slip is dropped against the published endpoint there.
+    #[test]
+    fn a_legacy_mouse_up_slip_no_frame_carried_must_not_widen_the_yank() {
+        fn yank_after(slip_frame: bool) -> String {
+            let mut app = make_scrollback_app(true);
+            crate::copy_mode::enter_copy_mode(&mut app);
+            super::remote_mouse_down(&mut app, 5, 2);
+            super::remote_mouse_drag(&mut app, 9, 2);
+            let _ = crate::layout::dump_layout_json(&mut app).expect("a frame"); // col 9 published
+            super::remote_mouse_drag(&mut app, 10, 2); // the slip
+            if slip_frame {
+                let _ = crate::layout::dump_layout_json(&mut app).expect("a frame");
+            }
+            super::remote_mouse_up(&mut app, 10, 2);
+            app.paste_buffers
+                .first()
+                .cloned()
+                .expect("a real drag must yank on release")
+        }
+        assert_ne!(
+            yank_after(false),
+            yank_after(true),
+            "a slip no frame carried must not add a character on the raw protocol"
+        );
     }
 
     #[test]
@@ -2537,17 +2758,66 @@ mod window_ops_tests {
         super::handle_pane_mouse(&mut app, 41, 32, 5, 0, true); // scrolls the view
         // Release on the SAME screen cell as the press: scrolling made this
         // a real multi-line drag, so it must yank rather than be snapped
-        // back to a click — both the #199 click guard and the anchor/pos
-        // comparison work on screen cells, which the scroll invalidated.
+        // back to a click — the #199 click guard works on the release cell
+        // against the press cell, and the scroll invalidated that pair.
         super::handle_pane_mouse(&mut app, 41, 0, 5, 2, false);
         assert!(!app.paste_buffers.is_empty(), "release must yank the selection");
-        // Char-mode selection from (row 2, col 5)@offset 3 to (row 0, col 5)
-        // @offset 4 spans the two scrollback lines history-71/history-72,
-        // sliced at col 5 on both ends.
-        assert_eq!(app.paste_buffers[0], "ry-71\nhistor", "yank must span the scrolled lines");
+        // Char-mode selection from the press cell (row 2, col 5)@offset 3 to
+        // the last DRAG cell (row 0, col 5)@offset 3 — the drag's OWN offset,
+        // recorded before its edge scroll moved the view to offset 4.  Content
+        // rows -3..-1: history-70/71 and the live row history-72, sliced at
+        // col 5 on both ends.  The release cell is not the endpoint, so it
+        // neither extends nor shortens this.  This is also exactly the range
+        // the frame paints (see `a_direction_mismatched_drag_paints_and_yanks_
+        // the_same_range` for the pairing half of that invariant).
+        assert_eq!(app.paste_buffers[0], "ry-70\nhistory-71\nhistor",
+            "yank must span from the anchor to the last drag cell");
         // A mouse yank cancels copy mode and returns to live view (#62).
         assert!(matches!(app.mode, Mode::Passthrough), "mouse yank must exit copy mode");
         assert_eq!(app.copy_scroll_offset, 0);
+    }
+
+    /// A drag whose row and column directions differ must paint and yank the
+    /// SAME range.  The frame pairs each column with its own row (tmux: the
+    /// selection runs from the anchor cell to the endpoint cell); independent
+    /// min/max on rows and columns used to paint one range and copy another,
+    /// which is the reported "sometimes the selection and the copy disagree"
+    /// — it happened in every drag direction, on any selection whose endpoint
+    /// sat on a different row.
+    #[test]
+    fn a_direction_mismatched_drag_paints_and_yanks_the_same_range() {
+        let mut app = make_scrollback_app(true);
+        crate::copy_mode::enter_copy_mode(&mut app);
+        super::handle_pane_mouse(&mut app, 41, 0, 6, 4, true);  // press: row 4, col 6
+        super::handle_pane_mouse(&mut app, 41, 32, 2, 1, true); // drag : row 1, col 2
+
+        // What the client is told to paint: the top row keeps the ENDPOINT's
+        // column (2) and the bottom row the anchor's (6).
+        let frame = crate::layout::dump_layout_json(&mut app).expect("a frame");
+        let num = |key: &str| -> i64 {
+            let pat = format!("\"{key}\"");
+            let at = frame.find(&pat).unwrap_or_else(|| panic!("{key} in {frame}"));
+            let rest = &frame[at + pat.len()..];
+            let colon = rest.find(':').expect("colon");
+            rest[colon + 1..]
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .expect("a number")
+        };
+        assert_eq!(num("sel_start_row"), 1, "painted selection starts on the drag row");
+        assert_eq!(num("sel_start_col"), 2, "...with the DRAG's column");
+        assert_eq!(num("sel_end_row"), 4, "painted selection ends on the press row");
+        assert_eq!(num("sel_end_col"), 6, "...with the PRESS's column");
+
+        super::handle_pane_mouse(&mut app, 41, 0, 2, 1, false); // release on the drag cell
+        assert_eq!(
+            app.paste_buffers.first().map(String::as_str),
+            Some("story-74\nhistory-75\nhistory-76\nhistory"),
+            "the copy must be the range the frame above points at (the frame's\n             rows are client-relative, the yank's are parser-relative, so this\n             pins the text)"
+        );
     }
 
     #[test]
