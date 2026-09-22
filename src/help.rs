@@ -109,7 +109,11 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     // tmux: bind PPage { copy-mode -u } — enter copy mode scrolled up one
     // page. The root table deliberately has no PageUp binding (issue #488).
     ("PageUp",  "copy-mode -u"),
-    ("]",       "paste-buffer"),
+    // tmux: bind -N 'Paste the most recent paste buffer' ] { paste-buffer -p }
+    // (key-bindings.c:422).  The -p is what makes the one keypress bracketed
+    // for a pane that asked for ?2004h; without it the paste arrives as typed
+    // input everywhere, not only on the build from issue #684.
+    ("]",       "paste-buffer -p"),
     ("=",       "choose-buffer"),
     ("#",       "list-buffers"),
 

@@ -4094,7 +4094,9 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Char('&') => { confirm_cmd = Some("kill-window".into()); }
                                 KeyCode::Char('z') => { cmd_batch.push("zoom-pane\n".into()); }
                                 KeyCode::Char('[') => { cmd_batch.push("copy-enter\n".into()); }
-                                KeyCode::Char(']') => { cmd_batch.push("paste-buffer\n".into()); }
+                                // tmux key-bindings.c:422 binds ] to
+                                // `paste-buffer -p` (issue #684).
+                                KeyCode::Char(']') => { cmd_batch.push("paste-buffer -p\n".into()); }
                                 KeyCode::Char('{') => { cmd_batch.push("swap-pane -U\n".into()); }
                                 KeyCode::Char('}') => { cmd_batch.push("swap-pane -D\n".into()); }
                                 KeyCode::Char('n') => { cmd_batch.push("next-window\n".into()); }
