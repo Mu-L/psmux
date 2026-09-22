@@ -272,6 +272,60 @@ class Injector
                             Thread.Sleep(20);
                         }
                     }
+                    else if (token.StartsWith("MOD:"))
+                    {
+                        // MOD:vkHex:charHex:ctrlHex  e.g. MOD:70:0000:0002
+                        //
+                        // Like RAW, but the modifier key-down/key-up records that
+                        // bracket the keypress are derived from the control key
+                        // state instead of being hard-wired to Ctrl.  A real
+                        // keyboard reports VK_MENU before an Alt combination and
+                        // VK_SHIFT before a shifted one, and Far Manager keys off
+                        // those, so Alt+F1 (the drives menu) cannot be expressed
+                        // with RAW, which would press Ctrl instead.
+                        var parts = token.Substring(4).Split(':');
+                        if (parts.Length == 3)
+                        {
+                            ushort rvk = Convert.ToUInt16(parts[0], 16);
+                            char rch = (char)Convert.ToUInt16(parts[1], 16);
+                            uint rctrl = Convert.ToUInt32(parts[2], 16);
+                            var pre = new List<INPUT_RECORD>();
+                            var post = new List<INPUT_RECORD>();
+                            uint held = 0;
+                            // Order matters: Ctrl first, then Alt, then Shift, and
+                            // released in the reverse order, which is the order
+                            // Windows reports for a real chord.
+                            if ((rctrl & 0x000C) != 0)
+                            {
+                                held |= (rctrl & 0x000C);
+                                pre.Add(MakeKey(true, 0x11, '\0', held));
+                                post.Insert(0, MakeKey(false, 0x11, '\0', 0));
+                            }
+                            if ((rctrl & 0x0003) != 0)
+                            {
+                                held |= (rctrl & 0x0003);
+                                pre.Add(MakeKey(true, 0x12, '\0', held));
+                                post.Insert(0, MakeKey(false, 0x12, '\0', held & ~0x0003u));
+                            }
+                            if ((rctrl & SHIFT_PRESSED) != 0)
+                            {
+                                held |= SHIFT_PRESSED;
+                                pre.Add(MakeKey(true, 0x10, '\0', held));
+                                post.Insert(0, MakeKey(false, 0x10, '\0', held & ~SHIFT_PRESSED));
+                            }
+                            var all = new List<INPUT_RECORD>();
+                            all.AddRange(pre);
+                            all.Add(MakeKey(true, rvk, rch, rctrl));
+                            all.Add(MakeKey(false, rvk, rch, rctrl));
+                            all.AddRange(post);
+                            var arr = all.ToArray();
+                            uint w; bool ok = WriteConsoleInput(handle, arr, (uint)arr.Length, out w);
+                            int e = ok ? 0 : Marshal.GetLastWin32Error();
+                            log.Add(string.Format("  MOD vk=0x{0:X2} ch=0x{1:X2} ctrl=0x{2:X4} n={3} ok={4} w={5} e={6}",
+                                rvk, (int)rch, rctrl, arr.Length, ok, w, e));
+                            if (ok) injected++;
+                        }
+                    }
                     else if (token.StartsWith("RAW:"))
                     {
                         // RAW:vkHex:charHex:ctrlHex  e.g. RAW:BF:1F:0008

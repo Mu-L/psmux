@@ -590,7 +590,7 @@ fn detect_mouse_input(pane: &mut Pane) -> bool {
 /// `0x01F6 -> 0x01B6` across a single wheel event.  psmux never touches
 /// `ENABLE_LINE_INPUT` or `ENABLE_ECHO_INPUT`, which is why the cooked pair is
 /// the signal that survives its own mouse traffic.
-fn detect_record_reader(pane: &mut Pane) -> bool {
+pub(crate) fn detect_record_reader(pane: &mut Pane) -> bool {
     console_input_mode(pane).map_or(false, mode_is_deliberate_record_reader)
 }
 
