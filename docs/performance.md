@@ -309,7 +309,7 @@ Get-CimInstance Win32_Process -Filter "Name='psmux.exe'" |
 
 If a number looks wrong, the debug and crash logs described in [Diagnostics](diagnostics.md) show where the time went.
 
-## The metrics folder, and reading the trend
+## The metrics folder
 
 Every performance suite writes one JSON file per run into `%USERPROFILE%\.psmux-test-data\metrics\`, never into the repository. Nothing is ever overwritten, so the folder is a history: a suspected regression is compared against the run that last passed instead of against a number in a comment.
 
@@ -360,7 +360,11 @@ Five suites are gates rather than benchmarks: they assert, and a sweep goes red 
 | | p50 for `kill-pane`, `kill-window`, `kill-session` | `<= 400 ms`, `<= 400 ms`, `<= 3000 ms` | |
 | | how many of ten creations exceed 150 ms, plus p90 and max | `<= 2 of 10`, `<= 300 ms`, `<= 1500 ms`, hard on a quiet machine and warnings otherwise | |
 | `test_idle_socket_traffic` | lines per second an idle attached pair puts on the socket | see the suite | `idle-socket-traffic-*` |
-| `test_perf_vs_terminals` | T1 psmux launch over bare pwsh, T2 psmux in Windows Terminal over plain Windows Terminal, T3 keystroke over the ConPTY floor and absolute p99, T4 first session and creation p90, T6 server and client working set, T7 idle CPU, T8 CPU per 100 keystrokes, T5 no leftover processes | `350 ms`, `300 ms`, `2.5 ms` and `25 ms`, `1000 ms` and `300 ms`, `60 MB` each, `3% of one core`, `3000 ms`, `0` | `perf_vs_terminals-*` |
+| `test_perf_vs_terminals` | T1 psmux launch over bare pwsh, T2 psmux in Windows Terminal over plain Windows Terminal, both load aware | `350 ms`, `300 ms` | `perf_vs_terminals-*` |
+| | T3 keystroke over the ConPTY floor measured in the same run, and the absolute p99 | `2.5 ms` and `25 ms` | |
+| | T4 first session to prompt, and creation p90 | `1000 ms` and `300 ms` | |
+| | T6 server and client working set, T7 idle CPU, T8 CPU per 100 keystrokes | `60 MB` each, `3% of one core`, `3000 ms` | |
+| | T5 no leftover processes | `0` | |
 
 **Why some budgets are ratios and some are load aware.** Both were measured, not guessed. Against the same installed binary on the same machine, once quiet and once with five other build jobs running:
 
@@ -373,7 +377,29 @@ Five suites are gates rather than benchmarks: they assert, and a sweep goes red 
 | `new-window` p50 | 25 ms | 29 ms | the warm pool's own path |
 | `new-window` p90 | 110 ms | 416 ms | a creation that waits out a cold shell waits out whatever a cold shell costs |
 
-So the hard assertions are the ones that do not move with the machine: a ratio for launch, a p50 for creation. The tail statistics are still asserted, but the suite samples `\Processor(_Total)\% Processor Time` around every cell, and when the machine was above 25 percent of total CPU a tail failure is recorded as a warning in the run output and in the JSON under `tail_warnings` instead of failing the sweep. The load itself is in the envelope, so a warning can always be checked against what the machine was doing.
+So the hard assertions are the ones that do not move with the machine: a ratio for launch, a p50 for creation, a keystroke p99, and everything measured against a floor taken in the same run. The rest are still asserted, but every suite samples `\Processor(_Total)\% Processor Time` around its cells, and when the machine was above 25 percent of total CPU those assertions are recorded as warnings in the run output and in the JSON (`tail_warnings`, or `soft` on a threshold row) instead of failing the sweep. The load itself is in the envelope, so a warning can always be checked against what the machine was doing.
+
+Which assertions are load aware, and why each one is or is not:
+
+| assertion | load aware | because |
+| --- | --- | --- |
+| launch ratio | no, hard always | both arms stretch together, so the ratio does not move |
+| launch absolute delta, and `test_perf_vs_terminals` T1, T1b, T2, T2b | yes | a difference between two timings stretches with the machine |
+| creation p50 per cell | no, hard always | it is the warm pool's own path and it moved 4 ms between a quiet box and one at 60 percent |
+| creation slow count, p90, max | yes | a creation that waits out a cold shell waits out whatever a cold shell costs today |
+| keystroke echo p50 | yes | under load a healthy median lands on top of the defect's median and stops discriminating |
+| keystroke echo p99 | no, hard always | under the same load it was still half the defect's |
+| keystroke over the ConPTY floor | no, hard always | the floor is measured in the same run and moves with the machine too |
+| memory, idle CPU, CPU per keystroke, leftover processes | no, hard always | not timings |
+
+A CPU counter sampled once per section is not on its own enough to tell a trustworthy run from an untrustworthy one. The head to head run of 2026-09-22 failed T1 and T2 while its own load samples read a median of 6.5 percent of total CPU: the machine was not steadily busy, it was stalling individual launches, and its first interleaved round measured every host at two to three times the rest of the run. So `test_perf_vs_terminals` also checks the spread of the reference arms it subtracts from, `p90 / median` on `bare_pwsh` and `wt_pwsh`, which is measured inside the very same interleaved window as the timings it judges:
+
+| | bare pwsh median | bare pwsh p90 | spread |
+| --- | ---: | ---: | ---: |
+| a trustworthy run | 434 ms | 477 ms | 1.10x |
+| the run that failed T1 and T2 | 428 ms | 736 ms | 1.72x |
+
+Above 1.35x the baseline is declared unstable, the difference thresholds report as warnings, and `ref_spread` and `ref_unstable` go into the JSON beside `load`.
 
 Memory and CPU are recorded by every gate and gated in one place. The keystroke gate samples the server and the attached client at the prompt and again after a burst of keystrokes, and reports working set, private bytes, CPU as ms per 100 keys, and CPU over a quiet window with nothing typed. The creation gate does the same at one pane and again after twenty windows and three splits, which is what shows a per pane poll: a number that grew with the pane count while the one pane sample looked fine. The launch gate samples the last iteration at its prompt. Idle CPU is a percentage of one core and its resolution is one scheduler tick, 15.6 ms, about 0.5 percent over a three second window. The thresholds on all of these live in `test_perf_vs_terminals` (T6, T7, T8), so there is only one place to argue with; the other gates assert only that the section produced data, because a JSON full of nulls that still says PASS is worse than a failure.
 

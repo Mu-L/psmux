@@ -366,6 +366,12 @@ $script:Opened   = [System.Collections.ArrayList]::new()   # GUI/console PIDs at
 $script:Reaped   = [System.Collections.ArrayList]::new()   # console hosts Windows had not reaped yet
 $script:Complete = $false
 $script:Notes    = [System.Collections.ArrayList]::new()
+# Set once the launch section has its numbers: true when a REFERENCE cell's own
+# p90 is more than $RefSpreadMax times its own median, which says this run's
+# baseline was being stalled and no threshold on a difference from it can be
+# trusted. See the comment on Check.
+$script:RefUnstable = $false
+$script:RefSpread   = [ordered]@{}
 
 function Say  { param($m) Write-Host $m }
 function Info { param($m) Write-Host "[INFO] $m" -ForegroundColor Cyan }
@@ -401,6 +407,20 @@ function Check {
     $ok = $Value -le $Limit
     $quiet = $true
     try { $quiet = Test-PerfMachineQuiet $QuietLoadPct } catch { }
+    # A CPU counter sampled once per section is not enough on its own. The run
+    # of 2026-09-22 22:45 failed T1 and T2 while its six load samples read a p50
+    # of 6.5 percent: the machine was not steadily busy, it was STALLING
+    # individual launches, and a one second sample taken between sections sees
+    # none of that. What does see it is the reference arm's own spread, measured
+    # in the very same interleaved run:
+    #
+    #   quiet run   bare pwsh median 434 ms   p90 477 ms   p90/median 1.10
+    #   this run    bare pwsh median 428 ms   p90 736 ms   p90/median 1.72
+    #
+    # A reference that unstable cannot support a threshold on a DIFFERENCE from
+    # it, whatever the CPU counter says, so $script:RefUnstable counts as not
+    # quiet as well. It costs nothing: the numbers are already measured.
+    if ($script:RefUnstable) { $quiet = $false }
     $soft = ((-not $ok) -and $LoadSensitive -and (-not $quiet))
     if ($ok) {
         Write-Host ("[PASS] {0}: {1:F1}{3} <= {2:F1}{3}" -f $Name, $Value, $Limit, $Unit) -ForegroundColor Green
@@ -1000,6 +1020,12 @@ function Save-Metrics {
         # guessed at. Save-Metrics is called after every section, and the
         # samples accumulate, so the block grows as the run goes on.
         load           = (Get-PerfLoadSummary)
+        # The reference arms' own p90 over their own median, and the verdict it
+        # produced. This is the other half of "was this run trustworthy", and
+        # unlike the CPU counter it is measured in the same interleaved window
+        # as the timings it judges.
+        ref_spread     = $script:RefSpread
+        ref_unstable   = $script:RefUnstable
         hosts_present  = [ordered]@{ windows_terminal = [bool]$WT; wezterm = [bool]$WEZ; alacritty = [bool]$ALAC }
         wt_was_running = $WtWasRunning
         params         = [ordered]@{
@@ -1135,6 +1161,25 @@ if (-not $SkipLaunch) {
 
     Head "1. LAUNCH THRESHOLDS"
     $bare = $script:Launch["bare_pwsh"]
+
+    # Was the baseline itself steady during this run? Measured on the reference
+    # cells only, because those are the ones the difference thresholds subtract.
+    # 1.35 sits above the 1.10 a quiet run produced and below the 1.72 a run
+    # with stalled launches produced, both measured on this machine on
+    # 2026-09-22 with the same binary.
+    $RefSpreadMax = 1.35
+    foreach ($refName in @("bare_pwsh", "wt_pwsh")) {
+        $r = $script:Launch[$refName]
+        if (-not $r -or -not $r.median -or $r.median -le 0) { continue }
+        $sp = [math]::Round($r.p90 / $r.median, 3)
+        $script:RefSpread[$refName] = $sp
+        if ($sp -gt $RefSpreadMax) {
+            $script:RefUnstable = $true
+            Warn ("{0} p90 {1:F0} ms is {2}x its own median {3:F0} ms, over {4}x: this run's baseline was being stalled, so the launch DIFFERENCE thresholds are reported as warnings rather than failures" -f $refName, $r.p90, $sp, $r.median, $RefSpreadMax)
+        } else {
+            Info ("{0} spread p90/median {1}x, within {2}x: the baseline was steady enough to subtract from" -f $refName, $sp, $RefSpreadMax)
+        }
+    }
     # T1 is an ABSOLUTE DELTA, not a ratio. A ratio of medians moves when bare
     # pwsh moves, and bare pwsh on this machine ranges from 350 to 600 ms
     # depending on what else is running, so the same psmux build scored 1.7x on
