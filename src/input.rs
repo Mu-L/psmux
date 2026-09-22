@@ -2516,6 +2516,162 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
     Ok(())
 }
 
+/// Minimum Windows build whose inbox conhost carries `ESC[200~` / `ESC[201~`
+/// through a ConPTY INPUT pipe to the pane child (issue #684).
+///
+/// psmux writes the two markers into the pane's input pipe and the write always
+/// reports success.  On Windows 10 19045 (inbox `conhost.exe` 10.0.19041.1) the
+/// far side of that pipe removes exactly those twelve bytes and hands the child
+/// the payload alone, so there is nothing for psmux to observe and the
+/// "fall back when the brackets are stripped" strategy the comment in
+/// [`send_paste_to_active`] describes can never fire.  The reporter measured it
+/// with a standalone `CreatePseudoConsole` host and no psmux in the chain:
+///
+/// ```text
+///   19045  input pipe          host wrote 28 bytes, child received 16, markers gone
+///   19045  WriteConsoleInputW  host wrote 31 records, child received 31 bytes, markers intact
+///   26200  input pipe          host wrote 28 bytes, child received 28 bytes, markers intact
+///   26200  WriteConsoleInputW  host wrote 31 records, child received 31 bytes, markers intact
+/// ```
+///
+/// Only those two builds are measured.  Everything between 19046 and 26199 is
+/// unknown, so the constant borrows [`crate::ssh_input::CONPTY_MOUSE_MIN_BUILD`]'s
+/// number rather than inventing one: 22523 is where psmux already draws the line
+/// between the inbox conhost that cannot carry VT on the input pipe and the one
+/// that can, for the mouse reports that travel the same channel in the same
+/// direction.  If a build in the gap turns out to carry the markers, this is the
+/// single number to move, and [`PASTE_INJECT_ENV`] lets a user on such a host
+/// pin the answer without waiting for a release.
+pub const PASTE_PIPE_BRACKET_MIN_BUILD: u32 = 22523;
+
+/// Environment override for the [`PASTE_PIPE_BRACKET_MIN_BUILD`] gate.
+///
+/// `PSMUX_PASTE_INJECT=1` treats this host as one whose conhost strips the
+/// markers, so a bracketed paste into a VT byte reader goes out as
+/// `KEY_EVENT` records however new the build is.  `=0` pins the pipe route on
+/// every build.  Unset keeps the build check.
+///
+/// `=1` opens the BUILD half of the gate only.  The `ENABLE_VIRTUAL_TERMINAL_INPUT`
+/// requirement below is never bypassed, because a child that reads
+/// `INPUT_RECORD`s cannot reassemble a VT sequence out of per character key
+/// events and would show the markers as the literal characters `[200~`
+/// (issue #98).  There is no override that can ask for that.
+pub const PASTE_INJECT_ENV: &str = "PSMUX_PASTE_INJECT";
+
+/// Parses [`PASTE_INJECT_ENV`] into an explicit yes/no.  Unset, empty or
+/// unrecognised yields `None`, meaning "fall back to the build check", the same
+/// shape as `ssh_input::forced_mouse_setting`.
+pub fn forced_paste_injection() -> Option<bool> {
+    let raw = std::env::var(PASTE_INJECT_ENV).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "on" | "true" | "yes" => Some(true),
+        "0" | "off" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// Which channel carries a paste into the pane child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteRoute {
+    /// Write into the ConPTY input pipe, the route psmux has taken since #98.
+    Pipe,
+    /// Deliver as `KEY_EVENT` records with `WriteConsoleInputW`, the route the
+    /// #74 era used and the only one that carries the markers on 19045.
+    Inject,
+}
+
+/// Decide how a paste reaches the pane child.
+///
+/// Pure so the matrix can be pinned by unit tests on any host; the caller
+/// supplies the three facts.
+///
+/// * `bracket` is false for a plain `paste-buffer` and for a child that never
+///   asked for `?2004h`.  There are then no markers to protect, and the pipe
+///   is both cheaper and safer (injection costs a `FreeConsole` /
+///   `AttachConsole` round trip per paste, which #597 shows can fail).
+/// * `child_reads_vt_bytes` is the #98 guard and is never overridden.
+/// * `build` of `None` keeps the pipe, the same conservatism
+///   `conpty_needs_mouse_record_bypass` applies to an unknown build.
+pub fn choose_paste_route(
+    bracket: bool,
+    build: Option<u32>,
+    child_reads_vt_bytes: bool,
+    forced: Option<bool>,
+) -> PasteRoute {
+    if !bracket {
+        return PasteRoute::Pipe;
+    }
+    if forced == Some(false) {
+        return PasteRoute::Pipe;
+    }
+    if !child_reads_vt_bytes {
+        return PasteRoute::Pipe;
+    }
+    if forced == Some(true) {
+        return PasteRoute::Inject;
+    }
+    match build {
+        Some(b) if b < PASTE_PIPE_BRACKET_MIN_BUILD => PasteRoute::Inject,
+        _ => PasteRoute::Pipe,
+    }
+}
+
+/// Send one pane's copy of a paste, over whichever channel
+/// [`choose_paste_route`] picks.
+///
+/// A failed injection falls back to the pipe rather than dropping the paste:
+/// text without markers is a worse paste, no text at all is a lost one.
+#[cfg(windows)]
+fn deliver_paste_to_pane(pane: &mut crate::types::Pane, text: &str, use_bracket: bool) {
+    let route = if use_bracket {
+        let vt = crate::window_ops::pane_reads_vt_bytes(pane);
+        let build = crate::ssh_input::windows_build_number();
+        let forced = forced_paste_injection();
+        let route = choose_paste_route(true, build, vt, forced);
+        // Every input to the decision, because the bytes a pane receives look
+        // the same on a host where both channels work and the only way to tell
+        // which one carried them is this line.
+        crate::debug_log::input_log(
+            "paste",
+            &format!(
+                "route decision: vt_byte_reader={} build={:?} gate={} {}={:?} -> {:?}",
+                vt, build, PASTE_PIPE_BRACKET_MIN_BUILD, PASTE_INJECT_ENV, forced, route
+            ),
+        );
+        route
+    } else {
+        PasteRoute::Pipe
+    };
+    if route == PasteRoute::Inject {
+        if let Some(pid) = pane.child_pid {
+            // send_vt_response encodes as UTF-16 and normalises a line break to
+            // CR exactly as write_paste_chunked does, so the child sees the same
+            // bytes whichever route carried them.
+            let payload = format!("\x1b[200~{}\x1b[201~", text);
+            let ok = crate::platform::mouse_inject::send_vt_response(pid, &payload);
+            crate::debug_log::input_log(
+                "paste",
+                &format!("route=inject pid={} text_len={} ok={}", pid, text.len(), ok),
+            );
+            if ok {
+                return;
+            }
+            crate::debug_log::input_log("paste", "route=inject failed, falling back to the pipe");
+        } else {
+            crate::debug_log::input_log(
+                "paste",
+                "route=inject wanted but the pane has no child pid, using the pipe",
+            );
+        }
+    } else {
+        crate::debug_log::input_log(
+            "paste",
+            &format!("route=pipe bracket={} text_len={}", use_bracket, text.len()),
+        );
+    }
+    write_paste_chunked(&mut pane.writer, text.as_bytes(), use_bracket);
+}
+
 /// Chunked PTY write for paste delivery.  The PTY pipe can silently
 /// drop bytes when a large payload (140+ lines) is written in a single
 /// call because the OS pipe buffer fills up.  We split the text into
@@ -2628,28 +2784,30 @@ pub fn send_paste_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
     // brackets may still not be parsed -- but at least the text content
     // arrives correctly without stray visible bracket characters.
     //
-    // For apps where PTY-pipe brackets get stripped by ConPTY, fall back to
-    // console injection for the TEXT ONLY (no bracket markers) so the content
-    // still arrives reliably.
+    // Issue #684 replaced the unreachable half of that strategy.  The pipe
+    // write reports success on the build where the markers are dropped, so
+    // "fall back when they get stripped" had nothing to observe and never ran.
+    // The decision is made up front instead, from the pane child's console
+    // mode and the host's build number: see `choose_paste_route`.
     #[cfg(windows)]
     {
         if app.sync_input {
             let win = &mut app.windows[app.active_idx];
-            fn write_all_panes(node: &mut crate::types::Node, text: &[u8], bracket: bool) {
+            fn write_all_panes(node: &mut crate::types::Node, text: &str, bracket: bool) {
                 match node {
                     crate::types::Node::Leaf(p) => {
-                        write_paste_chunked(&mut p.writer, text, bracket);
+                        deliver_paste_to_pane(p, text, bracket);
                     }
                     crate::types::Node::Split { children, .. } => {
                         for c in children { write_all_panes(c, text, bracket); }
                     }
                 }
             }
-            write_all_panes(&mut win.root, text.as_bytes(), use_bracket);
+            write_all_panes(&mut win.root, text, use_bracket);
         } else {
             let win = &mut app.windows[app.active_idx];
             if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-                write_paste_chunked(&mut p.writer, text.as_bytes(), use_bracket);
+                deliver_paste_to_pane(p, text, use_bracket);
             }
         }
     }
@@ -3567,3 +3725,7 @@ mod tests_issue610_ctrl_backspace;
 #[cfg(all(test, windows))]
 #[path = "../tests-rs/test_issue588_win32_input_escape.rs"]
 mod tests_issue588_win32_input_escape;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue684_paste_route.rs"]
+mod tests_issue684_paste_route;

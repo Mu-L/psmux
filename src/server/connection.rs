@@ -2131,8 +2131,36 @@ match cmd {
         }
     }
     "paste-buffer" | "pasteb" => {
-        let buf_name: Option<String> = args.windows(2).find(|w| w[0] == "-b").map(|w| w[1].to_string());
-        let paste_mode = args.iter().any(|a| *a == "-p");
+        // Issue #684: one parser for both dispatches, so -d and -s reach the
+        // CLI route as well and the in server route (commands.rs) cannot drift
+        // from it again.
+        let pb_args = crate::commands::parse_paste_buffer_args(&args);
+        let buf_name: Option<String> = pb_args.buffer.clone();
+        let paste_mode = pb_args.bracket;
+        let separator = pb_args.separator.clone();
+        let delete_after = pb_args.delete;
+        let send_text = |tx: &mpsc::Sender<CtrlReq>, text: String| {
+            let text = match &separator {
+                Some(sep) => crate::commands::apply_separator(&text, sep),
+                None => text,
+            };
+            if text.is_empty() { return; }
+            if paste_mode {
+                let _ = tx.send(CtrlReq::SendPaste(text));
+            } else {
+                let _ = tx.send(CtrlReq::SendText(text));
+            }
+        };
+        let delete_buffer = |tx: &mpsc::Sender<CtrlReq>| {
+            if !delete_after { return; }
+            match &buf_name {
+                Some(name) => match name.parse::<usize>() {
+                    Ok(idx) => { let _ = tx.send(CtrlReq::DeleteBufferAt(idx)); }
+                    Err(_) => { let _ = tx.send(CtrlReq::DeleteNamedBuffer(name.clone())); }
+                },
+                None => { let _ = tx.send(CtrlReq::DeleteBuffer); }
+            }
+        };
         if let Some(ref name) = buf_name {
             // Issue #264: an explicitly-named/-indexed buffer that does not
             // exist must error (matching real tmux's "no buffer <name>"),
@@ -2147,13 +2175,8 @@ match cmd {
             }
             match rrx.recv() {
                 Ok(Some(text)) => {
-                    if !text.is_empty() {
-                        if paste_mode {
-                            let _ = tx.send(CtrlReq::SendPaste(text));
-                        } else {
-                            let _ = tx.send(CtrlReq::SendText(text));
-                        }
-                    }
+                    send_text(&tx, text);
+                    delete_buffer(&tx);
                 }
                 _ => {
                     let err = format!("no buffer {}\n", name);
@@ -2177,13 +2200,8 @@ match cmd {
                         text = clip;
                     }
                 }
-                if !text.is_empty() {
-                    if paste_mode {
-                        let _ = tx.send(CtrlReq::SendPaste(text));
-                    } else {
-                        let _ = tx.send(CtrlReq::SendText(text));
-                    }
-                }
+                send_text(&tx, text);
+                delete_buffer(&tx);
             }
         }
     }

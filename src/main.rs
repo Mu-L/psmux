@@ -3215,8 +3215,19 @@ fn run_main() -> io::Result<()> {
                                 i += 1;
                             }
                         }
+                        // Issue #684: -s and -r were dropped here, so a
+                        // separator asked for on the CLI never reached the
+                        // server that now honours it.
+                        "-s" => {
+                            if let Some(s) = cmd_args.get(i + 1) {
+                                cmd.push_str(&format!(" -s {}", s));
+                                i += 1;
+                            }
+                        }
                         "-d" => { cmd.push_str(" -d"); }
                         "-p" => { cmd.push_str(" -p"); }
+                        "-r" => { cmd.push_str(" -r"); }
+                        "-S" => { cmd.push_str(" -S"); }
                         _ => {}
                     }
                     i += 1;

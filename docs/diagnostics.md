@@ -5,10 +5,12 @@ nowhere for an error message to land on screen, so psmux writes what it knows to
 This page lists every diagnostic file psmux can produce, the environment variables that turn the
 optional ones on, and what to attach when you file a bug report.
 
-Everything on this page is read only observation, with two exceptions called out where they
-appear: `PSMUX_FAKE_WIN_BUILD` moves psmux onto a different branch on purpose, and
-`PSMUX_FAKE_INJECT_FAIL` makes a Windows call fail on purpose, both so that a path you cannot
-otherwise reach on your machine can be reproduced on it.
+Everything on this page is read only observation, with three exceptions called out where they
+appear: `PSMUX_FAKE_WIN_BUILD` moves psmux onto a different branch on purpose,
+`PSMUX_FAKE_INJECT_FAIL` makes a Windows call fail on purpose, and `PSMUX_PASTE_INJECT` moves a
+paste onto the other delivery channel on purpose, all so that a path you cannot otherwise reach on
+your machine can be reproduced on it. The last of the three is also a real escape hatch: it is the
+supported way to correct psmux's guess about your conhost.
 
 ## Debug Logging
 
@@ -152,6 +154,49 @@ looks like when psmux cannot reach it.
 This is diagnostic only, and while it is set a pane gets no XTVERSION reply, no OSC colour reply,
 no injected mouse record and no Ctrl+C injection. Set it on the **server** process, with
 `$env:PSMUX_NO_WARM = "1"` and a killed server first, reproduce, then clear it.
+
+### The Paste Route Seam
+
+| Variable | What it does |
+|---|---|
+| `PSMUX_PASTE_INJECT=1` | Delivers a bracketed paste as `KEY_EVENT` records, as if this host's conhost stripped the markers from the pipe |
+| `PSMUX_PASTE_INJECT=0` | Pins the ConPTY input pipe, whatever the build says |
+
+A bracketed paste has to reach the pane child with `ESC[200~` in front of it and `ESC[201~` behind
+it. psmux writes those into the pane's ConPTY input pipe, and on Windows 10 19045 the inbox
+conhost (10.0.19041.1) removes exactly those twelve bytes and hands the child the payload alone.
+The write reports success, so there is nothing for psmux to notice. Measured with a standalone
+pseudoconsole host and no psmux in the chain (issue #684):
+
+```
+19045  input pipe          host wrote 28 bytes, child received 16, markers gone
+19045  WriteConsoleInputW  host wrote 31 records, child received 31 bytes, markers intact
+26200  input pipe          host wrote 28 bytes, child received 28 bytes, markers intact
+26200  WriteConsoleInputW  host wrote 31 records, child received 31 bytes, markers intact
+```
+
+So psmux gates the paste on the build number, at 22523, the same seam the mouse path already draws
+for the same defect on the same channel in the same direction. Below it, a pane whose child has
+`ENABLE_VIRTUAL_TERMINAL_INPUT` set gets the paste as `KEY_EVENT` records instead. Only 19045 and
+26200 are measured; everything between them is unknown, which is what this variable is for. If
+your pastes arrive unbracketed on a build above 22523, set it to `1`; if injection misbehaves on a
+build below it, set it to `0`, and please report either.
+
+`=1` opens the build half of the gate only. A pane whose child reads `INPUT_RECORD`s rather than
+bytes always keeps the pipe, because it cannot reassemble a VT sequence out of per character key
+events and would show the markers as the literal characters `[200~` in the editor (issue #98).
+No setting of this variable can ask for that.
+
+`PSMUX_INPUT_DEBUG=1` records the whole decision and the channel that carried the paste:
+
+```
+[paste] use_bracket=true text_len=490 text_preview="LINE0-..."
+[paste] route decision: vt_byte_reader=true build=Some(26200) gate=22523 PSMUX_PASTE_INJECT=Some(true) -> Inject
+[paste] route=inject pid=29004 text_len=490 ok=true
+```
+
+Set it on the **server** process, with `$env:PSMUX_NO_WARM = "1"` and a killed server first,
+reproduce, then clear it.
 
 ## Always On Diagnostic Files
 

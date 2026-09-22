@@ -528,6 +528,10 @@ pub(crate) const ENABLE_MOUSE_INPUT: u32 = 0x0010;
 /// still carrying either of these is line buffered and echoing, which no
 /// application that reads `INPUT_RECORD`s ever leaves in place.
 pub(crate) const COOKED_INPUT_MODE: u32 = 0x0002 | 0x0004;
+/// `ENABLE_VIRTUAL_TERMINAL_INPUT` — conhost stops parsing the child's input
+/// and passes VT bytes through verbatim, so the child reassembles sequences
+/// itself.  The paste route gate (issue #684) keys on this bit.
+pub(crate) const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
 
 /// The pane child's whole console input mode word, cached for 2 seconds.
 ///
@@ -592,6 +596,49 @@ fn detect_mouse_input(pane: &mut Pane) -> bool {
 /// the signal that survives its own mouse traffic.
 fn detect_record_reader(pane: &mut Pane) -> bool {
     console_input_mode(pane).map_or(false, mode_is_deliberate_record_reader)
+}
+
+/// Does this pane's child read its input as a VT byte stream (issue #684)?
+///
+/// The paste route gate asks this before it may deliver `ESC[200~` as
+/// `KEY_EVENT` records.  A byte stream reader (node, nvim, a crossterm app
+/// running with `ENABLE_VIRTUAL_TERMINAL_INPUT`) reassembles the markers out of
+/// the characters conhost hands it; an `INPUT_RECORD` reader cannot, and shows
+/// them as the literal characters `[200~` instead, which is issue #98.
+///
+/// The discriminator is the `ENABLE_VIRTUAL_TERMINAL_INPUT` bit ALONE, and
+/// deliberately NOT [`detect_record_reader`].  That heuristic answers a
+/// different question ("may psmux flip this child's mode?") where erring toward
+/// "record reader" is the safe side; here the safe side is the other one, and
+/// the heuristic gets this wrong for exactly the children the gate is for.
+/// Measured on this tree with the #684 recorder, whose two shapes differ only
+/// in the bit that matters:
+///
+/// ```text
+///   byte stream reader (VTI on, cooked off)   0x03F0  mouse=1 cooked=0 vti=1
+///   record reader      (VTI off, cooked off)  0x01F8  mouse=1 cooked=0 vti=0
+/// ```
+///
+/// `mode_is_deliberate_record_reader` is "mouse set and cooked clear", so it
+/// calls BOTH of those record readers: `ENABLE_MOUSE_INPUT` is part of the
+/// inherited `0x01F7` default and a byte stream reader has no reason to clear
+/// it.  Gating the paste on it kept every pane on the pipe, which is the one
+/// outcome issue #684 needs to change.  `ENABLE_VIRTUAL_TERMINAL_INPUT` is the
+/// direct signal instead: with it set conhost stops parsing and passes the
+/// bytes through, which is precisely the child that can reassemble `ESC[200~`.
+///
+/// A deliberate record reader never carries the bit.  crossterm's Windows
+/// backend reads `INPUT_RECORD`s and never sets it (issue #98's Helix), and
+/// psmux cannot set it behind its back either, because [`ensure_vti`] refuses
+/// to flip a `detect_record_reader` pane (issue #623).
+///
+/// Unlike [`ensure_vti`] this only ever QUERIES.  A paste has no business
+/// changing a child's console mode, so a child that has not set VTI itself
+/// simply keeps the pipe.  It reads the cached mode word `console_input_mode`
+/// already maintains for the mouse questions, so a paste costs no extra attach.
+#[cfg(windows)]
+pub(crate) fn pane_reads_vt_bytes(pane: &mut Pane) -> bool {
+    console_input_mode(pane).map_or(false, |m| m & ENABLE_VIRTUAL_TERMINAL_INPUT != 0)
 }
 
 /// The pure classification behind [`detect_record_reader`], split out so it can

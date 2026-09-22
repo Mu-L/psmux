@@ -596,7 +596,16 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
                 Some(Action::CopyMode)
             }
         }
-        "paste-buffer" | "pasteb" => Some(Action::Paste),
+        // Issue #684: a bare `paste-buffer` is the simple Action; anything with
+        // a flag keeps its whole command line so -p, -b, -d, -s and -t survive
+        // to the dispatch, the same shape copy-mode and split-window use above.
+        "paste-buffer" | "pasteb" => {
+            if parts.len() > 1 {
+                Some(Action::Command(cmd.to_string()))
+            } else {
+                Some(Action::Paste)
+            }
+        }
         "detach-client" | "detach" => Some(Action::Detach),
         "rename-window" | "renamew" => Some(Action::RenameWindow),
         "choose-window" | "choose-tree" => Some(Action::WindowChooser),
@@ -1029,6 +1038,160 @@ pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
         // anything it doesn't recognise to the server via TCP.
         _ => {
             execute_command_string(app, &cmdline)?;
+        }
+    }
+    Ok(())
+}
+
+/// The flags of tmux's `paste-buffer` (cmd-paste-buffer.c:36, args `"db:prSs:t:"`).
+///
+/// `-S` (no visual escaping of unprintable bytes) is parsed and ignored: psmux
+/// never applies tmux's `utf8_stravisx`, so its default already behaves as if
+/// `-S` were given.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct PasteBufferArgs {
+    /// `-p`: wrap in `ESC[200~` / `ESC[201~`, but only if the pane asked for it.
+    pub bracket: bool,
+    /// `-b`: buffer name, or a decimal index into the paste stack.
+    pub buffer: Option<String>,
+    /// `-d`: delete the buffer once it has been pasted.
+    pub delete: bool,
+    /// The separator that replaces each newline, from `-s` or implied by `-r`.
+    /// `None` means "leave the line endings to the pane writer", which already
+    /// emits CR, exactly tmux's default separator (cmd-paste-buffer.c:93).
+    pub separator: Option<String>,
+    /// `-t`: target pane.
+    pub target: Option<String>,
+}
+
+/// Parse a `paste-buffer` command line.
+///
+/// `args` is the command line WITHOUT the command name.  In the in server
+/// dispatch it is whitespace split, so a separator containing a space cannot be
+/// expressed there; that is a property of that dispatch, shared with every other
+/// command it serves, not of the flag handling.
+pub(crate) fn parse_paste_buffer_args(args: &[&str]) -> PasteBufferArgs {
+    let mut pb = PasteBufferArgs::default();
+    let mut raw_newlines = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "-p" => pb.bracket = true,
+            "-d" => pb.delete = true,
+            "-r" => raw_newlines = true,
+            "-S" => {}
+            "-b" => { pb.buffer = args.get(i + 1).map(|s| s.to_string()); i += 1; }
+            "-s" => { pb.separator = args.get(i + 1).map(|s| s.to_string()); i += 1; }
+            "-t" => { pb.target = args.get(i + 1).map(|s| s.to_string()); i += 1; }
+            _ => {}
+        }
+        i += 1;
+    }
+    if pb.separator.is_none() && raw_newlines {
+        pb.separator = Some("\n".to_string());
+    }
+    pb
+}
+
+/// Replace every newline with `sep`, the way cmd-paste-buffer.c:103 to :122
+/// walks the buffer and writes the separator after each line.
+pub(crate) fn apply_separator(text: &str, sep: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('\n') {
+        out.push_str(&rest[..i]);
+        out.push_str(sep);
+        rest = &rest[i + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Run a parsed `paste-buffer` against the active pane (issue #684).
+///
+/// The `-p` split mirrors `server/connection.rs`: bracketed pastes take the
+/// paste route, which is the one that consults the pane's `?2004h` and picks
+/// its delivery channel; everything else is plain text, which is what tmux does
+/// for a `paste-buffer` with no `-p` (cmd-paste-buffer.c:97).
+pub(crate) fn run_paste_buffer(app: &mut AppState, pb: &PasteBufferArgs) -> io::Result<()> {
+    // A named register selected in copy mode ("x p) still wins when no explicit
+    // buffer was asked for, the behaviour paste_latest gave prefix + ].
+    if pb.buffer.is_none() {
+        if let Some(reg) = app.copy_register.take() {
+            if let Some(text) = app.named_registers.get(&reg).cloned() {
+                if !text.is_empty() {
+                    if pb.bracket {
+                        crate::input::send_paste_to_active(app, &text)?;
+                    } else {
+                        crate::input::send_text_to_active(app, &text)?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    let text = match &pb.buffer {
+        Some(name) => {
+            let found = if let Ok(idx) = name.parse::<usize>() {
+                app.paste_buffers.get(idx).cloned()
+            } else {
+                app.named_buffers.get(name).cloned()
+            };
+            match found {
+                Some(t) => t,
+                None => {
+                    // tmux: "no buffer <name>" (cmd-paste-buffer.c:82).
+                    app.status_message = Some((
+                        format!("no buffer {}", name),
+                        std::time::Instant::now(),
+                        None,
+                    ));
+                    return Ok(());
+                }
+            }
+        }
+        None => {
+            let top = app.paste_buffers.first().cloned().unwrap_or_default();
+            if top.is_empty() {
+                // Issue #428: an empty stack falls back to the OS clipboard, the
+                // same fallback server/connection.rs applies.
+                crate::clipboard::read_from_system_clipboard().unwrap_or_default()
+            } else {
+                top
+            }
+        }
+    };
+
+    let text = match &pb.separator {
+        Some(sep) => apply_separator(&text, sep),
+        None => text,
+    };
+
+    if !text.is_empty() {
+        if pb.bracket {
+            crate::input::send_paste_to_active(app, &text)?;
+        } else {
+            crate::input::send_text_to_active(app, &text)?;
+        }
+    }
+
+    if pb.delete {
+        match &pb.buffer {
+            Some(name) => {
+                if let Ok(idx) = name.parse::<usize>() {
+                    if idx < app.paste_buffers.len() {
+                        app.paste_buffers.remove(idx);
+                    }
+                } else {
+                    app.named_buffers.remove(name);
+                }
+            }
+            None => {
+                if !app.paste_buffers.is_empty() {
+                    app.paste_buffers.remove(0);
+                }
+            }
         }
     }
     Ok(())
@@ -1699,7 +1862,25 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             app.mode = Mode::CommandPrompt { input: initial.clone(), cursor: initial.len() };
         }
         "paste-buffer" | "pasteb" => {
-            paste_latest(app)?;
+            // Issue #684: this dispatch used to call paste_latest() and throw
+            // every flag away, so a binding or a `:paste-buffer -p -b name`
+            // typed at the command prompt pasted the TOP buffer, unbracketed,
+            // whatever it asked for.  Only the CLI route
+            // (server/connection.rs) honoured -p and -b.
+            //
+            // A -t target is resolved by the server's own dispatch, which
+            // already wraps a targeted command in FocusTargetTemp, so it is
+            // forwarded whole the way send-keys and split-window are.  Without
+            // a control port there is nowhere to forward to and the active pane
+            // is the only pane, so the local path runs and -t is moot.
+            let pb = parse_paste_buffer_args(&parts[1..]);
+            if pb.target.is_some() {
+                if let Some(port) = app.control_port {
+                    let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+                    return Ok(());
+                }
+            }
+            run_paste_buffer(app, &pb)?;
         }
         "set-buffer" | "setb" => {
             // Parse -b name, -w (clipboard), and extract content
