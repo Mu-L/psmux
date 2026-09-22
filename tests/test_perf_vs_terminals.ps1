@@ -927,6 +927,10 @@ function New-Wrapper {
 # indistinguishable from a run that measured nothing.
 function Save-Metrics {
     param($Rows = @(), $Deltas = [ordered]@{})
+    # One load reading per save, and this function is called once after every
+    # section, so the samples map onto the sections without any bookkeeping.
+    # A reading costs one second; there are six saves in a full run.
+    try { Add-PerfLoadSample ("section {0}" -f $script:Thresholds.Count) | Out-Null } catch { }
     $payload = [ordered]@{
         # This suite keeps its own schema rather than the shared envelope's flat
         # `schema = 2`: it is rewritten after every section (complete=false) and
@@ -950,6 +954,14 @@ function Save-Metrics {
             ram_gb    = $RamGb
             note      = "may have been measured while other builds or benchmarks were running; medians and n>=5 are used for that reason"
         }
+        # That note used to be the only statement about what else the machine
+        # was doing, and it says "may have been", which answers nothing. This
+        # is the measurement: \Processor(_Total)\% Processor Time sampled by
+        # the shared helper, same shape and same field names as every other
+        # perf JSON, so a loaded run can be told from a quiet one rather than
+        # guessed at. Save-Metrics is called after every section, and the
+        # samples accumulate, so the block grows as the run goes on.
+        load           = (Get-PerfLoadSummary)
         hosts_present  = [ordered]@{ windows_terminal = [bool]$WT; wezterm = [bool]$WEZ; alacritty = [bool]$ALAC }
         wt_was_running = $WtWasRunning
         params         = [ordered]@{

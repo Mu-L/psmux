@@ -77,6 +77,25 @@
 #
 #   pwsh -File tests\test_keystroke_latency_gate.ps1 -MedianMaxMs 3 -P99MaxMs 8
 #
+# WHICH OF THE TWO SURVIVES A BUSY MACHINE
+# ----------------------------------------
+# Measured on 2026-09-22 against the SAME installed binary (0bcc421) on this
+# machine, against the five quiet runs already on disk:
+#
+#   quiet   (5 runs)          median 1.64 to 1.71   p99 2.23 to 2.77
+#   loaded  (5 agents busy)   median 3.20           p99 4.45
+#   the defect, quiet         median 3.86           p99 8.66
+#
+# Under load the healthy median lands on top of the defect's median and the
+# assertion stops discriminating; the healthy p99 is still half the defect's.
+# So the P99 ASSERTION IS HARD ALWAYS, and the median assertion is hard when
+# the machine was quiet and a recorded warning when it was not. The machine
+# load is sampled from \Processor(_Total)\% Processor Time and goes into the
+# JSON envelope, so a warning can always be checked against what the machine
+# was doing. Dropping the median assertion instead was rejected: on a quiet
+# machine it is the cheaper of the two signals and it reads 1.7 against a 3.0
+# budget, which is not a close thing.
+#
 # MEMORY AND CPU RIDE ALONG
 # -------------------------
 # The first echo run also samples the server and the attached client: working
@@ -131,6 +150,10 @@ param(
     # Quiet window for the idle CPU sample, in seconds. Nothing is typed during
     # it, so whatever the server and the client burn is work nobody asked for.
     [int]$IdleSeconds = 3,
+    # At or under this percentage of TOTAL cpu the machine counts as quiet and
+    # the echo median is a hard failure; above it, a warning. The p99 assertion
+    # is hard either way. See the header for the measurements behind that split.
+    [double]$QuietLoadPct = 25.0,
     [switch]$SkipPwsh,
     [switch]$SkipResources
 )
@@ -140,8 +163,10 @@ $ErrorActionPreference = "Continue"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 
+$script:Warnings = New-Object System.Collections.Generic.List[string]
 function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
+function Write-Warn($msg) { Write-Host "  [WARN] $msg" -ForegroundColor Yellow; $script:Warnings.Add($msg) | Out-Null }
 function Write-Info($msg) { Write-Host "  [INFO] $msg" -ForegroundColor DarkCyan }
 
 # Binary selection, in the order the suite runner needs it. The BUILD IN THE
@@ -336,6 +361,8 @@ Write-Host "--- cell 1: raw echo child in the pane (psmux's own path) ---" -Fore
 $runStats = @()
 $all = @()
 $script:ResourceBlock = $null
+Add-PerfLoadSample "start" | Out-Null
+Write-Info ("machine load at the start: {0}% of total cpu" -f (Get-PerfLoadSummary).p50_pct)
 for ($i = 1; $i -le $Runs; $i++) {
     # Run 1 also carries the memory and CPU sample: one is enough for a trend
     # line and each one costs an extra $IdleSeconds of sitting still.
@@ -369,6 +396,13 @@ $n = $all.Count
 Write-Info ("pooled n={0}  min={1:N2}  median={2:N2}  p90={3:N2}  p99={4:N2}  max={5:N2} ms" -f `
     $n, $min, $median, $p90, $p99, $max)
 
+Add-PerfLoadSample "after echo cell" | Out-Null
+$loadSummary = Get-PerfLoadSummary
+$wasQuiet = Test-PerfMachineQuiet $QuietLoadPct
+Write-Info ("machine load: n={0} min={1}% p50={2}% max={3}%  -> {4}" -f `
+    $loadSummary.n, $loadSummary.min_pct, $loadSummary.p50_pct, $loadSummary.max_pct, `
+    $(if ($wasQuiet) { "quiet, the median assertion is a hard failure" } else { "loaded, the median assertion is a warning" }))
+
 $stamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
 $jsonPath = Write-PerfMetrics -Suite "test_keystroke_latency_gate" -Binary $Binary `
     -FileStem "keystroke-latency" -MetricsDir $MetricsDir -Stamp $stamp -Data ([ordered]@{
@@ -376,6 +410,8 @@ $jsonPath = Write-PerfMetrics -Suite "test_keystroke_latency_gate" -Binary $Bina
     keysPerRun   = $N
     medianMaxMs  = $MedianMaxMs
     p99MaxMs     = $P99MaxMs
+    quiet_load_pct    = $QuietLoadPct
+    machine_was_quiet = $wasQuiet
     pooled       = [pscustomobject]@{ n = $n; min = $min; median = $median; p90 = $p90; p99 = $p99; max = $max }
     perRun       = @($runStats | ForEach-Object {
         [pscustomobject]@{ run = $_.Run; n = $_.N; min = $_.Min; median = $_.Median; p90 = $_.P90; p99 = $_.P99; max = $_.Max }
@@ -387,8 +423,13 @@ if ($jsonPath) { Write-Info "samples written to $jsonPath" }
 
 if ($median -lt $MedianMaxMs) {
     Write-Pass ("keystroke to screen median {0:N2}ms is under the {1:N1}ms gate" -f $median, $MedianMaxMs)
-} else {
+} elseif ($wasQuiet) {
     Write-Fail ("keystroke to screen median {0:N2}ms exceeds the {1:N1}ms gate - a hop on the input path is waiting on a poll interval rather than an event" -f $median, $MedianMaxMs)
+} else {
+    # See the header: under load a healthy median lands on top of the defect's
+    # median and stops discriminating, while the p99 below still does. The p99
+    # assertion is the one that stays hard.
+    Write-Warn ("keystroke to screen median {0:N2}ms exceeds the {1:N1}ms gate, but the machine was at {2}% of total cpu, over the {3}% quiet mark; the p99 assertion below is the one that still discriminates under load" -f $median, $MedianMaxMs, $loadSummary.p50_pct, $QuietLoadPct)
 }
 
 if ($p99 -lt $P99MaxMs) {
@@ -500,4 +541,5 @@ if (-not $SkipPwsh) {
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
 Write-Host "  Passed: $($script:TestsPassed)" -ForegroundColor Green
 Write-Host "  Failed: $($script:TestsFailed)" -ForegroundColor $(if ($script:TestsFailed -gt 0) { "Red" } else { "Green" })
+Write-Host "  Warnings: $($script:Warnings.Count)" -ForegroundColor $(if ($script:Warnings.Count -gt 0) { "Yellow" } else { "Green" })
 exit $script:TestsFailed
