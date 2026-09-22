@@ -273,6 +273,11 @@ param(
     # of its own server images (PSMUX_SERVER_IMAGE_NAMES is set from it below).
     [Alias("Psmux")][string]$Binary = "",
     [int]$IdleSeconds = 3,  # quiet window for the idle CPU measurement
+    # At or under this percentage of TOTAL cpu the machine counts as quiet and
+    # the four launch DIFFERENCE thresholds (T1, T1b, T2, T2b) are hard
+    # failures; above it they are recorded warnings. Every other threshold is
+    # hard in all cases. See the comment on Check.
+    [double]$QuietLoadPct = 25.0,
     [switch]$Quick,         # smaller n, for a smoke run
     [switch]$SkipLaunch,
     [switch]$SkipKeys,
@@ -369,13 +374,46 @@ function Skip { param($m) Write-Host "[SKIP] $m" -ForegroundColor Yellow }
 $script:Clock = [Diagnostics.Stopwatch]::StartNew()
 function Head { param($m) Write-Host ""; Write-Host ("=" * 78) -ForegroundColor DarkCyan; Write-Host ("  $m   [+{0:F0}s]" -f $script:Clock.Elapsed.TotalSeconds) -ForegroundColor White; Write-Host ("=" * 78) -ForegroundColor DarkCyan }
 
+# -LoadSensitive marks a threshold that is a DIFFERENCE BETWEEN TWO TIMINGS,
+# which is the one shape that cannot survive a busy machine: both arms stretch
+# under load and the difference between two stretched numbers stretches with
+# them. Measured on 2026-09-22 against the installed 0bcc421 with nothing
+# rebuilt between the two runs:
+#
+#   quiet    bare 434 ms   psmux_attached 661 ms   T1 = 227 ms   PASS
+#   loaded   bare 428 ms   psmux_attached 783 ms   T1 = 355 ms   FAIL (limit 350)
+#
+# The bare arm's own p90 in the loaded run was 736 ms against a 428 ms median,
+# so the machine was stalling individual launches, and the interleaving that
+# normally cancels drift cannot cancel a stall that lands in one arm.
+#
+# Such a threshold stays a hard failure when the run's own load samples say the
+# machine was quiet, and becomes a recorded warning when they do not. Every
+# threshold that is NOT a difference of two timings stays hard in all cases:
+# T3 is measured against the ConPTY floor taken in the same run, T4 is a p90 on
+# psmux alone, T6, T7 and T8 are memory and CPU, and T5 counts processes. Those
+# are the ones that still catch a regression on a loaded box.
+#
+# The verdict is recorded in the JSON as `pass`, `soft` and `machine_quiet`, so
+# a warning is never invisible.
 function Check {
-    param([string]$Name, [double]$Value, [double]$Limit, [string]$Unit, [string]$Why = "")
+    param([string]$Name, [double]$Value, [double]$Limit, [string]$Unit, [string]$Why = "", [switch]$LoadSensitive)
     $ok = $Value -le $Limit
-    if ($ok) { Write-Host ("[PASS] {0}: {1:F1}{3} <= {2:F1}{3}" -f $Name, $Value, $Limit, $Unit) -ForegroundColor Green }
-    else     { Write-Host ("[FAIL] {0}: {1:F1}{3} > {2:F1}{3}"  -f $Name, $Value, $Limit, $Unit) -ForegroundColor Red; $script:Fails++ }
+    $quiet = $true
+    try { $quiet = Test-PerfMachineQuiet $QuietLoadPct } catch { }
+    $soft = ((-not $ok) -and $LoadSensitive -and (-not $quiet))
+    if ($ok) {
+        Write-Host ("[PASS] {0}: {1:F1}{3} <= {2:F1}{3}" -f $Name, $Value, $Limit, $Unit) -ForegroundColor Green
+    } elseif ($soft) {
+        $lp = 0; try { $lp = (Get-PerfLoadSummary).p50_pct } catch { }
+        $m = ("{0}: {1:F1}{3} > {2:F1}{3}, but the machine was at {4}% of total cpu, over the {5}% quiet mark, and a difference of two timings stretches with the machine" -f $Name, $Value, $Limit, $Unit, $lp, $QuietLoadPct)
+        Write-Host "[WARN] $m" -ForegroundColor Yellow
+        [void]$script:Notes.Add($m)
+    } else {
+        Write-Host ("[FAIL] {0}: {1:F1}{3} > {2:F1}{3}"  -f $Name, $Value, $Limit, $Unit) -ForegroundColor Red; $script:Fails++
+    }
     if ($Why) { Write-Host "       $Why" -ForegroundColor DarkGray }
-    [void]$script:Thresholds.Add([pscustomobject]@{ name=$Name; value=[math]::Round($Value,2); limit=$Limit; unit=$Unit; pass=$ok; note=$Why })
+    [void]$script:Thresholds.Add([pscustomobject]@{ name=$Name; value=[math]::Round($Value,2); limit=$Limit; unit=$Unit; pass=$ok; soft=$soft; machine_quiet=$quiet; note=$Why })
 }
 
 function Percentile {
@@ -1107,23 +1145,23 @@ if (-not $SkipLaunch) {
     # without failing on a slow shell start that psmux did not cause.
     if ($bare -and $script:Launch["psmux_attached"]) {
         $pc = $script:Launch["psmux_attached"]
-        Check "T1 psmux attached launch minus bare pwsh (cold server)" ($pc.median - $bare.median) 350 "ms" `
+        Check -LoadSensitive "T1 psmux attached launch minus bare pwsh (cold server)" ($pc.median - $bare.median) 350 "ms" `
             ("psmux_attached median {0:F0} ms minus bare pwsh {1:F0} ms; this cell pays a server spawn on every repetition" -f $pc.median, $bare.median)
     } else { Warn "T1 not evaluated (a cell is missing)" }
     # The steady state case the old ratio was judged on keeps its own line, same
     # budget: this is the launch a user meets all day, with a server already up.
     if ($bare -and $script:Launch["psmux_attached_warm"]) {
         $pa = $script:Launch["psmux_attached_warm"]
-        Check "T1b psmux attached launch minus bare pwsh (warm server)" ($pa.median - $bare.median) 350 "ms" `
+        Check -LoadSensitive "T1b psmux attached launch minus bare pwsh (warm server)" ($pa.median - $bare.median) 350 "ms" `
             ("psmux_attached_warm median {0:F0} ms minus bare pwsh {1:F0} ms" -f $pa.median, $bare.median)
     } else { Warn "T1b not evaluated (a cell is missing)" }
     if ($script:Launch["wt_pwsh"] -and $script:Launch["psmux_in_wt_warm"]) {
         $pw = $script:Launch["psmux_in_wt_warm"]; $wtc = $script:Launch["wt_pwsh"]
-        Check "T2 psmux in WT over plain WT (warm)" ($pw.median - $wtc.median) 300 "ms" `
+        Check -LoadSensitive "T2 psmux in WT over plain WT (warm)" ($pw.median - $wtc.median) 300 "ms" `
             ("psmux_in_wt_warm {0:F0} ms minus wt_pwsh {1:F0} ms" -f $pw.median, $wtc.median)
     } else { Warn "T2 not evaluated (a cell is missing)" }
     if ($script:Launch["wt_pwsh"] -and $script:Launch["psmux_in_wt"]) {
-        Check "T2b psmux in WT over plain WT (cold server)" ($script:Launch["psmux_in_wt"].median - $script:Launch["wt_pwsh"].median) 700 "ms" `
+        Check -LoadSensitive "T2b psmux in WT over plain WT (cold server)" ($script:Launch["psmux_in_wt"].median - $script:Launch["wt_pwsh"].median) 700 "ms" `
             "the first psmux window of the day also pays a cold server spawn"
     }
     $null = Save-Metrics
