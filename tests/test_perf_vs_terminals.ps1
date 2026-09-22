@@ -273,6 +273,11 @@ param(
     # of its own server images (PSMUX_SERVER_IMAGE_NAMES is set from it below).
     [Alias("Psmux")][string]$Binary = "",
     [int]$IdleSeconds = 3,  # quiet window for the idle CPU measurement
+    # At or under this percentage of TOTAL cpu the machine counts as quiet and
+    # the four launch DIFFERENCE thresholds (T1, T1b, T2, T2b) are hard
+    # failures; above it they are recorded warnings. Every other threshold is
+    # hard in all cases. See the comment on Check.
+    [double]$QuietLoadPct = 25.0,
     [switch]$Quick,         # smaller n, for a smoke run
     [switch]$SkipLaunch,
     [switch]$SkipKeys,
@@ -361,6 +366,12 @@ $script:Opened   = [System.Collections.ArrayList]::new()   # GUI/console PIDs at
 $script:Reaped   = [System.Collections.ArrayList]::new()   # console hosts Windows had not reaped yet
 $script:Complete = $false
 $script:Notes    = [System.Collections.ArrayList]::new()
+# Set once the launch section has its numbers: true when a REFERENCE cell's own
+# p90 is more than $RefSpreadMax times its own median, which says this run's
+# baseline was being stalled and no threshold on a difference from it can be
+# trusted. See the comment on Check.
+$script:RefUnstable = $false
+$script:RefSpread   = [ordered]@{}
 
 function Say  { param($m) Write-Host $m }
 function Info { param($m) Write-Host "[INFO] $m" -ForegroundColor Cyan }
@@ -369,13 +380,60 @@ function Skip { param($m) Write-Host "[SKIP] $m" -ForegroundColor Yellow }
 $script:Clock = [Diagnostics.Stopwatch]::StartNew()
 function Head { param($m) Write-Host ""; Write-Host ("=" * 78) -ForegroundColor DarkCyan; Write-Host ("  $m   [+{0:F0}s]" -f $script:Clock.Elapsed.TotalSeconds) -ForegroundColor White; Write-Host ("=" * 78) -ForegroundColor DarkCyan }
 
+# -LoadSensitive marks a threshold that is a DIFFERENCE BETWEEN TWO TIMINGS,
+# which is the one shape that cannot survive a busy machine: both arms stretch
+# under load and the difference between two stretched numbers stretches with
+# them. Measured on 2026-09-22 against the installed 0bcc421 with nothing
+# rebuilt between the two runs:
+#
+#   quiet    bare 434 ms   psmux_attached 661 ms   T1 = 227 ms   PASS
+#   loaded   bare 428 ms   psmux_attached 783 ms   T1 = 355 ms   FAIL (limit 350)
+#
+# The bare arm's own p90 in the loaded run was 736 ms against a 428 ms median,
+# so the machine was stalling individual launches, and the interleaving that
+# normally cancels drift cannot cancel a stall that lands in one arm.
+#
+# Such a threshold stays a hard failure when the run's own load samples say the
+# machine was quiet, and becomes a recorded warning when they do not. Every
+# threshold that is NOT a difference of two timings stays hard in all cases:
+# T3 is measured against the ConPTY floor taken in the same run, T4 is a p90 on
+# psmux alone, T6, T7 and T8 are memory and CPU, and T5 counts processes. Those
+# are the ones that still catch a regression on a loaded box.
+#
+# The verdict is recorded in the JSON as `pass`, `soft` and `machine_quiet`, so
+# a warning is never invisible.
 function Check {
-    param([string]$Name, [double]$Value, [double]$Limit, [string]$Unit, [string]$Why = "")
+    param([string]$Name, [double]$Value, [double]$Limit, [string]$Unit, [string]$Why = "", [switch]$LoadSensitive)
     $ok = $Value -le $Limit
-    if ($ok) { Write-Host ("[PASS] {0}: {1:F1}{3} <= {2:F1}{3}" -f $Name, $Value, $Limit, $Unit) -ForegroundColor Green }
-    else     { Write-Host ("[FAIL] {0}: {1:F1}{3} > {2:F1}{3}"  -f $Name, $Value, $Limit, $Unit) -ForegroundColor Red; $script:Fails++ }
+    $quiet = $true
+    try { $quiet = Test-PerfMachineQuiet $QuietLoadPct } catch { }
+    # A CPU counter sampled once per section is not enough on its own. The run
+    # of 2026-09-22 22:45 failed T1 and T2 while its six load samples read a p50
+    # of 6.5 percent: the machine was not steadily busy, it was STALLING
+    # individual launches, and a one second sample taken between sections sees
+    # none of that. What does see it is the reference arm's own spread, measured
+    # in the very same interleaved run:
+    #
+    #   quiet run   bare pwsh median 434 ms   p90 477 ms   p90/median 1.10
+    #   this run    bare pwsh median 428 ms   p90 736 ms   p90/median 1.72
+    #
+    # A reference that unstable cannot support a threshold on a DIFFERENCE from
+    # it, whatever the CPU counter says, so $script:RefUnstable counts as not
+    # quiet as well. It costs nothing: the numbers are already measured.
+    if ($script:RefUnstable) { $quiet = $false }
+    $soft = ((-not $ok) -and $LoadSensitive -and (-not $quiet))
+    if ($ok) {
+        Write-Host ("[PASS] {0}: {1:F1}{3} <= {2:F1}{3}" -f $Name, $Value, $Limit, $Unit) -ForegroundColor Green
+    } elseif ($soft) {
+        $lp = 0; try { $lp = (Get-PerfLoadSummary).p50_pct } catch { }
+        $m = ("{0}: {1:F1}{3} > {2:F1}{3}, but the machine was at {4}% of total cpu, over the {5}% quiet mark, and a difference of two timings stretches with the machine" -f $Name, $Value, $Limit, $Unit, $lp, $QuietLoadPct)
+        Write-Host "[WARN] $m" -ForegroundColor Yellow
+        [void]$script:Notes.Add($m)
+    } else {
+        Write-Host ("[FAIL] {0}: {1:F1}{3} > {2:F1}{3}"  -f $Name, $Value, $Limit, $Unit) -ForegroundColor Red; $script:Fails++
+    }
     if ($Why) { Write-Host "       $Why" -ForegroundColor DarkGray }
-    [void]$script:Thresholds.Add([pscustomobject]@{ name=$Name; value=[math]::Round($Value,2); limit=$Limit; unit=$Unit; pass=$ok; note=$Why })
+    [void]$script:Thresholds.Add([pscustomobject]@{ name=$Name; value=[math]::Round($Value,2); limit=$Limit; unit=$Unit; pass=$ok; soft=$soft; machine_quiet=$quiet; note=$Why })
 }
 
 function Percentile {
@@ -927,6 +985,10 @@ function New-Wrapper {
 # indistinguishable from a run that measured nothing.
 function Save-Metrics {
     param($Rows = @(), $Deltas = [ordered]@{})
+    # One load reading per save, and this function is called once after every
+    # section, so the samples map onto the sections without any bookkeeping.
+    # A reading costs one second; there are six saves in a full run.
+    try { Add-PerfLoadSample ("section {0}" -f $script:Thresholds.Count) | Out-Null } catch { }
     $payload = [ordered]@{
         # This suite keeps its own schema rather than the shared envelope's flat
         # `schema = 2`: it is rewritten after every section (complete=false) and
@@ -950,6 +1012,20 @@ function Save-Metrics {
             ram_gb    = $RamGb
             note      = "may have been measured while other builds or benchmarks were running; medians and n>=5 are used for that reason"
         }
+        # That note used to be the only statement about what else the machine
+        # was doing, and it says "may have been", which answers nothing. This
+        # is the measurement: \Processor(_Total)\% Processor Time sampled by
+        # the shared helper, same shape and same field names as every other
+        # perf JSON, so a loaded run can be told from a quiet one rather than
+        # guessed at. Save-Metrics is called after every section, and the
+        # samples accumulate, so the block grows as the run goes on.
+        load           = (Get-PerfLoadSummary)
+        # The reference arms' own p90 over their own median, and the verdict it
+        # produced. This is the other half of "was this run trustworthy", and
+        # unlike the CPU counter it is measured in the same interleaved window
+        # as the timings it judges.
+        ref_spread     = $script:RefSpread
+        ref_unstable   = $script:RefUnstable
         hosts_present  = [ordered]@{ windows_terminal = [bool]$WT; wezterm = [bool]$WEZ; alacritty = [bool]$ALAC }
         wt_was_running = $WtWasRunning
         params         = [ordered]@{
@@ -1085,6 +1161,25 @@ if (-not $SkipLaunch) {
 
     Head "1. LAUNCH THRESHOLDS"
     $bare = $script:Launch["bare_pwsh"]
+
+    # Was the baseline itself steady during this run? Measured on the reference
+    # cells only, because those are the ones the difference thresholds subtract.
+    # 1.35 sits above the 1.10 a quiet run produced and below the 1.72 a run
+    # with stalled launches produced, both measured on this machine on
+    # 2026-09-22 with the same binary.
+    $RefSpreadMax = 1.35
+    foreach ($refName in @("bare_pwsh", "wt_pwsh")) {
+        $r = $script:Launch[$refName]
+        if (-not $r -or -not $r.median -or $r.median -le 0) { continue }
+        $sp = [math]::Round($r.p90 / $r.median, 3)
+        $script:RefSpread[$refName] = $sp
+        if ($sp -gt $RefSpreadMax) {
+            $script:RefUnstable = $true
+            Warn ("{0} p90 {1:F0} ms is {2}x its own median {3:F0} ms, over {4}x: this run's baseline was being stalled, so the launch DIFFERENCE thresholds are reported as warnings rather than failures" -f $refName, $r.p90, $sp, $r.median, $RefSpreadMax)
+        } else {
+            Info ("{0} spread p90/median {1}x, within {2}x: the baseline was steady enough to subtract from" -f $refName, $sp, $RefSpreadMax)
+        }
+    }
     # T1 is an ABSOLUTE DELTA, not a ratio. A ratio of medians moves when bare
     # pwsh moves, and bare pwsh on this machine ranges from 350 to 600 ms
     # depending on what else is running, so the same psmux build scored 1.7x on
@@ -1095,23 +1190,23 @@ if (-not $SkipLaunch) {
     # without failing on a slow shell start that psmux did not cause.
     if ($bare -and $script:Launch["psmux_attached"]) {
         $pc = $script:Launch["psmux_attached"]
-        Check "T1 psmux attached launch minus bare pwsh (cold server)" ($pc.median - $bare.median) 350 "ms" `
+        Check -LoadSensitive "T1 psmux attached launch minus bare pwsh (cold server)" ($pc.median - $bare.median) 350 "ms" `
             ("psmux_attached median {0:F0} ms minus bare pwsh {1:F0} ms; this cell pays a server spawn on every repetition" -f $pc.median, $bare.median)
     } else { Warn "T1 not evaluated (a cell is missing)" }
     # The steady state case the old ratio was judged on keeps its own line, same
     # budget: this is the launch a user meets all day, with a server already up.
     if ($bare -and $script:Launch["psmux_attached_warm"]) {
         $pa = $script:Launch["psmux_attached_warm"]
-        Check "T1b psmux attached launch minus bare pwsh (warm server)" ($pa.median - $bare.median) 350 "ms" `
+        Check -LoadSensitive "T1b psmux attached launch minus bare pwsh (warm server)" ($pa.median - $bare.median) 350 "ms" `
             ("psmux_attached_warm median {0:F0} ms minus bare pwsh {1:F0} ms" -f $pa.median, $bare.median)
     } else { Warn "T1b not evaluated (a cell is missing)" }
     if ($script:Launch["wt_pwsh"] -and $script:Launch["psmux_in_wt_warm"]) {
         $pw = $script:Launch["psmux_in_wt_warm"]; $wtc = $script:Launch["wt_pwsh"]
-        Check "T2 psmux in WT over plain WT (warm)" ($pw.median - $wtc.median) 300 "ms" `
+        Check -LoadSensitive "T2 psmux in WT over plain WT (warm)" ($pw.median - $wtc.median) 300 "ms" `
             ("psmux_in_wt_warm {0:F0} ms minus wt_pwsh {1:F0} ms" -f $pw.median, $wtc.median)
     } else { Warn "T2 not evaluated (a cell is missing)" }
     if ($script:Launch["wt_pwsh"] -and $script:Launch["psmux_in_wt"]) {
-        Check "T2b psmux in WT over plain WT (cold server)" ($script:Launch["psmux_in_wt"].median - $script:Launch["wt_pwsh"].median) 700 "ms" `
+        Check -LoadSensitive "T2b psmux in WT over plain WT (cold server)" ($script:Launch["psmux_in_wt"].median - $script:Launch["wt_pwsh"].median) 700 "ms" `
             "the first psmux window of the day also pays a cold server spawn"
     }
     $null = Save-Metrics

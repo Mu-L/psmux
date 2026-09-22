@@ -309,7 +309,7 @@ Get-CimInstance Win32_Process -Filter "Name='psmux.exe'" |
 
 If a number looks wrong, the debug and crash logs described in [Diagnostics](diagnostics.md) show where the time went.
 
-## The metrics folder, and reading the trend
+## The metrics folder
 
 Every performance suite writes one JSON file per run into `%USERPROFILE%\.psmux-test-data\metrics\`, never into the repository. Nothing is ever overwritten, so the folder is a history: a suspected regression is compared against the run that last passed instead of against a number in a comment.
 
@@ -324,6 +324,7 @@ Each file carries the same envelope, written by `tests/perf_metrics_common.ps1`:
 | `git_sha` | short HEAD of the tree that binary was built in, found by walking up from the binary itself, or `installed` when it is a `cargo install` copy that sits in no work tree |
 | `version` | the binary's own `psmux -V` line |
 | `machine`, `os`, `cpu`, `cpu_count`, `ram_gb` | where it was measured |
+| `load` | what else the machine was doing: `n`, `min_pct`, `p50_pct`, `max_pct` and every sample, each one a reading of `\Processor(_Total)\% Processor Time` with the process count beside it |
 
 `git_sha` is taken from the binary's own directory and not from the current checkout, which matters in the one case that matters: comparing a fresh build against the installed one. A run of the installed psmux is honestly labelled `installed` rather than tagged with whatever `HEAD` the shell happened to be sitting on.
 
@@ -334,24 +335,107 @@ These are the files that carry numbers:
 | `launch-to-prompt-<stamp>.json` | psmux against a bare pwsh, per iteration samples plus p50 / p90 / p99 for both arms |
 | `keystroke-latency-<stamp>.json` | the echo cell, pooled percentiles and every sample, plus the memory and CPU block |
 | `keystroke-latency-pwsh-<stamp>.json` | the shell cell and the ConPTY floor measured in the same run |
-| `creation_latency_gate-<stamp>.json` | `new-window`, `split-window -v` and `-h`, samples and percentiles, plus the memory and CPU block |
+| `creation_latency_gate-<stamp>.json` | thirteen cells: `new-window`, `split-window -v` and `-h` at ten samples each, the `-f`, `-b`, `-bh`, `-bv` and with a command variants at five, `new-session` with and without the warm pool, and `kill-pane`, `kill-window` and `kill-session`, each with samples and percentiles, plus the memory and CPU block |
 | `pane_startup_perf-<stamp>.json` | first session, warm pool depth and burst creation |
+| `idle-socket-traffic-<stamp>.json` | what an idle attached pair puts on the socket, in lines per second, with the CPU beside it |
 | `perf_vs_terminals-<stamp>.json` | the head to head against Windows Terminal, WezTerm and Alacritty, with every threshold and its verdict |
 
-**Memory and CPU** are collected by the two latency gates as data, not as a gate. The keystroke gate samples the server and the attached client at the prompt and again after a burst of keystrokes, and reports working set, private bytes, the CPU those keystrokes cost as ms per 100 keys, and the CPU burnt over a quiet window with nothing typed. The creation gate does the same at one pane and again after it has opened twenty windows and three splits, which is what shows a per pane poll: a number that grew with the pane count while the one pane sample looked fine. Idle CPU is reported as a percentage of one core, and its resolution is one scheduler tick, 15.6 ms, so about 0.5 percent over a three second window. The thresholds on all of these live in `test_perf_vs_terminals` (T6 memory, T7 idle CPU, T8 keystroke CPU) so there is only one place to argue with; the gates assert only that the section produced data, because a JSON full of nulls that still says PASS is worse than a failure.
+## The gates, and what fails a sweep
 
-`tests/perf_summary.ps1` reads the folder and prints the trend:
+Five suites are gates rather than benchmarks: they assert, and a sweep goes red when one of them does not hold. Every one of them runs in its own `-L` socket namespace and tears down only that namespace, so none of them can disturb a session you are using.
+
+| suite | what it asserts | budget | writes |
+| --- | --- | --- | --- |
+| `test_launch_to_prompt_gate` | psmux launch to a visible prompt divided by bare pwsh launch to a visible prompt | `<= 2.0x` (hard) | `launch-to-prompt-*` |
+| | psmux median minus bare pwsh median | `<= 400 ms`, hard on a quiet machine and a warning otherwise | |
+| `test_keystroke_latency_gate` | echo cell, pooled median over every keystroke of every run | `< 3 ms` | `keystroke-latency-*` |
+| | echo cell, pooled p99 | `< 8 ms` | |
+| | shell cell, median above the ConPTY floor measured in the same run | `< 2.5 ms` | `keystroke-latency-pwsh-*` |
+| | shell cell, p99 above that floor | `< 6 ms` | |
+| | shell cell, absolute median ceiling | `< 30 ms` | |
+| `test_creation_latency_gate` | p50 per cell for `new-window` and both splits | `<= 150 ms` (hard) | `creation_latency_gate-*` |
+| | p50 for the `-f`, `-b`, `-bh` and `-bv` variants | `<= 200 ms` | |
+| | p50 for a split that carries its own command | `<= 2000 ms` | |
+| | p50 for `new-session` with the warm pool, and with `PSMUX_NO_WARM=1` | `<= 2000 ms` and `<= 3000 ms` | |
+| | p50 for `kill-pane`, `kill-window`, `kill-session` | `<= 400 ms`, `<= 400 ms`, `<= 3000 ms` | |
+| | how many of ten creations exceed 150 ms, plus p90 and max | `<= 2 of 10`, `<= 300 ms`, `<= 1500 ms`, hard on a quiet machine and warnings otherwise | |
+| `test_idle_socket_traffic` | lines per second an idle attached pair puts on the socket | see the suite | `idle-socket-traffic-*` |
+| `test_perf_vs_terminals` | T1 psmux launch over bare pwsh, T2 psmux in Windows Terminal over plain Windows Terminal, both load aware | `350 ms`, `300 ms` | `perf_vs_terminals-*` |
+| | T3 keystroke over the ConPTY floor measured in the same run, and the absolute p99 | `2.5 ms` and `25 ms` | |
+| | T4 first session to prompt, and creation p90 | `1000 ms` and `300 ms` | |
+| | T6 server and client working set, T7 idle CPU, T8 CPU per 100 keystrokes | `60 MB` each, `3% of one core`, `3000 ms` | |
+| | T5 no leftover processes | `0` | |
+
+**Why some budgets are ratios and some are load aware.** Both were measured, not guessed. Against the same installed binary on the same machine, once quiet and once with five other build jobs running:
+
+| | quiet | loaded | |
+| --- | ---: | ---: | --- |
+| bare pwsh launch | 393 ms | 892 ms | the machine |
+| psmux launch | 625 ms | 1374 ms | the machine |
+| **delta** | **232 ms** | **482 ms** | doubles with load, so it cannot be a gate on its own |
+| **ratio** | **1.59x** | **1.54x** | moves 3 percent, so it can |
+| `new-window` p50 | 25 ms | 29 ms | the warm pool's own path |
+| `new-window` p90 | 110 ms | 416 ms | a creation that waits out a cold shell waits out whatever a cold shell costs |
+
+So the hard assertions are the ones that do not move with the machine: a ratio for launch, a p50 for creation, a keystroke p99, and everything measured against a floor taken in the same run. The rest are still asserted, but every suite samples `\Processor(_Total)\% Processor Time` around its cells, and when the machine was above 25 percent of total CPU those assertions are recorded as warnings in the run output and in the JSON (`tail_warnings`, or `soft` on a threshold row) instead of failing the sweep. The load itself is in the envelope, so a warning can always be checked against what the machine was doing.
+
+Which assertions are load aware, and why each one is or is not:
+
+| assertion | load aware | because |
+| --- | --- | --- |
+| launch ratio | no, hard always | both arms stretch together, so the ratio does not move |
+| launch absolute delta, and `test_perf_vs_terminals` T1, T1b, T2, T2b | yes | a difference between two timings stretches with the machine |
+| creation p50 per cell | no, hard always | it is the warm pool's own path and it moved 4 ms between a quiet box and one at 60 percent |
+| creation slow count, p90, max | yes | a creation that waits out a cold shell waits out whatever a cold shell costs today |
+| keystroke echo p50 | yes | under load a healthy median lands on top of the defect's median and stops discriminating |
+| keystroke echo p99 | no, hard always | under the same load it was still half the defect's |
+| keystroke over the ConPTY floor | no, hard always | the floor is measured in the same run and moves with the machine too |
+| memory, idle CPU, CPU per keystroke, leftover processes | no, hard always | not timings |
+
+A CPU counter sampled once per section is not on its own enough to tell a trustworthy run from an untrustworthy one. The head to head run of 2026-09-22 failed T1 and T2 while its own load samples read a median of 6.5 percent of total CPU: the machine was not steadily busy, it was stalling individual launches, and its first interleaved round measured every host at two to three times the rest of the run. So `test_perf_vs_terminals` also checks the spread of the reference arms it subtracts from, `p90 / median` on `bare_pwsh` and `wt_pwsh`, which is measured inside the very same interleaved window as the timings it judges:
+
+| | bare pwsh median | bare pwsh p90 | spread |
+| --- | ---: | ---: | ---: |
+| a trustworthy run | 434 ms | 477 ms | 1.10x |
+| the run that failed T1 and T2 | 428 ms | 736 ms | 1.72x |
+
+Above 1.35x the baseline is declared unstable, the difference thresholds report as warnings, and `ref_spread` and `ref_unstable` go into the JSON beside `load`.
+
+Memory and CPU are recorded by every gate and gated in one place. The keystroke gate samples the server and the attached client at the prompt and again after a burst of keystrokes, and reports working set, private bytes, CPU as ms per 100 keys, and CPU over a quiet window with nothing typed. The creation gate does the same at one pane and again after twenty windows and three splits, which is what shows a per pane poll: a number that grew with the pane count while the one pane sample looked fine. The launch gate samples the last iteration at its prompt. Idle CPU is a percentage of one core and its resolution is one scheduler tick, 15.6 ms, about 0.5 percent over a three second window. The thresholds on all of these live in `test_perf_vs_terminals` (T6, T7, T8), so there is only one place to argue with; the other gates assert only that the section produced data, because a JSON full of nulls that still says PASS is worse than a failure.
+
+## Reading the trend
+
+`tests/perf_summary.ps1` reads the metrics folder and prints it back:
 
 ```powershell
 pwsh -NoProfile -File tests\perf_summary.ps1              # last 8 runs of every metric
 pwsh -NoProfile -File tests\perf_summary.ps1 -Last 20     # a longer window
-pwsh -NoProfile -File tests\perf_summary.ps1 -Metric B    # one section: A, B, C or D
+pwsh -NoProfile -File tests\perf_summary.ps1 -Metric B    # one section: A, B, C, D or T
+pwsh -NoProfile -File tests\perf_summary.ps1 -Metric T    # the trend table on its own
 pwsh -NoProfile -File tests\perf_summary.ps1 -Csv perf.csv
 ```
 
-The four sections are the four questions: **A** launch to a usable prompt, psmux against a bare pwsh and against every terminal a head to head run found; **B** keystroke to screen at p50, p90 and p99, with the shell cell judged against the ConPTY floor measured in the same run; **C** creation latency at p50 and p90 for `new-window` and both splits; **D** working set, private bytes and CPU for the server and the client. Every row carries the git sha and the binary, so two rows can be compared without guessing what produced them. Rows written before the envelope existed show a blank sha and are still listed: the shape of the line is the point.
+Sections **A** to **D** are the four questions run by run: **A** launch to a usable prompt, psmux against a bare pwsh and against every terminal a head to head run found; **B** keystroke to screen at p50, p90 and p99, with the shell cell judged against the ConPTY floor measured in the same run; **C** creation latency at p50 and p90 for every cell; **D** working set, private bytes and CPU for the server and the client.
 
-All four latency suites are part of `tests\run_all_tests.ps1` as performance suites, so `-SkipPerf` skips them and a default sweep runs them. They take the build in `target\release` by default, ahead of the psmux on `PATH`; `-Binary <path>` or `PSMUX_TEST_BINARY` points them somewhere else, which is how two builds are compared against each other.
+Section **T** is the trend. One row per headline number, every one of them a number where lower is better, showing the minimum, the median and the maximum over the window, the newest value, and the median of the five runs before it:
+
+```
+  metric                             unit    runs       min    median       max    newest   prev5med  flag
+  launch psmux / bare pwsh           x          8     1.533     1.589     1.621     1.533      1.611  ok -5%
+  keystroke echo p50                 ms         8      1.64       1.7      1.83      1.71       1.69  ok +1%
+  creation new-window p50            ms         8        15        25        36        29         25  ok +20%
+  new-session warm p50               ms         6        69        82        96        82         83  ok -1%
+  new-session no-warm p50            ms         6       780       802       940       802        810  ok -1%
+  server working set at prompt       MB         8      15.6      15.7      15.8      15.7       15.7  ok 0%
+```
+
+A row is flagged **REGRESSED** when the newest run is worse than the median of the previous five by more than 20 percent, which `-RegressPct` changes. The comparison is against a median of five rather than against last time on purpose: any single previous run can be the one that ran while something else was linking, and a rule that fires on that stops being read, while a real regression is present in every run after it lands and so moves the median with it. Twenty percent is above this machine's run to run spread on every metric in the table.
+
+`-FailOnRegression` makes the script exit non zero when anything is flagged, for a pipeline that wants the trend itself to be a gate. By default it only prints, because the gates are the thing that fails a sweep.
+
+Before believing a flag, open the file it came from and look at `load`. A tail that grew on a machine at 70 percent is the afternoon; a p50 that grew on a quiet machine is the build.
+
+All of these suites are part of `tests\run_all_tests.ps1`, which runs every `tests\test_*.ps1` file, so a default sweep runs all of them and nothing has to be opted into. `-SkipPerf` skips the ones listed as performance suites. They take the build in `target\release` by default, ahead of the psmux on `PATH`; `-Binary <path>` or `PSMUX_TEST_BINARY` points them somewhere else, which is how two builds are compared against each other.
 
 ## FAQ
 

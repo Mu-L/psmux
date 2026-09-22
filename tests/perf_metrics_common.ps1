@@ -20,6 +20,25 @@
 #                 does not sit in a work tree (a cargo install copy does not)
 #   machine       computer name
 #   os / cpu / cpu_count / ram_gb
+#   load          what else the machine was doing: percent of TOTAL cpu busy,
+#                 sampled from \Processor(_Total)\% Processor Time, with every
+#                 sample a suite took during the run summarised as n/min/p50/max
+#
+# WHY THE LOAD BLOCK EXISTS
+# -------------------------
+# The owner's machine routinely runs five or six agents building and testing at
+# once, and a creation that is served by a warm spare in 17 ms on a quiet box
+# takes 35 ms on a box at 60 percent, while the one creation in ten that has to
+# wait out a cold pwsh start goes from 470 ms to 1780 ms. Measured here on
+# 2026-09-22 with five other agents building:
+#
+#   quiet  (2026-09-21 18:41)  new-window  p50 25 ms  p90 110 ms  max  474 ms
+#   loaded (2026-09-22 22:19)  new-window  p50 35 ms  p90 794 ms  max 1781 ms
+#
+# The p50 barely moves because it is the pool's own path. The tail is the
+# machine. A JSON that does not say which of the two it was recorded cannot
+# tell a regression from a busy afternoon, so the load goes in the envelope and
+# a gate may consult it before it decides whether a tail is a failure.
 #
 # and the same shapes for numbers: Get-PerfStats returns n/min/p50/p90/p99/max/
 # mean, and the resource helpers return working set, private bytes and CPU in
@@ -38,7 +57,10 @@
 #
 # Dot source it:  . "$PSScriptRoot\perf_metrics_common.ps1"
 
-$script:PerfSchema = 2
+# 3 added the `load` block to the envelope. Everything schema 2 carried is still
+# carried under the same names, so a schema 2 file and a schema 3 file line up
+# field for field and perf_summary.ps1 reads both.
+$script:PerfSchema = 3
 
 # ── percentiles ───────────────────────────────────────────────────────────
 # Nearest rank on the sorted sample, which is the rule the keystroke gate
@@ -112,6 +134,85 @@ function Get-PerfBinaryVersion {
     return ""
 }
 
+# ── what else the machine was doing ───────────────────────────────────────
+# One sample of \Processor(_Total)\% Processor Time, which is the percentage of
+# TOTAL cpu across every core, so 60 on a 32 core box means about 19 cores busy.
+#
+# Get-Counter is used first because it is the number Task Manager shows. It is
+# not always available: counter names are localised, the performance counter
+# service can be disabled, and a remote-free machine with a corrupt registry
+# answers nothing. The CIM class is the fallback, and $null is the honest answer
+# when neither works - a gate must never fail because it could not read a
+# counter, it must only lose the ability to explain a slow tail.
+function Get-PerfMachineLoad {
+    param([int]$SampleMs = 1000)
+    $pct = $null
+    try {
+        $s = Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 1 -ErrorAction Stop
+        $pct = [math]::Round([double]($s.CounterSamples | Select-Object -First 1 -ExpandProperty CookedValue), 1)
+    } catch {
+        try {
+            $c = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction Stop
+            if ($c) { $pct = [math]::Round([double]$c.PercentProcessorTime, 1) }
+        } catch { }
+    }
+    if ($null -ne $pct) {
+        if ($pct -lt 0) { $pct = 0.0 }
+        if ($pct -gt 100) { $pct = 100.0 }
+    }
+    $procs = 0
+    try { $procs = @(Get-Process -ErrorAction SilentlyContinue).Count } catch { }
+    return [ordered]@{
+        at          = (Get-Date).ToString("o")
+        cpu_pct     = $pct
+        process_cnt = $procs
+    }
+}
+
+# Samples accumulate for the life of the suite process. A gate calls
+# Add-PerfLoadSample at the points it cares about (before a cell, after a cell)
+# and the summary rides into the envelope automatically.
+$script:PerfLoadSamples = New-Object System.Collections.Generic.List[object]
+
+function Add-PerfLoadSample {
+    param([string]$Label = "")
+    $s = Get-PerfMachineLoad
+    $s["label"] = $Label
+    $script:PerfLoadSamples.Add($s) | Out-Null
+    return $s
+}
+
+function Get-PerfLoadSummary {
+    $vals = @($script:PerfLoadSamples | ForEach-Object { $_.cpu_pct } | Where-Object { $null -ne $_ })
+    $st = Get-PerfStats $vals 1
+    return [ordered]@{
+        n       = $st.n
+        min_pct = $st.min
+        p50_pct = $st.p50
+        max_pct = $st.max
+        # .ToArray(), not @(...). Wrapping a List[object] of ordered dictionaries
+        # in @() and then putting it in an [ordered] literal throws "Argument
+        # types do not match" in pwsh 7.6, and the throw happens while building
+        # the envelope, which would take every perf JSON with it.
+        samples = $script:PerfLoadSamples.ToArray()
+    }
+}
+
+# The one question a gate asks of the load: was this machine quiet enough that a
+# slow tail can only have been the product? Defaults to 25 percent of total cpu,
+# which on the owner's 32 core box is eight cores busy: comfortably above an
+# idle desktop and comfortably below one sibling cargo build.
+#
+# $null (the counter could not be read) is treated as NOT quiet. A gate that
+# cannot see the machine must not pretend the machine was idle.
+function Test-PerfMachineQuiet {
+    param([double]$MaxPct = 25.0)
+    $vals = @($script:PerfLoadSamples | ForEach-Object { $_.cpu_pct } | Where-Object { $null -ne $_ })
+    if ($vals.Count -eq 0) { return $false }
+    if ($vals.Count -ne $script:PerfLoadSamples.Count) { return $false }
+    return ((Get-PerfPercentile $vals 50) -le $MaxPct)
+}
+
 # ── the envelope every perf JSON carries ──────────────────────────────────
 function Get-PerfEnvelope {
     param([string]$Suite, [string]$Binary)
@@ -119,6 +220,10 @@ function Get-PerfEnvelope {
     try { $cpu = (Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Name) } catch { }
     $ram = 0
     try { $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory / 1GB, 1) } catch { }
+    # A suite that never called Add-PerfLoadSample still gets one reading, taken
+    # here, so no perf JSON can be written without saying what the machine was
+    # doing. It costs one second, once, at the end of a run.
+    if ($script:PerfLoadSamples.Count -eq 0) { Add-PerfLoadSample "at_write" | Out-Null }
     return [ordered]@{
         schema    = $script:PerfSchema
         suite     = $Suite
@@ -131,6 +236,7 @@ function Get-PerfEnvelope {
         cpu       = ($cpu -replace '\s+$', '')
         cpu_count = [Environment]::ProcessorCount
         ram_gb    = $ram
+        load      = (Get-PerfLoadSummary)
     }
 }
 

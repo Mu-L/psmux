@@ -29,11 +29,39 @@ $HOME_DIR = $env:USERPROFILE
 $PSMUX_DIR = "$HOME_DIR\.psmux"
 $PLUGINS_DIR = "$PSMUX_DIR\plugins"
 
+# The four session name shapes this suite creates, and nothing else. See
+# Reset-Psmux.
+$script:OwnSessionPatterns = @("bare_*", "plug_*", "verify_sync", "pwsh_perf")
+
+# Tear down ONLY what this suite made.
+#
+# This function used to be
+#
+#     Get-Process psmux | Stop-Process -Force
+#     Remove-Item "$PSMUX_DIR\*.port"
+#     Remove-Item "$PSMUX_DIR\*.key"
+#
+# which kills every psmux server on the machine by image name and then deletes
+# the registry of every session that was running, including the developer's own
+# attached sessions and, on this machine, the servers belonging to the five
+# other agents who are running their own suites at the same time. It is called
+# six times during a run, so a full sweep did that six times.
+#
+# A session is now found by NAME, killed with kill-session so the server tears
+# its own tree down, and only its own two registry files are removed. Nothing
+# here touches a process this suite did not create.
 function Reset-Psmux {
-    Get-Process psmux -ErrorAction SilentlyContinue | Stop-Process -Force
+    foreach ($pat in $script:OwnSessionPatterns) {
+        foreach ($f in @(Get-ChildItem "$PSMUX_DIR\$pat.port" -ErrorAction SilentlyContinue)) {
+            $name = $f.BaseName
+            try { & $PSMUX kill-session -t $name 2>&1 | Out-Null } catch { }
+        }
+    }
     Start-Sleep -Milliseconds 800
-    Remove-Item "$PSMUX_DIR\*.port" -Force -ErrorAction SilentlyContinue
-    Remove-Item "$PSMUX_DIR\*.key" -Force -ErrorAction SilentlyContinue
+    foreach ($pat in $script:OwnSessionPatterns) {
+        Remove-Item "$PSMUX_DIR\$pat.port" -Force -ErrorAction SilentlyContinue
+        Remove-Item "$PSMUX_DIR\$pat.key" -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host ""

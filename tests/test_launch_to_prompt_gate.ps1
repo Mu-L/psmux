@@ -42,12 +42,34 @@
 #            a SPLIT is ~25ms and a cold new-session is not
 #    ~540ms  pwsh's own init, which is slower through ConPTY than in a console
 #   psmux therefore owns roughly 100ms of a cold launch (two exe loads plus the
-#   registry); everything else is the shell and the operating system. The
-#   gate is set at 400ms: the measured ceiling plus room for a loaded machine
-#   (these suites run alongside others) and for the warm pane / warm server
-#   that psmux spawns during startup, which costs a further ~40-100ms of CPU
-#   contention. A regression that reintroduces a whole shell start is ~280ms
-#   and lands well outside it.
+#   registry); everything else is the shell and the operating system.
+#
+# THE GATE IS A RATIO, NOT A DIFFERENCE
+#
+#   An absolute delta cannot be a gate on a machine that is sometimes busy,
+#   because BOTH arms stretch when the machine is busy and the difference
+#   between two stretched numbers stretches with them. Measured on this machine
+#   against the same installed binary (0bcc421) on 2026-09-22:
+#
+#     quiet    bare 393 ms   psmux  625 ms   delta 232 ms   ratio 1.59
+#     loaded   bare 892 ms   psmux 1374 ms   delta 482 ms   ratio 1.54
+#
+#   Nothing about psmux differed between those two rows. The delta doubled and
+#   would have failed a 400 ms gate; the ratio moved by three percent. Across
+#   the five previous recorded runs the ratio sat between 1.56 and 1.62, and
+#   the loaded run above is inside that band.
+#
+#   So the HARD gate is the ratio, budgeted at $MaxRatio. The defect this file
+#   exists for put a whole second pwsh start (~278 ms) on top of a gap that was
+#   already ~250 ms, which on a quiet machine is 393 -> ~921 ms, a ratio of
+#   2.34; and because the ratio does not move with load, it is over the budget
+#   on a busy machine too.
+#
+#   The absolute delta is still asserted, because it is the number a human
+#   reads, but as a LOAD AWARE assertion: a hard failure when the machine was
+#   quiet during the run and a recorded warning when it was not. The machine
+#   load is sampled with \Processor(_Total)\% Processor Time and written into
+#   the JSON, so a warning can always be checked.
 #
 # MEMORY AND CPU
 #   A launch number on its own cannot tell a build that got there faster from a
@@ -68,6 +90,12 @@ param(
     [string]$Binary = "",
     [int]$N = 5,
     [int]$MaxDeltaMs = 400,
+    # THE HARD GATE. Measured ratios: 1.56 to 1.62 over five quiet runs and
+    # 1.54 on a machine at 74 percent. The defect is 2.34. See the header.
+    [double]$MaxRatio = 2.0,
+    # At or under this percentage of TOTAL cpu the machine counts as quiet and
+    # the absolute delta is a hard failure; above it, a warning.
+    [double]$QuietLoadPct = 25.0,
     # The quiet window used for the idle CPU sample on the last iteration.
     [int]$IdleSeconds = 3
 )
@@ -77,8 +105,10 @@ $ErrorActionPreference = "Continue"
 $script:TestsPassed = 0
 $script:TestsFailed = 0
 $script:TestsSkipped = 0
+$script:Warnings = New-Object System.Collections.Generic.List[string]
 function Write-Pass { param($msg) Write-Host "[PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
 function Write-Fail { param($msg) Write-Host "[FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
+function Write-Warn { param($msg) Write-Host "[WARN] $msg" -ForegroundColor Yellow; $script:Warnings.Add($msg) | Out-Null }
 function Write-Skip { param($msg) Write-Host "[SKIP] $msg" -ForegroundColor Yellow; $script:TestsSkipped++ }
 function Write-Info { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 function Write-Perf { param($msg) Write-Host "[PERF] $msg" -ForegroundColor Magenta }
@@ -210,6 +240,8 @@ function Median($a) {
 & $Binary -L $ns kill-server 2>$null | Out-Null
 
 $script:ResourceBlock = $null
+Add-PerfLoadSample "start" | Out-Null
+Write-Info ("machine load at the start: {0}% of total cpu" -f (Get-PerfLoadSummary).p50_pct)
 $bare = @(); $mux = @()
 for ($i = 1; $i -le $N; $i++) {
     $b = Measure-Bare $i
@@ -224,22 +256,45 @@ for ($i = 1; $i -le $N; $i++) {
 }
 & $Binary -L $ns kill-server 2>$null | Out-Null
 
+Add-PerfLoadSample "end" | Out-Null
+$loadSummary = Get-PerfLoadSummary
+$wasQuiet = Test-PerfMachineQuiet $QuietLoadPct
+
 $bareMed = Median $bare
 $muxMed  = Median $mux
+$ratio = $null
 
 if ($null -eq $bareMed -or $null -eq $muxMed) {
     Write-Fail "launch to prompt: a shell never reached its prompt (bare=$($bare -join ',') psmux=$($mux -join ','))"
 } else {
     $delta = [math]::Round($muxMed - $bareMed, 1)
+    if ($bareMed -gt 0) { $ratio = [math]::Round($muxMed / $bareMed, 3) }
     $bareStats = Get-PerfStats $bare 1
     $muxStats  = Get-PerfStats $mux 1
     Write-Perf ("bare  median: {0} ms  (p90 {1}, max {2})" -f $bareMed, $bareStats.p90, $bareStats.max)
     Write-Perf ("psmux median: {0} ms  (p90 {1}, max {2})" -f $muxMed, $muxStats.p90, $muxStats.max)
-    Write-Perf ("delta       : {0} ms (gate {1} ms)" -f $delta, $MaxDeltaMs)
+    Write-Perf ("delta       : {0} ms (gate {1} ms)   ratio: {2} (gate {3})" -f $delta, $MaxDeltaMs, $ratio, $MaxRatio)
+    Write-Perf ("machine load: n={0} min={1}% p50={2}% max={3}%  -> {4}" -f `
+        $loadSummary.n, $loadSummary.min_pct, $loadSummary.p50_pct, $loadSummary.max_pct, `
+        $(if ($wasQuiet) { "quiet" } else { "loaded" }))
+
+    # THE HARD GATE. Load invariant, because both arms stretch together.
+    if ($null -eq $ratio) {
+        Write-Fail "launch to prompt: the bare arm measured zero, so no ratio could be taken"
+    } elseif ($ratio -le $MaxRatio) {
+        Write-Pass ("launch to prompt: psmux takes {0}x bare pwsh (<= {1}x)" -f $ratio, $MaxRatio)
+    } else {
+        Write-Fail ("launch to prompt: psmux takes {0}x bare pwsh (> {1}x)  a shell wrapper around the pane command is the usual cause" -f $ratio, $MaxRatio)
+    }
+
+    # The number a human reads, judged only when the machine was quiet enough
+    # for it to mean anything. See the header.
     if ($delta -le $MaxDeltaMs) {
         Write-Pass "launch to prompt: psmux adds $delta ms over bare pwsh (<= $MaxDeltaMs ms)"
-    } else {
+    } elseif ($wasQuiet) {
         Write-Fail "launch to prompt: psmux adds $delta ms over bare pwsh (> $MaxDeltaMs ms)  a shell wrapper around the pane command is the usual cause"
+    } else {
+        Write-Warn ("launch to prompt: psmux adds $delta ms over bare pwsh (> $MaxDeltaMs ms), but the machine was at {0}% of total cpu, over the {1}% quiet mark, and an absolute delta stretches with the machine while the ratio ({2}x) does not" -f $loadSummary.p50_pct, $QuietLoadPct, $ratio)
     }
 }
 
@@ -252,6 +307,11 @@ if ($null -eq $bareMed -or $null -eq $muxMed) {
 $jsonPath = Write-PerfMetrics -Suite "test_launch_to_prompt_gate" -Binary $Binary -FileStem "launch-to-prompt" -Data ([ordered]@{
     iterations   = $N
     gate_ms      = $MaxDeltaMs
+    gate_ratio   = $MaxRatio
+    ratio        = $ratio
+    quiet_load_pct    = $QuietLoadPct
+    machine_was_quiet = $wasQuiet
+    tail_warnings     = $script:Warnings.ToArray()
     bare_ms      = $bare
     psmux_ms     = $mux
     bare_median  = $bareMed
@@ -266,5 +326,5 @@ if ($jsonPath) { Write-Info "samples: $jsonPath" }
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
-Write-Host "Passed: $script:TestsPassed  Failed: $script:TestsFailed  Skipped: $script:TestsSkipped"
+Write-Host "Passed: $script:TestsPassed  Failed: $script:TestsFailed  Skipped: $script:TestsSkipped  Warnings: $($script:Warnings.Count)"
 if ($script:TestsFailed -gt 0) { exit 1 } else { exit 0 }

@@ -6,10 +6,12 @@
 #
 #   pwsh -File tests\perf_summary.ps1              last 8 runs of every metric
 #   pwsh -File tests\perf_summary.ps1 -Last 20     a longer window
-#   pwsh -File tests\perf_summary.ps1 -Metric B    one section (A, B, C, D or all)
+#   pwsh -File tests\perf_summary.ps1 -Metric B    one section (A, B, C, D, T or all)
+#   pwsh -File tests\perf_summary.ps1 -Metric T    the trend table on its own
 #   pwsh -File tests\perf_summary.ps1 -Csv out.csv the same rows, for a chart
 #
-# The four sections are the owner's four questions:
+# The five sections are the owner's four questions, plus the one that reads the
+# answers back over time:
 #
 #   A  launch to a usable shell prompt, psmux against a bare pwsh, and against
 #      Windows Terminal, WezTerm and Alacritty where a head to head run exists
@@ -20,6 +22,22 @@
 #      keystrokes, at the first prompt of a fresh session, over an idle window,
 #      and idle as a percentage of one core) for the server and the attached
 #      client, from all five perf gates
+#   T  the trend: every headline number as min / median / max over the window,
+#      with the newest run compared against the MEDIAN OF THE PREVIOUS FIVE and
+#      flagged when it is worse by more than -RegressPct (20 by default)
+#
+# WHY THE COMPARISON IS AGAINST A MEDIAN OF FIVE AND NOT AGAINST LAST TIME
+#
+# Any single previous run can be the one that ran while a sibling agent was
+# linking. Comparing against it produces a regression alert every other day and
+# the alert stops being read. The median of the previous five is unmoved by one
+# bad afternoon and still moves immediately when a build genuinely gets slower,
+# because a real regression is present in every run after it lands. Twenty
+# percent is above this machine's run to run spread on every metric in the
+# table: keystroke p50 sat between 1.64 and 1.71 ms over five runs (4 percent),
+# launch delta between 224 and 235 ms (5 percent), and creation p50 between 15
+# and 28 ms, which is the widest at about 30 percent and is exactly why the
+# creation rows are read with the gate's own p50 budget beside them.
 #
 # Every row carries the git sha of the tree the measured binary was built in, or
 # "installed" when it was a cargo install copy, so two rows can be compared
@@ -30,10 +48,17 @@
 
 param(
     [int]$Last = 8,
-    [ValidateSet("all", "A", "B", "C", "D")]
+    [ValidateSet("all", "A", "B", "C", "D", "T")]
     [string]$Metric = "all",
     [string]$MetricsDir = "",
-    [string]$Csv = ""
+    [string]$Csv = "",
+    # How much worse than the median of the previous five counts as a
+    # regression, in percent. See the header for why 20.
+    [double]$RegressPct = 20.0,
+    # Exit 1 when any tracked metric is flagged. Off by default: this script is
+    # a reading tool and the gates are the thing that fails a sweep. CI that
+    # wants the trend to be a gate turns it on.
+    [switch]$FailOnRegression
 )
 
 $ErrorActionPreference = "Continue"
@@ -418,6 +443,186 @@ function Show-D {
     }
 }
 
+# ── T: the trend, and what is getting worse ───────────────────────────────
+#
+# One table instead of five, because the question "did anything get slower this
+# week" should not require reading five tables and doing the arithmetic in your
+# head. Every row is a metric where LOWER IS BETTER, which is every metric this
+# project records: milliseconds, megabytes, percent of a core.
+#
+# The window is at least six runs whatever -Last says, because the rule needs a
+# newest run plus five to take a median of. With fewer than six the row still
+# prints its min / median / max and says so in the flag column.
+$script:TrendRegressions = 0
+
+function Get-TrendSeries {
+    param([string]$Pattern, [string[]]$Exclude = @(), [scriptblock]$Value)
+    $files = @(Get-ChildItem -LiteralPath $MetricsDir -Filter $Pattern -File -ErrorAction SilentlyContinue |
+        Where-Object { $n = $_.Name; -not ($Exclude | Where-Object { $n -like $_ }) } |
+        Sort-Object LastWriteTime -Descending | Select-Object -First ([Math]::Max($Last, 6)))
+    $out = @()
+    foreach ($f in $files) {
+        try {
+            $j = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json
+            $v = & $Value $j
+            if ($null -eq $v) { continue }
+            $d = 0.0
+            if (-not [double]::TryParse([string]$v, [ref]$d)) { continue }
+            $out += [pscustomobject]@{ When = $f.LastWriteTime; Sha = (Sha $j); Value = $d }
+        } catch { }
+    }
+    # Newest first is how they were read; newest LAST is how a trend is read.
+    return @($out | Sort-Object When)
+}
+
+function Median-Of {
+    param([double[]]$V)
+    if ($V.Count -eq 0) { return $null }
+    $s = @($V | Sort-Object)
+    if ($s.Count % 2 -eq 1) { return [double]$s[[int](($s.Count - 1) / 2)] }
+    return (([double]$s[$s.Count / 2 - 1] + [double]$s[$s.Count / 2]) / 2.0)
+}
+
+function Show-TrendRow {
+    param([string]$Name, [string]$Unit, [int]$Round, $Series)
+    if ($null -eq $Series -or @($Series).Count -eq 0) {
+        Write-Host ("  {0,-34} {1,-6} {2,>5} {3,9} {4,9} {5,9} {6,9} {7,10}  {8}" -f `
+            $Name, $Unit, 0, "-", "-", "-", "-", "-", "no runs recorded") -ForegroundColor DarkGray
+        return
+    }
+    $s = @($Series)
+    $vals = [double[]]@($s | ForEach-Object { $_.Value })
+    $newest = $s[-1]
+    $min = ($vals | Measure-Object -Minimum).Minimum
+    $max = ($vals | Measure-Object -Maximum).Maximum
+    $med = Median-Of $vals
+
+    $flag = "few runs"; $colour = "DarkGray"; $baseline = $null; $pct = $null
+    if ($s.Count -ge 6) {
+        $prev5 = [double[]]@($s[($s.Count - 6)..($s.Count - 2)] | ForEach-Object { $_.Value })
+        $baseline = Median-Of $prev5
+        if ($null -ne $baseline -and $baseline -gt 0) {
+            $pct = (($newest.Value - $baseline) / $baseline) * 100.0
+            if ($pct -gt $RegressPct) {
+                $flag = ("REGRESSED +{0:N0}%" -f $pct); $colour = "Red"; $script:TrendRegressions++
+            } elseif ($pct -lt (-1 * $RegressPct)) {
+                $flag = ("improved {0:N0}%" -f $pct); $colour = "Green"
+            } else {
+                $flag = ("ok {0:+0;-0;0}%" -f $pct); $colour = "Gray"
+            }
+        }
+    }
+    Write-Host ("  {0,-34} {1,-6} {2,5} {3,9} {4,9} {5,9} {6,9} {7,10}  {8}" -f `
+        $Name, $Unit, $s.Count, (Num $min $Round), (Num $med $Round), (Num $max $Round),
+        (Num $newest.Value $Round), (Num $baseline $Round), $flag) -ForegroundColor $colour
+    Emit "T_trend" ([pscustomobject]@{
+        metric = $Name; unit = $Unit; runs = $s.Count
+        min = $min; median = $med; max = $max
+        newest = $newest.Value; newest_when = $newest.When.ToString("MM-dd HH:mm"); newest_sha = $newest.Sha
+        baseline_prev5_median = $baseline; delta_pct = $pct; flag = $flag
+    })
+}
+
+function Show-T {
+    Head "T  TREND, LAST $([Math]::Max($Last,6)) RUNS PER METRIC  (lower is better everywhere)"
+    Write-Host ("  {0,-34} {1,-6} {2,5} {3,9} {4,9} {5,9} {6,9} {7,10}  {8}" -f `
+        "metric", "unit", "runs", "min", "median", "max", "newest", "prev5med", "flag") -ForegroundColor DarkCyan
+
+    $kExcl = @("keystroke-latency-pwsh-*")
+
+    # A: launch
+    Show-TrendRow "launch psmux p50" "ms" 0 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop $j "psmux_median" })
+    Show-TrendRow "launch psmux minus bare pwsh" "ms" 0 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop $j "delta_ms" })
+    # The load invariant one, and the gate's own hard assertion. A file written
+    # before the ratio landed still contributes a row, computed from the two
+    # medians it does carry.
+    Show-TrendRow "launch psmux / bare pwsh" "x" 3 (Get-TrendSeries "launch-to-prompt-*.json" @() {
+        param($j)
+        $r = Prop $j "ratio"
+        if ($null -ne $r) { return $r }
+        $b = Prop $j "bare_median"; $m = Prop $j "psmux_median"
+        if ($null -eq $b -or $null -eq $m -or [double]$b -le 0) { return $null }
+        return ([double]$m / [double]$b)
+    })
+    $vtCell = {
+        param($j, $host_, $field)
+        $t = Prop $j "summary_table" @()
+        $c = ($t | Where-Object { $_.host -eq $host_ } | Select-Object -First 1)
+        Prop $c $field
+    }
+    Show-TrendRow "launch psmux attached (vs terms)" "ms" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $vtCell $j "psmux_attached" "launch_median" })
+    Show-TrendRow "launch Windows Terminal" "ms" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $vtCell $j "wt_pwsh" "launch_median" })
+    Show-TrendRow "launch WezTerm" "ms" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $vtCell $j "wezterm_pwsh" "launch_median" })
+    Show-TrendRow "launch bare pwsh" "ms" 0 (Get-TrendSeries "perf_vs_terminals-*.json" @() { param($j) & $vtCell $j "bare_pwsh" "launch_median" })
+
+    # B: keystroke
+    Show-TrendRow "keystroke echo p50" "ms" 2 (Get-TrendSeries "keystroke-latency-*.json" $kExcl { param($j) Prop (Prop $j "pooled") "median" })
+    Show-TrendRow "keystroke echo p99" "ms" 2 (Get-TrendSeries "keystroke-latency-*.json" $kExcl { param($j) Prop (Prop $j "pooled") "p99" })
+    Show-TrendRow "keystroke pwsh over ConPTY floor" "ms" 2 (Get-TrendSeries "keystroke-latency-pwsh-*.json" @() { param($j) Prop (Prop $j "pwsh") "medianDelta" })
+
+    # C: creation and teardown, every cell the gate records
+    $cell = {
+        param($j, $name, $stat)
+        $s = Prop $j "stats_ms"
+        $st = Prop $s $name
+        if ($st) { return (Prop $st $stat) }
+        return $null
+    }
+    foreach ($c in @(
+        @("new-window", "creation new-window p50"),
+        @("split-window -v", "creation split -v p50"),
+        @("split-window -h", "creation split -h p50"),
+        @("split -f", "creation split -f p50"),
+        @("split -b", "creation split -b p50"),
+        @("split -bh", "creation split -bh p50"),
+        @("split -bv", "creation split -bv p50"),
+        @("split with cmd", "creation split w/ command p50"),
+        @("new-session (warm)", "new-session warm p50"),
+        @("new-session (no warm)", "new-session no-warm p50"),
+        @("kill-pane", "teardown kill-pane p50"),
+        @("kill-window", "teardown kill-window p50"),
+        @("kill-session", "teardown kill-session p50")
+    )) {
+        $key = $c[0]; $label = $c[1]
+        Show-TrendRow $label "ms" 0 (Get-TrendSeries "creation_latency_gate-*.json" @() { param($j) & $cell $j $key "p50" }.GetNewClosure())
+    }
+    Show-TrendRow "creation new-window p90" "ms" 0 (Get-TrendSeries "creation_latency_gate-*.json" @() { param($j) & $cell $j "new-window" "p90" })
+
+    # D: what it costs to hold a session open
+    Show-TrendRow "server working set at prompt" "MB" 1 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop (Prop (Prop (Prop $j "resources") "at_prompt") "server") "ws_mb" })
+    Show-TrendRow "client working set at prompt" "MB" 1 (Get-TrendSeries "launch-to-prompt-*.json" @() { param($j) Prop (Prop (Prop (Prop $j "resources") "at_prompt") "client") "ws_mb" })
+    Show-TrendRow "server working set, session full" "MB" 1 (Get-TrendSeries "creation_latency_gate-*.json" @() { param($j) Prop (Prop (Prop (Prop $j "resources") "after_panes") "server") "ws_mb" })
+    Show-TrendRow "idle cpu, server plus client" "%core" 2 (Get-TrendSeries "launch-to-prompt-*.json" @() {
+        param($j)
+        $i = Prop (Prop $j "resources") "idle_cpu_pct_of_core"
+        if (-not $i) { return $null }
+        return ((Prop $i "server" 0) + (Prop $i "client" 0))
+    })
+    Show-TrendRow "cpu per 100 keystrokes, srv+cli" "ms" 0 (Get-TrendSeries "keystroke-latency-*.json" $kExcl {
+        param($j)
+        $c = Prop (Prop $j "resources") "cpu_ms_per_100_keys"
+        if (-not $c) { return $null }
+        return ((Prop $c "server" 0) + (Prop $c "client" 0))
+    })
+    Show-TrendRow "idle socket lines per second" "l/s" 2 (Get-TrendSeries "idle-socket-traffic-*.json" @() {
+        param($j)
+        $cells = Prop $j "cells"
+        if (-not $cells) { return $null }
+        $c = Prop $cells "silent"
+        if (-not $c) { return $null }
+        return (Prop $c "lines_per_sec")
+    })
+
+    Note "newest is the most recent run; prev5med is the median of the five before it"
+    Note "a row is flagged REGRESSED when newest is more than $RegressPct percent worse than prev5med"
+    Note "machine load is in each file's envelope under load; a loaded run explains a tail, never a p50"
+    if ($script:TrendRegressions -gt 0) {
+        Write-Host ("  {0} metric(s) flagged. Check the machine load in those files before believing any of them." -f $script:TrendRegressions) -ForegroundColor Red
+    } else {
+        Write-Host "  nothing flagged." -ForegroundColor Green
+    }
+}
+
 Write-Host ""
 Write-Host "psmux performance metrics, last $Last runs per metric" -ForegroundColor Cyan
 Write-Host "from $MetricsDir" -ForegroundColor DarkGray
@@ -426,6 +631,7 @@ if ($Metric -in @("all", "A")) { Show-A }
 if ($Metric -in @("all", "B")) { Show-B }
 if ($Metric -in @("all", "C")) { Show-C }
 if ($Metric -in @("all", "D")) { Show-D }
+if ($Metric -in @("all", "T")) { Show-T }
 
 if ($Csv) {
     try {
@@ -437,3 +643,5 @@ if ($Csv) {
     }
 }
 Write-Host ""
+if ($FailOnRegression -and $script:TrendRegressions -gt 0) { exit 1 }
+exit 0
