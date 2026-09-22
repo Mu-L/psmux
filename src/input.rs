@@ -2140,6 +2140,107 @@ pub(crate) fn win32_input_key_seq(vk: u16, scan: u16, uchar: u16, ctrl_state: u3
     )
 }
 
+/// `LEFT_CTRL_PRESSED` in a console `KEY_EVENT_RECORD`'s control key state.
+#[cfg(windows)]
+pub(crate) const LEFT_CTRL_PRESSED: u32 = 0x0008;
+/// `SHIFT_PRESSED` in a console `KEY_EVENT_RECORD`'s control key state.
+#[cfg(windows)]
+pub(crate) const SHIFT_PRESSED: u32 = 0x0010;
+
+/// Is this a key whose legacy VT encoding cannot carry the Ctrl modifier?
+///
+/// A terminal has no code for Ctrl + a digit.  tmux says so out loud: the
+/// `standard_map` table in `input-keys.c` (lines 487 to 490) sends `C-1` as the
+/// literal character `1`, `C-9` as `9`, `C-0` as `0`, and `C-2` as NUL, and
+/// `input_key_vt10x` (line 524) is where the modifier is dropped.  The only way
+/// out on a real terminal is the extended key form `CSI 27;5;49~` or `CSI 49;5u`
+/// (`input_key_extended`, input-keys.c:425), and tmux only uses it when the pane
+/// asked for it (`input_key`, input-keys.c:690).
+///
+/// psmux ports that table verbatim in [`ctrl_char_send_keys_byte`], which is
+/// right for a pane that reads bytes and wrong for a pane that reads
+/// `INPUT_RECORD`s: `C-1` reaches it as an unmodified `1`.  Measured against Far
+/// Manager's drives menu, where `1` is the hotkey of the Temporary panel plugin
+/// and Ctrl+1 toggles the disk type column, that is exactly issue #623's
+/// "left pane opens temporary panel".
+///
+/// Space is in the set because Windows encodes Ctrl+Space, Ctrl+2 and
+/// Ctrl+Shift+2 as the same NUL key record and
+/// [`crate::config::fold_nul_to_ctrl_space`] folds them together, so they all
+/// arrive here as `C-Space`.
+#[cfg(windows)]
+pub(crate) fn ctrl_modifier_is_lost_in_vt(c: char) -> bool {
+    c.is_ascii_digit() || c == ' '
+}
+
+/// The win32 input mode form of Ctrl (+ Shift) + `c`, for a pane that reads
+/// `INPUT_RECORD`s.
+///
+/// Measured under a bare pseudoconsole with a child in Far's own console mode
+/// (`0x01B8`), one byte sequence at a time:
+///
+/// ```text
+///   31                                  -> vk=0x31 ch=0x0031 ctrl=0x0000   (plain 1)
+///   1b 5b 32 37 3b 35 3b 34 39 7e       -> no record at all                (CSI 27;5;49~)
+///   1b 5b 34 39 3b 35 75                -> no record at all                (CSI 49;5u)
+///   1b 5b 34 39 3b 32 3b 30 3b 31 3b 38 3b 31 5f
+///                                       -> vk=0x31 ch=0x0000 ctrl=0x0008   (Ctrl+1)
+/// ```
+///
+/// So neither xterm extended key format survives ConPTY, and win32 input mode
+/// is the one encoding conhost turns back into a record with the modifier
+/// intact.  It needs no negotiation: the pseudoconsole above was created with
+/// no flags and parsed it anyway.
+///
+/// Returns `None` for every key whose VT encoding is already faithful, which is
+/// everything except [`ctrl_modifier_is_lost_in_vt`].
+#[cfg(windows)]
+pub(crate) fn ctrl_key_win32_seq(c: char, shift: bool) -> Option<String> {
+    if !ctrl_modifier_is_lost_in_vt(c) {
+        return None;
+    }
+    let vk = crate::platform::mouse_inject::char_to_vk(c);
+    if vk == 0 {
+        return None;
+    }
+    let scan = crate::platform::mouse_inject::vk_to_scan(vk);
+    let ctrl_state = LEFT_CTRL_PRESSED | if shift { SHIFT_PRESSED } else { 0 };
+    // UnicodeChar 0: a real Ctrl+digit press carries no character, and Far
+    // dispatches on the virtual key.
+    Some(win32_input_key_seq(vk, scan, 0, ctrl_state))
+}
+
+/// Deliver Ctrl (+ Shift) + `c` to `p` as a real console key record when `p`
+/// reads records and the VT encoding would have thrown the modifier away.
+///
+/// Returns true when the key was written here, so the caller skips the legacy
+/// byte.  Writing both would deliver the key twice (issue #363).
+///
+/// The gate is deliberately [`crate::window_ops::detect_record_reader`], the
+/// same classifier the rest of issue #623 uses: a pane that reads the VT bytes
+/// itself (nvim, opencode) would see a win32 sequence as literal garbage, and a
+/// shell keeps tmux's `standard_map` byte, so nothing but a record reader
+/// changes behaviour.
+#[cfg(windows)]
+pub(crate) fn write_ctrl_key_as_record(p: &mut crate::types::Pane, c: char, shift: bool) -> bool {
+    use std::io::Write as _;
+    let Some(seq) = ctrl_key_win32_seq(c, shift) else { return false };
+    if !crate::window_ops::detect_record_reader(p) {
+        return false;
+    }
+    let _ = p.writer.write_all(seq.as_bytes());
+    let _ = p.writer.flush();
+    // A win32 sequence latches this ConPTY: conhost stops dispatching a
+    // dangling ESC as the Escape key, so a later bare 0x1b has to be written in
+    // win32 form too (issue #588).  Far leans on Escape to close its menus.
+    p.win32_input_latched = true;
+    crate::debug_log::input_log(
+        "ctrl-record",
+        &format!("#623 Ctrl+{:?} shift={} as win32 record, pid={:?}", c, shift, p.child_pid),
+    );
+    true
+}
+
 /// Write key bytes into ONE pane's ConPTY input pipe.
 ///
 /// Every key psmux delivers to a pane goes through here so the one byte that
@@ -2209,6 +2310,28 @@ pub fn mark_win32_input_latched(app: &mut AppState) {
         if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
             p.win32_input_latched = true;
         }
+    }
+}
+
+/// Does the pane that `send_text_to_active` would write to read `INPUT_RECORD`s?
+///
+/// Routing mirrors [`mark_win32_input_latched`]: a focused FLOATING pane takes
+/// the key instead of the tiled active pane.  Used by the scriptable
+/// `send-keys` path, which has an `AppState` rather than a pane in hand.
+#[cfg(windows)]
+pub fn active_pane_is_record_reader(app: &mut AppState) -> bool {
+    {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(fi) = win.floating_focus {
+            if let Some(fp) = win.floating.get_mut(fi) {
+                return crate::window_ops::detect_record_reader(&mut fp.pane);
+            }
+        }
+    }
+    let win = &mut app.windows[app.active_idx];
+    match active_pane_mut(&mut win.root, &win.active_path) {
+        Some(p) => crate::window_ops::detect_record_reader(p),
+        None => false,
     }
 }
 
@@ -3499,6 +3622,13 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 && s.chars().nth(4).map_or(false, |c| !c.is_ascii_alphabetic()) =>
             {
                 let c = s.chars().nth(4).unwrap();
+                // Issue #623: same record reader exception as the C- arm below.
+                // Far binds Ctrl+Shift+<digit> to its folder shortcuts, and the
+                // byte this arm writes for C-S-1 is the character '1'.
+                #[cfg(windows)]
+                if write_ctrl_key_as_record(p, c, true) {
+                    return;
+                }
                 if let Some(byte) = ctrl_char_send_keys_byte(c) {
                     let _ = p.writer.write_all(&[byte]);
                     let _ = p.writer.flush();
@@ -3523,8 +3653,28 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     crate::platform::mouse_inject::send_ctrl_break_event(pid, false);
                 }
             }
+            // Ctrl+Space, which reaches the server under this name for a
+            // physical Ctrl+Space, Ctrl+2 and Ctrl+Shift+2 alike: Windows
+            // encodes all three as the same NUL key record and
+            // `fold_nul_to_ctrl_space` folds them together, exactly as tmux
+            // does in tty-keys.c ("C-Space is special").  The byte is NUL,
+            // which is tmux's `standard_map` entry for both ' ' and '2'.
+            "C-Space" | "c-space" | "C-space" => {
+                #[cfg(windows)]
+                if write_ctrl_key_as_record(p, ' ', false) {
+                    return;
+                }
+                write_key_seq(p, b"\x00");
+            }
             s if s.starts_with("C-") && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('c');
+                // Issue #623: a record reading pane gets the modifier that the
+                // legacy byte cannot carry.  Every other pane falls through to
+                // the tmux byte below.
+                #[cfg(windows)]
+                if write_ctrl_key_as_record(p, c, false) {
+                    return;
+                }
                 // tmux-parity mapping so C-/ -> 0x1f (^_), not the naive '/' & 0x1f
                 // == 0x0f (^O) collision with C-o (issue #226/#394).  Letters keep
                 // their usual byte (a->0x01 …), so Ctrl+<letter> is unaffected.
@@ -3729,3 +3879,7 @@ mod tests_issue588_win32_input_escape;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue684_paste_route.rs"]
 mod tests_issue684_paste_route;
+
+#[cfg(all(test, windows))]
+#[path = "../tests-rs/test_issue623_ctrl_digit.rs"]
+mod tests_issue623_ctrl_digit;

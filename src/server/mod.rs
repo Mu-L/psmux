@@ -113,6 +113,22 @@ fn file_sink_drive_is_remote(_path: &str) -> bool {
 
 /// Build a JSON fragment with overlay state (popup, menu, confirm, display_panes).
 /// Delegates popup-specific serialization to the popup module.
+/// The win32 input mode sequence for Ctrl (+ Shift) + `c`, but only when the
+/// pane `send_text_to_active` would reach reads `INPUT_RECORD`s and the key is
+/// one whose VT encoding drops the modifier (issue #623).
+///
+/// `None` means "send the legacy tmux byte", which is what every shell and
+/// every VT reading pane still gets.
+#[cfg(windows)]
+fn ctrl_key_record_seq_for_active(app: &mut AppState, c: char, shift: bool) -> Option<String> {
+    let seq = crate::input::ctrl_key_win32_seq(c, shift)?;
+    if crate::input::active_pane_is_record_reader(app) {
+        Some(seq)
+    } else {
+        None
+    }
+}
+
 fn serialize_overlay_json(app: &AppState) -> String {
     use crate::server::helpers::json_escape_string;
 
@@ -3302,9 +3318,44 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     && s.chars().nth(4).map_or(false, |c| !c.is_ascii_alphabetic()) =>
                                 {
                                     if let Some(c) = s.chars().nth(4) {
-                                        if let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) {
-                                            send_text_to_active(&mut app, &String::from(ctrl as char))?;
+                                        // Issue #623: Ctrl+Shift+<digit> (Far's folder
+                                        // shortcuts) has no VT encoding either.
+                                        #[cfg(windows)]
+                                        let handled = match ctrl_key_record_seq_for_active(&mut app, c, true) {
+                                            Some(seq) => {
+                                                send_text_to_active(&mut app, &seq)?;
+                                                crate::input::mark_win32_input_latched(&mut app);
+                                                true
+                                            }
+                                            None => false,
+                                        };
+                                        #[cfg(not(windows))]
+                                        let handled = false;
+                                        if !handled {
+                                            if let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) {
+                                                send_text_to_active(&mut app, &String::from(ctrl as char))?;
+                                            }
                                         }
+                                    }
+                                }
+                                // Ctrl+Space by name: a space cannot survive as the
+                                // third character of "C-x" on a whitespace split
+                                // command line, and the generic C- arm below would read
+                                // the 'S' of "C-Space" and send Ctrl+S.  tmux byte: NUL.
+                                "C-Space" | "c-space" | "C-space" => {
+                                    #[cfg(windows)]
+                                    let handled = match ctrl_key_record_seq_for_active(&mut app, ' ', false) {
+                                        Some(seq) => {
+                                            send_text_to_active(&mut app, &seq)?;
+                                            crate::input::mark_win32_input_latched(&mut app);
+                                            true
+                                        }
+                                        None => false,
+                                    };
+                                    #[cfg(not(windows))]
+                                    let handled = false;
+                                    if !handled {
+                                        send_text_to_active(&mut app, "\x00")?;
                                     }
                                 }
                                 s if s.starts_with("C-") => {
@@ -3353,6 +3404,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                                     // win32 form too from here on.
                                                     crate::input::mark_win32_input_latched(&mut app);
                                                 }
+                                            } else if let Some(seq) =
+                                                ctrl_key_record_seq_for_active(&mut app, c, false)
+                                            {
+                                                // Issue #623: Ctrl+<digit> has no VT
+                                                // encoding at all, so a record reading
+                                                // pane (Far Manager) was handed the
+                                                // bare digit and could not tell it from
+                                                // an unmodified keypress.
+                                                send_text_to_active(&mut app, &seq)?;
+                                                crate::input::mark_win32_input_latched(&mut app);
                                             } else {
                                                 send_text_to_active(&mut app, &String::from(ctrl as char))?;
                                             }

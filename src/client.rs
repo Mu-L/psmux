@@ -5343,7 +5343,19 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     command_cursor = pos;
                                 }
 
-                                KeyCode::Char(' ') => {
+                                // The CONTROL guard is load bearing (issue #623).
+                                // `fold_nul_to_ctrl_space` has already rewritten a
+                                // physical Ctrl+Space, Ctrl+2 or Ctrl+Shift+2 into
+                                // Char(' ') with CONTROL by the time this match runs,
+                                // and this arm sits EARLIER than the CONTROL arm, so
+                                // without the guard every one of them was typed into
+                                // the pane as a literal space (0x20).  Measured with a
+                                // record reading pane child: Ctrl+2 arrived as
+                                // `vk=0x20 ch=0x0020 ctrl=0x0000`.  That also
+                                // contradicted the fold's own promise of NUL, which is
+                                // what tmux sends (input-keys.c `standard_map`).
+                                KeyCode::Char(' ')
+                                    if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     #[cfg(windows)]
                                     {
                                         paste_pend.push(' ');
@@ -5488,7 +5500,14 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                     // (issue #368).  tmux-style name: C-S-x.  The server
                                     // injects a native KEY_EVENT carrying both modifiers so
                                     // console-input apps can tell the two apart.
-                                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                    if c == ' ' {
+                                        // A space cannot travel as the third character
+                                        // of "C-x": the command line is split on
+                                        // whitespace, so the argument would arrive as a
+                                        // bare "C-". Ctrl+Space (and the Ctrl+2 folded
+                                        // onto it) goes by name instead.
+                                        cmd_batch.push("send-key C-Space\n".to_string());
+                                    } else if key.modifiers.contains(KeyModifiers::SHIFT) {
                                         cmd_batch.push(format!("send-key C-S-{}\n", c.to_ascii_lowercase()));
                                     } else {
                                         cmd_batch.push(format!("send-key C-{}\n", c.to_ascii_lowercase()));
