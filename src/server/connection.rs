@@ -1291,11 +1291,26 @@ let capture_pane_by_id = matches!(cmd, "capture-pane" | "capturep") && pane_is_i
 // swap-pane swaps the target with the *current* active pane; focusing the
 // target first would make active == target and turn the swap into a no-op.
 let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || capture_pane_by_id;
+// Issue #690: `select-window -t <index>` used to send BOTH a permanent
+// FocusWindow from this generic block AND a SelectWindow from the
+// command's own arm below, for the same window.  Each request carries its
+// own hook slot in the server loop, so a single `select-window` ran
+// `after-select-window` twice (a hook that pasted landed its text twice).
+// tmux runs a command's after hook once: cmd-queue.c `cmdq_fire_command`
+// calls `cmdq_insert_hook(s, item, &fs, "after-%s", name)` exactly once
+// after the command's exec returns.  The arm below owns the plain index
+// form (it is the one that also fires `before-select-window`, in the right
+// order, before the switch), so this block stands down for it.  An @id or
+// a window name still focuses from here, because the arm below never
+// sends SelectWindow for those.
+let selectw_owns_index_target = matches!(cmd, "select-window" | "selectw")
+    && !target_win_is_id
+    && target_win.is_some();
 if is_focus_cmd {
     if let Some(wid) = target_win {
         if target_win_is_id {
             let _ = tx.send(CtrlReq::FocusWindowById(wid));
-        } else {
+        } else if !selectw_owns_index_target {
             let _ = tx.send(CtrlReq::FocusWindow(wid));
         }
     } else if let Some(ref wname) = target_win_name {
@@ -1924,8 +1939,15 @@ match cmd {
         // via SelectWindow would override that with the wrong window (#497).
         let idx = args.iter().find(|a| !a.starts_with('-')).and_then(|s| s.parse::<usize>().ok())
             .or(if target_win_is_id { None } else { target_win });
+        // tmux picks ONE operation: cmd-select-window.c tests -n, then -p,
+        // then -l, and only falls through to the -t target when none of them
+        // is given.  psmux used to send the target select AND the relative
+        // move, which selected twice and fired `after-select-window` twice.
+        let relative = args.iter().any(|a| matches!(*a, "-l" | "-n" | "-p"));
         if let Some(idx) = idx {
-            let _ = tx.send(CtrlReq::SelectWindow(idx));
+            if !relative {
+                let _ = tx.send(CtrlReq::SelectWindow(idx));
+            }
         }
         if args.iter().any(|a| *a == "-l") {
             let _ = tx.send(CtrlReq::LastWindow);

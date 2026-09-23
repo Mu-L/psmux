@@ -903,10 +903,37 @@ pub fn ensure_background(cmd: &str) -> String {
     cmd.to_string()
 }
 
+/// Hook firing trace, off unless `PSMUX_HOOK_DEBUG` names a file.
+///
+/// Issue #690 was one `select-window` running `after-select-window` twice, and
+/// the thing that settled it was a line per firing naming the control request
+/// that carried it (`FocusWindow` and then `SelectWindow`, one command, two
+/// slots).  Counting buffers proves a hook ran twice; only this says who ran it,
+/// so it stays, gated, for the next hook that fires the wrong number of times.
+/// Each line is `=== FIRE <event> [req=<tag>] pid=<pid> ===` followed by the
+/// psmux frames of the backtrace.
+pub fn hook_debug_trace(event: &str) {
+    let path = match std::env::var("PSMUX_HOOK_DEBUG") {
+        Ok(p) if !p.is_empty() => p,
+        _ => return,
+    };
+    use std::io::Write as _;
+    let bt = std::backtrace::Backtrace::force_capture().to_string();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "=== FIRE {} pid={} ===", event, std::process::id());
+        for line in bt.lines() {
+            if line.contains("psmux") && !line.contains("hook_debug_trace") {
+                let _ = writeln!(f, "    {}", line.trim());
+            }
+        }
+    }
+}
+
 /// Fire hooks for a given event.
 /// All run-shell commands from hooks are forced into background mode
 /// to avoid "running: ..." status bar noise and output popups.
 pub fn fire_hooks(app: &mut AppState, event: &str) {
+    hook_debug_trace(event);
     if let Some(commands) = app.hooks.get(event).cloned() {
         for cmd in commands {
             let bg_cmd = ensure_background(&cmd);
