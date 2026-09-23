@@ -2184,6 +2184,89 @@ pub fn swap_pane_between(app: &mut AppState, src_path: Vec<usize>, dst_path: Vec
     swapped
 }
 
+/// Swap two panes that live in DIFFERENT windows (`swap-pane -s A -t B` with
+/// A and B in separate windows, issue #689 part three).
+///
+/// tmux does this in `cmd_swap_pane_exec`: the two panes trade layout cells and
+/// window membership (cmd-swap-pane.c:143 to 155), each window's active pane
+/// becomes the pane that arrived unless `-d` was given (cmd-swap-pane.c:164 to
+/// 177), and both windows are re laid out (cmd-swap-pane.c:183 to 189).
+///
+/// psmux used to resolve BOTH halves inside `app.windows[app.active_idx]`, so
+/// `swap-pane -s s:0.0 -t s:1.0` resolved to the same pane twice and exited 0
+/// having done nothing.
+pub fn swap_pane_across_windows(
+    app: &mut AppState,
+    src_win: usize,
+    src_path: Vec<usize>,
+    dst_win: usize,
+    dst_path: Vec<usize>,
+    detach: bool,
+) -> bool {
+    if src_win == dst_win {
+        return swap_pane_between(app, src_path, dst_path, detach);
+    }
+    if src_win >= app.windows.len() || dst_win >= app.windows.len() { return false; }
+    let src_id = crate::tree::get_active_pane_id(&app.windows[src_win].root, &src_path);
+    let dst_id = crate::tree::get_active_pane_id(&app.windows[dst_win].root, &dst_path);
+    let (Some(src_id), Some(dst_id)) = (src_id, dst_id) else { return false };
+    if src_id == dst_id { return false; }
+    // Two distinct windows: borrow both roots at once.
+    let (lo, hi) = (src_win.min(dst_win), src_win.max(dst_win));
+    let (head, tail) = app.windows.split_at_mut(hi);
+    let swapped = if src_win < dst_win {
+        crate::tree::swap_nodes_across(&mut head[lo].root, &src_path, &mut tail[0].root, &dst_path)
+    } else {
+        crate::tree::swap_nodes_across(&mut tail[0].root, &src_path, &mut head[lo].root, &dst_path)
+    };
+    if !swapped { return false; }
+    // Each pane id now belongs to the other window's MRU list.
+    crate::tree::remove_from_mru(&mut app.windows[src_win].pane_mru, src_id);
+    crate::tree::remove_from_mru(&mut app.windows[dst_win].pane_mru, dst_id);
+    crate::tree::touch_mru(&mut app.windows[src_win].pane_mru, dst_id);
+    crate::tree::touch_mru(&mut app.windows[dst_win].pane_mru, src_id);
+    if !detach {
+        // Without -d each window activates the pane that arrived in it
+        // (cmd-swap-pane.c:165 to 167); the arriving pane sits in the slot the
+        // departing one vacated.
+        app.windows[src_win].active_path = src_path.clone();
+        app.windows[dst_win].active_path = dst_path.clone();
+    }
+    // With -d there is nothing to fix: psmux holds the active pane as a layout
+    // SLOT, so a window whose active slot was the swapped one already follows
+    // the arriving pane, and a window active elsewhere is left alone. That is
+    // exactly cmd-swap-pane.c:172 to 177.
+    //
+    // Both windows are re laid out, not just the active one: each pane must
+    // take the size of the cell it now occupies, and its PTY with it
+    // (cmd-swap-pane.c:183 and :187, window_pane_resize plus layout_fix_panes).
+    for w in [src_win, dst_win] {
+        let area = app.windows[w].area;
+        crate::tree::resize_window_panes(app, w, area);
+    }
+    true
+}
+
+/// Resolve a `swap-pane` pair from RAW target specs and perform the swap.
+/// `src` of None is tmux's default source: the current pane
+/// (cmd-swap-pane.c:38, `CMD_FIND_DEFAULT_MARKED`, which falls back to the
+/// current pane when no pane is marked).
+pub fn swap_pane_by_spec(
+    app: &mut AppState,
+    src: Option<&str>,
+    dst: &str,
+    detach: bool,
+) -> Result<bool, String> {
+    if app.windows.is_empty() { return Err("can't find pane".to_string()); }
+    let active = app.active_idx.min(app.windows.len() - 1);
+    let (sw, sp) = match src {
+        Some(s) => resolve_pane_spec(app, s)?,
+        None => (active, app.windows[active].active_path.clone()),
+    };
+    let (dw, dp) = resolve_pane_spec(app, dst)?;
+    Ok(swap_pane_across_windows(app, sw, sp, dw, dp, detach))
+}
+
 /// Resolve a tmux-style position token (e.g. `{top-right}`) to the path of the
 /// pane occupying that corner/edge of the current window.  Layout-independent:
 /// always finds whatever pane currently sits there.
@@ -3082,67 +3165,260 @@ pub fn rotate_panes(app: &mut AppState, upward: bool) {
     if rotated { crate::tree::resize_all_panes(app); }
 }
 
-pub fn break_pane_to_window(app: &mut AppState) {
-    let src_idx = app.active_idx;
-    let src_path = app.windows[src_idx].active_path.clone();
-    
-    // Extract the active pane from the current window using tree operations
+/// One `break-pane` invocation, tmux `cmd-break-pane.c` argument set
+/// `"abdPF:n:s:t:"` (cmd-break-pane.c:37).
+///
+/// `src` and `dst` stay RAW here so the whole session, not just the active
+/// window, is searched when the request is applied: a `-s` naming a pane in
+/// another window is the entire point of issue #689.
+#[derive(Default, Clone, Debug)]
+pub struct BreakPaneRequest {
+    /// `-s <src-pane>`: the pane to break out. None means the current pane.
+    pub src: Option<String>,
+    /// `-t <dst-window>`: the destination window index. None means the next
+    /// free index. A pane component here is an error, exactly as tmux's
+    /// `CMD_FIND_WINDOW_INDEX` refuses one (cmd-find.c:1153).
+    pub dst: Option<String>,
+    /// `-d`: do NOT switch to the new window (cmd-break-pane.c:186).
+    pub detach: bool,
+    /// `-n <window-name>` (cmd-break-pane.c:104, 169 to 174).
+    pub name: Option<String>,
+    /// `-a` / `-b`: insert after / before the destination window
+    /// (cmd-break-pane.c:119 to 127, `winlink_shuffle_up`).
+    pub after: bool,
+    pub before: bool,
+}
+
+/// Result of a successful `break-pane`: where the pane ended up, for `-P`.
+pub struct BrokenPane {
+    /// Vec position of the window the pane now lives in.
+    pub win_pos: usize,
+    /// Pane id that was broken out.
+    pub pane_id: Option<usize>,
+}
+
+/// Resolve a tmux PANE target (`-s`, and `-t` of the pane taking commands) to
+/// `(window Vec position, pane path)` anywhere in this session.
+///
+/// tmux resolves these with `CMD_FIND_PANE` (cmd-break-pane.c:42,
+/// cmd-swap-pane.c:38 and :39), which searches the whole session and reports
+/// `can't find pane: <spec>` on a miss. psmux used to resolve both halves
+/// inside the ACTIVE window only, so a spec naming another window either hit
+/// the wrong pane or silently resolved to the same pane twice.
+pub fn resolve_pane_spec(app: &AppState, spec: &str) -> Result<(usize, Vec<usize>), String> {
+    let spec = crate::cli::strip_exact_match_prefix(spec.trim());
+    let miss = || format!("can't find pane: {}", spec);
+    if app.windows.is_empty() { return Err(miss()); }
+    let active = app.active_idx.min(app.windows.len() - 1);
+    // A `{position}` token is layout geometry in the current window.
+    if spec.starts_with('{') {
+        return pane_path_at_position(app, spec).map(|p| (active, p)).ok_or_else(miss);
+    }
+    if spec.is_empty() {
+        return Ok((active, app.windows[active].active_path.clone()));
+    }
+    let pt = crate::cli::parse_target(spec);
+    // Window half of the spec.
+    let mut win_pos: Option<usize> = None;
+    if pt.window_is_id {
+        if let Some(id) = pt.window {
+            win_pos = Some(app.windows.iter().position(|w| w.id == id)
+                .ok_or_else(|| format!("can't find window: @{}", id))?);
+        }
+    } else if let Some(d) = pt.window {
+        win_pos = Some(app.win_pos(d).ok_or_else(|| format!("can't find window: {}", d))?);
+    } else if let Some(ref n) = pt.window_name {
+        win_pos = Some(app.windows.iter().position(|w| w.name == *n)
+            .ok_or_else(|| format!("can't find window: {}", n))?);
+    } else if pt.pane.is_none() {
+        // No window and no pane: a bare token, which parse_target files as a
+        // session name. tmux tries the session first and only then reads it as
+        // a window in the current session (cmd-find.c:348), so do the same.
+        match pt.session.as_deref() {
+            None => {}
+            Some(s) if s == app.session_name => {}
+            Some(s) => {
+                win_pos = Some(app.resolve_window_spec(s, false).map_err(|_| miss())?
+                    .pos().ok_or_else(miss)?);
+            }
+        }
+    }
+    match pt.pane {
+        Some(id) if pt.pane_is_id => {
+            // Pane ids are unique session wide, so `%N` resolves without a
+            // window half; an explicit window half still has to agree.
+            for (i, w) in app.windows.iter().enumerate() {
+                if let Some(p) = crate::tree::find_path_by_id(&w.root, id) {
+                    if win_pos.map_or(true, |wp| wp == i) { return Ok((i, p)); }
+                }
+            }
+            Err(miss())
+        }
+        Some(idx) => {
+            let wp = win_pos.unwrap_or(active);
+            let zero = idx.checked_sub(app.pane_base_index).ok_or_else(miss)?;
+            crate::tree::path_by_position(&app.windows[wp].root, zero)
+                .map(|p| (wp, p)).ok_or_else(miss)
+        }
+        None => {
+            let wp = win_pos.unwrap_or(active);
+            Ok((wp, app.windows[wp].active_path.clone()))
+        }
+    }
+}
+
+/// Resolve `break-pane -t` (a DESTINATION window index, tmux
+/// `CMD_FIND_WINDOW | CMD_FIND_WINDOW_INDEX`, cmd-break-pane.c:43).
+///
+/// Returns the display index the broken out window should take, or None for
+/// "the next free index" (tmux's `idx == -1`).
+fn resolve_break_dst(app: &AppState, spec: &str) -> Result<Option<usize>, String> {
+    let spec = crate::cli::strip_exact_match_prefix(spec.trim());
+    if spec.is_empty() { return Ok(None); }
+    let pt = crate::cli::parse_target(spec);
+    // tmux: "No pane is allowed if want an index." (cmd-find.c:1152 to 1156).
+    if pt.pane.is_some() { return Err("can't specify pane here".to_string()); }
+    if pt.window.is_none() && pt.window_name.is_none() {
+        return match pt.session.as_deref() {
+            // `-t <this session>` names no window, so the destination is the
+            // next free index (tmux leaves fs->idx at -1, cmd-find.c:351).
+            None => Ok(None),
+            Some(s) if s == app.session_name => Ok(None),
+            // A bare token that is not this session is read as a window.
+            Some(s) => match app.resolve_window_spec(s, true)? {
+                crate::types::WindowTarget::Pos(p) => Ok(Some(app.win_display_index(p))),
+                crate::types::WindowTarget::FreeIndex(i) => Ok(Some(i)),
+            },
+        };
+    }
+    match app.resolve_window_spec(spec, true)? {
+        crate::types::WindowTarget::Pos(p) => Ok(Some(app.win_display_index(p))),
+        crate::types::WindowTarget::FreeIndex(i) => Ok(Some(i)),
+    }
+}
+
+/// `break-pane`: move one pane out of its window into a window of its own.
+///
+/// Follows `cmd_break_pane_exec` (cmd-break-pane.c:89 to 207) in order:
+/// validate `-n`, apply `-a`/`-b` shuffling, refuse an index already in use
+/// (`index in use: N`, cmd-break-pane.c:148 to 151), detach the pane, build the
+/// new window, and select it unless `-d` was given (cmd-break-pane.c:186).
+pub fn break_pane(app: &mut AppState, req: &BreakPaneRequest) -> Result<BrokenPane, String> {
+    if app.windows.is_empty() { return Err("can't find pane".to_string()); }
+    let (src_idx, src_path) = match req.src.as_deref() {
+        Some(s) => resolve_pane_spec(app, s)?,
+        None => {
+            let i = app.active_idx.min(app.windows.len() - 1);
+            (i, app.windows[i].active_path.clone())
+        }
+    };
+    // tmux check_name: an empty window name is refused before anything moves.
+    if let Some(n) = req.name.as_deref() {
+        if n.trim().is_empty() { return Err(format!("invalid window name: {}", n)); }
+    }
+    let mut idx = match req.dst.as_deref() {
+        Some(d) => resolve_break_dst(app, d)?,
+        None => None,
+    };
+    // -a / -b: make room at (target + 1) / target and land there.
+    if req.after || req.before {
+        let base = idx.unwrap_or_else(|| app.win_display_index(app.active_idx.min(app.windows.len() - 1)));
+        let at = if req.after { base + 1 } else { base };
+        app.shuffle_window_indices_up(at);
+        idx = Some(at);
+    }
+    // An index already held by another window is tmux's "index in use: N", and
+    // it is checked BEFORE the pane is detached so a refusal changes nothing.
+    if let Some(want) = idx {
+        if app.win_pos(want).is_some() {
+            return Err(format!("index in use: {}", want));
+        }
+    }
+    // Remember the window the user is looking at so -d can put focus back even
+    // when the source window disappears (its Vec position may shift).
+    let prev_active_id = app.windows.get(app.active_idx).map(|w| w.id);
+
     let src_root = std::mem::replace(&mut app.windows[src_idx].root,
         Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
     let (remaining, extracted) = crate::tree::extract_node(src_root, &src_path);
-    
-    if let Some(pane_node) = extracted {
-        let src_empty = remaining.is_none();
-        if let Some(rem) = remaining {
-            app.windows[src_idx].root = rem;
-            app.windows[src_idx].active_path = crate::tree::first_leaf_path(&app.windows[src_idx].root);
-        }
-        
-        // Determine the window name from the pane
-        let win_name = match &pane_node {
+    let Some(pane_node) = extracted else {
+        if let Some(rem) = remaining { app.windows[src_idx].root = rem; }
+        return Err("can't find pane".to_string());
+    };
+    let src_empty = remaining.is_none();
+    if let Some(rem) = remaining {
+        app.windows[src_idx].root = rem;
+        app.windows[src_idx].active_path = crate::tree::first_leaf_path(&app.windows[src_idx].root);
+    }
+    let broken_id = crate::tree::collect_pane_ids(&pane_node).first().copied();
+    if let Some(bid) = broken_id {
+        crate::tree::remove_from_mru(&mut app.windows[src_idx].pane_mru, bid);
+    }
+    let win_name = match req.name.as_deref() {
+        Some(n) => n.to_string(),
+        None => match &pane_node {
             Node::Leaf(p) => p.title.clone(),
             _ => format!("win {}", app.windows.len() + 1),
-        };
-        
-        // Create new window containing the extracted pane
-        let initial_mru = crate::tree::collect_pane_ids(&pane_node);
-        app.windows.push(Window {
-            root: pane_node,
-            active_path: vec![],
-            name: win_name,
-            id: app.next_win_id,
-            area: app.client_area,
-            window_size: None,
-            window_options: Default::default(),
-            activity_flag: false,
-            bell_flag: false,
-            silence_flag: false,
-            last_output_time: std::time::Instant::now(),
-            last_seen_version: 0,
-            manual_rename: false,
-            layout_index: 0,
-            pane_mru: initial_mru,
-            zoom_saved: None,
-            linked_from: None,
-            floating: Vec::new(),
-            floating_focus: None,
-        });
-        app.next_win_id += 1;
-        app.on_window_appended();
-
-        if src_empty {
-            app.windows.remove(src_idx);
-            app.on_window_removed(src_idx);
-        }
-
-        // Switch to the new window
-        app.active_idx = app.windows.len() - 1;
-    } else {
-        // Extraction failed — restore
-        if let Some(rem) = remaining {
-            app.windows[src_idx].root = rem;
+        },
+    };
+    let initial_mru = crate::tree::collect_pane_ids(&pane_node);
+    app.windows.push(Window {
+        root: pane_node,
+        active_path: vec![],
+        name: win_name,
+        id: app.next_win_id,
+        area: app.client_area,
+        window_size: None,
+        window_options: Default::default(),
+        activity_flag: false,
+        bell_flag: false,
+        silence_flag: false,
+        last_output_time: std::time::Instant::now(),
+        last_seen_version: 0,
+        // tmux clears automatic-rename when -n named the window, so the name
+        // the caller chose survives the next title change.
+        manual_rename: req.name.is_some(),
+        layout_index: 0,
+        pane_mru: initial_mru,
+        zoom_saved: None,
+        linked_from: None,
+        floating: Vec::new(),
+        floating_focus: None,
+    });
+    app.next_win_id += 1;
+    app.on_window_appended();
+    let new_win_id = app.windows.last().map(|w| w.id);
+    if src_empty {
+        app.windows.remove(src_idx);
+        app.on_window_removed(src_idx);
+    }
+    // Place the new window at the requested display index.
+    if let Some(want) = idx {
+        if let Some(pos) = new_win_id.and_then(|id| app.windows.iter().position(|w| w.id == id)) {
+            app.move_window_to_index(pos, want)?;
         }
     }
+    let new_pos = new_win_id
+        .and_then(|id| app.windows.iter().position(|w| w.id == id))
+        .unwrap_or(app.windows.len() - 1);
+    if req.detach {
+        // -d: stay where we were. Re-resolve by window id, because removing an
+        // emptied source window shifts every position after it.
+        let keep = prev_active_id.and_then(|id| app.windows.iter().position(|w| w.id == id));
+        app.active_idx = keep.unwrap_or_else(|| new_pos.min(app.windows.len() - 1));
+    } else {
+        app.active_idx = new_pos;
+    }
+    if app.active_idx >= app.windows.len() {
+        app.active_idx = app.windows.len() - 1;
+    }
+    Ok(BrokenPane { win_pos: new_pos, pane_id: broken_id })
+}
+
+/// Legacy no-flag entry point (in TUI binding, `prefix !`): break the active
+/// pane out and switch to it, tmux's default `break-pane`.
+pub fn break_pane_to_window(app: &mut AppState) {
+    let _ = break_pane(app, &BreakPaneRequest::default());
 }
 
 /// `clear-history`: drop the active pane's scrollback.

@@ -453,7 +453,8 @@ fn generate_show_options(app: &AppState) -> String {
 
 /// Local join-pane: extract source pane and graft into target window.
 fn join_pane_local(app: &mut AppState, src_win: Option<usize>, src_pane: Option<usize>,
-                   target_win: Option<usize>, target_pane: Option<usize>, horizontal: bool) {
+                   target_win: Option<usize>, target_pane: Option<usize>, horizontal: bool,
+                   detach: bool) {
     // Resolve source/target display indices to Vec positions (default: active
     // window). win_pos honors gapped indices left by renumber-windows off.
     let src_pos = match src_win { Some(d) => app.win_pos(d), None => Some(app.active_idx) };
@@ -524,7 +525,11 @@ fn join_pane_local(app: &mut AppState, src_win: Option<usize>, src_pane: Option<
                 };
                 let split_kind = if horizontal { LayoutKind::Horizontal } else { LayoutKind::Vertical };
                 crate::tree::replace_leaf_with_split(&mut app.windows[tgt].root, &tgt_path, split_kind, pane_node);
-                app.active_idx = tgt;
+                // -d grafts without switching (cmd-join-pane.c:515 to 521).
+                if !detach { app.active_idx = tgt; }
+                else if app.active_idx >= app.windows.len() {
+                    app.active_idx = app.windows.len() - 1;
+                }
             }
         } else {
             if let Some(rem) = remaining {
@@ -1597,22 +1602,21 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 if let Some(port) = app.control_port {
                     let d = if detach { " -d" } else { "" };
                     let _ = send_control_to_port(port, &format!("swap-pane{} -s {} -t {}\n", d, src, tgt), &app.session_key);
-                } else {
-                    match (resolve_swap_pane_target_path(app, src), resolve_swap_pane_target_path(app, tgt)) {
-                        (Some(sp), Some(dp)) => { crate::window_ops::swap_pane_between(app, sp, dp, detach); }
-                        _ => { app.status_message = Some(("swap-pane: can't find pane".to_string(), Instant::now(), None)); }
-                    }
+                } else if let Err(e) = crate::window_ops::swap_pane_by_spec(app, Some(src), tgt, detach) {
+                    // Session wide resolution: -s / -t may name panes in two
+                    // different windows (#689).
+                    app.status_message = Some((format!("swap-pane: {}", e), Instant::now(), None));
                 }
             } else if let Some(tgt) = target {
                 if let Some(port) = app.control_port {
                     let _ = send_control_to_port(port, &format!("swap-pane -t {}\n", tgt), &app.session_key);
-                } else {
-                    let path = resolve_swap_pane_target_path(app, &tgt);
-                    if let Some(path) = path {
-                        crate::window_ops::swap_pane_with_path(app, path);
-                    } else {
-                        app.status_message = Some((format!("swap-pane: can't find pane: {}", tgt), Instant::now(), None));
+                } else if tgt.starts_with('{') {
+                    match resolve_swap_pane_target_path(app, &tgt) {
+                        Some(path) => { crate::window_ops::swap_pane_with_path(app, path); }
+                        None => { app.status_message = Some((format!("swap-pane: can't find pane: {}", tgt), Instant::now(), None)); }
                     }
+                } else if let Err(e) = crate::window_ops::swap_pane_by_spec(app, None, &tgt, detach) {
+                    app.status_message = Some((format!("swap-pane: {}", e), Instant::now(), None));
                 }
             } else if let Some(port) = app.control_port {
                 let dir = if parts.iter().any(|p| *p == "-U") { "-U" }
@@ -1638,9 +1642,16 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         }
         "break-pane" | "breakp" => {
             if let Some(port) = app.control_port {
-                let _ = send_control_to_port(port, "break-pane\n", &app.session_key);
+                // Forward the WHOLE command line. It used to send a bare
+                // "break-pane\n", which dropped every flag the user typed at
+                // the command prompt or bound to a key (#689).
+                let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                crate::window_ops::break_pane_to_window(app);
+                let flags: Vec<&str> = parts[1..].to_vec();
+                let (req, _print) = crate::server::connection::parse_break_pane_args(&flags, None);
+                if let Err(e) = crate::window_ops::break_pane(app, &req) {
+                    app.status_message = Some((format!("break-pane: {}", e), Instant::now(), None));
+                }
             }
         }
         "respawn-pane" | "respawnp" => {
@@ -2405,7 +2416,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         .find(|a| a.parse::<usize>().is_ok())
                         .and_then(|s| s.parse::<usize>().ok());
                 }
-                join_pane_local(app, src_win, src_pane, tgt_win, tgt_pane, horizontal);
+                join_pane_local(app, src_win, src_pane, tgt_win, tgt_pane, horizontal,
+                    parts[1..].iter().any(|a| *a == "-d"));
             }
         }
         "join-pane" | "joinp" => {
@@ -2447,7 +2459,8 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                         .find(|a| a.parse::<usize>().is_ok())
                         .and_then(|s| s.parse::<usize>().ok());
                 }
-                join_pane_local(app, src_win, src_pane, tgt_win, tgt_pane, horizontal);
+                join_pane_local(app, src_win, src_pane, tgt_win, tgt_pane, horizontal,
+                    parts[1..].iter().any(|a| *a == "-d"));
             }
         }
         "resize-window" | "resizew" => {

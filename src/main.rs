@@ -3146,7 +3146,13 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // A -s / -t that names no pane is tmux's "can't find pane: X"
+                // at exit 1, not a silent success (#689).
+                let resp = send_control_with_response(cmd)?;
+                if let Some(msg) = resp.strip_prefix("ERROR: ") {
+                    eprintln!("psmux: {}", msg.trim_end());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // resize-pane - Resize a pane
@@ -3600,16 +3606,24 @@ fn run_main() -> io::Result<()> {
                 send_control("display-panes\n".to_string())?;
                 return Ok(());
             }
-            // break-pane - Break pane out to a new window
+            // break-pane - Break pane out to a new window.
+            // Forwards tmux's whole flag set (cmd-break-pane.c:37,
+            // "abdPF:n:s:t:"). -s, -n, -a, -b, -P and -F used to be dropped
+            // here, so `break-pane -s other:0.2` reached the server as a bare
+            // `break-pane` and broke the ACTIVE pane instead (#689).
             "break-pane" | "breakp" => {
                 let mut cmd = "break-pane".to_string();
+                let mut print = false;
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
                         "-d" => { cmd.push_str(" -d"); }
-                        "-t" => {
-                            if let Some(t) = cmd_args.get(i + 1) {
-                                cmd.push_str(&format!(" -t {}", t));
+                        "-a" => { cmd.push_str(" -a"); }
+                        "-b" => { cmd.push_str(" -b"); }
+                        "-P" => { cmd.push_str(" -P"); print = true; }
+                        flag @ ("-t" | "-s" | "-n" | "-F") => {
+                            if let Some(v) = cmd_args.get(i + 1) {
+                                cmd.push_str(&format!(" {} {}", flag, crate::util::quote_arg_if_needed(v)));
                                 i += 1;
                             }
                         }
@@ -3618,7 +3632,15 @@ fn run_main() -> io::Result<()> {
                     i += 1;
                 }
                 cmd.push('\n');
-                send_control(cmd)?;
+                // -P prints where the pane landed, and a refused break (bad -s,
+                // `index in use: N`, `can't specify pane here`) must exit 1
+                // with tmux's message instead of silently succeeding.
+                let resp = send_control_with_response(cmd)?;
+                if let Some(msg) = resp.strip_prefix("ERROR: ") {
+                    eprintln!("psmux: {}", msg.trim_end());
+                    std::process::exit(1);
+                }
+                if print { print!("{}", resp); }
                 return Ok(());
             }
             // join-pane - Join a pane to another window (or across sessions)

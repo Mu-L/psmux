@@ -687,6 +687,26 @@ pub fn swap_nodes(root: &mut Node, a: &[usize], b: &[usize]) -> bool {
     true
 }
 
+/// Swap the subtree at `a` in `a_root` with the subtree at `b` in `b_root`,
+/// where the two roots are the layouts of two DIFFERENT windows.
+///
+/// tmux's `cmd_swap_pane_exec` (cmd-swap-pane.c:123 to 148) allows `-s` and
+/// `-t` to live in different windows: it splices each pane into the other
+/// window's pane list and exchanges the two layout cells, so the panes trade
+/// places across the window boundary. `swap_nodes` cannot express that because
+/// it takes a single root, and the ancestor check it needs inside one tree is
+/// meaningless between two.
+///
+/// An empty path is allowed here (unlike `swap_nodes`): a single pane window's
+/// root IS the leaf, and swapping it with a pane in another window is exactly
+/// what tmux does.
+pub fn swap_nodes_across(a_root: &mut Node, a: &[usize], b_root: &mut Node, b: &[usize]) -> bool {
+    let Some(pa) = node_at_mut(a_root, a) else { return false };
+    let Some(pb) = node_at_mut(b_root, b) else { return false };
+    std::mem::swap(pa, pb);
+    true
+}
+
 #[cfg(test)]
 mod swap_node_tests {
     use crate::types::{Node, LayoutKind};
