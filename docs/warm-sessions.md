@@ -91,6 +91,45 @@ one shell startup between all of them instead of one each. Measured over ten
 back to back `new-window` calls, that is nine creations at 15 to 30 ms and one
 at about 500 ms, against every second one costing 400 to 600 ms before.
 
+Concurrently, and genuinely so since
+[#686](https://github.com/psmux/psmux/issues/686). Every ConPTY spawn has to
+park the process's std handle slots for the length of its `CreateProcessW`, and
+that used to be done under an exclusive lock, so a surge of eight ran one spawn
+at a time: 45 ms, then 90, then 135, up to 504 ms for the last one, and a claim
+arriving between landings stalled 450 to 550 ms. Spawns now share that lock,
+because they all want the same parked state; only a console identity change
+(`FreeConsole`/`AttachConsole`, used for Ctrl+C delivery and input injection)
+still takes it exclusively, and it is blocked by, and blocks, every spawn in
+flight.
+
+At most four spare shells are inside `CreateProcessW` at once. That cap is a
+measurement, not caution: three concurrent spawns cost about 64 ms each on the
+reference machine, five cost 99 ms and eight cost 130 ms and up, and once a
+spawn costs more than the claim's wait budget every claim cold spawns, takes the
+next pane id, and thereby retires the whole batch still in flight. A claim now
+waits up to 250 ms for a spare that is already being spawned before cold
+spawning, which covers the slowest spawn at that concurrency. Over the ten call
+burst the two together took the p50 from 57 ms to about 25 ms and removed the
+450 to 550 ms outliers entirely.
+
+### Teardown
+
+A spare that is still being spawned belongs to nobody: the shell exists, its
+conhost exists, and the server has not seen it yet. `kill-server` used to kill
+the windows and the pooled spares only, so anything in flight was orphaned,
+parented to a dead psmux and idle at a prompt forever (six of them over ten
+rounds of "new-session, six new-window, kill-server").
+
+Every spawn is therefore tracked from the moment it is issued and gains its pid
+as soon as `CreateProcessW` returns one. A teardown closes that registry, kills
+the pids in it through the same creation time validated kill guard the panes
+use, and a spawn that finishes afterwards is told on arrival to kill the child
+it just created. The shutdown also kills its children *first*, before the client
+notifications and their sleeps, and the server no longer acknowledges a
+`kill-server` before it has actually gone: the caller treats the closed socket
+as "the server is dead" and force-kills the pid shortly after, which used to
+cut the shutdown off before it killed anything at all.
+
 One isolated slow creation does not surge: a cold `new-session` misses by
 definition, since its only spare was born moments earlier, and surging there
 fired eight shell spawns alongside the session's own starting shell and cost
@@ -107,6 +146,17 @@ server. Every claim, refill, landing and readiness flip is appended to
 `%TEMP%\psmux_warm_trace.log` (override with `PSMUX_WARM_TRACE_FILE`) with a
 millisecond timeline, including the age of the spare each claim received, which
 is the number that explains a slow open.
+
+A spawn line carries its own breakdown, which is how a serialised surge is told
+apart from a slow machine:
+
+```
+pool: spawned spare pane=6 pid=Some(28164) in 99.9ms (pty 6.2ms, proc 93.2ms, console wait 0.0ms)
+```
+
+`pty` is the ConPTY allocation, `proc` is the `CreateProcessW`, and `console
+wait` is how long that spawn waited to get into the console state. A non zero
+console wait means something is holding it exclusively.
 
 ## Disabling Warm Sessions
 

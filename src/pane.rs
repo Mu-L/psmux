@@ -867,7 +867,12 @@ pub fn warm_pane_is_live(wp: &mut crate::types::WarmPane) -> bool {
 pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState) -> io::Result<crate::types::WarmPane> {
     let params = warm_spawn_params(app)
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "warm panes disabled"))?;
-    spawn_warm_pane_from(pty_system, &params)
+    let out = spawn_warm_pane_from(pty_system, &params);
+    // Synchronous spawn: the caller owns the result the instant this returns,
+    // on the same thread that would run a teardown, so nothing is in flight
+    // afterwards (#686).
+    crate::warm_pane_sync::inflight::release(params.pane_id);
+    out
 }
 
 /// Take one finished refill off the channel and put it in the pool, or drop it.
@@ -882,17 +887,25 @@ pub fn land_spare(app: &mut AppState, slot: Option<crate::types::WarmPane>) {
     app.warm_pane.inflight = app.warm_pane.inflight.saturating_sub(1);
     match slot {
         Some(mut wp) => {
+            // The server owns this child now: whatever happens to it below, it
+            // is either in the pool (covered by `WarmPool::kill_all`) or killed
+            // right here, so the teardown reaper must stop tracking it (#686).
+            crate::warm_pane_sync::inflight::release(wp.pane_id);
             if wp.host_colors != app.host_colors {
+                if let Some(pid) = wp.child_pid {
+                    crate::platform::process_kill::kill_pid_tree(pid);
+                }
                 wp.child.kill().ok();
                 crate::warm_trace!(
                     "pool: dropped a spare that landed with a stale palette, depth={} inflight={}",
                     app.warm_pane.len(), app.warm_pane.inflight
                 );
             } else {
+                let (id, pid) = (wp.pane_id, wp.child_pid);
                 app.warm_pane.push(wp);
                 crate::warm_trace!(
-                    "pool: spare landed, depth={} inflight={}",
-                    app.warm_pane.len(), app.warm_pane.inflight
+                    "pool: spare landed pane={} pid={:?}, depth={} inflight={}",
+                    id, pid, app.warm_pane.len(), app.warm_pane.inflight
                 );
             }
         }
@@ -906,9 +919,27 @@ pub fn land_spare(app: &mut AppState, slot: Option<crate::types::WarmPane>) {
 }
 
 /// How long a claim will wait for a spare that is already being spawned before
-/// giving up and spawning its own. A refill posts its spare back in 20 to 37 ms
-/// on this machine, so this is a little over two of those.
-pub const WARM_INFLIGHT_WAIT: std::time::Duration = std::time::Duration::from_millis(80);
+/// giving up and spawning its own.
+///
+/// This used to be 80ms, "a little over two" of the 20 to 37ms a refill took to
+/// post its spare back. That figure was measured when spawns were serialised,
+/// which means it was the cost of ONE `CreateProcessW` with the machine
+/// otherwise idle. A surge now runs [`WARM_SPAWN_CONCURRENCY`] of them at once
+/// and each costs 90 to 190ms, so 80ms expired every single time, and what
+/// follows a timeout is not merely one cold spawn (#686):
+///
+///   the claim cold spawns and takes the next pane id, which raises the pool's
+///   issued floor above every id the in flight batch reserved, so all of those
+///   spares are killed the moment they land ("spare landed, depth=0" in the
+///   trace); the pool is then empty again, schedules another full batch, and
+///   the next claim repeats it. A burst of ten new windows spawned and killed
+///   fifty shells this way and its p50 was 251ms.
+///
+/// Waiting instead costs at most this budget and usually ends in an in flight
+/// spare, which keeps the ids monotonic and the treadmill from ever starting.
+/// 250ms covers the slowest spawn measured at the current concurrency; past it
+/// the caller still cold spawns exactly as before.
+pub const WARM_INFLIGHT_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// A claim found nothing, but refills are already in flight. Wait briefly for
 /// the next one to land and use that, instead of spawning a further shell.
@@ -969,6 +1000,66 @@ pub fn await_inflight_spare(
     out
 }
 
+/// How many spare shells may be inside `CreateProcessW` at the same time.
+///
+/// Not unbounded, and the measurement is the whole argument (#686). Spawns used
+/// to be fully serialised by the console state lock, so a surge of eight cost
+/// 45ms, then 90, then 135, up to 504ms for the last one. Letting all eight run
+/// at once fixed the staircase and broke something else: eight `CreateProcessW`
+/// plus eight booting pwsh saturate the machine, so each spawn cost 130 to
+/// 330ms instead of 45ms, and the FIRST spare no longer landed inside
+/// [`WARM_INFLIGHT_WAIT`]. Every claim then timed out, cold spawned, raised the
+/// pool's issued floor, and killed the whole in flight batch on arrival, which
+/// spawned another eight: a burst of ten new windows produced sixty shells and
+/// a p50 of 251ms, worse than the serialised build.
+///
+/// Four is where the measurement puts the knee on this machine: three
+/// concurrent spawns cost ~64ms each, five cost ~99ms, eight cost 130ms and up.
+/// At four the per spawn cost stays near the single spawn figure, so the first
+/// spare still lands inside the claim's wait budget, and eight spares take two
+/// short waves instead of one long queue.
+pub const WARM_SPAWN_CONCURRENCY: usize = 4;
+
+static WARM_SPAWN_SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+/// A permit to be inside a ConPTY spawn. Released on drop.
+pub struct WarmSpawnPermit;
+
+impl Drop for WarmSpawnPermit {
+    fn drop(&mut self) {
+        let (m, cv) = &WARM_SPAWN_SLOTS;
+        let mut n = m.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+        cv.notify_one();
+    }
+}
+
+/// Wait for a spawn slot. `None` means the server is tearing down and this
+/// spawn must not happen at all, which is also what keeps the teardown reaper
+/// from waiting out its budget on threads that never created a process.
+///
+/// Only the background spare spawner queues here. A cold spawn on the loop
+/// thread is a user waiting on a window, so it never queues behind spares.
+pub fn warm_spawn_permit() -> Option<WarmSpawnPermit> {
+    let (m, cv) = &WARM_SPAWN_SLOTS;
+    let mut n = m.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if crate::warm_pane_sync::inflight::is_tearing_down() {
+            return None;
+        }
+        if *n < WARM_SPAWN_CONCURRENCY {
+            *n += 1;
+            return Some(WarmSpawnPermit);
+        }
+        // Timed, so the teardown check above is re-run rather than waited on.
+        let (g, _) = cv
+            .wait_timeout(n, std::time::Duration::from_millis(5))
+            .unwrap_or_else(|e| e.into_inner());
+        n = g;
+    }
+}
+
 /// Bring the spare pool up to its effective target, spawning each missing
 /// spare on its own thread.
 ///
@@ -992,6 +1083,7 @@ pub fn schedule_warm_refill(app: &mut AppState) {
     let deficit = app.warm_pane.deficit_for(target);
     for _ in 0..deficit {
         let Some(params) = warm_spawn_params(app) else { break };
+        let spawn_pane_id = params.pane_id;
         let tx = tx.clone();
         app.warm_pane.inflight += 1;
         crate::warm_trace!(
@@ -1006,6 +1098,13 @@ pub fn schedule_warm_refill(app: &mut AppState) {
         let started = std::thread::Builder::new()
             .name("psmux-warm-spawn".into())
             .spawn(move || {
+                let Some(_permit) = warm_spawn_permit() else {
+                    // Teardown began before this spawn started: no process was
+                    // ever created, so there is nothing for the reaper to kill.
+                    crate::warm_pane_sync::inflight::release(params.pane_id);
+                    let _ = tx.send(None);
+                    return;
+                };
                 let pty = portable_pty::native_pty_system();
                 match spawn_warm_pane_from(&*pty, &params) {
                     Ok(wp) => {
@@ -1013,6 +1112,11 @@ pub fn schedule_warm_refill(app: &mut AppState) {
                     }
                     Err(e) => {
                         crate::warm_trace!("pool: refill FAILED pane={}: {e}", params.pane_id);
+                        // Nothing survives a failed spawn, so the reaper has
+                        // nothing to chase. `record_pid` already dropped the
+                        // entry on the shutdown path; this covers a genuine
+                        // spawn failure.
+                        crate::warm_pane_sync::inflight::release(params.pane_id);
                         // `None` still releases the reservation. Without it the
                         // pool would believe a spare is forever on its way.
                         let _ = tx.send(None);
@@ -1021,6 +1125,7 @@ pub fn schedule_warm_refill(app: &mut AppState) {
             });
         if started.is_err() {
             app.warm_pane.inflight -= 1;
+            crate::warm_pane_sync::inflight::release(spawn_pane_id);
             break;
         }
     }
@@ -1066,6 +1171,9 @@ pub fn warm_spawn_params(app: &mut AppState) -> Option<WarmSpawnParams> {
     let expanded_shell = crate::format::expand_format(&app.default_shell, app);
     let pane_id = app.next_pane_id;
     app.next_pane_id += 1;
+    // Track the spawn from the moment it is issued, so a teardown that happens
+    // while it is still inside CreateProcessW can still reap the shell (#686).
+    crate::warm_pane_sync::inflight::issue(pane_id);
     Some(WarmSpawnParams {
         rows,
         cols,
@@ -1094,6 +1202,7 @@ pub fn spawn_warm_pane_from(pty_system: &dyn portable_pty::PtySystem, p: &WarmSp
     let pair = pty_system
         .openpty(size)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
+    let t_openpty = t0.elapsed();
     let mut shell_cmd = if !p.expanded_shell.is_empty() {
         build_default_shell(&p.expanded_shell, p.env_shim, p.allow_predictions)
     } else {
@@ -1103,9 +1212,27 @@ pub fn spawn_warm_pane_from(pty_system: &dyn portable_pty::PtySystem, p: &WarmSp
     set_tmux_env(&mut shell_cmd, pane_id, p.control_port, p.socket_name.as_deref(), &p.session_name, p.claude_code_fix_tty, p.claude_code_force_interactive);
     set_host_colors_env(&mut shell_cmd, p.host_colors.as_ref());
     apply_user_environment(&mut shell_cmd, &p.environment);
+    let t_spawn0 = std::time::Instant::now();
     let child = pair.slave
         .spawn_command(shell_cmd)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
+    let t_spawn = t_spawn0.elapsed();
+    let console_wait = portable_pty::last_spawn_console_wait_us();
+    // The pid exists now, so the server can reap this shell even if it never
+    // becomes a pool member (#686). A `false` answer means the server has begun
+    // to die: nothing will ever adopt this child, so kill it here.
+    let early_pid = crate::platform::mouse_inject::get_child_pid(&*child);
+    if !crate::warm_pane_sync::inflight::record_pid(p.pane_id, early_pid) {
+        if let Some(pid) = early_pid {
+            crate::platform::process_kill::kill_pid_tree(pid);
+        }
+        let mut child = child;
+        let _ = child.kill();
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "server is shutting down; spare killed on arrival",
+        ));
+    }
     drop(pair.slave);
     let scrollback = p.history_limit as u32;
     let mut parser = vt100::Parser::new(rows, cols, scrollback as usize);
@@ -1126,13 +1253,24 @@ pub fn spawn_warm_pane_from(pty_system: &dyn portable_pty::PtySystem, p: &WarmSp
         .try_clone_reader()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
     let output_ring = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<u8>::new()));
-    let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
+    let child_pid = early_pid;
     spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer, cpr_writer, cq_writer, output_ring.clone(), pane_id, child_pid);
     let mut pty_writer = spawn_pane_write_queue(pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?);
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let now = std::time::Instant::now();
-    crate::warm_trace!("pool: spawned spare pane={} pid={:?} in {:.1}ms", pane_id, child_pid, t0.elapsed().as_micros() as f64 / 1000.0);
+    // The phase breakdown is what showed the surge was serialised: `pty` stayed
+    // flat while `proc` and its `wait` component climbed by one whole
+    // CreateProcessW per concurrent spawn (#686).
+    crate::warm_trace!(
+        "pool: spawned spare pane={} pid={:?} in {:.1}ms (pty {:.1}ms, proc {:.1}ms, console wait {:.1}ms)",
+        pane_id,
+        child_pid,
+        t0.elapsed().as_micros() as f64 / 1000.0,
+        t_openpty.as_micros() as f64 / 1000.0,
+        t_spawn.as_micros() as f64 / 1000.0,
+        console_wait as f64 / 1000.0
+    );
     Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, bell_pending, cpr_pending, color_query_pending, child_pid, pane_id, rows, cols, output_ring, spawned_at: now, ready: false, last_dv: 0, last_change: now, trace_settled: false, host_colors: p.host_colors.clone() })
 }
 
