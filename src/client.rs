@@ -2884,6 +2884,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // Windows paths ever populate it.
     #[allow(unused_variables)]
     let mut paste_gesture = PasteGesture::default();
+    // The clipboard's first characters, re-read only when the system's
+    // clipboard sequence number moves.  Consulted before a 1 to 2 character
+    // burst is committed as typing: if it is the start of what is on the
+    // clipboard it is the head of a paste, not a keystroke (#684 follow up).
+    #[cfg(windows)]
+    let mut paste_clip_head = ClipboardHeadCache::default();
+    // One log line per held group, not one per loop turn.
+    #[cfg(windows)]
+    let mut paste_head_logged = false;
 
     // Track whether a modified Enter Press was already handled this keypress
     // cycle.  WezTerm sends Shift+Enter as Release-only (no Press), so we
@@ -6414,11 +6423,28 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
         // paste even though the user explicitly disabled paste detection.
         #[cfg(windows)]
         {
+            // The clipboard head is only consulted for a buffer that is still
+            // short enough to be a candidate, so an ordinary keystroke costs
+            // one GetClipboardSequenceNumber and a prefix compare.
+            let evidence = if paste_detection_enabled
+                && !paste_pend.is_empty()
+                && paste_pend.len() <= 2
+                && !paste_confirmed
+                && !paste_stage2
+            {
+                PasteHeadEvidence {
+                    gesture_open: paste_gesture.is_open(),
+                    clip_head: paste_clip_head.get(),
+                }
+            } else {
+                PasteHeadEvidence::default()
+            };
             if should_zero_latency_flush_paste_pend(
                 &paste_pend,
                 paste_detection_enabled,
                 paste_confirmed,
                 paste_stage2,
+                evidence,
             ) {
                 if input_log_enabled() {
                     input_log("paste", &format!(
@@ -6443,6 +6469,23 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 }
                 paste_pend.clear();
                 paste_pend_start = None;
+                paste_head_logged = false;
+            } else if !paste_pend.is_empty()
+                && paste_pend.len() <= 2
+                && paste_detection_enabled
+                && !paste_confirmed
+                && !paste_stage2
+            {
+                if !paste_head_logged && input_log_enabled() {
+                    input_log("paste", &format!(
+                        "holding {} char(s): head of a paste (ctrl-v gesture={}, clipboard prefix={})",
+                        paste_pend.len(),
+                        evidence.gesture_open,
+                        evidence.clipboard_starts_with(&paste_pend)));
+                    paste_head_logged = true;
+                }
+            } else {
+                paste_head_logged = false;
             }
         }
 
@@ -8583,23 +8626,113 @@ fn should_buffer_leading_paste_control(
     true
 }
 
+/// The two pieces of evidence that the character in hand is the HEAD of a
+/// paste rather than a keystroke, checked before it is committed as typing.
+///
+/// The zero latency flush exists because a typed character must not wait out
+/// the 20 ms detection window, and its original comment assumed the console
+/// host hands the whole clipboard to the input buffer in one write, so a paste
+/// would always have three or more characters pending by the time the client
+/// drained the batch.  gabri-ns measured a host where that is not true
+/// (Windows 10 19045, #684 follow up): the first batch held ONE character, it
+/// went out as `send-text`, and the child saw `M` `ESC[200~` `icrosoft...`,
+/// with the head of the paste on the wrong side of the marker.  A 490 byte
+/// clipboard leaked 32 characters the same way.  Emulated here with a 2 ms
+/// drip (tests/paste_host_injector.cs `drip`), all 43 characters escaped.
+///
+/// tmux never faces this: its host brackets the paste in the byte stream and
+/// `tty_keys_paste` (tty-keys.c:838) returns 1 for "partial" while the closing
+/// `ESC[201~` has not arrived, so the whole thing is held in the input buffer
+/// and nothing is dispatched as keys.  The console input buffer carries no such
+/// marker, so psmux has to recognise the head some other way.
+#[cfg(windows)]
+#[derive(Clone, Copy, Default)]
+struct PasteHeadEvidence<'a> {
+    /// A Ctrl+V press is still in flight: whatever arrives now belongs to it.
+    /// Absent on hosts that bind Ctrl+V themselves and swallow the press.
+    gesture_open: bool,
+    /// The beginning of the system clipboard, cached by sequence number.
+    /// A paste IS the clipboard, whichever gesture started it (Ctrl+V,
+    /// Shift+Insert, the right click menu), so a pending buffer that is a
+    /// prefix of it is the strongest evidence available at the first
+    /// character.
+    clip_head: Option<&'a str>,
+}
+
+#[cfg(windows)]
+impl<'a> PasteHeadEvidence<'a> {
+    /// True when `pend` could be the start of the clipboard's text.
+    ///
+    /// The clipboard must have at least 3 characters: at or below 2 the paste
+    /// and the typing paths are the same code (both flush as `send-text`), so
+    /// holding would cost latency and change nothing.
+    fn clipboard_starts_with(&self, pend: &str) -> bool {
+        match self.clip_head {
+            Some(head) => head.chars().count() >= 3 && head.starts_with(pend),
+            None => false,
+        }
+    }
+
+    fn head_of_paste(&self, pend: &str) -> bool {
+        self.gesture_open || self.clipboard_starts_with(pend)
+    }
+}
+
 #[cfg(windows)]
 fn should_zero_latency_flush_paste_pend(
     paste_pend: &str,
     paste_detection_enabled: bool,
     paste_confirmed: bool,
     paste_stage2: bool,
+    evidence: PasteHeadEvidence<'_>,
 ) -> bool {
     if paste_confirmed || paste_stage2 || paste_pend.is_empty() {
         return false;
     }
     if !paste_detection_enabled {
+        // The user asked for no paste detection at all: never hold.
         return true;
     }
     if paste_pend.starts_with('\n') || paste_pend.starts_with('\t') {
         return false;
     }
-    paste_pend.len() <= 2
+    if paste_pend.len() > 2 {
+        return false;
+    }
+    // Hold the head of a paste for the ordinary 20 ms window, which is what
+    // decides whether this becomes a bracketed `send-paste`.  Typing is
+    // unaffected unless the character typed is the clipboard's first
+    // character, and that case simply takes the path every character took
+    // before the zero latency flush existed.
+    !evidence.head_of_paste(paste_pend)
+}
+
+/// The clipboard's first characters, re-read only when the system's clipboard
+/// sequence number moves.
+///
+/// 64 characters is far more than the check needs (the pending buffer is at
+/// most 2 characters when the flush decision is made) and keeps the cache
+/// cheap for a multi megabyte clipboard.
+#[cfg(windows)]
+#[derive(Default)]
+struct ClipboardHeadCache {
+    seq: Option<u32>,
+    head: Option<String>,
+}
+
+#[cfg(windows)]
+impl ClipboardHeadCache {
+    const HEAD_CHARS: usize = 64;
+
+    fn get(&mut self) -> Option<&str> {
+        let seq = crate::clipboard::clipboard_sequence_number();
+        if self.seq != Some(seq) {
+            self.seq = Some(seq);
+            self.head = read_from_system_clipboard()
+                .map(|t| t.chars().take(Self::HEAD_CHARS).collect::<String>());
+        }
+        self.head.as_deref()
+    }
 }
 
 /// What the client has already forwarded for the paste gesture in flight.
@@ -8618,18 +8751,40 @@ struct PasteGesture {
     delivered: Option<(String, Instant)>,
     /// True once any of this gesture's characters have been forwarded.
     injected: bool,
+    /// When the Ctrl+V press that opened this gesture was seen.  The host's
+    /// characters follow it within a few milliseconds, so a burst arriving
+    /// inside [`PASTE_GESTURE_WINDOW`] of it is that paste and must not be
+    /// committed as typing (issue #684 follow up).
+    opened_at: Option<Instant>,
 }
+
+/// How long after a Ctrl+V press an arriving character still counts as part of
+/// that paste.  The host injects within a few milliseconds of the press; this
+/// is generous enough for a slow one and short enough that a key held down and
+/// released has no lasting effect on typing.
+const PASTE_GESTURE_WINDOW: Duration = Duration::from_millis(300);
 
 impl PasteGesture {
     /// A new Ctrl+V started: nothing of this gesture has been forwarded yet.
     fn start(&mut self) {
         self.delivered = None;
         self.injected = false;
+        self.opened_at = Some(Instant::now());
     }
 
     /// The gesture is over, however it ended.
     fn finish(&mut self) {
-        self.start();
+        self.delivered = None;
+        self.injected = false;
+        self.opened_at = None;
+    }
+
+    /// True while a Ctrl+V press is recent enough that the characters arriving
+    /// now are its paste.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn is_open(&self) -> bool {
+        self.opened_at
+            .map_or(false, |at| at.elapsed() < PASTE_GESTURE_WINDOW)
     }
 
     /// Remember `text` as forwarded on behalf of this gesture.
