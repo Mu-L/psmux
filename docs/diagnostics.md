@@ -231,17 +231,36 @@ runs each:
 
 ```
                               inbox conhost      OpenConsole 1.24.2607.10001
-launch to prompt, median      674 ms             3608 ms   (bare pwsh 434 ms)
+launch to prompt, median      596 ms             711 ms    (bare pwsh 415 / 457 ms)
 keystroke to screen, pwsh     16.74 ms median    2.19 to 2.47 ms median
-DA1 / DA2 / DECRQM 2026       answered by host   0 bytes, nobody answers
+DA1 / DA2 / DSR / DECRQM      answered by host   answered by psmux
 XTVERSION                     answered by psmux  answered by psmux
 ```
 
-The 3 second launch cost is one timeout: that OpenConsole writes `ESC[1t` and `ESC[c` upstream at
-startup and waits for the DA1 reply, which the inbox conhost would have answered itself and which
-psmux does not answer, so the pane child sits in its console connect until the host gives up. The
-keystroke win is real and large, and so is the regression next to it. Set this only when you know
-which of the two you are buying.
+#### Who answers the terminal's round trip questions
+
+A program in a pane can ask the terminal what it is and what modes it has on. psmux answers
+**DA1** (`ESC[c`), **DA2** (`ESC[>c`), **DSR** (`ESC[5n` and `ESC[6n`) and **DECRQM**
+(`ESC[?<mode>$p`) itself, with the same bytes tmux sends: `ESC[?1;2c`, `ESC[>84;0;0c`, `ESC[0n`,
+`ESC[<row>;<col>R` and `ESC[?<mode>;<value>$y` with 1 set, 2 reset, 0 not recognised
+(`input.c`, `INPUT_CSI_DA`, `INPUT_CSI_DA_TWO`, `INPUT_CSI_DSR`, `INPUT_CSI_QUERY_PRIVATE`).
+`ESC[>q` (XTVERSION) is answered too, and `ESC[1t` is ignored, again like tmux.
+
+On the inbox `conhost.exe` none of that is visible, because that host answers those four itself
+and never forwards them to psmux. A host that forwards them instead, which is what recent
+OpenConsole builds do, used to leave them unanswered, and that cost two things at once: a program
+in the pane got zero bytes back for DA1, DA2 and DECRQM, and **every pane launch stalled about
+three seconds**, because OpenConsole opens a pane by writing `ESC[1t ESC[c` toward psmux and
+parks the child inside its console connect until the DA1 reply arrives. psmux answering the
+queries removes both: prompt at 616 / 617 / 615 ms where it used to be 3777 / 3747 / 3799 ms.
+
+One deliberate difference from tmux: DECRQM for mode **2026** (synchronized output) reports `0`,
+not recognised, rather than tmux's `2`. psmux has no synchronized output to offer, and `0` is
+byte for byte what the inbox host already answers on this build, so a pane sees the same reply
+whichever console host is under it.
+
+The keystroke win is real and large. Set this when you want it, knowing you are also taking on a
+console host that Windows Update does not patch for you.
 
 `PSMUX_NO_PASSTHROUGH=1` is independent of this and does not change either number.
 
