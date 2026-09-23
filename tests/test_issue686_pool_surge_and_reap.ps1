@@ -33,7 +33,12 @@
 #      30ms concurrent, and does not depend on how fast this machine is.
 #
 #   2. The user visible number that follows from it: the p50 of a ten call
-#      burst, which must stay well under the ~500ms stall.
+#      burst. This one is a guard rather than the discriminator, because the
+#      serialised build's p50 was 57ms with the damage in its tail. It is here
+#      because the first attempt at the fix, unserialising the spawns with no
+#      cap on how many run at once, took the p50 to 251ms: eight concurrent
+#      spawns are slow enough that every claim cold spawns and retires the
+#      batch in flight. Under 110ms means neither failure is present.
 #
 #   3. ZERO orphan pane shells after a kill-server with a surge in flight.
 #      Orphans are counted only as pwsh children of the server pid THIS suite

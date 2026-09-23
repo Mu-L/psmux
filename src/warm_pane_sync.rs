@@ -473,11 +473,15 @@ pub mod inflight {
 /// creation time before terminating, so a pid recycled between the spawn and
 /// this call is never touched.
 pub fn reap_inflight_spares() -> usize {
-    // 150ms, not longer: a shutdown is racing the caller's force-kill fallback,
-    // so a long wait here is time the process may not have. Spawners that are
-    // slower than this see the teardown flag and kill their own child, and the
-    // shutdown path calls this a second time after its client courtesies.
-    let pids = inflight::reap(std::time::Duration::from_millis(150), std::thread::sleep);
+    // The budget only applies while a spawn is actually in flight without a pid
+    // yet, ie a thread inside CreateProcessW; an idle shutdown returns from here
+    // immediately. 400ms is what a CreateProcessW costs on a machine under load
+    // (a 150ms budget let two shells through during a concurrent test sweep),
+    // and the shutdown path calls this twice with its client courtesies in
+    // between, so the real grace is about twice this. Both fit inside the
+    // 1500ms the kill-server handler holds its socket open for, which is what
+    // keeps the caller's force-kill fallback from cutting the shutdown short.
+    let pids = inflight::reap(std::time::Duration::from_millis(400), std::thread::sleep);
     for pid in &pids {
         crate::platform::process_kill::kill_pid_tree(*pid);
     }
