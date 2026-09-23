@@ -186,6 +186,11 @@ cp '$(To-WslPath $keyWin)' $keyWsl && sed -i 's/\r`$//' $keyWsl && chmod 600 $ke
 sed 's/\r`$//' '$(To-WslPath $driverWin)' > /tmp/psmux_i598_drv.py
 echo PREP_OK
 "@
+# A CRLF checkout puts a \r at the end of every line of that here string, and
+# bash then runs `chmod 600 /tmp/psmux_i598_key\r` and writes the driver to a
+# file literally named `psmux_i598_drv.py\r`, while `echo PREP_OK\r` still
+# prints PREP_OK. Hand bash LF only, whatever the checkout did to this file.
+$prep = $prep -replace "`r`n", "`n"
 $prepOut = & wsl -d $distro -e bash -lc $prep 2>&1 | Out-String
 if ($prepOut -notmatch "PREP_OK") { Write-Skip "could not stage the ssh key inside WSL: $prepOut"; exit 0 }
 
