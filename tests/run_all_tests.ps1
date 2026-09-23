@@ -979,8 +979,29 @@ function Clean-Server {
                     -RedirectStandardError  (Join-Path $script:RunDir "ks_err.tmp")
             if (-not $ks.WaitForExit(5000)) { try { $ks.Kill() } catch {} }
         } catch {}
+        # A server killed by image name leaves every pane shell it spawned alive
+        # with no parent: 24 `pwsh -NoLogo -NoProfile -NoExit ...` orphans sat
+        # on the machine after sweep 2026-09-23_13-54-30, each with a conhost.
+        # Record the children of every surviving server BY PID before the kill,
+        # and stop them afterwards. Only direct children of a psmux server, and
+        # only pwsh/cmd/conhost images, so nothing unrelated is ever touched.
+        $orphanCandidates = @()
+        foreach ($srv in @(Get-Process psmux -ErrorAction SilentlyContinue)) {
+            try {
+                $orphanCandidates += @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($srv.Id)" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^(pwsh|powershell|cmd|conhost)\.exe$' } |
+                    ForEach-Object { $_.ProcessId })
+            } catch {}
+        }
         # Force-kill any lingering processes, then poll (up to 3s) instead of fixed sleeps
         Get-Process psmux -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        foreach ($childPid in $orphanCandidates) {
+            $c = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+            if ($c -and $c.ProcessName -match '^(pwsh|powershell|cmd|conhost)$') {
+                Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if ($orphanCandidates.Count -gt 0) { Write-KillNote ("CLEAN-SERVER reaped {0} pane shell(s) of the killed server(s) by pid: {1}" -f $orphanCandidates.Count, ($orphanCandidates -join ',')) }
         $deadline = [DateTime]::Now.AddSeconds(3)
         while ([DateTime]::Now -lt $deadline) {
             if (-not (Get-Process psmux -ErrorAction SilentlyContinue)) { break }
