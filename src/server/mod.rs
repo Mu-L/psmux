@@ -935,6 +935,45 @@ fn read_fresh_startup_error_at(path: &str, since_epoch: u64) -> Option<(String, 
     Some((err_lines.join(" "), path.to_string()))
 }
 
+/// Make the window at `internal_idx` the active one, the way tmux's
+/// `session_select` does: remember the last window, clear the new window's
+/// activity, bell and silence alerts (`server-client.c`
+/// `s->curw->flags &= ~WINLINK_ALERTFLAGS`) and resize its panes.
+///
+/// Returns true when the active window actually moved. Three request arms and
+/// `SelectPaneTarget` shared one copy of this body; they now share one
+/// function, so a change to what "focusing a window" means cannot land in
+/// three places out of four.
+pub(crate) fn focus_window_at(app: &mut AppState, internal_idx: usize) -> bool {
+    if internal_idx >= app.windows.len() || internal_idx == app.active_idx {
+        return false;
+    }
+    crate::copy_mode::switch_with_copy_save(app, |app| {
+        app.last_window_idx = app.active_idx;
+        app.active_idx = internal_idx;
+    });
+    if let Some(win) = app.windows.get_mut(internal_idx) {
+        win.activity_flag = false;
+        win.bell_flag = false;
+        win.silence_flag = false;
+    }
+    crate::tree::resize_all_panes(app);
+    true
+}
+
+/// The (window id, pane id) the session is focused on, which is what tmux
+/// compares when it decides whether a `select-pane` changed anything
+/// (cmd-select-pane.c:269, `if (wp == w->active) return`).
+pub(crate) fn active_pane_identity(app: &AppState) -> (usize, usize) {
+    match app.windows.get(app.active_idx) {
+        Some(win) => (
+            win.id,
+            crate::tree::get_active_pane_id(&win.root, &win.active_path).unwrap_or(usize::MAX),
+        ),
+        None => (usize::MAX, usize::MAX),
+    }
+}
+
 /// Absolute path to `~/.psmux/config-warnings.log`, or None if no home dir.
 pub(crate) fn config_warnings_log_path() -> Option<String> {
     Some(format!("{}\\config-warnings.log", crate::paths::psmux_dir_opt()?))
@@ -2417,59 +2456,63 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::FocusWindow(wid) => {
                     // wid is a display index (same as tmux window number), convert to internal array index
                     if let Some(internal_idx) = app.win_pos(wid) {
-                        if internal_idx != app.active_idx {
-                            switch_with_copy_save(&mut app, |app| {
-                                app.last_window_idx = app.active_idx;
-                                app.active_idx = internal_idx;
-                            });
-                            // Clear activity/bell/silence flags on the newly-focused window
-                            if let Some(win) = app.windows.get_mut(internal_idx) {
-                                win.activity_flag = false;
-                                win.bell_flag = false;
-                                win.silence_flag = false;
-                            }
-                            // Lazily resize panes in the newly-focused window
-                            resize_all_panes(&mut app);
-                        }
+                        focus_window_at(&mut app, internal_idx);
                     }
                     meta_dirty = true;
                     hook_event = Some("after-select-window");
                 }
                 CtrlReq::FocusWindowByName(ref name) => {
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.name == *name) {
-                        if internal_idx != app.active_idx {
-                            switch_with_copy_save(&mut app, |app| {
-                                app.last_window_idx = app.active_idx;
-                                app.active_idx = internal_idx;
-                            });
-                            if let Some(win) = app.windows.get_mut(internal_idx) {
-                                win.activity_flag = false;
-                                win.bell_flag = false;
-                                win.silence_flag = false;
-                            }
-                            resize_all_panes(&mut app);
-                        }
+                        focus_window_at(&mut app, internal_idx);
                     }
                     meta_dirty = true;
                     hook_event = Some("after-select-window");
                 }
                 CtrlReq::FocusWindowById(id) => {
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.id == id) {
-                        if internal_idx != app.active_idx {
-                            switch_with_copy_save(&mut app, |app| {
-                                app.last_window_idx = app.active_idx;
-                                app.active_idx = internal_idx;
-                            });
-                            if let Some(win) = app.windows.get_mut(internal_idx) {
-                                win.activity_flag = false;
-                                win.bell_flag = false;
-                                win.silence_flag = false;
-                            }
-                            resize_all_panes(&mut app);
-                        }
+                        focus_window_at(&mut app, internal_idx);
                     }
                     meta_dirty = true;
                     hook_event = Some("after-select-window");
+                }
+                // One request for the whole `-t` of a `select-pane` (#691).
+                CtrlReq::SelectPaneTarget { win, win_is_id, ref win_name, pane, pane_is_id, fire_hook } => {
+                    let before = active_pane_identity(&app);
+                    let internal_idx = if let Some(w) = win {
+                        if win_is_id {
+                            app.windows.iter().position(|x| x.id == w)
+                        } else {
+                            app.win_pos(w)
+                        }
+                    } else if let Some(name) = win_name.as_deref() {
+                        app.windows.iter().position(|x| x.name == name)
+                    } else {
+                        None
+                    };
+                    if let Some(i) = internal_idx {
+                        focus_window_at(&mut app, i);
+                    }
+                    if let Some(p) = pane {
+                        let old_path = app.windows[app.active_idx].active_path.clone();
+                        if pane_is_id {
+                            switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, p); });
+                        } else {
+                            switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, p); });
+                        }
+                        if app.windows[app.active_idx].active_path != old_path {
+                            unzoom_if_zoomed(&mut app);
+                        }
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &win.active_path) {
+                            crate::tree::touch_mru(&mut win.pane_mru, pid);
+                        }
+                    }
+                    meta_dirty = true;
+                    // cmd-select-pane.c:269 returns before the hook when the
+                    // target pane is already the active one.
+                    if fire_hook && active_pane_identity(&app) != before {
+                        hook_event = Some("after-select-pane");
+                    }
                 }
                 CtrlReq::FocusPane(pid) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
@@ -3778,6 +3821,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::SelectPane(dir, keep_zoom) => {
                     if let Some(cmds) = app.hooks.get("before-select-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    let _pane_before = active_pane_identity(&app);
                     // Auto-unzoom when navigating to another pane (tmux behavior).
                     // For directional nav: unzoom first so compute_rects uses
                     // real geometry, then re-zoom only if focus didn't change.
@@ -3915,7 +3959,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         _ => {}
                     }
                     meta_dirty = true;
-                    hook_event = Some("after-select-pane");
+                    // tmux fires `after-select-pane` from the activation at
+                    // cmd-select-pane.c:276, which line :269 skips when the
+                    // pane did not move; `-m`, `-M`, `-e` and `-d` return
+                    // earlier still (cmd-select-pane.c:100, :180) and never
+                    // reach it.
+                    if active_pane_identity(&app) != _pane_before {
+                        hook_event = Some("after-select-pane");
+                    }
                 }
                 CtrlReq::SelectWindow(idx) => {
                     if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }

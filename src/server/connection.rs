@@ -350,6 +350,55 @@ pub(crate) fn select_window_requests(
     }
 }
 
+/// Does this `select-pane` carry an operation of its own, one that
+/// `CtrlReq::SelectPane` will perform and whose `after-select-pane` it will
+/// fire?
+///
+/// tmux's cmd-select-pane.c runs exactly one of these per command and returns
+/// before the generic target activation: `-l`/last-pane at :164, `-m`/`-M` at
+/// :100, `-e`/`-d` at :180, `-T`/`-P` at :247. The relative `:.+` / `:.-`
+/// forms and `-U/-D/-L/-R` fall through to the activation at :274. Either way
+/// the command is ONE operation and fires its after hook at most once (#690,
+/// cmd-queue.c `cmdq_fire_command`), so when this is true the `-t` request
+/// must not fire it as well.
+pub(crate) fn select_pane_has_own_operation(args: &[&str], raw_target: Option<&str>) -> bool {
+    let relative = raw_target.map_or(false, |t| {
+        t.contains(".+") || t.contains(".-") || t == "+" || t == "-" || t == ":.+" || t == ":.-"
+    });
+    relative
+        || args.iter().any(|a| {
+            matches!(*a, "-U" | "-D" | "-L" | "-R" | "-l" | "-m" | "-M" | "-e" | "-d")
+        })
+}
+
+/// The single request a `select-pane`'s `-t` emits (issue #691).
+///
+/// One place decides, the way `select_window_requests` does for #690: the
+/// generic `-t` focus block no longer sends a `FocusWindow` (which names
+/// `after-select-window`, the wrong hook: tmux's cmd-select-pane.c never fires
+/// it) plus a pane focus that names no hook at all.
+pub(crate) fn select_pane_requests(
+    args: &[&str],
+    raw_target: Option<&str>,
+    target_win: Option<usize>,
+    target_win_is_id: bool,
+    target_win_name: Option<&str>,
+    target_pane: Option<usize>,
+    pane_is_id: bool,
+) -> Vec<CtrlReq> {
+    if target_win.is_none() && target_win_name.is_none() && target_pane.is_none() {
+        return Vec::new();
+    }
+    vec![CtrlReq::SelectPaneTarget {
+        win: target_win,
+        win_is_id: target_win_is_id,
+        win_name: target_win_name.map(|s| s.to_string()),
+        pane: target_pane,
+        pane_is_id,
+        fire_hook: !select_pane_has_own_operation(args, raw_target),
+    }]
+}
+
 /// Walk the sub-commands produced by `split_top_level_semicolons` and merge
 /// any consecutive run of `send`/`send-keys` commands targeting the same
 /// pane into a single synthesized `send -lt <target> <bytes>` command.
@@ -948,6 +997,10 @@ if control_echo || control_noecho {
                     if let Some(v) = cmd_args.get(i+1) {
                         // Issue #558: drop the '=' exact-match marker (see TARGET capture).
                         ctrl_raw_target = Some(crate::cli::strip_exact_match_prefix(v).to_string());
+                        // Issue #692: a window command's bare `-t 0` is a window
+                        // index in the current session (tmux cmd-find.c:443),
+                        // not a session name.
+                        let v = &crate::cli::coerce_bare_window_target(cmd_name, v);
                         let pt = parse_target(v);
                         if pt.window.is_some() { ctrl_target_win = pt.window; ctrl_target_win_is_id = pt.window_is_id; ctrl_target_win_name = None; }
                         else if pt.window_name.is_some() { ctrl_target_win_name = pt.window_name; ctrl_target_win = None; ctrl_target_win_is_id = false; }
@@ -1009,7 +1062,18 @@ if control_echo || control_noecho {
                 })
             });
         if focus_err.is_none() {
-            if is_focus_cmd {
+            if is_focus_cmd && matches!(cmd_name, "select-pane" | "selectp") {
+                // Issue #691: one request for the whole target, so the command
+                // fires its own hook (`after-select-pane`) once and never
+                // `after-select-window`.
+                for req in select_pane_requests(
+                    &cmd_args,
+                    ctrl_raw_target.as_deref(), ctrl_target_win, ctrl_target_win_is_id,
+                    ctrl_target_win_name.as_deref(), ctrl_target_pane, ctrl_pane_is_id,
+                ) {
+                    let _ = tx_ctrl.send(req);
+                }
+            } else if is_focus_cmd {
                 if let Some(wid) = ctrl_target_win {
                     if ctrl_target_win_is_id {
                         let _ = tx_ctrl.send(CtrlReq::FocusWindowById(wid));
@@ -1279,6 +1343,10 @@ if set_option_command {
             if let Some(v) = args.get(i+1) {
             // Issue #558: drop the '=' exact-match marker (see TARGET capture).
                 raw_target = Some(crate::cli::strip_exact_match_prefix(v).to_string());
+                // Issue #692: a window command's bare `-t 0` is a window index
+                // in the current session (tmux cmd-find.c:443), not a session
+                // name, so put the colon back before the generic parse.
+                let v = &crate::cli::coerce_bare_window_target(cmd, v);
                 // Parse the -t value using parse_target for consistent handling
                 let pt = parse_target(v);
                 if pt.window.is_some() { target_win = pt.window; target_win_is_id = pt.window_is_id; target_win_name = None; }
@@ -1357,23 +1425,36 @@ let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" 
 // in the server loop, one `select-window` ran `after-select-window`
 // twice.  A pane part on a select-window target is still focused here.
 let selectw_owns_window_target = matches!(cmd, "select-window" | "selectw");
+// Issue #691: and `select-pane` owns its WHOLE target, window part
+// included, for the same reason. Focusing the window part here fired
+// `after-select-window` for a command tmux gives `after-select-pane`.
+let selectp_owns_target = matches!(cmd, "select-pane" | "selectp");
 if is_focus_cmd {
-    if !selectw_owns_window_target {
-        if let Some(wid) = target_win {
-            if target_win_is_id {
-                let _ = tx.send(CtrlReq::FocusWindowById(wid));
-            } else {
-                let _ = tx.send(CtrlReq::FocusWindow(wid));
-            }
-        } else if let Some(ref wname) = target_win_name {
-            let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
+    if selectp_owns_target {
+        for req in select_pane_requests(
+            &args, raw_target.as_deref(), target_win, target_win_is_id,
+            target_win_name.as_deref(), target_pane, pane_is_id,
+        ) {
+            let _ = tx.send(req);
         }
-    }
-    if let Some(pid) = target_pane {
-        if pane_is_id {
-            let _ = tx.send(CtrlReq::FocusPane(pid));
-        } else {
-            let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
+    } else {
+        if !selectw_owns_window_target {
+            if let Some(wid) = target_win {
+                if target_win_is_id {
+                    let _ = tx.send(CtrlReq::FocusWindowById(wid));
+                } else {
+                    let _ = tx.send(CtrlReq::FocusWindow(wid));
+                }
+            } else if let Some(ref wname) = target_win_name {
+                let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
+            }
+        }
+        if let Some(pid) = target_pane {
+            if pane_is_id {
+                let _ = tx.send(CtrlReq::FocusPane(pid));
+            } else {
+                let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
+            }
         }
     }
 } else {

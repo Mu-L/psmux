@@ -2547,6 +2547,30 @@ pub enum CtrlReq {
     FocusWindowByName(String),
     FocusPane(usize),
     FocusPaneByIndex(usize),
+    /// The whole `-t` of a `select-pane`, as ONE request (issue #691).
+    ///
+    /// The generic `-t` focus block used to send a permanent `FocusWindow` for
+    /// the window part of a pane target and a `FocusPane`/`FocusPaneByIndex`
+    /// for the pane part. `FocusWindow` names `after-select-window` in its
+    /// hook slot and the pane requests name nothing, so `select-pane -t s:0.1`
+    /// moved the active pane, fired `after-select-window` and never fired
+    /// `after-select-pane`. tmux fires the command's OWN hook, once:
+    /// cmd-select-pane.c:276 `cmdq_insert_hook(s, item, current,
+    /// "after-select-pane")`, and cmd-select-pane.c:269 returns before it when
+    /// the target pane is already active.
+    ///
+    /// `fire_hook` is false when a direction, `-l`, `-m`, `-M`, `-e` or `-d`
+    /// flag follows in the same command: `CtrlReq::SelectPane` carries the
+    /// operation then, and one command may fire its after hook only once
+    /// (#690, tmux cmd-queue.c `cmdq_fire_command`).
+    SelectPaneTarget {
+        win: Option<usize>,
+        win_is_id: bool,
+        win_name: Option<String>,
+        pane: Option<usize>,
+        pane_is_id: bool,
+        fire_hook: bool,
+    },
     /// Temporary focus for generic -t targeting, with validation (issue #545).
     /// The server resolves the window and/or pane FIRST and replies Err when
     /// the target does not exist, so the connection thread can report
