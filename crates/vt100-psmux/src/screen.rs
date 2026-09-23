@@ -171,6 +171,18 @@ pub struct Screen {
     /// alone so a prior SetUserVar/633;E can "latch" via the subsequent C marker.
     osc_shell_command: Option<String>,
 
+    /// Per pane colour palette set by OSC 4 and emptied by OSC 104 / RIS
+    /// (issue #685).  `None` until the first entry is set, so a pane that
+    /// never touches its palette costs one pointer and renders byte for byte
+    /// as it did before.  tmux keeps the same thing on the pane
+    /// (`tmux.h:1379`) and allocates it lazily too (`colour.c:1280`).
+    palette: Option<Box<crate::palette::ColourPalette>>,
+
+    /// Bumped on every change to `palette`.  The pane reader thread compares
+    /// it to the value it last published so it can mirror the low sixteen
+    /// entries for the OSC 4 query responder without locking on every batch.
+    palette_generation: u64,
+
     /// Set to `true` when the screen is cleared (CSI 2J) while
     /// `squelch_clear_pending` is active.  The layout serialiser
     /// checks this flag to know that `cls` has finished.
@@ -227,6 +239,8 @@ impl Screen {
             osc52_clipboard: None,
             hyperlinks: Vec::new(),
             osc_shell_command: None,
+            palette: None,
+            palette_generation: 0,
             squelch_cleared: false,
             squelch_clear_pending: false,
             audible_bell_count: 0,
@@ -949,6 +963,80 @@ impl Screen {
     /// Terminal, etc.) can perform the actual copy.
     pub fn take_clipboard(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
         self.osc52_clipboard.take()
+    }
+
+    // ---- OSC 4 / OSC 104 per pane colour palette (issue #685) ----
+
+    /// This pane's palette, or `None` when no OSC 4 has ever been accepted.
+    ///
+    /// Serialisers take this once per pane per frame and hand it to
+    /// [`resolve_colour`](Self::resolve_colour), so a pane without a palette
+    /// pays a single null check for the whole frame.
+    #[must_use]
+    pub fn colour_palette(&self) -> Option<&crate::palette::ColourPalette> {
+        self.palette.as_deref()
+    }
+
+    /// The RGB override for one index, if set.  tmux's `colour_palette_get`
+    /// (`colour.c:1251`).
+    #[must_use]
+    pub fn palette_entry(&self, idx: u8) -> Option<(u8, u8, u8)> {
+        self.palette.as_ref().and_then(|p| p.get(idx))
+    }
+
+    /// Set or unset one palette entry.  Returns `true` when the stored value
+    /// changed, mirroring `colour_palette_set` (`colour.c:1272`), whose return
+    /// is what makes tmux schedule a full redraw.
+    pub fn set_palette_entry(
+        &mut self,
+        idx: u8,
+        rgb: Option<(u8, u8, u8)>,
+    ) -> bool {
+        if rgb.is_none() && self.palette.is_none() {
+            // Nothing allocated, nothing to unset: tmux returns 0 here too
+            // rather than allocating 256 slots for a reset.
+            return false;
+        }
+        let palette = self
+            .palette
+            .get_or_insert_with(|| Box::new(crate::palette::ColourPalette::default()));
+        if palette.set(idx, rgb) {
+            self.palette_generation = self.palette_generation.wrapping_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop the whole palette (`colour_palette_clear`, `colour.c:1227`).
+    /// Returns `true` when something was dropped.
+    pub fn clear_palette(&mut self) -> bool {
+        let dropped = self.palette.take().is_some_and(|p| !p.is_empty());
+        if dropped {
+            self.palette_generation = self.palette_generation.wrapping_add(1);
+        }
+        dropped
+    }
+
+    /// A counter bumped on every accepted palette change.  The pane reader
+    /// thread uses it to notice that the mirror it keeps for the OSC 4 query
+    /// responder is stale, without walking 256 entries per output batch.
+    #[must_use]
+    pub fn palette_generation(&self) -> u64 {
+        self.palette_generation
+    }
+
+    /// Replace an indexed colour with this pane's palette RGB.  This is the
+    /// substitution tmux performs in `tty_check_fg` / `tty_check_bg` /
+    /// `tty_check_us` (`tty.c:2822`, `2892`, `2945`) just before the cell
+    /// reaches the terminal.  A pane with no palette returns `c` untouched.
+    #[inline]
+    #[must_use]
+    pub fn resolve_colour(&self, c: crate::attrs::Color) -> crate::attrs::Color {
+        match &self.palette {
+            Some(p) => p.resolve(c),
+            None => c,
+        }
     }
 
     /// Begin an OSC 8 hyperlink: intern `uri` and set it as the current pen's

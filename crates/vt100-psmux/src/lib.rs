@@ -56,6 +56,7 @@ mod attrs;
 mod callbacks;
 mod cell;
 mod grid;
+mod palette;
 mod parser;
 mod perform;
 mod row;
@@ -66,6 +67,7 @@ pub mod width;
 pub use attrs::{Color, UnderlineStyle};
 pub use callbacks::Callbacks;
 pub use cell::Cell;
+pub use palette::{parse_palette_index, parse_x11_colour, ColourPalette};
 pub use parser::Parser;
 pub use screen::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 pub use width::{

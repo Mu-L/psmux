@@ -624,8 +624,12 @@ pub fn render_popup_overlay(
                     for col in 0..inner_w {
                         if let Some(cell) = screen.cell(row, col) {
                             let mut style = Style::default();
-                            style = style.fg(crate::rendering::vt_to_color(cell.fgcolor()));
-                            style = style.bg(crate::rendering::vt_to_color(cell.bgcolor()));
+                            // Issue #685: a popup pane owns a palette like any
+                            // other pane (tmux gives one to `popup_data` too,
+                            // popup.c:624), so its indexed colours resolve
+                            // through it before they reach the screen.
+                            style = style.fg(crate::rendering::vt_to_color(screen.resolve_colour(cell.fgcolor())));
+                            style = style.bg(crate::rendering::vt_to_color(screen.resolve_colour(cell.bgcolor())));
                             if cell.dim() {
                                 style = style.add_modifier(Modifier::DIM);
                             }
@@ -638,7 +642,7 @@ pub fn render_popup_overlay(
                             style = crate::rendering::with_underline(
                                 style,
                                 cell.underline_style().sgr_subparam(),
-                                match cell.underline_color() {
+                                match screen.resolve_colour(cell.underline_color()) {
                                     vt100::Color::Default => None,
                                     c => Some(crate::rendering::vt_to_color(c)),
                                 },

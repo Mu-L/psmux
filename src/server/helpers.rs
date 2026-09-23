@@ -802,8 +802,21 @@ pub(crate) fn answer_color_queries(
     child_pid: Option<u32>,
     colors: &crate::types::HostColors,
 ) {
+    answer_color_queries_for_pane(bits, writer, child_pid, colors, None);
+}
+
+/// Issue #685: as [`answer_color_queries`], with the asking pane's own OSC 4
+/// palette taking precedence over the host terminal's, the way tmux answers
+/// from `wp->palette` first.
+pub(crate) fn answer_color_queries_for_pane(
+    bits: u32,
+    writer: &mut dyn std::io::Write,
+    child_pid: Option<u32>,
+    colors: &crate::types::HostColors,
+    pane_palette: Option<[Option<(u8, u8, u8)>; 16]>,
+) {
     if bits == 0 { return; }
-    let (scheme, osc) = build_color_replies(bits, colors);
+    let (scheme, osc) = build_color_replies_for_pane(bits, colors, pane_palette);
     if let Some(scheme) = scheme {
         let _ = writer.write_all(scheme.as_bytes());
         let _ = writer.flush();
@@ -852,6 +865,23 @@ pub(crate) fn build_color_replies(
     bits: u32,
     colors: &crate::types::HostColors,
 ) -> (Option<String>, String) {
+    build_color_replies_for_pane(bits, colors, None)
+}
+
+/// Issue #685: the same reply, but answering palette queries from the asking
+/// pane's OWN OSC 4 palette when it has an entry for that index.
+///
+/// tmux does exactly this: `input_osc_4` (`input.c:2947`) calls
+/// `colour_palette_get` on the pane's palette and replies from it, and only
+/// when the pane has no entry does it forward the question to the real
+/// terminal (`input_add_request`, `INPUT_REQUEST_PALETTE`).  Without the
+/// override a pane that had just set index 4 to `#000080` would be told the
+/// outer terminal's `#0037DA`, which is the same mismatch #685 is about.
+pub(crate) fn build_color_replies_for_pane(
+    bits: u32,
+    colors: &crate::types::HostColors,
+    pane_palette: Option<[Option<(u8, u8, u8)>; 16]>,
+) -> (Option<String>, String) {
     // Light/dark scheme query: CSI ?996n → CSI ?997;1n (dark) / ?997;2n (light).
     let scheme = if bits & crate::types::COLOR_QUERY_SCHEME != 0 {
         Some(format!("\x1b[?997;{}n", if colors.is_dark() { 1 } else { 2 }))
@@ -868,7 +898,9 @@ pub(crate) fn build_color_replies(
     }
     for i in 0..16usize {
         if bits & (1u32 << i) != 0 {
-            if let Some(rgb) = colors.palette[i] {
+            // The pane's own entry wins; the host's is the fallback.
+            let own = pane_palette.and_then(|p| p[i]);
+            if let Some(rgb) = own.or(colors.palette[i]) {
                 osc.push_str(&format!("\x1b]4;{};{}\x1b\\", i, x11_rgb(rgb)));
             }
         }
@@ -894,9 +926,11 @@ pub(crate) fn answer_color_queries_sync(
     bits: u32,
     child_pid: Option<u32>,
     colors: &crate::types::HostColors,
+    pane_id: usize,
 ) -> bool {
     if bits == 0 { return true; }
-    let (scheme, osc) = build_color_replies(bits, colors);
+    let (scheme, osc) =
+        build_color_replies_for_pane(bits, colors, crate::types::pane_palette(pane_id));
     let combined = format!("{}{}", scheme.as_deref().unwrap_or(""), osc);
     if combined.is_empty() { return true; }
     match child_pid {
@@ -912,7 +946,8 @@ pub(crate) fn drain_color_queries(node: &mut crate::types::Node, colors: &crate:
         crate::types::Node::Leaf(p) => {
             let bits = p.color_query_pending.swap(0, std::sync::atomic::Ordering::AcqRel);
             if bits != 0 {
-                answer_color_queries(bits, &mut *p.writer, p.child_pid, colors);
+                let own = crate::types::pane_palette(p.id);
+                answer_color_queries_for_pane(bits, &mut *p.writer, p.child_pid, colors, own);
             }
         }
         crate::types::Node::Split { children, .. } => {

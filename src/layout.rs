@@ -13,13 +13,38 @@ use crate::tree::get_split_mut;
 /// as a `Vec<RowRunsJson>`.
 /// Extracts the extended underline style and the SGR 58 underline colour from
 /// a parsed cell, in the shape the run JSON carries them (#589).
-fn cell_underline(cell: &vt100::Cell) -> (u8, Option<String>) {
+fn cell_underline(
+    cell: &vt100::Cell,
+    pal: Option<&vt100::ColourPalette>,
+) -> (u8, Option<String>) {
     let ul = cell.underline_style().sgr_subparam();
-    let ulc = match cell.underline_color() {
+    let ulc = match pal_resolve(pal, cell.underline_color()) {
         vt100::Color::Default => None,
         c => Some(crate::util::color_to_name(c).into_owned()),
     };
     (ul, ulc)
+}
+
+/// Issue #685: replace an indexed colour with the pane's OSC 4 palette entry
+/// on the way out, which is where tmux does the same substitution
+/// (`tty.c:2822` `tty_check_fg`, `tty.c:2892` `tty_check_bg`, `tty.c:2945`
+/// `tty_check_us`, all called from `tty_attributes` at `tty.c:2685`).
+///
+/// `pal` is read once per pane per frame, so a pane that never set a palette
+/// pays one null check for the whole frame and its wire bytes are unchanged.
+/// Resolving here rather than on the client means the palette never has to
+/// travel: the existing wire form already carries `rgb:R,G,B` (`util.rs`
+/// `color_to_name`, parsed back by `style.rs` `map_color`), so a resolved cell
+/// is just an ordinary RGB cell and no frame grows by a byte.
+#[inline]
+fn pal_resolve(
+    pal: Option<&vt100::ColourPalette>,
+    c: vt100::Color,
+) -> vt100::Color {
+    match pal {
+        Some(p) => p.resolve(c),
+        None => c,
+    }
 }
 
 pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Vec<RowRunsJson> {
@@ -31,6 +56,9 @@ pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Ve
     const FLAG_BLINK: u8 = 32;
     const FLAG_HIDDEN: u8 = 64;
     const FLAG_STRIKETHROUGH: u8 = 128;
+
+    // Issue #685: taken once for the whole screen, not per cell.
+    let pal = screen.colour_palette();
 
     let mut result: Vec<RowRunsJson> = Vec::with_capacity(rows as usize);
     for r in 0..rows {
@@ -44,8 +72,8 @@ pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Ve
             let (width, cell_fg_raw, cell_bg_raw, flags, cell_link) = if let Some(cell) = screen.cell(r, c) {
                 let t = cell.contents();
                 let t = if t.is_empty() { " " } else { t };
-                let cell_fg = cell.fgcolor();
-                let cell_bg = cell.bgcolor();
+                let cell_fg = pal_resolve(pal, cell.fgcolor());
+                let cell_bg = pal_resolve(pal, cell.bgcolor());
                 let cell_link = cell.hyperlink_id();
                 let mut w = vt100::str_width(t) as u16;
                 if w == 0 { w = 1; }
@@ -58,7 +86,7 @@ pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Ve
                 if cell.blink() { fl |= FLAG_BLINK; }
                 if cell.hidden() { fl |= FLAG_HIDDEN; }
                 if cell.strikethrough() { fl |= FLAG_STRIKETHROUGH; }
-                let (cell_ul, cell_ulc) = cell_underline(cell);
+                let (cell_ul, cell_ulc) = cell_underline(cell, pal);
 
                 // A hyperlink change must also break the run so the client can
                 // wrap exactly the linked text in OSC 8 (#361).
@@ -424,6 +452,8 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                     };
                 };
                 let screen = parser.screen();
+                // Issue #685: the pane's OSC 4 palette, taken once per frame.
+                let pal = screen.colour_palette();
                 let (cr, cc) = screen.cursor_position();
                 let hide_cursor_flag = screen.hide_cursor();
                 // ConPTY never passes through ESC[?1049h, so alternate_screen()
@@ -480,8 +510,8 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                         let (width, cell_fg_raw, cell_bg_raw, flags, cell_link) = if let Some(cell) = screen.cell(r, c) {
                             let t = cell.contents();
                             let t = if t.is_empty() { " " } else { t };
-                            let cell_fg = cell.fgcolor();
-                            let cell_bg = cell.bgcolor();
+                            let cell_fg = pal_resolve(pal, cell.fgcolor());
+                            let cell_bg = pal_resolve(pal, cell.bgcolor());
                             let cell_link = cell.hyperlink_id();
                             let mut w = vt100::str_width(t) as u16;
                             if w == 0 { w = 1; }
@@ -494,7 +524,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                             if cell.blink() { fl |= FLAG_BLINK; }
                             if cell.hidden() { fl |= FLAG_HIDDEN; }
                             if cell.strikethrough() { fl |= FLAG_STRIKETHROUGH; }
-                            let (cell_ul, cell_ulc) = cell_underline(cell);
+                            let (cell_ul, cell_ulc) = cell_underline(cell, pal);
 
                             // Run merging — push &str directly, no String allocation.
                             // Break on hyperlink change so OSC 8 wraps exactly the
@@ -915,6 +945,12 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         Err(_) => break 'snap LeafSnap { cr: 0, cc: 0, alt: false, wants_mouse: false, hide_cursor: false, view_offset: 0, rows_v2: vec![], content: vec![] },
                     };
                     let screen = parser.screen();
+                    // Issue #685: this pane's OSC 4 palette, read once for the
+                    // whole snapshot.  `None` for every pane that never set
+                    // one, which is the overwhelmingly common case, so the
+                    // per-cell cost is a single null check on an already hot
+                    // register.
+                    let pal = screen.colour_palette();
                     let (cr, cc) = screen.cursor_position();
                     let hide_cursor = screen.hide_cursor();
                     // Live scrollback offset — nonzero for a direct-scrolled
@@ -951,8 +987,8 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                             if let Some(cell) = screen.cell(r, c) {
                                 let t = cell.contents();
                                 let t = if t.is_empty() { " " } else { t };
-                                let cfg = cell.fgcolor();
-                                let cbg = cell.bgcolor();
+                                let cfg = pal_resolve(pal, cell.fgcolor());
+                                let cbg = pal_resolve(pal, cell.bgcolor());
                                 let mut w = vt100::str_width(t) as u16;
                                 if w == 0 { w = 1; }
                                 let mut fl = 0u8;
@@ -969,7 +1005,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 // client wraps exactly the linked text in OSC 8 (#361).
                                 let clink = cell.hyperlink_id();
                                 let cul = cell.underline_style().sgr_subparam();
-                                let culc = cell.underline_color();
+                                let culc = pal_resolve(pal, cell.underline_color());
                                 if prev_fg == Some(cfg) && prev_bg == Some(cbg) && prev_fl == fl
                                     && prev_link == Some(clink)
                                     && prev_ul == cul && prev_ulc == culc
@@ -1030,7 +1066,9 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                     let t = if t.is_empty() { " " } else { t };
                                     let w = vt100::str_width(t).max(1) as u16;
                                     row_cells.push(CopyCell {
-                                        text: t.to_string(), fg: cell.fgcolor(), bg: cell.bgcolor(),
+                                        // Issue #685: copy mode paints the same
+                                        // cells, so it resolves the palette too.
+                                        text: t.to_string(), fg: pal_resolve(pal, cell.fgcolor()), bg: pal_resolve(pal, cell.bgcolor()),
                                         bold: cell.bold(), italic: cell.italic(), underline: cell.underline(),
                                         inverse: cell.inverse(), dim: cell.dim(), blink: cell.blink(), hidden: cell.hidden(), strikethrough: cell.strikethrough(), width: w,
                                     });
@@ -1555,3 +1593,7 @@ mod test_issue361_serialize_hyperlink;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue361_fastdump_hyperlink.rs"]
 mod test_issue361_fastdump_hyperlink;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue685_pane_palette.rs"]
+mod test_issue685_pane_palette;
