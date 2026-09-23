@@ -3178,6 +3178,56 @@ pub static CPR_DATA_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::
 /// query response is needed.
 pub static COLOR_QUERY_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Issue #597: device-attribute and mode replies (DA1, DA2, DSR 5, DECRQM)
+/// that the parser thread has composed and the server loop still has to write
+/// into the owning pane's PTY input.
+///
+/// A global keyed by pane id rather than a field on `Pane`, for the same
+/// reason `PIPE_WRITERS` is one: the queue has to be reachable from a pane's
+/// parser thread, which holds a pane id and nothing else, and every pane kind
+/// (tree pane, warm spare, popup, float) would otherwise need its own copy of
+/// the field threaded through its own constructor.
+///
+/// The replies go out on the PTY writer, not through
+/// `mouse_inject::send_vt_response`, because the thing waiting for a DA1 answer
+/// at pane startup is the console host itself: OpenConsole opens the stream
+/// with `ESC[1t ESC[c` before the child's console connect completes, and it
+/// reads the answer off the input pipe.  A console input record would never
+/// reach it.  This is also the path the ESC[6n responder already uses, and it
+/// is proven under both hosts (see `drain_cpr_pending`).
+pub static DEVICE_REPLIES: Mutex<Vec<(usize, Vec<u8>)>> = Mutex::new(Vec::new());
+
+/// Cheap gate for `DEVICE_REPLIES`, the same shape as `CPR_DATA_PENDING`: the
+/// server loop pays one atomic per pass while no pane has asked anything.
+pub static DEVICE_REPLY_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Queue a device reply for `pane_id` and raise the gate.  Called from a
+/// pane's parser thread (issue #597).
+pub fn push_device_reply(pane_id: usize, bytes: Vec<u8>) {
+    if bytes.is_empty() { return; }
+    if let Ok(mut q) = DEVICE_REPLIES.lock() {
+        // A pane whose child asks and never reads (or a pane whose server loop
+        // has already gone) must not grow this without bound.
+        const MAX_QUEUED: usize = 64;
+        if q.len() >= MAX_QUEUED { q.remove(0); }
+        q.push((pane_id, bytes));
+    }
+    DEVICE_REPLY_PENDING.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Take every queued reply for `pane_id`, concatenated in arrival order.
+/// Returns `None` when this pane has nothing waiting (issue #597).
+pub fn take_device_replies(pane_id: usize) -> Option<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::new();
+    if let Ok(mut q) = DEVICE_REPLIES.lock() {
+        if q.is_empty() { return None; }
+        q.retain(|(id, bytes)| {
+            if *id == pane_id { out.extend_from_slice(bytes); false } else { true }
+        });
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 /// Issue #473: the host terminal color spec captured by the client at startup
 /// (before the input pump starts), consumed by `establish_connection` which
 /// reports it to the server on every (re)connect.  `None` inside means the

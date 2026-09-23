@@ -1927,6 +1927,38 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
             }
         }
+        // Issue #597: write the DA1/DA2/DSR/DECRQM answers the parser threads
+        // composed.  Deliberately outside the `data_ready` arm above: a warm
+        // spare that is still starting up is exactly the pane whose console
+        // host is blocked on its own `ESC[c`, and it must not have to wait for
+        // some other pane to produce output before it gets an answer.
+        if crate::types::DEVICE_REPLY_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            use std::io::Write as _;
+            for win in &mut app.windows {
+                helpers::drain_device_replies(&mut win.root);
+                for fp in win.floating.iter_mut() {
+                    if let Some(b) = crate::types::take_device_replies(fp.pane.id) {
+                        let _ = fp.pane.writer.write_all(&b);
+                        let _ = fp.pane.writer.flush();
+                    }
+                }
+            }
+            // The warm spares are not in any window tree yet, and they are the
+            // panes this matters most for: the whole point of the pool is that
+            // a spare has already reached a prompt when it is claimed.
+            for wp in app.warm_pane.iter_mut() {
+                if let Some(b) = crate::types::take_device_replies(wp.pane_id) {
+                    let _ = wp.writer.write_all(&b);
+                    let _ = wp.writer.flush();
+                }
+            }
+            if let Mode::PopupMode { popup_pane: Some(ref mut pane), .. } = app.mode {
+                if let Some(b) = crate::types::take_device_replies(pane.id) {
+                    let _ = pane.writer.write_all(&b);
+                    let _ = pane.writer.flush();
+                }
+            }
+        }
         // When a popup PTY or a floating pane is active, always push frames so
         // interactive content (fzf, shell prompts) updates in real-time.
         if matches!(app.mode, Mode::PopupMode { .. })
