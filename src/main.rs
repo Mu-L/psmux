@@ -3650,12 +3650,17 @@ fn run_main() -> io::Result<()> {
                 // but preserved in PSMUX_TARGET_FULL env var.
                 let mut source_spec = String::new();
                 let mut horizontal = false;
+                let mut detach = false;
                 let mut i = 1;
                 while i < cmd_args.len() {
                     match cmd_args[i].as_str() {
                         "-h" => horizontal = true,
                         "-v" => {} // vertical is default
-                        "-d" => {} // detach (ignored at CLI level)
+                        // -d must be FORWARDED, not swallowed: it is the server
+                        // that decides whether to select the destination window
+                        // (cmd-join-pane.c:515). Dropping it here is why
+                        // join-pane -d switched anyway (#689).
+                        "-d" => detach = true,
                         "-s" => {
                             if let Some(t) = cmd_args.get(i + 1) {
                                 source_spec = t.to_string();
@@ -3748,6 +3753,7 @@ fn run_main() -> io::Result<()> {
                     // Same-session join-pane: forward to server as before
                     let mut cmd = "join-pane".to_string();
                     if horizontal { cmd.push_str(" -h"); }
+                    if detach { cmd.push_str(" -d"); }
                     if !source_spec.is_empty() { cmd.push_str(&format!(" -s {}", source_spec)); }
                     if !target_spec.is_empty() { cmd.push_str(&format!(" -t {}", target_spec)); }
                     cmd.push('\n');

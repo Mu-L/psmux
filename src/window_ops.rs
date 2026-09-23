@@ -3190,6 +3190,7 @@ pub struct BreakPaneRequest {
 }
 
 /// Result of a successful `break-pane`: where the pane ended up, for `-P`.
+#[derive(Debug, Clone)]
 pub struct BrokenPane {
     /// Vec position of the window the pane now lives in.
     pub win_pos: usize,
@@ -3230,10 +3231,13 @@ pub fn resolve_pane_spec(app: &AppState, spec: &str) -> Result<(usize, Vec<usize
     } else if let Some(ref n) = pt.window_name {
         win_pos = Some(app.windows.iter().position(|w| w.name == *n)
             .ok_or_else(|| format!("can't find window: {}", n))?);
-    } else if pt.pane.is_none() {
-        // No window and no pane: a bare token, which parse_target files as a
-        // session name. tmux tries the session first and only then reads it as
-        // a window in the current session (cmd-find.c:348), so do the same.
+    } else {
+        // Nothing in the window slot. parse_target files a bare leading token
+        // as a SESSION name, including the `win.0` and `0.2` forms where tmux
+        // reads that token as a window (it splits on '.' for the pane and only
+        // then decides). tmux tries the session first and falls back to a
+        // window in the current session (cmd-find.c:348), so do the same: a
+        // token that is not this session's name is a window here.
         match pt.session.as_deref() {
             None => {}
             Some(s) if s == app.session_name => {}
@@ -3741,3 +3745,7 @@ mod test_issue657_wheel_nonshell_full_screen;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue669_border_status_mouse_rows.rs"]
 mod test_issue669_border_status_mouse_rows;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue689_break_swap_pane.rs"]
+mod tests_issue689_break_swap_pane;

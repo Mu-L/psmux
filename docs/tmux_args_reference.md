@@ -29,7 +29,7 @@ This is the reference for the commands **psmux itself** accepts and the flags **
 |---|---|---|---|
 | `attach-session` | `attach`, `a`, `at` | `t:` | CLI, SRV, CFG |
 | `bind-key` | `bind` | `nrT:` | CLI, SRV, CFG, CTL |
-| `break-pane` | `breakp` | `dt:` | CLI, SRV, CFG, CTL |
+| `break-pane` | `breakp` | `abdPF:n:s:t:` | CLI, SRV, CFG, CTL |
 | `capture-pane` | `capturep` | `eJpb:E:S:t:` | CLI, SRV, CFG, CTL |
 | `choose-buffer` | `chooseb` | none | CLI, SRV, CFG |
 | `choose-client` | *(none)* | none | CLI, SRV, CFG |
@@ -316,18 +316,24 @@ A psmux extension that creates a pane floating above the tiled layout.
 **swap-pane** (`swapp`)
 - Boolean: `-U` (swap up), `-D` (swap down), `-d` (do not move the active pane)
 - Value: `-s` (source pane), `-t` (destination pane)
+- `-s` and `-t` may name panes in two DIFFERENT windows; the two panes trade window and layout slot, and both windows are re laid out. Without `-s` the source is the current pane. A spec that names no pane is `can't find pane: X` at exit 1.
+- psmux extension: `-t` also accepts a layout position token such as `{top-right}`, and `-L`/`-R` swap with the spatial neighbour (tmux has only `-U`/`-D`).
 - Not accepted: `-Z`
 
 **join-pane** (`joinp`) and **move-pane** (`movep`)
-- Boolean: `-h` (horizontal), `-v` (vertical, the default), `-d` (do not switch)
+- Boolean: `-h` (horizontal), `-v` (vertical, the default), `-d` (graft the pane without switching to the destination window)
 - Value: `-s` (source pane), `-t` (destination pane)
 - A `-s <other-session>:...` source moves a live pane between independent servers.
 - Not accepted: `-b`, `-f`, `-p`, `-l`
 
 **break-pane** (`breakp`)
-- Boolean: `-d` (do not switch to the new window)
-- Value: `-t` (target)
-- Not accepted: `-a`, `-b`, `-P`, `-F`, `-n`, `-s`
+- Boolean: `-d` (do not switch to the new window), `-a` (insert after the destination window), `-b` (insert before it), `-P` (print where the pane landed)
+- Value: `-s` (source pane), `-t` (destination window), `-n` (window name), `-F` (format for `-P`)
+- `-s` is the pane to break out and is resolved across the whole session, so `-s other:0.2` and `-s %7` reach a pane in another window. Without `-s` the current pane is used.
+- `-t` is a DESTINATION window index, not a pane. `-t 6` puts the new window at index 6, `-t <session>` takes the next free index, and an index another window already holds is refused with `index in use: N` at exit 1. Naming a pane in it (`-t sess:0.1`, `-t %3`) is refused with `can't specify pane here` at exit 1, the way tmux refuses a pane where it wants an index. Use `-s` to choose the pane.
+- `-P` prints `#{session_name}:#{window_index}.#{pane_index}` unless `-F` supplies a template.
+- `-n` also pins the name, so the window keeps it instead of following the pane title.
+- Not accepted: `-W`, `-x`, `-y`, `-X`, `-Y` (floating panes)
 
 **respawn-pane** (`respawnp`, `resp`)
 - Boolean: `-k` (kill the existing process first)
