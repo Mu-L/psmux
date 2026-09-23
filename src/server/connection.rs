@@ -2131,77 +2131,32 @@ match cmd {
         }
     }
     "paste-buffer" | "pasteb" => {
-        // Issue #684: one parser for both dispatches, so -d and -s reach the
-        // CLI route as well and the in server route (commands.rs) cannot drift
-        // from it again.
-        let pb_args = crate::commands::parse_paste_buffer_args(&args);
-        let buf_name: Option<String> = pb_args.buffer.clone();
-        let paste_mode = pb_args.bracket;
-        let separator = pb_args.separator.clone();
-        let delete_after = pb_args.delete;
-        let send_text = |tx: &mpsc::Sender<CtrlReq>, text: String| {
-            let text = match &separator {
-                Some(sep) => crate::commands::apply_separator(&text, sep),
-                None => text,
-            };
-            if text.is_empty() { return; }
-            if paste_mode {
-                let _ = tx.send(CtrlReq::SendPaste(text));
+        // Issue #684: one parser AND one executor for both dispatches, so -d,
+        // -s and -t reach the CLI route as well and the in server route
+        // (commands.rs) cannot drift from it again.
+        //
+        // This used to be a buffer lookup (ShowNamedBuffer, a round trip) and
+        // then a separate SendPaste.  The lookup is a non-focus request, so it
+        // spent the validated `-t` focus the dispatcher had just applied and
+        // the paste that followed landed in whatever pane the user was looking
+        // at (gabri-ns on #684).  One request now carries the whole command and
+        // the target with it, which is also what tmux does: cmd-paste-buffer.c
+        // resolves the pane with cmd_find_pane and writes to it.
+        //
+        // `-t` here keeps its `without_outer_target` stripping, so re-read it
+        // from the raw target the dispatcher parsed.
+        let mut pb_args = crate::commands::parse_paste_buffer_args(&args);
+        if pb_args.target.is_none() {
+            pb_args.target = raw_target.clone();
+        }
+        let (rtx, rrx) = mpsc::channel::<Option<String>>();
+        let _ = tx.send(CtrlReq::PasteBuffer(pb_args, rtx));
+        if let Ok(Some(msg)) = rrx.recv() {
+            if persistent {
+                let _ = tx.send(CtrlReq::ShowTextPopup("paste-buffer".to_string(), format!("ERROR: {}", msg)));
             } else {
-                let _ = tx.send(CtrlReq::SendText(text));
-            }
-        };
-        let delete_buffer = |tx: &mpsc::Sender<CtrlReq>| {
-            if !delete_after { return; }
-            match &buf_name {
-                Some(name) => match name.parse::<usize>() {
-                    Ok(idx) => { let _ = tx.send(CtrlReq::DeleteBufferAt(idx)); }
-                    Err(_) => { let _ = tx.send(CtrlReq::DeleteNamedBuffer(name.clone())); }
-                },
-                None => { let _ = tx.send(CtrlReq::DeleteBuffer); }
-            }
-        };
-        if let Some(ref name) = buf_name {
-            // Issue #264: an explicitly-named/-indexed buffer that does not
-            // exist must error (matching real tmux's "no buffer <name>"),
-            // not silently no-op. ShowBufferAt/ShowNamedBuffer return `None`
-            // when the buffer is missing, distinct from an empty-but-present
-            // buffer's `Some(String::new())`.
-            let (rtx, rrx) = mpsc::channel::<Option<String>>();
-            if let Ok(idx) = name.parse::<usize>() {
-                let _ = tx.send(CtrlReq::ShowBufferAt(rtx, idx));
-            } else {
-                let _ = tx.send(CtrlReq::ShowNamedBuffer(rtx, name.clone()));
-            }
-            match rrx.recv() {
-                Ok(Some(text)) => {
-                    send_text(&tx, text);
-                    delete_buffer(&tx);
-                }
-                _ => {
-                    let err = format!("no buffer {}\n", name);
-                    if persistent {
-                        let _ = tx.send(CtrlReq::ShowTextPopup("paste-buffer".to_string(), format!("ERROR: {}", err.trim_end())));
-                    } else {
-                        let _ = write!(write_stream, "ERROR: {}", err);
-                        let _ = write_stream.flush();
-                    }
-                }
-            }
-        } else {
-            let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::ShowBuffer(rtx));
-            if let Ok(mut text) = rrx.recv() {
-                // Issue #428: when no explicit buffer is named and the internal
-                // paste-buffer stack is empty, fall back to the OS clipboard so
-                // prefix+] pastes externally-copied text (matching Ctrl+Shift+V).
-                if text.is_empty() {
-                    if let Some(clip) = crate::clipboard::read_from_system_clipboard() {
-                        text = clip;
-                    }
-                }
-                send_text(&tx, text);
-                delete_buffer(&tx);
+                let _ = write!(write_stream, "ERROR: {}\n", msg);
+                let _ = write_stream.flush();
             }
         }
     }

@@ -1107,13 +1107,108 @@ pub(crate) fn apply_separator(text: &str, sep: &str) -> String {
     out
 }
 
-/// Run a parsed `paste-buffer` against the active pane (issue #684).
+/// Point `app` at the pane `-t` names for the duration of `f`, then put the
+/// focus back exactly where it was.
+///
+/// tmux resolves `paste-buffer -t` with `cmd_find_pane` and writes to that
+/// pane's event (cmd-paste-buffer.c:66 and :124), so the target is the pane the
+/// text lands in, not the one the user is looking at.  psmux's paste writers
+/// take the pane from `app.active_idx` / `active_path`, so the shortest honest
+/// equivalent is to move that cursor, paste, and move it back, all inside one
+/// server request so nothing else can observe the move.
+///
+/// The CLI route also issues a validated `FocusTargetTemp` before this, but
+/// that focus is spent by the first non-focus request the server handles, which
+/// is why a `-t` used to reach the buffer lookup and never the paste
+/// (gabri-ns, #684 follow up).
+///
+/// Returns tmux's error text when the target does not resolve.
+fn with_paste_target<T>(
+    app: &mut AppState,
+    target: &str,
+    f: impl FnOnce(&mut AppState) -> io::Result<T>,
+) -> io::Result<Result<T, String>> {
+    let pt = crate::cli::parse_target(target);
+    let win_idx: Option<usize> = if let Some(w) = pt.window {
+        if pt.window_is_id {
+            app.windows.iter().position(|x| x.id == w)
+        } else {
+            app.win_pos(w)
+        }
+    } else if let Some(ref name) = pt.window_name {
+        app.windows.iter().position(|x| x.name == *name)
+    } else if pt.pane_is_id {
+        // A bare `%N` names a pane in any window (issue #332).
+        pt.pane
+            .and_then(|p| crate::tree::find_pane_by_id_global(app, p))
+            .map(|(wi, _)| wi)
+    } else {
+        Some(app.active_idx)
+    };
+    let win_idx = match win_idx {
+        Some(i) if i < app.windows.len() => i,
+        _ => {
+            let spec = if let Some(w) = pt.window {
+                if pt.window_is_id { format!("@{}", w) } else { w.to_string() }
+            } else if let Some(ref name) = pt.window_name {
+                name.clone()
+            } else if let Some(p) = pt.pane {
+                return Ok(Err(format!("can't find pane: %{}", p)));
+            } else {
+                target.to_string()
+            };
+            return Ok(Err(format!("can't find window: {}", spec)));
+        }
+    };
+
+    let saved_idx = app.active_idx;
+    let saved_path = app.windows[saved_idx].active_path.clone();
+    app.active_idx = win_idx;
+    if let Some(p) = pt.pane {
+        if pt.pane_is_id {
+            if crate::tree::find_pane_by_id_global(app, p).is_none() {
+                app.active_idx = saved_idx;
+                return Ok(Err(format!("can't find pane: %{}", p)));
+            }
+            crate::tree::focus_pane_by_id_no_mru(app, p);
+        } else {
+            if p >= crate::tree::count_panes(&app.windows[win_idx].root) {
+                app.active_idx = saved_idx;
+                return Ok(Err(format!("can't find pane: {}", p)));
+            }
+            crate::tree::focus_pane_by_index(app, p);
+        }
+    }
+    let out = f(app);
+    if saved_idx < app.windows.len() {
+        app.active_idx = saved_idx;
+        app.windows[saved_idx].active_path = saved_path;
+    }
+    out.map(Ok)
+}
+
+/// Run a parsed `paste-buffer` against the pane `-t` names, or the active pane
+/// (issue #684).
 ///
 /// The `-p` split mirrors `server/connection.rs`: bracketed pastes take the
 /// paste route, which is the one that consults the pane's `?2004h` and picks
 /// its delivery channel; everything else is plain text, which is what tmux does
 /// for a `paste-buffer` with no `-p` (cmd-paste-buffer.c:97).
-pub(crate) fn run_paste_buffer(app: &mut AppState, pb: &PasteBufferArgs) -> io::Result<()> {
+///
+/// `Ok(Some(msg))` is tmux's error text for the caller to report: the CLI route
+/// writes it to the client as `ERROR: ...`, the in server route puts it in the
+/// status line.
+pub(crate) fn run_paste_buffer(app: &mut AppState, pb: &PasteBufferArgs) -> io::Result<Option<String>> {
+    match pb.target.clone() {
+        Some(t) => match with_paste_target(app, &t, |app| run_paste_buffer_here(app, pb))? {
+            Ok(inner) => Ok(inner),
+            Err(msg) => Ok(Some(msg)),
+        },
+        None => run_paste_buffer_here(app, pb),
+    }
+}
+
+fn run_paste_buffer_here(app: &mut AppState, pb: &PasteBufferArgs) -> io::Result<Option<String>> {
     // A named register selected in copy mode ("x p) still wins when no explicit
     // buffer was asked for, the behaviour paste_latest gave prefix + ].
     if pb.buffer.is_none() {
@@ -1127,7 +1222,7 @@ pub(crate) fn run_paste_buffer(app: &mut AppState, pb: &PasteBufferArgs) -> io::
                     }
                 }
             }
-            return Ok(());
+            return Ok(None);
         }
     }
 
@@ -1142,12 +1237,7 @@ pub(crate) fn run_paste_buffer(app: &mut AppState, pb: &PasteBufferArgs) -> io::
                 Some(t) => t,
                 None => {
                     // tmux: "no buffer <name>" (cmd-paste-buffer.c:82).
-                    app.status_message = Some((
-                        format!("no buffer {}", name),
-                        std::time::Instant::now(),
-                        None,
-                    ));
-                    return Ok(());
+                    return Ok(Some(format!("no buffer {}", name)));
                 }
             }
         }
@@ -1194,7 +1284,7 @@ pub(crate) fn run_paste_buffer(app: &mut AppState, pb: &PasteBufferArgs) -> io::
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Execute a command string (used by menus, hooks, confirm dialogs, etc.)
@@ -1868,19 +1958,16 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // whatever it asked for.  Only the CLI route
             // (server/connection.rs) honoured -p and -b.
             //
-            // A -t target is resolved by the server's own dispatch, which
-            // already wraps a targeted command in FocusTargetTemp, so it is
-            // forwarded whole the way send-keys and split-window are.  Without
-            // a control port there is nowhere to forward to and the active pane
-            // is the only pane, so the local path runs and -t is moot.
+            // A -t target used to be forwarded to the control port so the CLI
+            // dispatch's FocusTargetTemp would resolve it.  That focus is spent
+            // by the first non-focus request the server handles, so the paste
+            // still landed in the active pane; `run_paste_buffer` resolves the
+            // target itself now, the way cmd-paste-buffer.c does with
+            // cmd_find_pane, and both dispatches share it.
             let pb = parse_paste_buffer_args(&parts[1..]);
-            if pb.target.is_some() {
-                if let Some(port) = app.control_port {
-                    let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
-                    return Ok(());
-                }
+            if let Some(msg) = run_paste_buffer(app, &pb)? {
+                app.status_message = Some((msg, std::time::Instant::now(), None));
             }
-            run_paste_buffer(app, &pb)?;
         }
         "set-buffer" | "setb" => {
             // Parse -b name, -w (clipboard), and extract content

@@ -2572,6 +2572,14 @@ pub enum CtrlReq {
     SendText(String),
     SendKey(String),
     SendPaste(String),
+    /// A whole parsed `paste-buffer`, run inside the server loop (issue #684).
+    ///
+    /// One request, not a buffer lookup followed by a separate send: the CLI
+    /// dispatch's `-t` focus is spent by the first non-focus request the server
+    /// handles, so splitting the command in two was what sent a `-t` paste to
+    /// the active pane.  The reply carries tmux's error text ("no buffer x",
+    /// "can't find window: x") or `None`.
+    PasteBuffer(crate::commands::PasteBufferArgs, mpsc::Sender<Option<String>>),
     ZoomPane,
     PrefixBegin,
     PrefixEnd,
