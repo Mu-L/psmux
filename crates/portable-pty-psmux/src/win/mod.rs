@@ -15,6 +15,10 @@ pub mod conpty;
 mod procthreadattr;
 mod psuedocon;
 
+/// Which ConPTY implementation this process loaded: the system one, or a
+/// conpty.dll named by `PSMUX_CONPTY_DIR`.  Diagnostics only.
+pub use psuedocon::{conpty_source, ConPtySource};
+
 use filedescriptor::OwnedHandle;
 
 #[derive(Debug)]
