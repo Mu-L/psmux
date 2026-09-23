@@ -569,6 +569,21 @@ pub(crate) const CSI_MAX_PARAM_LEN: usize = 32;
 /// between two keys a person pressed.
 pub(crate) const TEXT_BURST_MS: u64 = 20;
 
+/// How long a CR keeps looking for the LF that completes it (issue #598).
+///
+/// A pasted CRLF is one line ending, so the LF must not decode as `C-j` and end
+/// the client's text run.  The two bytes routinely arrive in different console
+/// reads when sshd's ConPTY hands over a fragmented paste, measured at gaps of
+/// 20 ms and more, so [`TEXT_BURST_MS`] cannot decide this pair and the window
+/// has to be much wider than a burst.
+///
+/// It is bounded at all only to keep issue #642 honest: a `C-j` pressed a
+/// moment after Enter still decodes.  A CR and an LF genuinely typed this close
+/// together are indistinguishable from a line ending on a byte stream, the same
+/// unavoidable collision #642 records for Ctrl+J and Ctrl+Enter, and a pasted
+/// CRLF is the overwhelmingly more common of the two.
+pub(crate) const CRLF_PAIR_MS: u64 = 250;
+
 /// Folds a bare Escape that is immediately followed by Enter into one
 /// `Alt+Enter` event (issue #611).
 ///
@@ -1438,6 +1453,29 @@ struct VtParser {
     osc: String,
     /// Pending high surrogate for UTF-16 decoding.
     hi_sur: Option<u16>,
+    /// When the last ordinary character left this parser as text.
+    ///
+    /// A `0x0a` arriving within [`TEXT_BURST_MS`] of one is the LF of a pasted
+    /// CRLF and not a keypress (issue #598).  This is the same clock and the
+    /// same window `EscCoalesce` keeps for the `[` of an extended key (issue
+    /// #654); the SSH path needs its own because `InputSource::Ssh` has no
+    /// coalescer, the decode happens here in `on_ground`.
+    ///
+    /// A DECODED key deliberately does not refresh it, so two presses of a held
+    /// key both still decode.
+    last_text: Option<std::time::Instant>,
+    /// When the character this parser last saw on the ground state was a CR.
+    ///
+    /// An LF that follows one within [`CRLF_PAIR_MS`] is the second half of a
+    /// CRLF line ending and is swallowed, because the CR already produced the
+    /// Enter.  Any other character clears it, so only an ADJACENT LF pairs.
+    ///
+    /// The window is much wider than the 20 ms text burst on purpose: the two
+    /// bytes of a CRLF routinely land in different console reads when a paste
+    /// arrives fragmented, which is the whole of issue #598, and 20 ms is not
+    /// enough to survive that.  It is bounded at all only so that a `C-j`
+    /// pressed some time after an Enter still decodes (issue #642).
+    prev_cr_at: Option<std::time::Instant>,
 }
 
 impl VtParser {
@@ -1456,7 +1494,18 @@ impl VtParser {
             needs_vti_recheck: false,
             osc: String::new(),
             hi_sur: None,
+            last_text: None,
+            prev_cr_at: None,
         }
+    }
+
+    /// True when a character left as text so recently that whatever follows is
+    /// still the same run: a paste, not a key.
+    #[inline]
+    fn in_text_burst(&self, now: std::time::Instant) -> bool {
+        self.last_text.is_some_and(|t| {
+            now.saturating_duration_since(t) < std::time::Duration::from_millis(TEXT_BURST_MS)
+        })
     }
 
     #[inline(always)]
@@ -1624,11 +1673,52 @@ impl VtParser {
 
     #[inline]
     fn on_ground<F: FnMut(Event)>(&mut self, ch: char, emit: &mut F) {
+        let now = std::time::Instant::now();
+        // A 0x0a that lands inside a run of text is the LF of a pasted CRLF,
+        // not a keypress (issue #598).
+        //
+        // Ctrl+J IS the byte 0x0a, so the arm below decodes a bare one as C-j
+        // and that is right for a key somebody pressed (issue #642).  Inside a
+        // paste it is payload, and the difference is not cosmetic: a decoded
+        // key ENDS the client's text run, so it flushes what it has as one
+        // `send-paste`, sends C-j on its own, then opens a FRESH paste for the
+        // next line.  A three line clipboard reaches the pane as three
+        // separately bracketed pastes with a literal LF between them, and a
+        // shell with bracketed paste on runs each one as its own command line.
+        //
+        // This is the rule #654 already applies to the `[` of an extended key,
+        // on the same 20 ms window and for the same reason: a decoder must not
+        // eat the user's own clipboard.  A real C-j opens its burst, so it is
+        // not in a text run and still decodes, which is all #642 asked for.
+        //
+        // Two things tell a paste's LF from a keypress, and the CRLF pairing is
+        // the one that carries the reproduction: it needs no clock, so it holds
+        // however badly the two bytes are split across reads.  The 20 ms window
+        // is the fallback for a paste that carries BARE LFs, the shape a Unix
+        // file gives a Mac clipboard.
+        let was_cr = std::mem::take(&mut self.prev_cr_at).is_some_and(|t| {
+            now.saturating_duration_since(t) < std::time::Duration::from_millis(CRLF_PAIR_MS)
+        });
+        if ch == '\n' && (was_cr || self.in_text_burst(now)) {
+            if !was_cr {
+                // A bare LF stands in for the whole line ending.
+                self.last_text = Some(now);
+                emit(make_key(KeyCode::Enter, KeyModifiers::empty()));
+            }
+            // After a CR the Enter has already gone out, so the LF is the rest
+            // of ONE line ending and is swallowed.  The run stays alive either
+            // way so the next line's bytes are still inside it.
+            self.last_text = Some(now);
+            return;
+        }
         match ch {
             '\x1b' => {
                 self.state = PS::Escape;
             }
-            '\r' => emit(make_key(KeyCode::Enter, KeyModifiers::empty())),
+            '\r' => {
+                self.prev_cr_at = Some(now);
+                emit(make_key(KeyCode::Enter, KeyModifiers::empty()))
+            }
             // NOTE: 0x0a deliberately has NO arm here.  It falls through to the
             // Ctrl+A..Ctrl+Z arm below, which turns it into C-j (issue #642).
             //
@@ -1668,7 +1758,12 @@ impl VtParser {
             c if c as u32 == 29 => emit(make_key(KeyCode::Char(']'), KeyModifiers::CONTROL)),
             c if c as u32 == 30 => emit(make_key(KeyCode::Char('^'), KeyModifiers::CONTROL)),
             c if c as u32 == 31 => emit(make_key(KeyCode::Char('_'), KeyModifiers::CONTROL)),
-            c => emit(make_key(KeyCode::Char(c), KeyModifiers::empty())),
+            c => {
+                // Ordinary text keeps the run alive.  Only this arm does: a
+                // decoded key must not, or a held key would stop decoding.
+                self.last_text = Some(now);
+                emit(make_key(KeyCode::Char(c), KeyModifiers::empty()))
+            }
         }
     }
 
@@ -2815,6 +2910,10 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue642_vt_ctrl_j.rs"]
 mod tests_issue642_vt_ctrl_j;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue598_paste_lf.rs"]
+mod tests_issue598_paste_lf;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue457_ssh_mouse_build_gate.rs"]

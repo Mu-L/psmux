@@ -31,6 +31,22 @@
 #   5. the outer terminal keeps bracketed paste ON for the whole attachment,
 #      i.e. ESC[?2004l is never sent before detach.  If it were, iTerm2 would
 #      stop wrapping pastes and the user would see unbracketed text.
+#   6. THE FRAGMENTED SHAPES, which is where the reported regression lives.
+#      The payload is written to the pty in small pieces with a gap between
+#      them, the way a paste reaches the Windows side when sshd's ConPTY hands
+#      the client its records in separate reads.
+#
+#      Below about ten bytes per piece, sshd's ConPTY mangles the ESC[200~ open
+#      marker itself, measured as ESC[0n ESC[0n ~ reaching the client, so psmux
+#      never sees a bracketed paste and falls back to its text-burst heuristic.
+#      That part is a ConPTY defect and is out of psmux's reach.  What psmux
+#      MUST still do is deliver the clipboard as ONE gesture, because a decoded
+#      key in the middle of the run ends it: before the fix a three line paste
+#      arrived as THREE separately bracketed pastes with a literal LF between
+#      them, and a shell with bracketed paste on ran each one as a command.
+#
+#      The regression was 5e16dcf (#642), which made a bare 0x0a decode as C-j.
+#      That is right for a keypress and wrong for the LF of a pasted CRLF.
 #
 # Skips cleanly, exit 0, when WSL, a WSL python3, sshd on localhost or key auth
 # for the current user is missing.
@@ -109,6 +125,8 @@ $driver = @'
 import os, sys, pty, select, time, fcntl, termios, struct, signal, subprocess
 hostip, keyfile, remote, outlog, payfile = sys.argv[1:6]
 attach_wait = float(sys.argv[6]); post_wait = float(sys.argv[7])
+chunk_size  = int(sys.argv[8]) if len(sys.argv) > 8 else 0
+chunk_delay = float(sys.argv[9]) if len(sys.argv) > 9 else 0.0
 payload = open(payfile, 'rb').read()
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 120, 0, 0))
@@ -131,7 +149,18 @@ def pump(sec):
             out.write(d); out.flush()
 pump(attach_wait)
 out.write(b"\n<<<MARK:PASTE>>>\n"); out.flush()
-os.write(master, payload)
+if chunk_size > 0:
+    for i in range(0, len(payload), chunk_size):
+        os.write(master, payload[i:i+chunk_size])
+        end = time.time() + chunk_delay
+        while time.time() < end:
+            r, _, _ = select.select([master], [], [], 0.01)
+            if master in r:
+                try: d = os.read(master, 65536)
+                except OSError: break
+                if d: out.write(d); out.flush()
+else:
+    os.write(master, payload)
 pump(post_wait)
 out.write(b"\n<<<MARK:DETACH>>>\n"); out.flush()
 os.write(master, b'\x02'); time.sleep(0.4); os.write(master, b'd')
@@ -169,7 +198,8 @@ function New-Payload([string]$name, [string]$text) {
 
 # Run one shape: start a detached session whose pane child is the recorder,
 # drive the Unix ssh client through the paste, return the recorder's bytes.
-function Invoke-SshPaste([string]$tag, [string]$payloadFile, [string]$recMode) {
+function Invoke-SshPaste([string]$tag, [string]$payloadFile, [string]$recMode,
+                         [int]$chunkSize = 0, [double]$chunkDelay = 0.0) {
     & $PSMUX -L $NS kill-server 2>&1 | Out-Null
     Start-Sleep -Milliseconds 700
     $recLog = Join-Path $root "$tag.rec.log"
@@ -186,7 +216,7 @@ function Invoke-SshPaste([string]$tag, [string]$payloadFile, [string]$recMode) {
     $remote = "$attachCmd `"$PSMUX`" $NS $SESS"
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remote))
     $cmd = "export PSMUX_SSH_USER='$sshUser'; R=`$(echo $b64 | base64 -d); " +
-           "python3 /tmp/psmux_i598_drv.py '$hostIp' '$keyWsl' `"`$R`" '$(To-WslPath $outLog)' '$(To-WslPath $payloadFile)' 7 6"
+           "python3 /tmp/psmux_i598_drv.py '$hostIp' '$keyWsl' `"`$R`" '$(To-WslPath $outLog)' '$(To-WslPath $payloadFile)' 7 9 $chunkSize $chunkDelay"
     & wsl -d $distro -e bash -lc $cmd 2>&1 | Out-Null
 
     $deadline = (Get-Date).AddSeconds(30)
@@ -276,6 +306,60 @@ else {
     if ($disable -ge 0 -and $detach -ge 0 -and $disable -lt $detach) {
         Write-Fail "bracketed paste was turned off at offset $disable, before the detach at $detach"
     } else { Write-Pass "bracketed paste was never turned off before detach" }
+}
+
+Write-Host "`n[6] the reported regression: a FRAGMENTED multi line paste" -ForegroundColor Yellow
+# 5 bytes at a time, 20 ms apart.  Below about ten bytes per piece sshd's ConPTY
+# destroys the ESC[200~ marker before psmux sees it, so a little marker residue
+# reaching the pane is expected and is NOT what this asserts.  What it asserts
+# is that the clipboard still arrives as ONE gesture and that no line ending
+# terminates it, because that is what makes a bracketed paste shell execute
+# each line as a command.
+#
+# Before the fix, on 0af98f6: three ESC[200~ openers, three ESC[201~ closers and
+# a literal LF between them.  After: one opener, one closer.
+$r6 = Invoke-SshPaste "frag" (New-Payload "p_frag" $t2) "vt" 5 0.02
+if (-not $r6.ok) { Write-Fail "fragmented: $($r6.why)" }
+else {
+    $opens  = ([regex]::Matches($r6.hex, "1b5b3230307e")).Count
+    $closes = ([regex]::Matches($r6.hex, "1b5b3230317e")).Count
+    Write-Info "fragmented recorder bytes: $($r6.total), openers $opens, closers $closes"
+    if ($opens -eq 1 -and $closes -eq 1) {
+        Write-Pass "a fragmented paste is still ONE bracketed gesture (was 3 before the #642 fix)"
+    } else {
+        Write-Fail "a fragmented paste was split into $opens openers and $closes closers, so a bracketed paste shell would run each fragment as its own command"
+    }
+    # The three line payload must produce exactly two line endings, not four.
+    # Before 5e16dcf a CRLF reached the pane as CR CR; 5e16dcf turned the LF
+    # into C-j, which ended the run instead.  One CR per line is correct.
+    $crs = ([regex]::Matches($r6.hex, "0d")).Count
+    if ($crs -eq 2) { Write-Pass "each CRLF collapsed to exactly one CR ($crs for three lines)" }
+    else { Write-Fail "expected 2 line endings for three lines, got $crs" }
+    # No line of the payload may be missing.
+    $txt = ""
+    try { $txt = -join ( ($r6.hex -split '(..)' | Where-Object { $_ }) | ForEach-Object { [char][Convert]::ToInt32($_,16) } ) } catch {}
+    $missing = @("line one","line two","line three") | Where-Object { $txt -notlike "*$_*" }
+    if (-not $missing) { Write-Pass "all three lines survived the fragmented delivery" }
+    else { Write-Fail "lines lost in a fragmented paste: $($missing -join ', ')" }
+}
+
+Write-Host "`n[7] a real C-j keypress still decodes as C-j (issue #642 must survive)" -ForegroundColor Yellow
+# The fix folds an LF into the text run only when a CR came immediately before
+# it, or when ordinary text arrived within the same 20 ms burst.  A bare 0x0a
+# that opens its own burst is a keypress and must still reach the pane as C-j,
+# which is what made a `C-j` prefix work over SSH in the first place.
+$lonePay = Join-Path $root "p_ctrlj.bin"
+[IO.File]::WriteAllBytes($lonePay, [byte[]](0x0a))
+$r7 = Invoke-SshPaste "ctrlj" $lonePay "vt"
+if (-not $r7.ok) { Write-Fail "lone 0x0a: $($r7.why)" }
+else {
+    Write-Info "lone 0x0a recorder bytes: $($r7.total) hex=$($r7.hex)"
+    # C-j reaches a VT reading child as the byte 0x0a.  An Enter would be 0x0d.
+    if ($r7.hex -match "0a" -and $r7.hex -notmatch "0d") {
+        Write-Pass "a lone 0x0a still reaches the pane as 0x0a (C-j), not as 0x0d (Enter)"
+    } else {
+        Write-Fail "a lone 0x0a reached the pane as '$($r7.hex)'; #642 expects 0a and not 0d"
+    }
 }
 
 # --- cleanup ----------------------------------------------------------------
