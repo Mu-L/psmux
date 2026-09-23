@@ -338,6 +338,52 @@ fn coalesce_send_commands(parts: Vec<String>) -> Vec<String> {
     out
 }
 
+/// tmux's `break-pane` template when `-P` is given without `-F`
+/// (cmd-break-pane.c:29, BREAK_PANE_TEMPLATE).
+pub const BREAK_PANE_TEMPLATE: &str = "#{session_name}:#{window_index}.#{pane_index}";
+
+/// Split a `break-pane` command line into the request the server applies and
+/// the `-P` format, if any.
+///
+/// tmux's flag set is `"abdPF:n:s:t:"` (cmd-break-pane.c:37). psmux parsed NONE
+/// of it: the whole command reached the server as a bare `BreakPane`, so `-d`
+/// did nothing and `-s` silently broke the ACTIVE pane (issue #689). Shared by
+/// the plain CLI route and the control / in-TUI route so both agree.
+///
+/// `outer_target` is the `-t` value the generic target parser already peeled
+/// off the command line; for break-pane it is a DESTINATION window, never a
+/// pane to operate on.
+pub fn parse_break_pane_args(
+    args: &[&str],
+    outer_target: Option<&str>,
+) -> (crate::window_ops::BreakPaneRequest, Option<String>) {
+    let mut req = crate::window_ops::BreakPaneRequest::default();
+    req.dst = outer_target.map(|t| t.to_string());
+    let mut print = false;
+    let mut format: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "-d" => { req.detach = true; }
+            "-a" => { req.after = true; }
+            "-b" => { req.before = true; }
+            "-P" => { print = true; }
+            "-s" => { if let Some(v) = args.get(i + 1) { req.src = Some(v.trim_matches('"').to_string()); i += 1; } }
+            "-t" => { if let Some(v) = args.get(i + 1) { req.dst = Some(v.trim_matches('"').to_string()); i += 1; } }
+            "-n" => { if let Some(v) = args.get(i + 1) { req.name = Some(v.trim_matches('"').to_string()); i += 1; } }
+            "-F" => { if let Some(v) = args.get(i + 1) { format = Some(v.trim_matches('"').to_string()); i += 1; } }
+            _ => {}
+        }
+        i += 1;
+    }
+    let print = if print {
+        Some(format.unwrap_or_else(|| BREAK_PANE_TEMPLATE.to_string()))
+    } else {
+        None
+    };
+    (req, print)
+}
+
 /// Parsed `new-pane` flags. Semantics match tmux `cmd-split-window.c`:
 /// `-x`=width, `-y`=height, `-X`=x-position, `-Y`=y-position, `-B`=border-lines,
 /// `-T`=title, `-c`=start-directory, `-d`=detached, `-P`=print pane id.
@@ -877,8 +923,13 @@ if control_echo || control_noecho {
         // destination that need not exist yet), so temp-focusing here would
         // either undo the change (#483) or misdirect it (#442) for
         // control-mode clients exactly as it did for one-shot ones.
+        // break-pane's -t is a DESTINATION window index that need not exist
+        // yet (cmd-break-pane.c:43, CMD_FIND_WINDOW_INDEX), and its own parser
+        // owns it. Temp-focusing it used to be the only reason `break-pane -t`
+        // preserved the current window (#689).
         let skip_target_focus = matches!(cmd_name, "join-pane" | "joinp" | "move-pane" | "movep"
             | "move-window" | "movew" | "swap-window" | "swapw"
+            | "break-pane" | "breakp"
             | "switch-client" | "switchc" | "resize-window" | "resizew"
             | "kill-window" | "killw" | "detach-client" | "detach");
         // capture-pane -t %N resolves the pane id inside the capture itself;
@@ -1218,8 +1269,13 @@ let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "
 // its handler resolves itself — it must never be validated as a pane/window
 // target (a client id shaped like %N would be rejected whenever no pane %N
 // exists, and a nonexistent client is that command's documented safe no-op).
+// break-pane's -t is a DESTINATION window index that need not exist yet
+// (cmd-break-pane.c:43, CMD_FIND_WINDOW_INDEX), and break-pane's own parser
+// owns it. The temporary focus was the ONLY reason `break-pane -t` left the
+// current window alone, which is why bare `break-pane -d` still switched (#689).
 let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "movep"
     | "move-window" | "movew" | "swap-window" | "swapw"
+    | "break-pane" | "breakp"
     | "switch-client" | "switchc" | "resize-window" | "resizew"
     | "kill-window" | "killw" | "detach-client" | "detach");
 let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_id {
@@ -2015,19 +2071,31 @@ match cmd {
         let raw_t = args.iter().position(|a| *a == "-t")
             .and_then(|i| args.get(i + 1).copied())
             .or_else(|| raw_target.as_deref());
-        // -s <src> -t <dst>: swap two explicit panes (#442). Only when BOTH
-        // resolve to a concrete pane (id or index); a `{position}` token is not
-        // a valid source. Otherwise fall through to the -t / directional forms.
-        let src = raw_s.map(parse_target).and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id)));
-        let dst = raw_t.filter(|t| !t.starts_with('{')).map(parse_target)
-            .and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id)));
-        if let (Some((sv, sid)), Some((dv, did))) = (src, dst) {
-            let _ = tx.send(CtrlReq::SwapPaneSrcDst { src: sv, src_is_id: sid, dst: dv, dst_is_id: did, detach });
+        // `-t <pane>` (with or without `-s`) is resolved session wide, so
+        // either half may name a pane in another window (#689). A `{position}`
+        // token stays on the layout-token path; anything that names no pane at
+        // all falls through to the directional -U/-D form.
+        let names_pane = |s: &str| {
+            let pt = parse_target(s);
+            pt.pane.is_some() || pt.window.is_some() || pt.window_name.is_some()
+        };
+        if let Some(t) = raw_t.filter(|t| !t.starts_with('{') && (names_pane(t) || raw_s.is_some())) {
+            let (resp_s, resp_r) = mpsc::channel();
+            let _ = tx.send(CtrlReq::SwapPaneSrcDst {
+                src: raw_s.map(|s| s.to_string()),
+                dst: t.to_string(),
+                detach,
+                resp: resp_s,
+            });
+            if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+                if !persistent {
+                    let _ = writeln!(write_stream, "ERROR: {}", e);
+                    let _ = write_stream.flush();
+                }
+            }
         } else if let Some(tok) = raw_t.filter(|t| t.starts_with('{')) {
             // Layout position token like {top-right} — layout-independent.
             let _ = tx.send(CtrlReq::SwapPanePosition(tok.to_string()));
-        } else if let Some((p, is_id)) = raw_t.map(parse_target).and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id))) {
-            let _ = tx.send(CtrlReq::SwapPaneTarget(p, is_id));
         } else {
             let dir = if args.iter().any(|a| *a == "-U") { "U" }
                 else if args.iter().any(|a| *a == "-L") { "L" }
@@ -2362,7 +2430,26 @@ match cmd {
         let _ = tx.send(CtrlReq::RotateWindow(upward));
     }
     "display-panes" | "displayp" => { let _ = tx.send(CtrlReq::DisplayPanes); }
-    "break-pane" | "breakp" => { let _ = tx.send(CtrlReq::BreakPane); }
+    "break-pane" | "breakp" => {
+        let (req, print) = parse_break_pane_args(&args, raw_target.as_deref());
+        let (resp_s, resp_r) = mpsc::channel();
+        let _ = tx.send(CtrlReq::BreakPaneReq { req, print, resp: resp_s });
+        match resp_r.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(text)) => {
+                if !text.is_empty() {
+                    let _ = writeln!(write_stream, "{}", text);
+                    let _ = write_stream.flush();
+                }
+            }
+            Ok(Err(e)) => {
+                if !persistent {
+                    let _ = writeln!(write_stream, "ERROR: {}", e);
+                    let _ = write_stream.flush();
+                }
+            }
+            Err(_) => {}
+        }
+    }
     "join-pane" | "joinp" | "move-pane" | "movep" => {
         // Parse -s source and -h/-v direction.
         // -t target is already parsed by the global -t handler above into target_win / target_pane.
@@ -2397,6 +2484,10 @@ match cmd {
             target_win: tgt_win,
             target_pane: target_pane,
             horizontal,
+            // -d: graft the pane without switching to the target window
+            // (cmd-join-pane.c:515). It was parsed nowhere, so join-pane
+            // always switched, the same defect break-pane had (#689).
+            detach: args.iter().any(|a| *a == "-d"),
         });
     }
     "respawn-pane" | "respawnp" => {
@@ -5043,30 +5134,47 @@ fn dispatch_control_command(
             // -s <src> -t <dst>: swap two explicit panes (#442). Only when both
             // resolve to a concrete pane; otherwise fall through.
             let detach = args.iter().any(|a| *a == "-d");
-            let src = args.iter().position(|a| *a == "-s")
+            let raw_s = args.iter().position(|a| *a == "-s")
+                .and_then(|i| args.get(i + 1).copied());
+            let raw_t = args.iter().position(|a| *a == "-t")
                 .and_then(|i| args.get(i + 1).copied())
-                .map(parse_target)
-                .and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id)));
-            let dst_inline = args.iter().position(|a| *a == "-t")
-                .and_then(|i| args.get(i + 1).copied())
-                .map(parse_target)
-                .and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id)));
-            let dst = dst_inline.or_else(|| target_pane.map(|p| (p, pane_is_id)));
-            if let (Some((sv, sid)), Some((dv, did))) = (src, dst) {
-                let _ = tx.send(CtrlReq::SwapPaneSrcDst { src: sv, src_is_id: sid, dst: dv, dst_is_id: did, detach });
-            } else if let Some(tok) = raw_target.filter(|t| t.starts_with('{')) {
-                let _ = tx.send(CtrlReq::SwapPanePosition(tok.to_string()));
-            } else {
-                let resolved = dst;
-                if let Some((p, is_id)) = resolved {
-                    let _ = tx.send(CtrlReq::SwapPaneTarget(p, is_id));
-                } else {
-                    let direction = if args.iter().any(|a| *a == "-U") { "U".to_string() }
-                                   else if args.iter().any(|a| *a == "-L") { "L".to_string() }
-                                   else if args.iter().any(|a| *a == "-R") { "R".to_string() }
-                                   else { "D".to_string() };
-                    let _ = tx.send(CtrlReq::SwapPane(direction));
+                .or(raw_target);
+            // Both halves are resolved session wide by the server, so either
+            // may name a pane in another window (#689).
+            let names_pane = |s: &str| {
+                let pt = parse_target(s);
+                pt.pane.is_some() || pt.window.is_some() || pt.window_name.is_some()
+            };
+            if let Some(t) = raw_t.filter(|t| !t.starts_with('{') && (names_pane(t) || raw_s.is_some())) {
+                let (sw_s, sw_r) = mpsc::channel();
+                let _ = tx.send(CtrlReq::SwapPaneSrcDst {
+                    src: raw_s.map(|s| s.to_string()),
+                    dst: t.to_string(),
+                    detach,
+                    resp: sw_s,
+                });
+                match sw_r.recv_timeout(Duration::from_secs(5)) {
+                    Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                    _ => { let _ = resp_tx.send(String::new()); }
                 }
+                return true;
+            } else if let Some(tok) = raw_t.filter(|t| t.starts_with('{')) {
+                let _ = tx.send(CtrlReq::SwapPanePosition(tok.to_string()));
+            } else if let Some(p) = target_pane {
+                let (sw_s, sw_r) = mpsc::channel();
+                let dst = if pane_is_id { format!("%{}", p) } else { format!(".{}", p) };
+                let _ = tx.send(CtrlReq::SwapPaneSrcDst { src: None, dst, detach, resp: sw_s });
+                match sw_r.recv_timeout(Duration::from_secs(5)) {
+                    Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                    _ => { let _ = resp_tx.send(String::new()); }
+                }
+                return true;
+            } else {
+                let direction = if args.iter().any(|a| *a == "-U") { "U".to_string() }
+                               else if args.iter().any(|a| *a == "-L") { "L".to_string() }
+                               else if args.iter().any(|a| *a == "-R") { "R".to_string() }
+                               else { "D".to_string() };
+                let _ = tx.send(CtrlReq::SwapPane(direction));
             }
             let _ = resp_tx.send(String::new());
             true
@@ -5252,8 +5360,16 @@ fn dispatch_control_command(
             true
         }
         "break-pane" | "breakp" => {
-            let _ = tx.send(CtrlReq::BreakPane);
-            let _ = resp_tx.send(String::new());
+            // Control-mode / in-TUI path: same parser, so `-d`, `-s`, `-n`,
+            // `-a`, `-b`, `-P` and `-F` mean the same thing on every route.
+            let (req, print) = parse_break_pane_args(args, raw_target);
+            let (bp_s, bp_r) = mpsc::channel();
+            let _ = tx.send(CtrlReq::BreakPaneReq { req, print, resp: bp_s });
+            match bp_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(text)) => { let _ = resp_tx.send(text); }
+                Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                Err(_) => { let _ = resp_tx.send(String::new()); }
+            }
             true
         }
         "respawn-pane" | "respawnp" => {

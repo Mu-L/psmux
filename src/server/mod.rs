@@ -1,7 +1,7 @@
 pub(crate) mod helpers;
 pub(crate) mod options;
 pub(crate) mod option_catalog;
-mod connection;
+pub(crate) mod connection;
 
 use std::io::{self, Write};
 use std::sync::mpsc;
@@ -33,7 +33,7 @@ use crate::layout::{dump_layout_json, dump_layout_json_fast, apply_layout, cycle
     cycle_layout_reverse};
 use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remote_mouse_up,
     remote_mouse_button, remote_mouse_motion, remote_scroll_up, remote_scroll_down,
-    swap_pane, swap_pane_with_path, break_pane_to_window, unzoom_if_zoomed, resize_pane_vertical,
+    swap_pane, swap_pane_with_path, unzoom_if_zoomed, resize_pane_vertical,
     resize_pane_horizontal, resize_pane_absolute, rotate_panes, respawn_active_pane,
     handle_pane_mouse, handle_pane_scroll, copy_drag_begin, handle_split_set_sizes, handle_split_resize_done};
 use crate::config::{load_config, parse_key_string, format_key_binding, normalize_key_for_binding,
@@ -2066,7 +2066,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         CtrlReq::KillWindow => "KillWindow",
                         CtrlReq::KillPane => "KillPane",
                         CtrlReq::KillPaneById(_) => "KillPaneById",
-                        CtrlReq::BreakPane => "BreakPane",
+                        CtrlReq::BreakPaneReq { .. } => "BreakPane",
                         CtrlReq::JoinPane { .. } => "JoinPane",
                         CtrlReq::MovePane { .. } => "MovePane",
                         CtrlReq::PaneForwardExtract(..) => "PaneForwardExtract",
@@ -4317,53 +4317,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         hook_event = Some("after-swap-pane");
                     }
                 }
-                CtrlReq::SwapPaneTarget(target, is_id) => {
+                CtrlReq::SwapPaneSrcDst { src, dst, detach, resp } => {
+                    // swap-pane [-s <src>] -t <dst>: swap two panes named by raw
+                    // target specs, either of which may live in another window
+                    // (#442, #689).
                     // tmux: swap-pane without -Z permanently unzooms (#82)
                     unzoom_if_zoomed(&mut app);
-                    let path = {
-                        let win = &app.windows[app.active_idx];
-                        if is_id {
-                            crate::tree::find_path_by_id(&win.root, target)
-                        } else {
-                            match target.checked_sub(app.pane_base_index) {
-                                Some(idx) => crate::tree::path_by_position(&win.root, idx),
-                                None => None,
-                            }
-                        }
-                    };
-                    if let Some(path) = path {
-                        if swap_pane_with_path(&mut app, path) {
-                            meta_dirty = true;
-                            hook_event = Some("after-swap-pane");
-                        }
-                    } else {
-                        app.status_message = Some((format!("swap-pane: can't find pane: {}", target), std::time::Instant::now(), None));
-                    }
-                }
-                CtrlReq::SwapPaneSrcDst { src, src_is_id, dst, dst_is_id, detach } => {
-                    // swap-pane -s <src> -t <dst>: swap two explicit panes (#442).
-                    // tmux: swap-pane without -Z permanently unzooms (#82)
-                    unzoom_if_zoomed(&mut app);
-                    fn resolve_pane_path(app: &AppState, val: usize, is_id: bool) -> Option<Vec<usize>> {
-                        let win = &app.windows[app.active_idx];
-                        if is_id {
-                            crate::tree::find_path_by_id(&win.root, val)
-                        } else {
-                            val.checked_sub(app.pane_base_index)
-                                .and_then(|idx| crate::tree::path_by_position(&win.root, idx))
-                        }
-                    }
-                    let sp = resolve_pane_path(&app, src, src_is_id);
-                    let dp = resolve_pane_path(&app, dst, dst_is_id);
-                    match (sp, dp) {
-                        (Some(sp), Some(dp)) => {
-                            if crate::window_ops::swap_pane_between(&mut app, sp, dp, detach) {
+                    match crate::window_ops::swap_pane_by_spec(&mut app, src.as_deref(), &dst, detach) {
+                        Ok(swapped) => {
+                            if swapped {
                                 meta_dirty = true;
                                 hook_event = Some("after-swap-pane");
                             }
+                            let _ = resp.send(Ok(()));
                         }
-                        _ => {
-                            app.status_message = Some(("swap-pane: can't find pane".to_string(), std::time::Instant::now(), None));
+                        Err(e) => {
+                            app.status_message = Some((format!("swap-pane: {}", e), std::time::Instant::now(), None));
+                            meta_dirty = true;
+                            let _ = resp.send(Err(e));
                         }
                     }
                 }
@@ -4586,15 +4557,33 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                     meta_dirty = true;
                 }
-                CtrlReq::BreakPane => {
+                CtrlReq::BreakPaneReq { req, print, resp } => {
                     unzoom_if_zoomed(&mut app);
-                    break_pane_to_window(&mut app);
-                    crate::resize_window::refresh_dynamic_window_sizes(&mut app);
-                    hook_event = Some("after-break-pane");
-                    meta_dirty = true;
+                    match crate::window_ops::break_pane(&mut app, &req) {
+                        Ok(broken) => {
+                            crate::resize_window::refresh_dynamic_window_sizes(&mut app);
+                            resize_all_panes(&mut app);
+                            hook_event = Some("after-break-pane");
+                            meta_dirty = true;
+                            // -P prints where the pane ended up, expanded
+                            // against the window it landed in, not the active
+                            // one (with -d they are different windows).
+                            let text = match print {
+                                Some(fmt) => crate::format::expand_format_for_window(&fmt, &app, broken.win_pos),
+                                None => String::new(),
+                            };
+                            let _ = broken.pane_id;
+                            let _ = resp.send(Ok(text));
+                        }
+                        Err(e) => {
+                            app.status_message = Some((format!("break-pane: {}", e), std::time::Instant::now(), None));
+                            meta_dirty = true;
+                            let _ = resp.send(Err(e));
+                        }
+                    }
                 }
-                CtrlReq::JoinPane { src_win, src_pane, target_win, target_pane, horizontal }
-                | CtrlReq::MovePane { src_win, src_pane, target_win, target_pane, horizontal } => {
+                CtrlReq::JoinPane { src_win, src_pane, target_win, target_pane, horizontal, detach }
+                | CtrlReq::MovePane { src_win, src_pane, target_win, target_pane, horizontal, detach } => {
                     unzoom_if_zoomed(&mut app);
                     // Resolve source/target display indices to Vec positions
                     // (default: active window). win_pos honors gapped indices.
@@ -4670,7 +4659,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 };
                                 let split_kind = if horizontal { LayoutKind::Horizontal } else { LayoutKind::Vertical };
                                 tree::replace_leaf_with_split(&mut app.windows[tgt].root, &tgt_path, split_kind, pane_node);
-                                app.active_idx = tgt;
+                                // -d grafts the pane without switching to the
+                                // target window (cmd-join-pane.c:515 to 521:
+                                // the session_select is inside `if (!d)`).
+                                if !detach { app.active_idx = tgt; }
+                                else if app.active_idx >= app.windows.len() {
+                                    app.active_idx = app.windows.len() - 1;
+                                }
                             }
                             resize_all_panes(&mut app);
                             meta_dirty = true;

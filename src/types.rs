@@ -2706,17 +2706,15 @@ pub enum CtrlReq {
     /// name entirely whenever that second request did not land.
     ClaimSession(String, Option<String>, Option<String>, Option<String>, Option<String>, mpsc::Sender<String>),
     SwapPane(String),
-    /// swap-pane -t <target>: swap the active pane with the pane identified by
-    /// (target, pane_is_id).  When `pane_is_id` is true the value is a pane id
-    /// (`%N`); otherwise it is a user-facing pane index that is normalized
-    /// using pane-base-index before resolving a positional pane path.
-    SwapPaneTarget(usize, bool),
-    /// swap-pane -s <src> -t <dst>: swap the two explicit panes named by
-    /// `-s` and `-t` (issue #442).  Each pane is a (value, is_id) pair
-    /// resolved the same way as `SwapPaneTarget`.  `detach` is true when
-    /// `-d` was given: the active pane is left unchanged (following its pane
-    /// to the new slot); otherwise, per tmux, the `-t` pane becomes active.
-    SwapPaneSrcDst { src: usize, src_is_id: bool, dst: usize, dst_is_id: bool, detach: bool },
+    /// swap-pane `-s <src>` `-t <dst>`: swap the two panes named by the RAW
+    /// target specs (issues #442 and #689).  `src` of None is tmux's default
+    /// source, the current pane.  Both specs are resolved session wide, so
+    /// either may name a pane in another window (cmd-swap-pane.c:38, :39,
+    /// CMD_FIND_PANE) — they used to be pre-resolved pane indexes looked up in
+    /// the ACTIVE window alone, which made a cross window swap resolve to the
+    /// same pane twice and do nothing at exit 0.  `detach` is `-d`: the panes
+    /// still trade places but neither window changes its active pane.
+    SwapPaneSrcDst { src: Option<String>, dst: String, detach: bool, resp: mpsc::Sender<Result<(), String>> },
     /// swap-pane -t <token>: swap the active pane with the pane at a layout
     /// position token (e.g. `{top-right}`).  Layout-independent.
     SwapPanePosition(String),
@@ -2747,16 +2745,30 @@ pub enum CtrlReq {
     RotateWindow(bool),
     DisplayPanes,
     DisplayPaneSelect(usize),
-    BreakPane,
+    /// break-pane: move one pane into a window of its own.  Carries the whole
+    /// tmux flag set (`abdPF:n:s:t:`, cmd-break-pane.c:37); it used to carry
+    /// nothing at all, so `-d` was ignored and `-s` silently broke the ACTIVE
+    /// pane (issue #689).  `print` is Some(format) for `-P` (the `-F` template,
+    /// or tmux's BREAK_PANE_TEMPLATE).  The reply is the `-P` text, or the
+    /// error tmux would print.
+    BreakPaneReq {
+        req: crate::window_ops::BreakPaneRequest,
+        print: Option<String>,
+        resp: mpsc::Sender<Result<String, String>>,
+    },
     /// join-pane: move a pane from source window into target window as a split.
     /// Fields: src_win (window index), src_pane (positional pane index), target_win,
-    /// target_pane, horizontal (true = -h side-by-side, false = -v stacked).
+    /// target_pane, horizontal (true = -h side-by-side, false = -v stacked),
+    /// detach (`-d`: graft the pane but do NOT switch to the target window,
+    /// cmd-join-pane.c:515 to 521; it used to be parsed nowhere, so join-pane
+    /// always switched).
     JoinPane {
         src_win: Option<usize>,
         src_pane: Option<usize>,
         target_win: Option<usize>,
         target_pane: Option<usize>,
         horizontal: bool,
+        detach: bool,
     },
     /// respawn-pane. Fields: optional workdir (-c), kill flag (-k), command
     /// (`--`/positional shell-command), empty (-E), and the per-request reply.
@@ -2885,6 +2897,7 @@ pub enum CtrlReq {
         target_win: Option<usize>,
         target_pane: Option<usize>,
         horizontal: bool,
+        detach: bool,
     },
     /// Extract a pane and start I/O forwarding for cross-session transfer.
     /// Fields: window index, pane index, response channel.
