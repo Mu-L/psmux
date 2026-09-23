@@ -764,7 +764,8 @@ fire.
 | `after-new-window` | A window is created |
 | `after-split-window` | A pane is split |
 | `after-kill-pane` | A pane is killed |
-| `after-select-window` | A different window becomes active |
+| `after-select-window` | A different window becomes active. Fires ONCE per `select-window`; it fired twice before issue #690 |
+| `before-select-window` | A `select-window` is about to switch, before the window changes |
 | `after-select-pane` | A different pane becomes active |
 | `after-rename-window` | A window is renamed |
 | `after-rename-session` | The session is renamed |

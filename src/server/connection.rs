@@ -1358,16 +1358,16 @@ let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" 
 // twice.  A pane part on a select-window target is still focused here.
 let selectw_owns_window_target = matches!(cmd, "select-window" | "selectw");
 if is_focus_cmd {
-    if selectw_owns_window_target {
-        // nothing: the arm below sends exactly one window request
-    } else if let Some(wid) = target_win {
-        if target_win_is_id {
-            let _ = tx.send(CtrlReq::FocusWindowById(wid));
-        } else {
-            let _ = tx.send(CtrlReq::FocusWindow(wid));
+    if !selectw_owns_window_target {
+        if let Some(wid) = target_win {
+            if target_win_is_id {
+                let _ = tx.send(CtrlReq::FocusWindowById(wid));
+            } else {
+                let _ = tx.send(CtrlReq::FocusWindow(wid));
+            }
+        } else if let Some(ref wname) = target_win_name {
+            let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
         }
-    } else if let Some(ref wname) = target_win_name {
-        let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
     }
     if let Some(pid) = target_pane {
         if pane_is_id {

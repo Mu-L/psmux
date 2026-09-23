@@ -7085,7 +7085,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             }
             // Fire any hooks registered for the event that just occurred
             if let Some(event) = hook_event {
-                crate::commands::hook_debug_trace(&format!("{} req={}", event, _req_tag));
+                if crate::commands::hook_debug_enabled() {
+                    crate::commands::hook_debug_trace(&format!("{} req={}", event, _req_tag));
+                }
                 let _pre_hook_idx = app.active_idx;
                 let cmds: Vec<String> = app.hooks.get(event).cloned().unwrap_or_default();
                 for cmd in cmds {

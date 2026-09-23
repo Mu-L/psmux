@@ -84,7 +84,7 @@ fn issue690_window_name_target_focuses_by_name() {
     assert_eq!(reqs.len(), 1);
     match &reqs[0] {
         CtrlReq::FocusWindowByName(name) => assert_eq!(name, "editor"),
-        other => panic!("expected FocusWindowByName, got {:?}", std::mem::discriminant(other)),
+        _ => panic!("a window name target must focus by name, not by index"),
     }
 }
 
