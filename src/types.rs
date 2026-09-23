@@ -3347,6 +3347,55 @@ pub static PIPE_PANE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::
 /// competing for the ConPTY output pipe.
 pub static PIPE_WRITERS: Mutex<Vec<(usize, Box<dyn std::io::Write + Send>)>> = Mutex::new(Vec::new());
 
+/// Issue #685: the low sixteen OSC 4 palette entries of every pane that has
+/// set any, mirrored out of the pane's `vt100::Screen` so the colour query
+/// responder can read them without taking the parser lock.
+///
+/// tmux answers an `OSC 4;<i>;?` query from the pane's own palette first
+/// (`input.c:2947` `colour_palette_get`) and only asks the real terminal when
+/// the pane has no entry of its own (`input_add_request`,
+/// `INPUT_REQUEST_PALETTE`).  psmux's responder lives in the pane READER
+/// thread (`pane.rs` `scan_color_queries` plus
+/// `server::helpers::answer_color_queries_sync`, issues #473 and #556), which
+/// runs ahead of the parser thread and must not block on it, so the parser
+/// thread publishes here after each batch that changed the palette.
+///
+/// `PANE_PALETTE_ANY` is the same cheap gate `PIPE_PANE_COUNT` is: while no
+/// pane in this server has ever set a palette entry, the responder never takes
+/// the mutex, so nothing about the existing path changes.  Only indexes 0..=15
+/// are mirrored because that is the whole range the query scanner recognises.
+pub static PANE_PALETTE_ANY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+pub static PANE_PALETTES: Mutex<Vec<(usize, [Option<(u8, u8, u8)>; 16])>> =
+    Mutex::new(Vec::new());
+
+/// Publish (or, with an all-`None` table, withdraw) one pane's mirrored
+/// palette.  Called from the pane parser thread only when the palette
+/// generation moved.
+pub fn publish_pane_palette(pane_id: usize, entries: [Option<(u8, u8, u8)>; 16]) {
+    let any = entries.iter().any(Option::is_some);
+    let Ok(mut table) = PANE_PALETTES.lock() else { return };
+    match table.iter_mut().find(|(id, _)| *id == pane_id) {
+        Some(slot) if any => slot.1 = entries,
+        Some(_) => {
+            table.retain(|(id, _)| *id != pane_id);
+        }
+        None if any => table.push((pane_id, entries)),
+        None => {}
+    }
+    PANE_PALETTE_ANY.store(!table.is_empty(), std::sync::atomic::Ordering::Release);
+}
+
+/// This pane's mirrored palette, if it has one.
+#[must_use]
+pub fn pane_palette(pane_id: usize) -> Option<[Option<(u8, u8, u8)>; 16]> {
+    if !PANE_PALETTE_ANY.load(std::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    let table = PANE_PALETTES.lock().ok()?;
+    table.iter().find(|(id, _)| *id == pane_id).map(|(_, e)| *e)
+}
+
 /// Tracked persistent client TCP streams.
 /// Connection handlers register clones here so the server can explicitly
 /// `shutdown()` them before `process::exit(0)`.  Without this, Windows

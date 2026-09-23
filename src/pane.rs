@@ -3350,7 +3350,7 @@ pub fn spawn_reader_thread(
                     if color_query_bits != 0 {
                         let colors = crate::types::shared_host_colors();
                         if !crate::server::helpers::answer_color_queries_sync(
-                            color_query_bits, child_pid, &colors,
+                            color_query_bits, child_pid, &colors, pane_id,
                         ) {
                             // Injection unavailable (no child pid, or a
                             // non-Windows build): keep the #473 server-loop
@@ -3470,6 +3470,11 @@ pub fn spawn_reader_thread(
     // ── Parser thread: coalesces staged bytes, processes under one lock ──
     thread::spawn(move || {
         let mut cpr_scanner = CprScanner::new();
+        // Issue #685: the palette generation last mirrored into
+        // `types::PANE_PALETTES`.  A fresh parser starts at 0 with an empty
+        // palette, so a pane id reused by respawn-pane withdraws whatever the
+        // previous child published the moment its successor writes anything.
+        let mut published_palette_gen: u64 = u64::MAX;
         loop {
             // Wait for at least one byte (or shutdown).
             {
@@ -3559,6 +3564,23 @@ pub fn spawn_reader_thread(
                 parser.process(&bytes);
                 if parser.screen_mut().take_audible_bell() {
                     bell_pending.store(true, Ordering::Release);
+                }
+                // Issue #685: mirror the low sixteen OSC 4 entries out for the
+                // colour query responder, which runs in the reader thread and
+                // cannot take this lock.  The generation check makes this free
+                // for every pane that never sets a palette, and near free for
+                // one that sets it once at startup the way conhost does.
+                let gen = parser.screen().palette_generation();
+                if gen != published_palette_gen {
+                    published_palette_gen = gen;
+                    let screen = parser.screen();
+                    let mut entries: [Option<(u8, u8, u8)>; 16] = [None; 16];
+                    for (i, slot) in entries.iter_mut().enumerate() {
+                        *slot = screen.palette_entry(
+                            u8::try_from(i).unwrap_or(0),
+                        );
+                    }
+                    crate::types::publish_pane_palette(pane_id, entries);
                 }
             }
             // When TUI sends RMCUP, reset cursor shape so it doesn't

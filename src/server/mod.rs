@@ -1913,14 +1913,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     for fp in win.floating.iter_mut() {
                         let bits = fp.pane.color_query_pending.swap(0, std::sync::atomic::Ordering::AcqRel);
                         if bits != 0 {
-                            helpers::answer_color_queries(bits, &mut *fp.pane.writer, fp.pane.child_pid, &colors);
+                            let own = crate::types::pane_palette(fp.pane.id);
+                            helpers::answer_color_queries_for_pane(bits, &mut *fp.pane.writer, fp.pane.child_pid, &colors, own);
                         }
                     }
                 }
                 if let Mode::PopupMode { popup_pane: Some(ref mut pane), .. } = app.mode {
                     let bits = pane.color_query_pending.swap(0, std::sync::atomic::Ordering::AcqRel);
                     if bits != 0 {
-                        helpers::answer_color_queries(bits, &mut *pane.writer, pane.child_pid, &colors);
+                        let own = crate::types::pane_palette(pane.id);
+                        helpers::answer_color_queries_for_pane(bits, &mut *pane.writer, pane.child_pid, &colors, own);
                     }
                 }
             }

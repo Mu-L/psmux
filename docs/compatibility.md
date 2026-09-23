@@ -292,6 +292,30 @@ psmux 3.3.8 (unknown commit)              # no revision recorded anywhere
 
 `cargo install --git` uses libgit2 and never needs the `git` binary, so a machine without git on PATH used to install happily and then report `unknown commit`. The commit date is only ever available from git, so a fallback build prints the hash without a date.
 
+### Per Pane Colour Palette (OSC 4 and OSC 104)
+
+Each pane keeps its own 256 entry colour palette, exactly as tmux keeps one on every `window_pane` (#685). A pane child sets an entry with OSC 4 and clears it with OSC 104, and psmux substitutes the palette's RGB for an indexed colour at render time, which is where tmux does the same substitution in `tty_check_fg`, `tty_check_bg` and `tty_check_us`:
+
+```text
+ESC]4;4;rgb:00/00/80 ESC\      index 4 becomes #000080 in THIS pane
+ESC]4;4;#000080 ESC\           the # form, also accepted
+ESC]4;4;rgb:0000/0000/8080 ESC\   one to four hex digits per channel
+ESC]4;4;rgb:00/00/80;6;rgb:00/80/80 ESC\   several pairs in one sequence
+ESC]104;4 ESC\                 put index 4 back
+ESC]104 ESC\                   put every index back
+ESC]4;4;? ESC\                 answered from this pane's entry, then from the host terminal
+```
+
+This matters most for Windows console applications. A pane child on ConPTY announces its console colour table as OSC 4 and then paints with indexed SGR rather than true colour, so Far Manager's panels are `ESC[48;5;4m` against an OSC 4 that says index 4 is `#000080`. Before #685 psmux dropped the palette and re rendered the cell as a plain `ESC[44m`, which Windows Terminal painted with its own Campbell `#0037DA`. Far inside psmux now paints `#000080`, `#008080` and `#00FFFF` exactly as Far outside psmux does.
+
+Three deliberate choices:
+
+- **The palette is per pane and is never forwarded to the outer terminal.** Two panes with different palettes would fight over one terminal, which is precisely why tmux resolves it per pane instead.
+- **A pane that never sets a palette is unchanged, byte for byte.** The substitution costs one null check per frame for such a pane, and nothing travels on the wire that did not travel before.
+- **A respawned pane starts empty.** `respawn-pane` installs a fresh parser, and an in band RIS (`ESC c`) clears the palette too, matching tmux.
+
+One platform limit, measured on Windows 11 build 26200: conhost swallows a **bare** `ESC]104 ESC\` on the ConPTY output path, so a pane child running under ConPTY cannot reach the clear-everything form. `ESC]104;4 ESC\` arrives normally.
+
 ## Behavioral Differences from tmux
 
 A few commands intentionally behave differently from upstream tmux. These are deliberate choices, not bugs.

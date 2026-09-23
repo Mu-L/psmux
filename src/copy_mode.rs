@@ -1524,6 +1524,13 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
 /// Negative -S values read from scrollback history; i32::MIN means all retained history.
 /// `pane_id` is an explicit `-t %N` target (None = active pane); `preserve_trailing`
 /// is the `-N` flag (keep trailing spaces per row, styled ones included).
+///
+/// Issue #685: the pane's OSC 4 palette is deliberately NOT applied here.
+/// tmux's `capture-pane -e` goes through `grid_string_cells` (`grid.c`), which
+/// reads `gc->fg` / `gc->bg` straight out of the cell; only the tty path
+/// (`tty_check_fg` and friends) substitutes the palette.  So a capture reports
+/// the indexed colour the pane actually wrote, and a caller that wants the
+/// resolved RGB reads the rendered frame instead.
 pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<i32>, pane_id: Option<usize>, preserve_trailing: bool) -> io::Result<Option<String>> {
     let (win_idx, path) = capture_target(app, pane_id);
     let win = &mut app.windows[win_idx];
