@@ -186,38 +186,111 @@ fn non_control_key_not_buffered_even_when_paste_pending() {
     ));
 }
 
+/// Nothing on the clipboard and no Ctrl+V in flight: what a keystroke looks
+/// like to the flush decision.
+#[cfg(windows)]
+fn typed() -> PasteHeadEvidence<'static> {
+    PasteHeadEvidence::default()
+}
+
 #[cfg(windows)]
 #[test]
 fn leading_enter_waits_past_zero_latency_flush_when_detection_on() {
-    assert!(!should_zero_latency_flush_paste_pend("\n", true, false, false));
+    assert!(!should_zero_latency_flush_paste_pend("\n", true, false, false, typed()));
 }
 
 #[cfg(windows)]
 #[test]
 fn leading_tab_waits_past_zero_latency_flush_when_detection_on() {
-    assert!(!should_zero_latency_flush_paste_pend("\t", true, false, false));
+    assert!(!should_zero_latency_flush_paste_pend("\t", true, false, false, typed()));
 }
 
 #[cfg(windows)]
 #[test]
 fn leading_control_flushes_immediately_when_detection_off() {
-    assert!(should_zero_latency_flush_paste_pend("\n", false, false, false));
-    assert!(should_zero_latency_flush_paste_pend("\t", false, false, false));
+    assert!(should_zero_latency_flush_paste_pend("\n", false, false, false, typed()));
+    assert!(should_zero_latency_flush_paste_pend("\t", false, false, false, typed()));
 }
 
 #[cfg(windows)]
 #[test]
 fn normal_short_typing_still_flushes_immediately() {
-    assert!(should_zero_latency_flush_paste_pend("a", true, false, false));
-    assert!(should_zero_latency_flush_paste_pend("ab", true, false, false));
+    assert!(should_zero_latency_flush_paste_pend("a", true, false, false, typed()));
+    assert!(should_zero_latency_flush_paste_pend("ab", true, false, false, typed()));
 }
 
 #[cfg(windows)]
 #[test]
 fn paste_states_do_not_zero_latency_flush() {
-    assert!(!should_zero_latency_flush_paste_pend("a", true, true, false));
-    assert!(!should_zero_latency_flush_paste_pend("a", true, false, true));
-    assert!(!should_zero_latency_flush_paste_pend("abc", true, false, false));
+    assert!(!should_zero_latency_flush_paste_pend("a", true, true, false, typed()));
+    assert!(!should_zero_latency_flush_paste_pend("a", true, false, true, typed()));
+    assert!(!should_zero_latency_flush_paste_pend("abc", true, false, false, typed()));
+}
+
+// ── Issue #684 follow up: the head of a paste must not go out as typing ──
+//
+// gabri-ns measured a console host that hands the input buffer one character
+// at a time, so the client's first drained batch held a single character and
+// the zero latency flush committed it as `send-text` before the burst was
+// recognised.  The child then saw `M` `ESC[200~` `icrosoft...`, with the first
+// character of the paste outside the brackets.
+
+#[cfg(windows)]
+#[test]
+fn the_first_character_of_a_clipboard_paste_is_held() {
+    let clip = "Microsoft Windows [Version 10.0.19045.7725]";
+    let ev = PasteHeadEvidence { gesture_open: false, clip_head: Some(clip) };
+    assert!(!should_zero_latency_flush_paste_pend("M", true, false, false, ev));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_burst_under_an_open_ctrl_v_gesture_is_held_whatever_the_clipboard_says() {
+    // Hosts that forward the Ctrl+V press give the client the stronger
+    // signal; the clipboard may even be unreadable at that instant.
+    let ev = PasteHeadEvidence { gesture_open: true, clip_head: None };
+    assert!(!should_zero_latency_flush_paste_pend("M", true, false, false, ev));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_character_that_is_not_the_clipboard_head_still_flushes_immediately() {
+    let ev = PasteHeadEvidence { gesture_open: false, clip_head: Some("Microsoft") };
+    assert!(should_zero_latency_flush_paste_pend("x", true, false, false, ev));
+    // The second character of a burst is judged on its own pending buffer,
+    // which is why typing after the held head is not delayed as well.
+    assert!(should_zero_latency_flush_paste_pend("i", true, false, false, ev));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_clipboard_of_one_or_two_characters_never_holds() {
+    // At two characters or fewer both paths end in the same `send-text`, so
+    // holding would buy nothing and cost the 20 ms window.
+    for clip in ["a", "ab"] {
+        let ev = PasteHeadEvidence { gesture_open: false, clip_head: Some(clip) };
+        assert!(should_zero_latency_flush_paste_pend("a", true, false, false, ev));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn paste_detection_off_never_holds_the_head() {
+    // The user asked for no paste detection: nothing may add latency, whatever
+    // is on the clipboard.
+    let ev = PasteHeadEvidence { gesture_open: true, clip_head: Some("Microsoft") };
+    assert!(should_zero_latency_flush_paste_pend("M", false, false, false, ev));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_ctrl_v_gesture_closes_and_stops_holding() {
+    let mut g = PasteGesture::default();
+    assert!(!g.is_open(), "a gesture that never started is not open");
+    g.start();
+    assert!(g.is_open(), "the press opens it");
+    g.finish();
+    assert!(!g.is_open(), "the paste going out closes it");
 }
 
 // ── Issue #164: status-format[] must parse inline styles end-to-end ──

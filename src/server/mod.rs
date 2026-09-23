@@ -2988,6 +2988,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     PTY_DATA_READY swap above already set state_dirty. */ }
                 CtrlReq::SendKey(k) => { crate::pty_trace::mark("g", 0, k.as_bytes()); app.status_message = None; crate::input::stamp_interactive_key(&mut app, &k); send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
+                CtrlReq::PasteBuffer(pb, resp) => {
+                    // No `?` here on purpose: a write that fails because the
+                    // target pane died a moment ago is a routine failure of one
+                    // command, and `run_server` returning would take every
+                    // window and pane in the session with it.  It goes back to
+                    // the caller as the command's error instead.
+                    let reply = match crate::commands::run_paste_buffer(&mut app, &pb) {
+                        Ok(err) => err,
+                        Err(e) => Some(format!("paste-buffer: {}", e)),
+                    };
+                    let _ = resp.send(reply);
+                    echo_pending_until = Some(Instant::now());
+                }
                 CtrlReq::ZoomPane => { toggle_zoom(&mut app); state_dirty = true; meta_dirty = true; hook_event = Some("after-resize-pane"); }
                 // tmux: the prefix forces a switch to the prefix table, which
                 // drops any `switch-client -T` latch (issue #640).

@@ -24,7 +24,10 @@
 //! - **Capped** — auto-stop after N entries to prevent disk fill
 //! - **Thread-safe** — use `LazyLock<Mutex<Option<File>>>`
 //! - **Timestamped** — `[HH:MM:SS.mmm]` prefix on every line
-//! - **Truncated on startup** — fresh log each session (no stale data)
+//! - **Truncated on startup** — fresh log each session (no stale data), EXCEPT
+//!   for the files more than one psmux process writes.  `input_debug.log` is
+//!   written by the client and by the server, so it is opened in append mode
+//!   with a banner per process; see [`open_shared_log`].
 
 use std::io::Write;
 use std::sync::{LazyLock, Mutex};
@@ -35,17 +38,70 @@ fn psmux_dir() -> String {
     crate::paths::psmux_dir()
 }
 
+/// How a log file is opened when a process takes it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LogMode {
+    /// One writer: start clean so the file holds this session only.
+    Truncate,
+    /// Several processes write the same file: every one of them appends.
+    ///
+    /// `truncate(true)` is wrong the moment a second process can open the same
+    /// path.  `input_debug.log` is exactly that: the client and the server both
+    /// write it, each through its own `LazyLock` that opens on its first line,
+    /// and each keeps its own file offset.  gabri-ns hit both halves of that on
+    /// #684: the server's first `[paste]` line truncated the file the client had
+    /// been writing since startup, wiping every client `[paste]` line before it,
+    /// and the client's next write landed at its old offset and re-extended the
+    /// file over the hole, leaving 106,367 NUL bytes between the server's four
+    /// lines and the rest of the client's.
+    Append,
+}
+
 /// Open a log file in the psmux data directory, creating the directory if needed.
 /// Returns `None` if the file cannot be created.
 fn open_log(filename: &str) -> Option<std::fs::File> {
-    let dir = psmux_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true) // fresh log each session
-        .write(true)
-        .open(format!("{}/{}", dir, filename))
-        .ok()
+    open_log_in(&psmux_dir(), filename, LogMode::Truncate)
+}
+
+/// Open a log file that more than one psmux process writes.
+///
+/// Appending, rather than a per process file name: the client's and the
+/// server's lines are two halves of one story (the client decides a burst is a
+/// paste, the server decides which channel carries it), and reading them
+/// interleaved in one file, in one timeline, is what made #684 diagnosable at
+/// all.  Two files would have to be correlated by timestamp by hand, and every
+/// existing instruction, test and doc would have to learn a new name.  Each
+/// process writes a banner naming itself when it opens the file, so the halves
+/// are still attributable, and `PSMUX_INPUT_DEBUG` is opt in with a 10,000 line
+/// cap per process, so the file cannot grow behind anyone's back.
+fn open_shared_log(filename: &str) -> Option<std::fs::File> {
+    let mut file = open_log_in(&psmux_dir(), filename, LogMode::Append)?;
+    let _ = writeln!(
+        file,
+        "[{}][log] === {} pid {} opened {} (append) ===",
+        chrono::Local::now().format("%H:%M:%S%.3f"),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "psmux".to_string()),
+        std::process::id(),
+        filename
+    );
+    let _ = file.flush();
+    Some(file)
+}
+
+/// The open itself, with the directory and the mode passed in so it can be
+/// exercised against a temporary directory in a unit test.
+pub(crate) fn open_log_in(dir: &str, filename: &str, mode: LogMode) -> Option<std::fs::File> {
+    let _ = std::fs::create_dir_all(dir);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).write(true);
+    match mode {
+        LogMode::Truncate => { opts.truncate(true); }
+        LogMode::Append => { opts.append(true); }
+    }
+    opts.open(format!("{}/{}", dir, filename)).ok()
 }
 
 /// Check if an env var is set to a truthy value ("1" or "true").
@@ -243,9 +299,14 @@ pub fn style_log_enabled() -> bool {
 
 /// Input event debug log, gated by `PSMUX_INPUT_DEBUG=1`.
 /// Traces every crossterm event + console input mode at startup.
+///
+/// Opened in APPEND mode: the client and the server both write this file (the
+/// client's paste decision and the server's channel decision are the two halves
+/// of one paste), so whichever opened it second used to truncate the other's
+/// lines away.  See [`open_shared_log`].
 static INPUT_LOG: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| {
     if !env_enabled("PSMUX_INPUT_DEBUG") { return Mutex::new(None); }
-    Mutex::new(open_log("input_debug.log"))
+    Mutex::new(open_shared_log("input_debug.log"))
 });
 
 static INPUT_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -335,14 +396,9 @@ pub fn server_log_enabled() -> bool {
 /// log before it could be read.
 static SESSION_LOG: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| {
     if !env_enabled("PSMUX_SESSION_DEBUG") { return Mutex::new(None); }
-    let dir = psmux_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(format!("{}/session_debug.log", dir))
-        .ok();
-    Mutex::new(f)
+    // Every short lived psmux CLI process runs the registry cleanup, so this
+    // one has always appended; it is the same reason input_debug.log now does.
+    Mutex::new(open_log_in(&psmux_dir(), "session_debug.log", LogMode::Append))
 });
 
 static SESSION_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -376,4 +432,8 @@ pub fn session_log(component: &str, msg: &str) {
 pub fn session_log_enabled() -> bool {
     SESSION_LOG.lock().ok().map_or(false, |g| g.is_some())
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue684_input_log_append.rs"]
+mod tests_issue684_input_log_append;
 

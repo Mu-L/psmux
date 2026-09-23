@@ -46,6 +46,13 @@ Two more details worth knowing:
 
 - `PSMUX_SESSION_DEBUG` appends rather than truncates. Registry cleanup runs in every short-lived
   `psmux` CLI process, so truncating on open would erase the log before you could read it.
+- `PSMUX_INPUT_DEBUG` appends too, for the same reason. Two processes write it: the attached client
+  (which decides whether a burst of characters is a paste) and the server (which decides which
+  channel carries that paste into the pane). Each opens the file on its first line, so while it
+  truncated, whichever wrote second erased the other's evidence, and the first one's next write
+  landed at its old offset and left a hole of NUL bytes behind it. Each process writes a banner
+  naming itself when it opens the file, so the two halves stay attributable, and the file holds
+  more than one run: delete it before a reproduction if you want only that run in it.
 - `PSMUX_LATENCY_LOG=1` also enables a server side companion at
   `%USERPROFILE%\psmux_server_latency.log` holding dump-state build times. Read the two together
   to tell a slow server from a slow client.

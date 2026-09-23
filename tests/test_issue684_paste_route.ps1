@@ -29,14 +29,41 @@
 #            which must NEVER be handed injected marker bytes because it would
 #            show them as the literal characters [200~.
 
+#
+# PORTABILITY (gabri-ns ran this on Windows 10 19045 with Windows PowerShell
+# 5.1 and reported three ways it misjudged that host):
+#
+#   * `e is not an escape in Windows PowerShell 5.1, it is the letter e, so
+#     every byte exact comparison wanted 65 5b 32 30 30 7e where the child had
+#     correctly received 1b 5b 32 30 30 7e.  [char]27 is the portable spelling.
+#   * the assertions that pin PSMUX_PASTE_INJECT=0 and then expect markers are
+#     asserting the defect this issue is about: below build 22523 that conhost
+#     strips them from the pipe BY DESIGN, which is the whole reason the
+#     injection route exists.  They are gated on the build now.
+#   * the wide payload really is mangled on 19045, on both routes AND without
+#     psmux in the chain at all (his measurement: Latin 1 to NUL, each CJK
+#     character to one unstable byte, under code page 65001 on the ReadFile
+#     side).  That is the platform, so the assertion is strict at 22523 and
+#     above and informational below.
+#
 $ErrorActionPreference = "Continue"
 $PSMUX = if ($env:PSMUX_TEST_BIN) { $env:PSMUX_TEST_BIN } else { (Get-Command psmux -EA Stop).Source }
-$NS = "i684paste"
+$NS = if ($env:PSMUX_TEST_NS) { $env:PSMUX_TEST_NS } else { "i684paste" }
 $script:TestsPassed = 0
 $script:TestsFailed = 0
+$script:TestsSkipped = 0
+
+# The build that decides whether this host's conhost carries ESC[200~ through a
+# pane's ConPTY input pipe.  Same constant as the product's
+# PASTE_PIPE_BRACKET_MIN_BUILD, and same one as CONPTY_MOUSE_MIN_BUILD before
+# it: the pipe strips the markers below it.
+$PIPE_BRACKET_MIN_BUILD = 22523
+$OSBuild = [System.Environment]::OSVersion.Version.Build
+$PipeCarriesMarkers = $OSBuild -ge $PIPE_BRACKET_MIN_BUILD
 
 function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
+function Write-Skip($msg) { Write-Host "  [SKIP] $msg" -ForegroundColor Yellow; $script:TestsSkipped++ }
 function Write-Info($msg) { Write-Host "  [INFO] $msg" -ForegroundColor Cyan }
 
 $repoTests = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -93,9 +120,10 @@ $wideFile = Join-Path $root "payload_wide.txt"
 # What the pane child must receive: every line break collapsed to a single CR,
 # which is what BOTH channels do (write_paste_chunked normalises CRLF to CR and
 # send_vt_response does the same on its way into UTF-16).
+$ESC = [char]27   # NOT `e: Windows PowerShell 5.1 reads that as the letter e.
 function Expected([string]$text, [bool]$bracket) {
     $body = $text -replace "`r`n", "`r"
-    if ($bracket) { "`e[200~" + $body + "`e[201~" } else { $body }
+    if ($bracket) { "$ESC[200~" + $body + "$ESC[201~" } else { $body }
 }
 function HexOf([string]$s) {
     ([Text.Encoding]::UTF8.GetBytes($s) | ForEach-Object { $_.ToString("x2") }) -join ""
@@ -151,13 +179,19 @@ function Invoke-Paste {
 }
 
 Write-Host "`n=== Issue #684: paste route ===" -ForegroundColor Yellow
+Write-Info "host build $OSBuild, pipe bracket gate $PIPE_BRACKET_MIN_BUILD, this conhost $(if ($PipeCarriesMarkers) { 'carries' } else { 'STRIPS' }) ESC[200~ on the input pipe"
 
 # 1. The pipe route, which is what this host does on its own.
 $pipe = Invoke-Paste -Tag "pipe" -PayloadFile $stdFile -Inject "0"
 $want = HexOf (Expected $stdText $true)
 if ($pipe.Route -eq "pipe") { Write-Pass "PSMUX_PASTE_INJECT=0 pins the pipe route" }
 else { Write-Fail "PSMUX_PASTE_INJECT=0 chose '$($pipe.Route)'" }
-if ($pipe.Hex -eq $want) { Write-Pass "pipe route delivers the 490 byte payload byte exact with both markers ($($pipe.Total) bytes)" }
+if (-not $PipeCarriesMarkers) {
+    # Below the gate this assertion would be asserting the defect: the pipe
+    # loses the markers on that conhost, by design, which is why psmux does not
+    # use the pipe there unless PSMUX_PASTE_INJECT=0 forces it.
+    Write-Skip "pipe route byte exactness: build $OSBuild is below $PIPE_BRACKET_MIN_BUILD, this conhost strips the markers from the pipe (that is the defect, not a regression). Got $($pipe.Total) bytes, markers 200=$($pipe.Has200) 201=$($pipe.Has201)"
+} elseif ($pipe.Hex -eq $want) { Write-Pass "pipe route delivers the 490 byte payload byte exact with both markers ($($pipe.Total) bytes)" }
 else { Write-Fail "pipe route bytes differ`n    want $want`n    got  $($pipe.Hex)" }
 
 # 2. The injection route, the one a 19045 pane needs, forced on here.
@@ -168,7 +202,9 @@ if ($inj.Has200 -eq "YES" -and $inj.Has201 -eq "YES") { Write-Pass "the injected
 else { Write-Fail "the injected paste lost a marker (200=$($inj.Has200) 201=$($inj.Has201))" }
 if ($inj.Hex -eq $want) { Write-Pass "injection route delivers the same 490 byte payload byte exact ($($inj.Total) bytes)" }
 else { Write-Fail "injection route bytes differ`n    want $want`n    got  $($inj.Hex)" }
-if ($inj.Hex -eq $pipe.Hex) { Write-Pass "both routes hand the child IDENTICAL bytes" }
+if (-not $PipeCarriesMarkers) {
+    Write-Skip "route equality: on build $OSBuild the pipe arm is missing the 12 marker bytes the injection arm carries, which is exactly why the injection route exists (inject $($inj.Total) bytes, pipe $($pipe.Total))"
+} elseif ($inj.Hex -eq $pipe.Hex) { Write-Pass "both routes hand the child IDENTICAL bytes" }
 else { Write-Fail "the two routes disagree, so a 19045 user would not get what a 26200 user gets" }
 
 # 3. Chunking: 10100 bytes crosses both the 512 byte pipe chunk and the 2048
@@ -179,13 +215,33 @@ if ($bigInj.Hex -eq $bigWant) { Write-Pass "a 10100 byte paste survives injectio
 else { Write-Fail "the chunked injection lost bytes: want $($bigWant.Length/2), got $($bigInj.Total)" }
 
 # 4. An ESC byte and non ASCII through the UTF-16 record encoding.
+#
+# gabri-ns measured this payload on 19045 four ways: through psmux on the pipe,
+# through psmux on the injection route, and through a bare pseudoconsole host
+# with NO psmux in the chain on each of those two channels.  The ASCII, the ESC
+# byte, the CR and the markers survive every time; only the non ASCII changes,
+# and it changes WITHOUT psmux too (Latin 1 to NUL, each CJK character to one
+# byte whose value is not stable between runs).  That is the inbox conhost
+# converting the console input buffer's UTF-16 under code page 65001 on the
+# ReadFile side, a stronger form of the emoji caveat on 26200.  So: strict at
+# and above the gate, informational below it.
 $wideWant = HexOf (Expected $wideText $true)
 $wideInj  = Invoke-Paste -Tag "wideinj" -PayloadFile $wideFile -Inject "1"
 $widePipe = Invoke-Paste -Tag "widepipe" -PayloadFile $wideFile -Inject "0"
-if ($wideInj.Hex -eq $wideWant) { Write-Pass "an ESC byte, Latin 1 and CJK survive the KEY_EVENT records" }
-else { Write-Fail "the wide payload was mangled by injection`n    want $wideWant`n    got  $($wideInj.Hex)" }
-if ($wideInj.Hex -eq $widePipe.Hex) { Write-Pass "the wide payload is identical on both routes" }
-else { Write-Fail "the wide payload differs between the routes" }
+$wideAsciiOk = $wideInj.Text -match 'ASCII-start' -and $wideInj.Text -match '-end' -and $wideInj.Text -match '<ESC>ESCBYTE-'
+if (-not $PipeCarriesMarkers) {
+    if ($wideAsciiOk) {
+        Write-Skip "wide payload: build $OSBuild mangles non ASCII in the conhost on BOTH routes and without psmux at all (reporter measured it). The ASCII, the ESC byte and the markers did arrive: '$($wideInj.Text)'"
+    } else {
+        Write-Fail "the wide payload lost its ASCII or its ESC byte, which the platform does NOT explain: '$($wideInj.Text)'"
+    }
+    Write-Skip "wide payload route equality: not comparable below the gate, the two channels mangle non ASCII differently on that conhost"
+} else {
+    if ($wideInj.Hex -eq $wideWant) { Write-Pass "an ESC byte, Latin 1 and CJK survive the KEY_EVENT records" }
+    else { Write-Fail "the wide payload was mangled by injection`n    want $wideWant`n    got  $($wideInj.Hex)" }
+    if ($wideInj.Hex -eq $widePipe.Hex) { Write-Pass "the wide payload is identical on both routes" }
+    else { Write-Fail "the wide payload differs between the routes" }
+}
 
 # 5. Issue #98: a record reader keeps the pipe even with the override on, and
 #    never sees the markers as literal characters.
@@ -226,8 +282,14 @@ Write-Host "`n=== Issue #684: paste-buffer flags in the in server dispatch ===" 
 # A hook runs through commands.rs execute_command_string, the same route a key
 # binding and the command prompt take.  Before the fix this pasted buffer 0
 # unbracketed whatever the flags said.
-function Invoke-HookPaste([string]$Tag, [string]$Command, [string]$Inject = "0") {
+# $Inject defaults to "" on purpose: the NATURAL route for this host.  It used
+# to default to "0", which pins the pipe, and on a build below the gate that
+# made the flag assertions measure the channel instead of the flags: the pane
+# did receive NAMEDBUF684, -p was honoured (the server log said
+# "route=pipe bracket=true"), and the conhost then ate the twelve marker bytes.
+function Invoke-HookPaste([string]$Tag, [string]$Command, [string]$Inject = "") {
     if ($Inject -ne "") { $env:PSMUX_PASTE_INJECT = $Inject }
+    else { Remove-Item env:PSMUX_PASTE_INJECT -EA SilentlyContinue }
     & $PSMUX -L $NS kill-server 2>&1 | Out-Null
     Start-Sleep -Milliseconds 400
     $log = Join-Path $root "rec_$Tag.log"
@@ -287,6 +349,84 @@ $missing = Invoke-HookPaste -Tag "missing" -Command "paste-buffer -p -b nosuchbu
 if ($missing.Total -le 0) { Write-Pass "a missing named buffer pastes nothing (tmux: no buffer <name>)" }
 else { Write-Fail "a missing buffer still pasted $($missing.Total) bytes: '$($missing.Text)'" }
 
+Write-Host "`n=== Issue #684 follow up: -t names the pane the text lands in ===" -ForegroundColor Yellow
+
+# gabri-ns: `paste-buffer -t <pane>` on the CLI route pasted into the ACTIVE
+# pane.  parse_paste_buffer_args filled `target` and the dispatch never read
+# it, and the validated -t focus the dispatcher applies was spent by the
+# buffer lookup that ran before the paste.  tmux resolves the pane with
+# cmd_find_pane and writes to it (cmd-paste-buffer.c:66 and :124).
+#
+# Two recorders, one per window, window 0 active: the payload must land in
+# window 1 and window 0 must receive NOTHING.
+function Invoke-TargetedPaste([string]$Tag, [string]$How) {
+    Remove-Item env:PSMUX_PASTE_INJECT -EA SilentlyContinue
+    & $PSMUX -L $NS kill-server 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 400
+    $sess = "i684_$Tag"
+    $log0 = Join-Path $root "rec_${Tag}_w0.log"
+    $log1 = Join-Path $root "rec_${Tag}_w1.log"
+    Remove-Item $log0, $log1 -EA SilentlyContinue
+    & $PSMUX -L $NS new -d -s $sess -x 100 -y 30 -- $recorder $log0 16 vt 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    & $PSMUX -L $NS new-window -t $sess -- $recorder $log1 14 vt 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+    & $PSMUX -L $NS set-buffer -b tbuf684 "TARGETED684" 2>&1 | Out-Null
+    $err = ""
+    if ($How -eq "cli") {
+        & $PSMUX -L $NS select-window -t "${sess}:0" 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 400
+        $err = ((& $PSMUX -L $NS paste-buffer -p -b tbuf684 -t "${sess}:1" 2>&1) -join " ").Trim()
+    } else {
+        # The in server dispatch: a hook, a key binding and the command prompt
+        # all reach paste-buffer through execute_command_string.  The hook runs
+        # AFTER the switch to window 0, so the active pane at paste time is
+        # window 0's recorder and the target is window 1's.
+        & $PSMUX -L $NS set-hook -g after-select-window "paste-buffer -p -b tbuf684 -t ${sess}:1" 2>&1 | Out-Null
+        & $PSMUX -L $NS select-window -t "${sess}:0" 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 600
+        & $PSMUX -L $NS set-hook -gu after-select-window 2>&1 | Out-Null
+    }
+    Start-Sleep -Seconds 16
+    $res = [ordered]@{ W0 = ""; W1 = ""; T0 = -1; T1 = -1; Err = $err }
+    if (Test-Path $log0) { foreach ($l in Get-Content $log0) { if ($l -match '^TEXT (.*)$') { $res.W0 = $Matches[1] } elseif ($l -match '^TOTAL (\d+)$') { $res.T0 = [int]$Matches[1] } } }
+    if (Test-Path $log1) { foreach ($l in Get-Content $log1) { if ($l -match '^TEXT (.*)$') { $res.W1 = $Matches[1] } elseif ($l -match '^TOTAL (\d+)$') { $res.T1 = [int]$Matches[1] } } }
+    & $PSMUX -L $NS kill-session -t $sess 2>&1 | Out-Null
+    [pscustomobject]$res
+}
+
+$tcli = Invoke-TargetedPaste -Tag "tcli" -How "cli"
+if ($tcli.W1 -match 'TARGETED684') { Write-Pass "CLI: paste-buffer -t <window> lands in the TARGET pane ($($tcli.T1) bytes)" }
+else { Write-Fail "CLI: the -t target received '$($tcli.W1)' ($($tcli.T1) bytes)" }
+if ($tcli.T0 -le 0) { Write-Pass "CLI: the active pane received nothing (it used to receive the whole paste)" }
+else { Write-Fail "CLI: the ACTIVE pane received $($tcli.T0) bytes: '$($tcli.W0)'" }
+
+# The byte count on this arm can be a multiple of one paste: psmux fires
+# `after-select-window` twice for a single `select-window` (reproduced with a
+# hook that only runs `set-buffer`, so it is nothing to do with paste-buffer).
+# What this asserts is WHERE the text landed, which is unaffected by that.
+$thook = Invoke-TargetedPaste -Tag "thook" -How "hook"
+if ($thook.W1 -match 'TARGETED684') { Write-Pass "in server dispatch: a bound paste-buffer -t lands in the TARGET pane ($($thook.T1) bytes)" }
+else { Write-Fail "in server dispatch: the -t target received '$($thook.W1)' ($($thook.T1) bytes)" }
+if ($thook.T0 -le 0) { Write-Pass "in server dispatch: the active pane received nothing" }
+else { Write-Fail "in server dispatch: the ACTIVE pane received $($thook.T0) bytes: '$($thook.W0)'" }
+
+# tmux's error text for a target that does not resolve, and no paste anywhere.
+& $PSMUX -L $NS kill-server 2>&1 | Out-Null
+Start-Sleep -Milliseconds 400
+& $PSMUX -L $NS new -d -s i684_terr -x 80 -y 24 2>&1 | Out-Null
+Start-Sleep -Seconds 2
+& $PSMUX -L $NS set-buffer -b tbuf684 "TARGETED684" 2>&1 | Out-Null
+$errWin  = ((& $PSMUX -L $NS paste-buffer -p -b tbuf684 -t "i684_terr:9" 2>&1) -join " ").Trim()
+$rcWin   = $LASTEXITCODE
+$errPane = ((& $PSMUX -L $NS paste-buffer -p -b tbuf684 -t "%9999" 2>&1) -join " ").Trim()
+$rcPane  = $LASTEXITCODE
+if ($errWin -match "can't find window: 9" -and $rcWin -ne 0) { Write-Pass "a -t window that does not exist reports tmux's ""can't find window"" and exits $rcWin" }
+else { Write-Fail "bad -t window said '$errWin' rc=$rcWin" }
+if ($errPane -match "can't find pane: %9999" -and $rcPane -ne 0) { Write-Pass "a -t pane that does not exist reports tmux's ""can't find pane"" and exits $rcPane" }
+else { Write-Fail "bad -t pane said '$errPane' rc=$rcPane" }
+& $PSMUX -L $NS kill-session -t i684_terr 2>&1 | Out-Null
+
 # ---------------------------------------------------------------------------
 & $PSMUX -L $NS kill-server 2>&1 | Out-Null
 $env:PSMUX_DATA_DIR = $savedDataDir
@@ -296,6 +436,10 @@ if ($null -eq $savedInject) { Remove-Item env:PSMUX_PASTE_INJECT -EA SilentlyCon
 else { $env:PSMUX_PASTE_INJECT = $savedInject }
 
 Write-Host "`n================ SUMMARY ================" -ForegroundColor Yellow
+Write-Host "  Host build: $OSBuild (pipe bracket gate $PIPE_BRACKET_MIN_BUILD)" -ForegroundColor Cyan
 Write-Host "  Passed: $script:TestsPassed" -ForegroundColor Green
 Write-Host "  Failed: $script:TestsFailed" -ForegroundColor $(if ($script:TestsFailed -gt 0) { "Red" } else { "Green" })
+if ($script:TestsSkipped -gt 0) {
+    Write-Host "  Skipped: $script:TestsSkipped (platform: this conhost strips the markers from the input pipe)" -ForegroundColor Yellow
+}
 if ($script:TestsFailed -gt 0) { exit 1 } else { exit 0 }

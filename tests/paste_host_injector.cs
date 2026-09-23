@@ -19,6 +19,24 @@
 //   paste_host_injector.exe <pid> plain <delay_ms> <text>  Ctrl+V press, then
 //                                    the release after delay_ms, no chars (a
 //                                    host that does not inject)
+//   paste_host_injector.exe <pid> drip  <delay_ms> <text>  the same as host,
+//                                    except every character is its OWN
+//                                    WriteConsoleInputW call with a gap
+//                                    (PSMUX_INJECT_GAP_MS, default 2) between
+//                                    them.  This is the shape gabri-ns measured
+//                                    on Windows 10 19045: the first event batch
+//                                    the client drains holds ONE character, not
+//                                    the whole clipboard, so a client that
+//                                    flushes a short batch as typing puts the
+//                                    head of the paste outside the brackets.
+//   paste_host_injector.exe <pid> dripv <delay_ms> <text>  drip, with the
+//                                    Ctrl+V PRESS delivered first (a host that
+//                                    does not swallow the press).
+//   paste_host_injector.exe <pid> type  <delay_ms> <text>  no paste at all: a
+//                                    hand typing, one character per
+//                                    PSMUX_INJECT_GAP_MS (default 120), press
+//                                    and release 40 ms apart, no Ctrl anywhere.
+//                                    The control case for the paste head hold.
 //
 // Exit codes: 0 delivered, 2 AttachConsole failed (treat as SKIP), 3 write failed.
 // Log: %TEMP%\psmux_paste_host_inject.log
@@ -89,6 +107,12 @@ class PasteHostInjector
         return r;
     }
 
+    static void Spin(int ms)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed.TotalMilliseconds < ms) { Thread.SpinWait(200); }
+    }
+
     static bool Write(IntPtr h, List<INPUT_RECORD> recs, List<string> log, string what)
     {
         uint written;
@@ -132,6 +156,35 @@ class PasteHostInjector
         }
 
         bool ok = true;
+
+        if (mode == "type")
+        {
+            // Not a paste at all: a hand typing, one character at a time, with
+            // a human gap (PSMUX_INJECT_GAP_MS, default 120) and no Ctrl and no
+            // Ctrl+V anywhere.  This is the control case for the paste head
+            // hold: every one of these characters must still be forwarded as
+            // typing the instant it arrives.
+            int tgap = 120;
+            string tgapEnv = Environment.GetEnvironmentVariable("PSMUX_INJECT_GAP_MS");
+            if (!string.IsNullOrEmpty(tgapEnv)) int.TryParse(tgapEnv, out tgap);
+            foreach (char c in text)
+            {
+                short scan = VkKeyScanW(c);
+                ushort vk = 0; uint mods = 0;
+                if (scan != -1)
+                {
+                    vk = (ushort)(scan & 0xFF);
+                    if ((scan & 0x100) != 0) mods |= SHIFT_PRESSED;
+                }
+                ok &= Write(h, new List<INPUT_RECORD> { Key(true, vk, c, mods) }, log, "type down");
+                Thread.Sleep(40);
+                ok &= Write(h, new List<INPUT_RECORD> { Key(false, vk, c, mods) }, log, "type up");
+                Thread.Sleep(tgap);
+            }
+            File.WriteAllText(logFile, string.Join("\n", log));
+            return ok ? 0 : 3;
+        }
+
         // The user holds Ctrl: the host forwards the modifier itself.
         ok &= Write(h, new List<INPUT_RECORD> { Key(true, VK_CONTROL, '\0', LEFT_CTRL_PRESSED) }, log, "ctrl down");
 
@@ -142,6 +195,46 @@ class PasteHostInjector
             ok &= Write(h, new List<INPUT_RECORD> { Key(true, VK_V, '\x16', LEFT_CTRL_PRESSED) }, log, "ctrl+v press");
             Thread.Sleep(delay);
             ok &= Write(h, new List<INPUT_RECORD> { Key(false, VK_V, '\x16', LEFT_CTRL_PRESSED) }, log, "ctrl+v release");
+        }
+        else if (mode == "drip" || mode == "dripv")
+        {
+            // The 19045 shape: the host does NOT hand the console input buffer
+            // the clipboard in one write.  Each character lands on its own,
+            // milliseconds apart, so a client that drains the queue between
+            // them sees a batch of one.
+            int gap = 2;
+            string gapEnv = Environment.GetEnvironmentVariable("PSMUX_INJECT_GAP_MS");
+            if (!string.IsNullOrEmpty(gapEnv)) int.TryParse(gapEnv, out gap);
+            if (mode == "dripv")
+            {
+                ok &= Write(h, new List<INPUT_RECORD> { Key(true, VK_V, '\x16', LEFT_CTRL_PRESSED) }, log, "ctrl+v press");
+            }
+            int i = 0;
+            foreach (char c in text)
+            {
+                short scan = VkKeyScanW(c);
+                ushort vk = 0; uint mods = 0;
+                if (scan != -1)
+                {
+                    vk = (ushort)(scan & 0xFF);
+                    if ((scan & 0x100) != 0) mods |= SHIFT_PRESSED;
+                }
+                var one = new List<INPUT_RECORD> { Key(true, vk, c, mods), Key(false, vk, c, mods) };
+                uint written;
+                var arr = one.ToArray();
+                bool w = WriteConsoleInput(h, arr, (uint)arr.Length, out written);
+                if (!w) { ok = false; log.Add("  drip char " + i + " FAILED err=" + Marshal.GetLastWin32Error()); }
+                i++;
+                // Thread.Sleep(2) is not 2 ms: without timeBeginPeriod the
+                // scheduler rounds it up to the 15.6 ms tick, which drips far
+                // slower than any real host and makes every character its own
+                // batch.  Spin on the performance counter instead so the gap
+                // is the gap that was asked for.
+                if (gap > 0) Spin(gap);
+            }
+            log.Add(string.Format("  dripped characters: {0} chars, gap={1}ms", i, gap));
+            Thread.Sleep(delay);
+            ok &= Write(h, new List<INPUT_RECORD> { Key(false, VK_V, '\x16', LEFT_CTRL_PRESSED) }, log, "ctrl+v release only");
         }
         else
         {
