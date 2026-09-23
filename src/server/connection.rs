@@ -5684,3 +5684,7 @@ mod tests_issue583_pane_scope_target;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue690_hook_once.rs"]
 mod tests_issue690_hook_once;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue691_hook_table.rs"]
+mod tests_issue691_hook_table;

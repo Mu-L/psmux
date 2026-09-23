@@ -1542,3 +1542,7 @@ mod tests_issue558_eq_prefix;
 #[cfg(test)]
 #[path = "../tests-rs/test_discussion571_attached_global_args.rs"]
 mod tests_discussion571_attached_global_args;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue692_select_window_targets.rs"]
+mod tests_issue692_select_window_targets;
