@@ -120,6 +120,11 @@ class QueryProbe {
             new string[] { "DA1", "\x1b[c" },
             new string[] { "DA2", "\x1b[>c" },
             new string[] { "DSR_CPR", "\x1b[6n" },
+            // Issue #597 follow up: `CSI 5 n` is the one of the four psmux
+            // started answering that the inbox host was never measured on, so
+            // the probe asks it explicitly.  Exactly one reply must come back,
+            // whoever sends it.
+            new string[] { "DSR_STATUS", "\x1b[5n" },
             new string[] { "DECRQM_2026", "\x1b[?2026$p" },
             new string[] { "DECRQM_1006", "\x1b[?1006$p" },
             new string[] { "XTGETTCAP_TN", "\x1bP+q544e\x1b\\" },

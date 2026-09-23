@@ -760,6 +760,32 @@ pub(crate) fn drain_cpr_pending(node: &mut crate::types::Node) {
     }
 }
 
+/// Issue #597: write any DA1/DA2/DSR/DECRQM answers this pane's parser thread
+/// composed into the pane's PTY input.
+///
+/// The PTY writer, not `mouse_inject::send_vt_response`: at pane startup the
+/// party waiting for the DA1 answer is the console host itself (OpenConsole
+/// opens with `ESC[1t ESC[c` and parks the child's console connect until the
+/// answer arrives on the input pipe), and a console input record would never
+/// reach it.  It is the same path `drain_cpr_pending` above uses for ESC[6n,
+/// which is measured working under both the inbox host and OpenConsole.
+pub(crate) fn drain_device_replies(node: &mut crate::types::Node) {
+    use std::io::Write as _;
+    match node {
+        crate::types::Node::Leaf(p) => {
+            if let Some(bytes) = crate::types::take_device_replies(p.id) {
+                let _ = p.writer.write_all(&bytes);
+                let _ = p.writer.flush();
+            }
+        }
+        crate::types::Node::Split { children, .. } => {
+            for c in children {
+                drain_device_replies(c);
+            }
+        }
+    }
+}
+
 /// Issue #473: format an RGB triple as the xterm 16-bit-per-channel reply
 /// payload (`rgb:RRRR/GGGG/BBBB`), scaling 8-bit values by duplication.
 fn x11_rgb((r, g, b): (u8, u8, u8)) -> String {

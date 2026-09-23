@@ -136,6 +136,10 @@ foreach ($pair in @(
     @("DA1",         '^\x1b\[\?\d+(;\d+)*c$'),
     @("DA2",         '^\x1b\[>\d+(;\d+)*c$'),
     @("DSR_CPR",     '^\x1b\[\d+;\d+R$'),
+    # Issue #597 follow up: psmux answers `CSI 5 n` itself now.  The anchored
+    # match is the point: on this host exactly one `ESC[0n` must come back, so
+    # a second reply from psmux on top of the host's would fail here.
+    @("DSR_STATUS",  '^\x1b\[0n$'),
     @("DECRQM_2026", '^\x1b\[\?2026;\d+\$y$'))) {
     $name = $pair[0]
     $line = Get-ProbeLine $out $name
