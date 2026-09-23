@@ -3925,6 +3925,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 app.last_window_idx = app.active_idx;
                                 app.active_idx = internal_idx;
                             });
+                            // Clear activity/bell/silence flags on the newly
+                            // focused window.  This request is now the only one
+                            // a `select-window -t <index>` sends (#690), so the
+                            // clearing FocusWindow used to do has to happen
+                            // here or a selected window would keep its alert.
+                            if let Some(win) = app.windows.get_mut(internal_idx) {
+                                win.activity_flag = false;
+                                win.bell_flag = false;
+                                win.silence_flag = false;
+                            }
                             resize_all_panes(&mut app);
                         }
                     }
@@ -7113,6 +7123,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             }
             // Fire any hooks registered for the event that just occurred
             if let Some(event) = hook_event {
+                if crate::commands::hook_debug_enabled() {
+                    crate::commands::hook_debug_trace(&format!("{} req={}", event, _req_tag));
+                }
                 let _pre_hook_idx = app.active_idx;
                 let cmds: Vec<String> = app.hooks.get(event).cloned().unwrap_or_default();
                 for cmd in cmds {

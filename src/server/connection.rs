@@ -291,6 +291,65 @@ fn without_outer_target<'a>(cmd: &str, args: &[&'a str]) -> Vec<&'a str> {
     filtered
 }
 
+/// The window selecting control requests one `select-window` emits, decided in
+/// ONE place (issue #690).
+///
+/// The bug was two places deciding: the generic `-t` focus block sent a
+/// permanent `FocusWindow` for the target, and this command's own arm sent a
+/// `SelectWindow` for the same window right after it.  Every request carries
+/// its own hook slot in the server loop, so a single `select-window` ran
+/// `after-select-window` twice, and a hook that pasted landed its text twice.
+/// tmux fires a command's after hook once, from the command queue:
+/// cmd-queue.c `cmdq_fire_command` calls
+/// `cmdq_insert_hook(s, item, &fs, "after-%s", name)` once, after the command's
+/// exec returns.
+///
+/// The choice between the forms is tmux's, from cmd-select-window.c: `-n`,
+/// then `-p`, then `-l` are each the whole operation, and only when none of
+/// them is given does the `-t` target decide.  A plain index goes through
+/// `SelectWindow`, which is also the request that fires
+/// `before-select-window`, and fires it before the switch.  An `@id` and a
+/// window name keep the focus requests they have always used.
+///
+/// `args` must already have had the outer `-t` removed by
+/// `without_outer_target`, so the only positional left is tmux's window
+/// number.
+pub(crate) fn select_window_requests(
+    args: &[&str],
+    target_win: Option<usize>,
+    target_win_is_id: bool,
+    target_win_name: Option<&str>,
+) -> Vec<CtrlReq> {
+    if args.iter().any(|a| *a == "-n") {
+        return vec![CtrlReq::NextWindow];
+    }
+    if args.iter().any(|a| *a == "-p") {
+        return vec![CtrlReq::PrevWindow];
+    }
+    if args.iter().any(|a| *a == "-l") {
+        return vec![CtrlReq::LastWindow];
+    }
+    if target_win_is_id {
+        // #497: an @id target must never be re-sent as an INDEX.
+        return match target_win {
+            Some(id) => vec![CtrlReq::FocusWindowById(id)],
+            None => Vec::new(),
+        };
+    }
+    let idx = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .and_then(|s| s.parse::<usize>().ok())
+        .or(target_win);
+    if let Some(idx) = idx {
+        return vec![CtrlReq::SelectWindow(idx)];
+    }
+    match target_win_name {
+        Some(name) => vec![CtrlReq::FocusWindowByName(name.to_string())],
+        None => Vec::new(),
+    }
+}
+
 /// Walk the sub-commands produced by `split_top_level_semicolons` and merge
 /// any consecutive run of `send`/`send-keys` commands targeting the same
 /// pane into a single synthesized `send -lt <target> <bytes>` command.
@@ -1291,15 +1350,24 @@ let capture_pane_by_id = matches!(cmd, "capture-pane" | "capturep") && pane_is_i
 // swap-pane swaps the target with the *current* active pane; focusing the
 // target first would make active == target and turn the swap into a no-op.
 let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus || capture_pane_by_id;
+// Issue #690: `select-window` decides its own window target, in
+// `select_window_requests`, and this block does not touch it.  Both used
+// to act on it, a permanent FocusWindow here and a SelectWindow from the
+// command's arm below, and since every request carries its own hook slot
+// in the server loop, one `select-window` ran `after-select-window`
+// twice.  A pane part on a select-window target is still focused here.
+let selectw_owns_window_target = matches!(cmd, "select-window" | "selectw");
 if is_focus_cmd {
-    if let Some(wid) = target_win {
-        if target_win_is_id {
-            let _ = tx.send(CtrlReq::FocusWindowById(wid));
-        } else {
-            let _ = tx.send(CtrlReq::FocusWindow(wid));
+    if !selectw_owns_window_target {
+        if let Some(wid) = target_win {
+            if target_win_is_id {
+                let _ = tx.send(CtrlReq::FocusWindowById(wid));
+            } else {
+                let _ = tx.send(CtrlReq::FocusWindow(wid));
+            }
+        } else if let Some(ref wname) = target_win_name {
+            let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
         }
-    } else if let Some(ref wname) = target_win_name {
-        let _ = tx.send(CtrlReq::FocusWindowByName(wname.clone()));
     }
     if let Some(pid) = target_pane {
         if pane_is_id {
@@ -1919,22 +1987,9 @@ match cmd {
         }
     }
     "select-window" | "selectw" => {
-        // An @id target was already focused permanently by the generic target
-        // focus block above (FocusWindowById). Re-sending it here as an INDEX
-        // via SelectWindow would override that with the wrong window (#497).
-        let idx = args.iter().find(|a| !a.starts_with('-')).and_then(|s| s.parse::<usize>().ok())
-            .or(if target_win_is_id { None } else { target_win });
-        if let Some(idx) = idx {
-            let _ = tx.send(CtrlReq::SelectWindow(idx));
-        }
-        if args.iter().any(|a| *a == "-l") {
-            let _ = tx.send(CtrlReq::LastWindow);
-        }
-        if args.iter().any(|a| *a == "-n") {
-            let _ = tx.send(CtrlReq::NextWindow);
-        }
-        if args.iter().any(|a| *a == "-p") {
-            let _ = tx.send(CtrlReq::PrevWindow);
+        // Exactly one window request per command, chosen in one place (#690).
+        for req in select_window_requests(&args, target_win, target_win_is_id, target_win_name.as_deref()) {
+            let _ = tx.send(req);
         }
     }
     "list-panes" | "lsp" => {
@@ -5544,3 +5599,7 @@ mod tests_pane_border_indicator_control;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue583_pane_scope_target.rs"]
 mod tests_issue583_pane_scope_target;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue690_hook_once.rs"]
+mod tests_issue690_hook_once;
