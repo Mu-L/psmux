@@ -1,6 +1,6 @@
 //! Per pane colour palette, the OSC 4 / OSC 104 store (issue #685).
 //!
-//! A pane child on ConPTY announces its console colour table as OSC 4 palette
+//! A pane child on `ConPTY` announces its console colour table as OSC 4 palette
 //! sets: conhost pushes all 256 entries and then paints with *indexed* SGR
 //! (`ESC[38;5;14m`, `ESC[48;5;6m`).  Without somewhere to keep those entries,
 //! the indexes mean whatever the outer terminal's own scheme says they mean,
@@ -200,10 +200,11 @@ fn scale_hex(digits: &[u8]) -> Option<u8> {
         return None;
     }
     let mut v: u32 = 0;
+    let mut max: u32 = 0;
     for &d in digits {
         v = v * 16 + u32::from(hex_val(d)?);
+        max = max * 16 + 15;
     }
-    let max: u32 = (1u32 << (4 * digits.len() as u32)) - 1;
     Some(u8::try_from((v * 255 + max / 2) / max).unwrap_or(255))
 }
 
