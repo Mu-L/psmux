@@ -129,6 +129,25 @@ function HexOf([string]$s) {
     ([Text.Encoding]::UTF8.GetBytes($s) | ForEach-Object { $_.ToString("x2") }) -join ""
 }
 
+# A fixed 3 s after `new -d` was enough on a quiet box and not under a sibling
+# cargo build: sweep and agent runs on 2026-09-24 lost whole cases to a session
+# that came up in 4 s, and every later assertion of that case failed with it.
+# Poll instead: the session answers, then the pane runs what it was asked to.
+function Wait-SessionReady([string]$Session, [string]$PaneCommand = "", [int]$TimeoutMs = 20000) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        & $PSMUX -L $NS has-session -t $Session 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            if ($PaneCommand -eq "") { return $true }
+            $cmd = (& $PSMUX -L $NS display-message -t $Session -p '#{pane_current_command}' 2>$null | Out-String).Trim()
+            if ($cmd -match $PaneCommand) { return $true }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    Write-Info "session $Session not ready after $TimeoutMs ms"
+    return $false
+}
+
 # --- one measurement --------------------------------------------------------
 # Runs the recorder as a pane child, loads a buffer, pastes into it, and returns
 # the recorder's parsed block plus the route psmux chose.
@@ -153,7 +172,8 @@ function Invoke-Paste {
     Remove-Item $log -EA SilentlyContinue
     $sess = "i684_$Tag"
     & $PSMUX -L $NS new -d -s $sess -x 100 -y 30 -- $recorder $log $Seconds $RecorderMode 2>&1 | Out-Null
-    Start-Sleep -Seconds 3
+    [void](Wait-SessionReady $sess 'paste_recorder')
+    Start-Sleep -Milliseconds 800
     & $PSMUX -L $NS load-buffer $PayloadFile 2>&1 | Out-Null
     Start-Sleep -Milliseconds 300
     $argv = @("-L", $NS, "paste-buffer") + ($Flags -split ' ' | Where-Object { $_ -ne "" }) + @("-t", $sess)
@@ -268,7 +288,7 @@ Write-Host "`n=== Issue #684: the default ] binding ===" -ForegroundColor Yellow
 & $PSMUX -L $NS kill-server 2>&1 | Out-Null
 Start-Sleep -Milliseconds 400
 & $PSMUX -L $NS new -d -s i684_keys -x 80 -y 24 2>&1 | Out-Null
-Start-Sleep -Seconds 2
+[void](Wait-SessionReady 'i684_keys')
 $keys = (& $PSMUX -L $NS list-keys) -join "`n"
 # tmux key-bindings.c:422: bind -N 'Paste the most recent paste buffer' ] { paste-buffer -p }
 if ($keys -match 'bind-key -T prefix \] paste-buffer -p') {
@@ -301,9 +321,10 @@ function Invoke-HookPaste([string]$Tag, [string]$Command, [string]$Inject = "") 
     # "no server running", which would satisfy a "the buffer is gone"
     # assertion for the wrong reason.
     & $PSMUX -L $NS new -d -s $sess -x 100 -y 30 2>&1 | Out-Null
-    Start-Sleep -Seconds 1
+    [void](Wait-SessionReady $sess)
     & $PSMUX -L $NS new-window -t $sess -- $recorder $log 12 vt 2>&1 | Out-Null
-    Start-Sleep -Seconds 3
+    [void](Wait-SessionReady $sess 'paste_recorder')
+    Start-Sleep -Milliseconds 800
     & $PSMUX -L $NS set-buffer -b named684 "NAMEDBUF684" 2>&1 | Out-Null
     & $PSMUX -L $NS set-buffer "DEFAULTBUF684" 2>&1 | Out-Null
     $res = [ordered]@{ Text = ""; Total = -1; Buffers = ""; BuffersBefore = "" }
@@ -368,9 +389,10 @@ function Invoke-TargetedPaste([string]$Tag, [string]$How) {
     $log1 = Join-Path $root "rec_${Tag}_w1.log"
     Remove-Item $log0, $log1 -EA SilentlyContinue
     & $PSMUX -L $NS new -d -s $sess -x 100 -y 30 -- $recorder $log0 16 vt 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+    [void](Wait-SessionReady $sess 'paste_recorder')
     & $PSMUX -L $NS new-window -t $sess -- $recorder $log1 14 vt 2>&1 | Out-Null
-    Start-Sleep -Seconds 3
+    [void](Wait-SessionReady "${sess}:1" 'paste_recorder')
+    Start-Sleep -Milliseconds 800
     & $PSMUX -L $NS set-buffer -b tbuf684 "TARGETED684" 2>&1 | Out-Null
     $err = ""
     if ($How -eq "cli") {
@@ -415,7 +437,7 @@ else { Write-Fail "in server dispatch: the ACTIVE pane received $($thook.T0) byt
 & $PSMUX -L $NS kill-server 2>&1 | Out-Null
 Start-Sleep -Milliseconds 400
 & $PSMUX -L $NS new -d -s i684_terr -x 80 -y 24 2>&1 | Out-Null
-Start-Sleep -Seconds 2
+[void](Wait-SessionReady 'i684_terr')
 & $PSMUX -L $NS set-buffer -b tbuf684 "TARGETED684" 2>&1 | Out-Null
 $errWin  = ((& $PSMUX -L $NS paste-buffer -p -b tbuf684 -t "i684_terr:9" 2>&1) -join " ").Trim()
 $rcWin   = $LASTEXITCODE
