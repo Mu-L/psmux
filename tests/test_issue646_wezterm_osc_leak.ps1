@@ -128,11 +128,17 @@ try {
 
         # The client's own input pump is the second, byte exact witness: on a clean
         # start it emits nothing at all before the user touches the keyboard.
+        # Keyboard emits only. A window that opens under the physical pointer
+        # makes WezTerm report a motion event the moment any-motion tracking is
+        # on (`Mouse(MouseEvent { kind: Moved, column: 50, row: 1 })`, measured
+        # 2026-09-23 with the pointer parked at x=516 y=126), and that is the
+        # pointer, not a torn colour reply. Sweeps 2026-09-21_18-01-58 and
+        # 2026-09-23_13-54-30 failed on exactly that with an empty pane.
         $emitted = @()
         $log = Join-Path $dd "ssh_input.log"
         if (Test-Path $log) {
             $emitted = @(Get-Content $log -EA SilentlyContinue |
-                         Where-Object { $_ -match 'emit\(char\)' } |
+                         Where-Object { $_ -match 'emit\(char\)' -and $_ -notmatch 'Mouse\(' } |
                          ForEach-Object { if ($_ -match "Char\('(.*?)'\)") { $Matches[1] } else { "?" } })
         }
 
