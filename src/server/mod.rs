@@ -1958,6 +1958,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = pane.writer.flush();
                 }
             }
+            // A warm spare is built on a worker thread and only joins
+            // `app.warm_pane` when this loop takes it off the refill channel,
+            // so its host's `ESC[c` can arrive while the pane is reachable from
+            // nowhere.  Keep the gate up until the reply finds its owner, or
+            // ages out.
+            crate::types::rearm_device_replies();
         }
         // When a popup PTY or a floating pane is active, always push frames so
         // interactive content (fzf, shell prompts) updates in real-time.

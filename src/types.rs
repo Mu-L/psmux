@@ -3195,7 +3195,23 @@ pub static COLOR_QUERY_PENDING: std::sync::atomic::AtomicBool = std::sync::atomi
 /// reads the answer off the input pipe.  A console input record would never
 /// reach it.  This is also the path the ESC[6n responder already uses, and it
 /// is proven under both hosts (see `drain_cpr_pending`).
-pub static DEVICE_REPLIES: Mutex<Vec<(usize, Vec<u8>)>> = Mutex::new(Vec::new());
+pub static DEVICE_REPLIES: Mutex<Vec<(usize, std::time::Instant, Vec<u8>)>> =
+    Mutex::new(Vec::new());
+
+/// How long a queued reply waits for its pane to become reachable before it is
+/// dropped.
+///
+/// A warm spare is built on a worker thread and only reaches `app.warm_pane`
+/// when the server loop takes it off the refill channel, so its console host's
+/// `ESC[c` can easily arrive while the pane is in neither the window tree nor
+/// the pool.  Draining on the raised gate alone would then find no owner, and
+/// with the gate already cleared the reply would sit in the queue forever while
+/// the spare waited out the host's full three second timeout: measured as a
+/// cold first session at 4507 ms against 1392 ms on the inbox host.  So the
+/// drain re-arms the gate while anything is still queued, and this bound is
+/// what stops a reply for a pane that will never be reachable (a proxy pane,
+/// or one killed in the gap) from re-arming it forever.
+const DEVICE_REPLY_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Cheap gate for `DEVICE_REPLIES`, the same shape as `CPR_DATA_PENDING`: the
 /// server loop pays one atomic per pass while no pane has asked anything.
@@ -3210,7 +3226,7 @@ pub fn push_device_reply(pane_id: usize, bytes: Vec<u8>) {
         // has already gone) must not grow this without bound.
         const MAX_QUEUED: usize = 64;
         if q.len() >= MAX_QUEUED { q.remove(0); }
-        q.push((pane_id, bytes));
+        q.push((pane_id, std::time::Instant::now(), bytes));
     }
     DEVICE_REPLY_PENDING.store(true, std::sync::atomic::Ordering::Release);
 }
@@ -3221,11 +3237,30 @@ pub fn take_device_replies(pane_id: usize) -> Option<Vec<u8>> {
     let mut out: Vec<u8> = Vec::new();
     if let Ok(mut q) = DEVICE_REPLIES.lock() {
         if q.is_empty() { return None; }
-        q.retain(|(id, bytes)| {
+        q.retain(|(id, _, bytes)| {
             if *id == pane_id { out.extend_from_slice(bytes); false } else { true }
         });
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+/// Called at the end of a drain pass: expire anything that has waited past
+/// `DEVICE_REPLY_TTL` and leave the gate raised if a reply is still waiting for
+/// a pane that was not reachable this pass (issue #597).
+pub fn rearm_device_replies() {
+    let still_waiting = match DEVICE_REPLIES.lock() {
+        Ok(mut q) => {
+            if !q.is_empty() {
+                let now = std::time::Instant::now();
+                q.retain(|(_, queued, _)| now.duration_since(*queued) < DEVICE_REPLY_TTL);
+            }
+            !q.is_empty()
+        }
+        Err(_) => false,
+    };
+    if still_waiting {
+        DEVICE_REPLY_PENDING.store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 /// Issue #473: the host terminal color spec captured by the client at startup

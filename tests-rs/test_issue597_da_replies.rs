@@ -297,3 +297,37 @@ fn a_batch_of_plain_text_costs_nothing_and_answers_nothing() {
     let mut s = DeviceQueryScanner::new();
     assert!(s.scan(b"no escapes here at all").is_empty());
 }
+
+// ── the hand off queue ────────────────────────────────────────────────────
+
+#[test]
+fn a_queued_reply_waits_for_its_pane_and_is_taken_once() {
+    // Pane ids well past anything the rest of the suite uses, so this stays
+    // independent of whatever else is running: `take_device_replies` only ever
+    // removes entries for the id it is asked about.
+    let mine = 9_597_001;
+    let other = 9_597_002;
+    assert_eq!(crate::types::take_device_replies(mine), None);
+
+    crate::types::push_device_reply(mine, b"\x1b[?1;2c".to_vec());
+    crate::types::push_device_reply(other, b"\x1b[0n".to_vec());
+    // A pane that is not reachable yet, a warm spare still on its way to the
+    // pool, must not consume another pane's answer.
+    assert_eq!(crate::types::take_device_replies(9_597_003), None);
+    // Several answers for one pane come back concatenated, in arrival order.
+    crate::types::push_device_reply(mine, b"\x1b[>84;0;0c".to_vec());
+    assert_eq!(
+        crate::types::take_device_replies(mine),
+        Some(b"\x1b[?1;2c\x1b[>84;0;0c".to_vec())
+    );
+    // ...and only once.
+    assert_eq!(crate::types::take_device_replies(mine), None);
+    assert_eq!(crate::types::take_device_replies(other), Some(b"\x1b[0n".to_vec()));
+}
+
+#[test]
+fn an_empty_reply_is_never_queued() {
+    let id = 9_597_004;
+    crate::types::push_device_reply(id, Vec::new());
+    assert_eq!(crate::types::take_device_replies(id), None);
+}
