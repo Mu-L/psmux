@@ -826,6 +826,13 @@ impl WarmPool {
         // has since taken a higher one. Handing this out would walk the visible
         // sequence backwards. See `issued_floor`.
         if wp.pane_id < self.issued_floor {
+            crate::warm_trace!(
+                "pool: refused spare pane={} pid={:?} below floor {}",
+                wp.pane_id, wp.child_pid, self.issued_floor
+            );
+            if let Some(pid) = wp.child_pid {
+                crate::platform::process_kill::kill_pid_tree(pid);
+            }
             wp.child.kill().ok();
             return;
         }
@@ -900,8 +907,19 @@ impl WarmPool {
     /// server is going away" site; leaving a spare behind here is how orphan
     /// shells get created.
     pub fn kill_all(&mut self) {
+        let mut n = 0;
         for mut wp in self.spares.drain(..) {
+            // The tree, not just the direct child: a spare's shell can already
+            // have children of its own, and TerminateProcess on the parent
+            // alone leaves those running (#686).
+            if let Some(pid) = wp.child_pid {
+                crate::platform::process_kill::kill_pid_tree(pid);
+            }
             wp.child.kill().ok();
+            n += 1;
+        }
+        if n > 0 {
+            crate::warm_trace!("pool: killed {n} pooled spare(s)");
         }
     }
     /// Drop spares whose shell died while idling (#450). Returns how many were

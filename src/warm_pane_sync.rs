@@ -334,9 +334,166 @@ pub fn reconcile_consumed_parser(parser: &mut vt100::Parser, app: &AppState) {
     }
 }
 
+/// Spares whose shell exists but which the server does not own yet (#686).
+///
+/// The pool's own `kill_all` can only reach spares that are already in
+/// `AppState`. A surge hands eight spawns to background threads, and each one
+/// is a real `CreateProcessW` long before its `WarmPane` reaches the server
+/// loop: the shell exists, its conhost exists, and the server knows nothing
+/// about it. `kill-server` in that window killed the windows and the pool and
+/// then called `process::exit`, which stops the spawner threads mid flight and
+/// leaves those shells parented to a dead psmux, idle at a prompt forever. The
+/// measured leak was six orphan `pwsh` over ten rounds of "new-session, six
+/// new-window, kill-server".
+///
+/// So the spawn is tracked from the moment it is ISSUED, not from the moment it
+/// lands:
+///
+///   * [`issue`] records the pane id with no pid yet, on the loop thread.
+///   * [`record_pid`] fills the pid in on the spawner thread, as soon as
+///     `CreateProcessW` has returned one. It answers `false` when the server has
+///     already begun to die, which tells the spawner to kill the child it just
+///     created rather than post it to a loop that will never read it.
+///   * [`release`] drops the entry once the spare is the server's (it landed in
+///     `AppState`, where `WarmPool::kill_all` covers it) or once the spawn has
+///     failed.
+///   * [`reap`] is the teardown: it closes the registry to new pids and returns
+///     every pid still in it, for the caller to kill by pid through the kill
+///     guard. It waits briefly for any spawn caught inside `CreateProcessW`,
+///     because that one's pid appears a few milliseconds late.
+pub mod inflight {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    static SPAWNS: Mutex<Option<HashMap<usize, Option<u32>>>> = Mutex::new(None);
+    static TEARING_DOWN: AtomicBool = AtomicBool::new(false);
+
+    fn with<R>(f: impl FnOnce(&mut HashMap<usize, Option<u32>>) -> R) -> R {
+        let mut g = SPAWNS.lock().unwrap_or_else(|e| e.into_inner());
+        f(g.get_or_insert_with(HashMap::new))
+    }
+
+    /// True once teardown has begun: no spawn issued from here on is ever
+    /// adopted.
+    pub fn is_tearing_down() -> bool {
+        TEARING_DOWN.load(Ordering::SeqCst)
+    }
+
+    /// Record that a spare spawn has been handed to the spawner. Called on the
+    /// loop thread, before the thread exists, so there is no window in which a
+    /// spawn is running untracked.
+    pub fn issue(pane_id: usize) {
+        with(|m| {
+            m.insert(pane_id, None);
+        });
+    }
+
+    /// The spawner has a pid. Returns false when the server is tearing down, in
+    /// which case the caller owns the kill: the entry is dropped here so the
+    /// reaper does not also chase a pid the spawner is already killing.
+    pub fn record_pid(pane_id: usize, pid: Option<u32>) -> bool {
+        if is_tearing_down() {
+            with(|m| m.remove(&pane_id));
+            return false;
+        }
+        with(|m| {
+            if let Some(slot) = m.get_mut(&pane_id) {
+                *slot = pid;
+            }
+        });
+        true
+    }
+
+    /// This spawn is no longer in flight: it landed in `AppState` (the pool
+    /// owns the child now) or it failed.
+    pub fn release(pane_id: usize) {
+        with(|m| {
+            m.remove(&pane_id);
+        });
+    }
+
+    /// Pane ids still in flight, for diagnostics and tests.
+    pub fn pending() -> Vec<usize> {
+        let mut v = with(|m| m.keys().copied().collect::<Vec<_>>());
+        v.sort_unstable();
+        v
+    }
+
+    /// Pids recorded so far, without disturbing the registry.
+    pub fn pids() -> Vec<u32> {
+        let mut v = with(|m| m.values().filter_map(|p| *p).collect::<Vec<_>>());
+        v.sort_unstable();
+        v
+    }
+
+    /// Close the registry and drain it.
+    ///
+    /// Returns the pids to kill. Entries with no pid yet are spawns sitting
+    /// inside `CreateProcessW`: they cannot be killed because nothing knows
+    /// what to kill, so the caller polls again until they have either
+    /// registered a pid (reaped on that pass) or seen the teardown flag and
+    /// killed their own child (which removes the entry). `budget` bounds that
+    /// wait, because a shutdown must never hang on a spawn that wedged.
+    pub fn reap(budget: std::time::Duration, mut sleep: impl FnMut(std::time::Duration)) -> Vec<u32> {
+        TEARING_DOWN.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + budget;
+        let mut killed = Vec::new();
+        loop {
+            let (ready, waiting) = with(|m| {
+                let ready: Vec<(usize, u32)> =
+                    m.iter().filter_map(|(id, p)| p.map(|p| (*id, p))).collect();
+                for (id, _) in &ready {
+                    m.remove(id);
+                }
+                (ready, m.len())
+            });
+            killed.extend(ready.into_iter().map(|(_, p)| p));
+            if waiting == 0 || std::time::Instant::now() >= deadline {
+                break;
+            }
+            sleep(std::time::Duration::from_millis(5));
+        }
+        killed
+    }
+
+    /// Tests share one process, so the registry has to be resettable.
+    #[cfg(test)]
+    pub fn reset_for_test() {
+        TEARING_DOWN.store(false, Ordering::SeqCst);
+        with(|m| m.clear());
+    }
+}
+
+/// Kill every spare the server does not own yet, and stop any spawn still in
+/// flight from surviving this process (#686).
+///
+/// Called from the shutdown path, after the pool's own spares are killed. The
+/// kill goes through the platform kill guard, which validates each pid's
+/// creation time before terminating, so a pid recycled between the spawn and
+/// this call is never touched.
+pub fn reap_inflight_spares() -> usize {
+    // 150ms, not longer: a shutdown is racing the caller's force-kill fallback,
+    // so a long wait here is time the process may not have. Spawners that are
+    // slower than this see the teardown flag and kill their own child, and the
+    // shutdown path calls this a second time after its client courtesies.
+    let pids = inflight::reap(std::time::Duration::from_millis(150), std::thread::sleep);
+    for pid in &pids {
+        crate::platform::process_kill::kill_pid_tree(*pid);
+    }
+    if !pids.is_empty() {
+        crate::warm_trace!("pool: reaped {} in flight spare(s) on teardown: {:?}", pids.len(), pids);
+    }
+    pids.len()
+}
+
 #[cfg(test)]
 #[path = "../tests-rs/test_warm_pane_sync.rs"]
 mod test_warm_pane_sync;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue686_pool_reap.rs"]
+mod tests_issue686_pool_reap;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_warm_pool_depth.rs"]

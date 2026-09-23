@@ -51,6 +51,37 @@ use crate::help;
 /// attached client's namespace-wide kill (which fans out to its peers first,
 /// then lands here) — so the shutdown sequence cannot drift between them.
 fn shutdown_this_server(app: &mut AppState) -> ! {
+    crate::warm_trace!(
+        "shutdown: pooled spares={} inflight={} pending={:?}",
+        app.warm_pane.len(),
+        app.warm_pane.inflight,
+        crate::warm_pane_sync::inflight::pending()
+    );
+    // Children FIRST, before anything that costs time (#686).
+    //
+    // This used to notify the control clients (80ms drain), remove the
+    // registry files, send DETACH and sleep 50ms, and only then kill the pane
+    // children and the pool. That ordering assumed the process would live long
+    // enough to finish, and it does not: the caller of a kill-server treats EOF
+    // on its request socket as "the server is gone" and force-kills the pid
+    // 50ms later, so everything after the first sleep was routinely never run.
+    // The measurement was six orphan pwsh over ten rounds of "new-session, six
+    // new-window, kill-server", each still holding a conhost. Registry files go
+    // first because they are two unlink calls and they stop a client
+    // reconnecting to a server that is dying; the kills follow immediately; the
+    // client-facing courtesies come after, since a client that is about to be
+    // detached does not care whether its panes died a millisecond earlier.
+    let regpath = crate::paths::port_file(&app.port_file_base());
+    let keypath = crate::paths::key_file(&app.port_file_base());
+    let _ = std::fs::remove_file(&regpath);
+    let _ = std::fs::remove_file(&keypath);
+    // Kill all child processes using a single process snapshot
+    tree::kill_all_children_batch(&mut app.windows);
+    // Kill warm pane's child (process::exit skips Drop)
+    app.warm_pane.kill_all();
+    // ...and the spares whose spawn is still in flight, which the pool
+    // cannot see because they have not reached AppState yet.
+    crate::warm_pane_sync::reap_inflight_spares();
     // Notify control clients that the server is going away, matching tmux's
     // "%exit" wire notification before close. Flushes through the writer
     // thread so iTerm2 sees a proper EOF-with-reason instead of a raw TCP RST.
@@ -65,19 +96,13 @@ fn shutdown_this_server(app: &mut AppState) -> ! {
         // process exits.
         std::thread::sleep(std::time::Duration::from_millis(80));
     }
-    // Remove port/key files FIRST so clients see the session as gone
-    // immediately, then kill processes.
-    let regpath = crate::paths::port_file(&app.port_file_base());
-    let keypath = crate::paths::key_file(&app.port_file_base());
-    let _ = std::fs::remove_file(&regpath);
-    let _ = std::fs::remove_file(&keypath);
     crate::types::send_directive_to_all_clients("DETACH");
     std::thread::sleep(Duration::from_millis(50));
     crate::types::shutdown_persistent_streams();
-    // Kill all child processes using a single process snapshot
-    tree::kill_all_children_batch(&mut app.windows);
-    // Kill warm pane's child (process::exit skips Drop)
-    app.warm_pane.kill_all();
+    // A last sweep: a spare whose CreateProcessW returned while the reap above
+    // was already past it registers its pid on the way out and kills its own
+    // child, but a spawner that is slower than that leaves one more pid here.
+    crate::warm_pane_sync::reap_inflight_spares();
     // TerminateProcess is synchronous on Windows — processes are already dead.
     // Minimal delay for OS handle cleanup.
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1526,6 +1551,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         crate::session::remove_session_id_file(&app.port_file_base());
         // Kill warm pane if one was pre-spawned
         app.warm_pane.kill_all();
+        // ...and the spares whose spawn is still in flight, which the pool
+        // cannot see because they have not reached AppState yet. Without this,
+        // a teardown during a surge left the shells born a few milliseconds
+        // later parented to a dead psmux, idle at a prompt forever (#686).
+        crate::warm_pane_sync::reap_inflight_spares();
         return Err(e);
     }
     // Resize panes now that the initial window exists and config is loaded.
@@ -2586,6 +2616,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             crate::types::shutdown_persistent_streams();
                             tree::kill_all_children_batch(&mut app.windows);
                             app.warm_pane.kill_all();
+                            // ...and the spares whose spawn is still in flight, which the pool
+                            // cannot see because they have not reached AppState yet. Without this,
+                            // a teardown during a surge left the shells born a few milliseconds
+                            // later parented to a dead psmux, idle at a prompt forever (#686).
+                            crate::warm_pane_sync::reap_inflight_spares();
                             std::thread::sleep(std::time::Duration::from_millis(10));
                             std::process::exit(0);
                         }
@@ -3986,6 +4021,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     tree::kill_all_children_batch(&mut app.windows);
                     // Kill warm pane's child (process::exit skips Drop)
                     app.warm_pane.kill_all();
+                    // ...and the spares whose spawn is still in flight, which the pool
+                    // cannot see because they have not reached AppState yet. Without this,
+                    // a teardown during a surge left the shells born a few milliseconds
+                    // later parented to a dead psmux, idle at a prompt forever (#686).
+                    crate::warm_pane_sync::reap_inflight_spares();
                     // TerminateProcess is synchronous on Windows — processes
                     // are already dead.  Minimal delay for OS handle cleanup.
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -5665,6 +5705,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         crate::types::shutdown_persistent_streams();
                         tree::kill_all_children_batch(&mut app.windows);
                         app.warm_pane.kill_all();
+                        // ...and the spares whose spawn is still in flight, which the pool
+                        // cannot see because they have not reached AppState yet. Without this,
+                        // a teardown during a surge left the shells born a few milliseconds
+                        // later parented to a dead psmux, idle at a prompt forever (#686).
+                        crate::warm_pane_sync::reap_inflight_spares();
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         std::process::exit(0);
                     }
@@ -5747,6 +5792,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         crate::types::shutdown_persistent_streams();
                         tree::kill_all_children_batch(&mut app.windows);
                         app.warm_pane.kill_all();
+                        // ...and the spares whose spawn is still in flight, which the pool
+                        // cannot see because they have not reached AppState yet. Without this,
+                        // a teardown during a surge left the shells born a few milliseconds
+                        // later parented to a dead psmux, idle at a prompt forever (#686).
+                        crate::warm_pane_sync::reap_inflight_spares();
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         std::process::exit(0);
                     }
@@ -5795,6 +5845,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         crate::types::shutdown_persistent_streams();
                         tree::kill_all_children_batch(&mut app.windows);
                         app.warm_pane.kill_all();
+                        // ...and the spares whose spawn is still in flight, which the pool
+                        // cannot see because they have not reached AppState yet. Without this,
+                        // a teardown during a surge left the shells born a few milliseconds
+                        // later parented to a dead psmux, idle at a prompt forever (#686).
+                        crate::warm_pane_sync::reap_inflight_spares();
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         std::process::exit(0);
                     }
@@ -7619,6 +7674,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 crate::types::shutdown_persistent_streams();
                 // Kill warm pane's child (process::exit skips Drop)
                 app.warm_pane.kill_all();
+                // ...and the spares whose spawn is still in flight, which the pool
+                // cannot see because they have not reached AppState yet. Without this,
+                // a teardown during a surge left the shells born a few milliseconds
+                // later parented to a dead psmux, idle at a prompt forever (#686).
+                crate::warm_pane_sync::reap_inflight_spares();
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 std::process::exit(0);
             }

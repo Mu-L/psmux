@@ -3623,6 +3623,11 @@ match cmd {
             let _ = tx.send(CtrlReq::KillServerScoped(all));
         } else {
             let _ = tx.send(CtrlReq::KillServer);
+            // Hold this one-shot connection open until the server exits: the
+            // caller reads it until EOF and force-kills the pid 50ms after,
+            // so an early close makes the force-kill land in the middle of
+            // the shutdown and orphan whatever it had not killed yet (#686).
+            std::thread::sleep(Duration::from_millis(1500));
         }
     }
     "choose-tree" | "choose-window" | "choose-session" => {
@@ -4977,6 +4982,17 @@ fn dispatch_control_command(
         }
         "kill-server" => {
             let _ = tx.send(CtrlReq::KillServer);
+            // Deliberately NOT answered here (#686). The caller
+            // (`session::kill_servers_in_scope`) reads this socket until EOF
+            // because "EOF means the server is gone", then force-kills the pid
+            // 50ms later. Answering straight away closes the socket while the
+            // shutdown has barely started, so the force-kill lands in the
+            // middle of it and every pane shell and pool spare it had not
+            // reached yet is orphaned. The server's own exit is what closes
+            // this socket, which is the EOF the caller actually wants. The
+            // sleep is the wedged-server fallback: if the shutdown never
+            // happens, answer late rather than never.
+            std::thread::sleep(Duration::from_millis(1500));
             let _ = resp_tx.send(String::new());
             true
         }

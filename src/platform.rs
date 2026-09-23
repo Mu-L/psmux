@@ -3247,6 +3247,27 @@ pub mod process_kill {
         let _ = child.kill();
     }
 
+    /// Kill a process tree given only its root PID, with the same PID-reuse
+    /// guard as [`kill_process_tree`].
+    ///
+    /// Needed by the warm pool's teardown reaper (#686): a spare whose spawn is
+    /// still in flight has no `Child` handle on the server side yet, only the
+    /// pid its `CreateProcessW` returned. The cutoff is captured BEFORE the
+    /// snapshot, so a pid recycled after this call began is rejected rather
+    /// than killed.
+    pub fn kill_pid_tree(root_pid: u32) {
+        if root_pid == 0 || root_pid == 4 {
+            return;
+        }
+        let cutoff = now_filetime();
+        let mut descs = collect_descendants(root_pid);
+        descs.reverse();
+        for &dpid in &descs {
+            terminate_pid(dpid, Some(cutoff));
+        }
+        terminate_pid(root_pid, Some(cutoff));
+    }
+
     /// Kill multiple process trees using a SINGLE process snapshot.
     /// Much faster than calling `kill_process_tree` N times when
     /// killing an entire session (avoids N separate system snapshots).
@@ -3460,6 +3481,9 @@ pub mod process_kill {
     pub fn kill_process_tree(child: &mut Box<dyn portable_pty::Child>) {
         let _ = child.kill();
     }
+
+    /// Kill by root pid — no-op off Windows (see the Windows twin, #686).
+    pub fn kill_pid_tree(_root_pid: u32) {}
 
     /// Batch kill — on non-Windows, just kill each child individually.
     pub fn kill_process_trees_batch(children: &mut [&mut Box<dyn portable_pty::Child>]) {
