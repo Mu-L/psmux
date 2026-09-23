@@ -198,6 +198,53 @@ No setting of this variable can ask for that.
 Set it on the **server** process, with `$env:PSMUX_NO_WARM = "1"` and a killed server first,
 reproduce, then clear it.
 
+### The Console Host Seam
+
+| Variable | What it does |
+|---|---|
+| `PSMUX_CONPTY_DIR=<dir>` | Loads `<dir>\conpty.dll` and uses the `OpenConsole.exe` next to it as every pane's console host |
+| unset (the default) | The system ConPTY in `kernel32.dll`, driving the inbox `conhost.exe` |
+
+Every psmux pane is a pseudoconsole, and the process that owns that pseudoconsole is a console
+host. By default that host is the `conhost.exe` shipped in the Windows you are running, reached
+through the `CreatePseudoConsole` export in `kernel32.dll`. Microsoft also publishes the same
+component out of band, as a `conpty.dll` plus an `OpenConsole.exe`, so an application can carry a
+newer console host than the one in the box. That is how Windows Terminal and WezTerm work.
+
+psmux does not ship either file and never loads one on its own. Nothing but `kernel32.dll` is
+touched unless you name a directory yourself, which is the point of this variable: it is an
+escape hatch for a host whose inbox `conhost.exe` has a defect you are stuck with, not a
+supported configuration. The DLL is loaded by absolute path with
+`LOAD_WITH_ALTERED_SEARCH_PATH`, so the `OpenConsole.exe` that gets spawned is the one beside the
+DLL you named and not something else off the search path. If the directory does not exist, holds
+no `conpty.dll`, or holds one that will not load or does not export the three ConPTY entry
+points, psmux logs the reason and falls back to `kernel32.dll`, so a bad value costs you nothing
+but the default behaviour.
+
+Where to get the files: the `Microsoft.Windows.Console.ConPTY` package on nuget.org, which is
+MIT licensed and carries `runtimes\win-x64\native\conpty.dll` and
+`build\native\runtimes\x64\OpenConsole.exe`. Put the two side by side in one directory and point
+the variable at it.
+
+Measured on Windows 11 26200 with that package at 1.24.2607.10001, against the inbox host, three
+runs each:
+
+```
+                              inbox conhost      OpenConsole 1.24.2607.10001
+launch to prompt, median      674 ms             3608 ms   (bare pwsh 434 ms)
+keystroke to screen, pwsh     16.74 ms median    2.19 to 2.47 ms median
+DA1 / DA2 / DECRQM 2026       answered by host   0 bytes, nobody answers
+XTVERSION                     answered by psmux  answered by psmux
+```
+
+The 3 second launch cost is one timeout: that OpenConsole writes `ESC[1t` and `ESC[c` upstream at
+startup and waits for the DA1 reply, which the inbox conhost would have answered itself and which
+psmux does not answer, so the pane child sits in its console connect until the host gives up. The
+keystroke win is real and large, and so is the regression next to it. Set this only when you know
+which of the two you are buying.
+
+`PSMUX_NO_PASSTHROUGH=1` is independent of this and does not change either number.
+
 ## Always On Diagnostic Files
 
 These three are written without any variable being set. They exist because the failures they
