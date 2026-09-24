@@ -233,6 +233,15 @@ MIT licensed and carries `runtimes\win-x64\native\conpty.dll` and
 `build\native\runtimes\x64\OpenConsole.exe`. Put the two side by side in one directory and point
 the variable at it.
 
+On Windows 10 19045 this is the one setting that repairs the whole family of inbox conhost
+defects at once, measured by a reporter on #597 and #684 with the package at 1.24.2607.10001:
+device queries (DA1, DA2, DSR, DECRQM) are answered while a program waits on them instead of
+being held until the next paint, bracketed pastes keep their `ESC[200~` / `ESC[201~` markers on
+the ConPTY input pipe, and non ASCII pastes (Latin 1, CJK) arrive byte exact where the inbox
+host on that build mangles them. Under it psmux also takes the cheaper pipe route for a
+bracketed paste rather than the `WriteConsoleInputW` injection it uses on the inbox host below
+build 22523; `PSMUX_PASTE_INJECT=1` still forces injection if you need it.
+
 Measured on Windows 11 26200 with that package at 1.24.2607.10001, against the inbox host, three
 runs each:
 

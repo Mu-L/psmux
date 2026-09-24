@@ -1,7 +1,7 @@
 //! Issue #684: the paste route gate, and the `paste-buffer` flags the in
 //! server dispatch used to throw away.
 //!
-//! The route half is pure by construction (`choose_paste_route` takes the three
+//! The route half is pure by construction (`choose_paste_route` takes the four
 //! facts as arguments) so the 19045 branch, which is unreachable on any modern
 //! host, can still be pinned here.
 
@@ -30,7 +30,7 @@ fn unbracketed_paste_always_takes_the_pipe() {
         for vt in [true, false] {
             for forced in [None, Some(true), Some(false)] {
                 assert_eq!(
-                    choose_paste_route(false, build, vt, forced),
+                    choose_paste_route(false, build, vt, forced, false),
                     PasteRoute::Pipe,
                     "build={:?} vt={} forced={:?}",
                     build,
@@ -45,7 +45,7 @@ fn unbracketed_paste_always_takes_the_pipe() {
 #[test]
 fn old_build_with_a_vt_byte_reader_injects() {
     assert_eq!(
-        choose_paste_route(true, OLD, true, None),
+        choose_paste_route(true, OLD, true, None, false),
         PasteRoute::Inject
     );
 }
@@ -55,35 +55,35 @@ fn old_build_with_a_record_reader_keeps_the_pipe() {
     // Issue #98: injected marker bytes reach an INPUT_RECORD reader as the
     // literal characters [ 2 0 0 ~.  The guard holds on every build and under
     // every override.
-    assert_eq!(choose_paste_route(true, OLD, false, None), PasteRoute::Pipe);
+    assert_eq!(choose_paste_route(true, OLD, false, None, false), PasteRoute::Pipe);
     assert_eq!(
-        choose_paste_route(true, OLD, false, Some(true)),
+        choose_paste_route(true, OLD, false, Some(true), false),
         PasteRoute::Pipe
     );
     assert_eq!(
-        choose_paste_route(true, NEW, false, Some(true)),
+        choose_paste_route(true, NEW, false, Some(true), false),
         PasteRoute::Pipe
     );
 }
 
 #[test]
 fn new_build_keeps_the_pipe_because_it_carries_the_markers() {
-    assert_eq!(choose_paste_route(true, NEW, true, None), PasteRoute::Pipe);
+    assert_eq!(choose_paste_route(true, NEW, true, None, false), PasteRoute::Pipe);
 }
 
 #[test]
 fn an_unknown_build_keeps_todays_behaviour() {
-    assert_eq!(choose_paste_route(true, None, true, None), PasteRoute::Pipe);
+    assert_eq!(choose_paste_route(true, None, true, None, false), PasteRoute::Pipe);
 }
 
 #[test]
 fn the_boundary_build_is_on_the_pipe_side() {
     assert_eq!(
-        choose_paste_route(true, Some(PASTE_PIPE_BRACKET_MIN_BUILD), true, None),
+        choose_paste_route(true, Some(PASTE_PIPE_BRACKET_MIN_BUILD), true, None, false),
         PasteRoute::Pipe
     );
     assert_eq!(
-        choose_paste_route(true, Some(PASTE_PIPE_BRACKET_MIN_BUILD - 1), true, None),
+        choose_paste_route(true, Some(PASTE_PIPE_BRACKET_MIN_BUILD - 1), true, None, false),
         PasteRoute::Inject
     );
 }
@@ -93,14 +93,45 @@ fn the_override_moves_the_build_half_in_both_directions() {
     // =1 makes a modern host behave like 19045, which is how the route is
     // testable at all on 26200.
     assert_eq!(
-        choose_paste_route(true, NEW, true, Some(true)),
+        choose_paste_route(true, NEW, true, Some(true), false),
         PasteRoute::Inject
     );
     // =0 pins the pipe on a host the build check would have sent to injection.
     assert_eq!(
-        choose_paste_route(true, OLD, true, Some(false)),
+        choose_paste_route(true, OLD, true, Some(false), false),
         PasteRoute::Pipe
     );
+}
+
+#[test]
+fn a_supplied_host_takes_the_pipe_on_an_old_build() {
+    // #597: OpenConsole 1.24 under PSMUX_CONPTY_DIR on 19045 carries the
+    // markers on the pipe (502 bytes, both markers, wide payload byte exact,
+    // measured with PSMUX_PASTE_INJECT=0).  The build number describes the
+    // inbox host, so it must not send such a pane through AttachConsole.
+    assert_eq!(choose_paste_route(true, OLD, true, None, true), PasteRoute::Pipe);
+    assert_eq!(
+        choose_paste_route(true, Some(PASTE_PIPE_BRACKET_MIN_BUILD - 1), true, None, true),
+        PasteRoute::Pipe
+    );
+    // Unknown build under a supplied host: still the pipe.
+    assert_eq!(choose_paste_route(true, None, true, None, true), PasteRoute::Pipe);
+}
+
+#[test]
+fn a_supplied_host_never_relaxes_the_other_guards() {
+    // =1 still wins, for a supplied host that turns out to strip the markers.
+    assert_eq!(
+        choose_paste_route(true, OLD, true, Some(true), true),
+        PasteRoute::Inject
+    );
+    // The #98 record reader guard is untouched by the host.
+    assert_eq!(
+        choose_paste_route(true, OLD, false, Some(true), true),
+        PasteRoute::Pipe
+    );
+    // An unbracketed paste is the pipe under every host.
+    assert_eq!(choose_paste_route(false, OLD, true, None, true), PasteRoute::Pipe);
 }
 
 // ── paste-buffer flags ────────────────────────────────────────────────────

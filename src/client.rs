@@ -6477,11 +6477,19 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 && !paste_stage2
             {
                 if !paste_head_logged && input_log_enabled() {
+                    // Name the rule that held it.  A newline or tab is held by
+                    // the rule that predates the paste head (they never take
+                    // the zero latency path); calling that "head of a paste"
+                    // with two falses after it read as a contradiction (#684).
+                    let gesture = evidence.gesture_open;
+                    let prefix = evidence.clipboard_starts_with(&paste_pend);
+                    let why = if gesture || prefix {
+                        format!("head of a paste (ctrl-v gesture={}, clipboard prefix={})", gesture, prefix)
+                    } else {
+                        "newline or tab never takes the zero latency path".to_string()
+                    };
                     input_log("paste", &format!(
-                        "holding {} char(s): head of a paste (ctrl-v gesture={}, clipboard prefix={})",
-                        paste_pend.len(),
-                        evidence.gesture_open,
-                        evidence.clipboard_starts_with(&paste_pend)));
+                        "holding {} char(s): {}", paste_pend.len(), why));
                     paste_head_logged = true;
                 }
             } else {

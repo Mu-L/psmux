@@ -204,31 +204,53 @@ Start-Sleep -Milliseconds 500
 
 # ── part 3: the three second stall is gone ───────────────────────────────────
 
-Write-Host "`n[Part 3] a pane on this host reaches a prompt in under a second" -ForegroundColor Yellow
-$times = @()
-for ($i = 1; $i -le 3; $i++) {
-    & $PSMUX -L $NS kill-server 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 600
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    & $PSMUX -L $NS new-session -d -s "da_t$i" -x 100 -y 30 2>&1 | Out-Null
-    $ms = -1
-    $dl = (Get-Date).AddSeconds(20)
-    while ((Get-Date) -lt $dl) {
-        $cap = (& $PSMUX -L $NS capture-pane -p -t "da_t$i" 2>&1) -join "`n"
-        if ($cap -match 'PS [A-Za-z]:\\[^\r\n]*>') { $ms = $sw.ElapsedMilliseconds; break }
-        Start-Sleep -Milliseconds 100
+Write-Host "`n[Part 3] a pane on this host reaches a prompt as fast as one on the inbox host" -ForegroundColor Yellow
+# The bar is RELATIVE to the inbox conhost on the same box, not a fixed number.
+# A Windows 10 box with only Windows PowerShell 5.1 takes 2.2 to 2.6 s to a
+# prompt under either host (reporter's measurement on #597), so a fixed 1.5 s
+# bar failed there without any stall. What DA1 unanswered costs is a flat
+# 3 s hold on top of whatever the shell takes, so: the supplied host must reach
+# a prompt within 1500 ms of the inbox host's median, and never 3 s late. The
+# prompt regex accepts pwsh, Windows PowerShell and cmd, and SHELL is cleared
+# so a bash runner (Git Bash exports it) does not open bash panes instead.
+$savedShell = $env:SHELL
+Remove-Item env:SHELL -EA SilentlyContinue
+function Measure-PromptMs([string]$Tag) {
+    $out = @()
+    for ($i = 1; $i -le 3; $i++) {
+        & $PSMUX -L $NS kill-server 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 600
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        & $PSMUX -L $NS new-session -d -s "da_$Tag$i" -x 100 -y 30 2>&1 | Out-Null
+        $ms = -1
+        $dl = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $dl) {
+            $cap = (& $PSMUX -L $NS capture-pane -p -t "da_$Tag$i" 2>&1) -join "`n"
+            if ($cap -match '(PS [A-Za-z]:\\[^\r\n]*>|^[A-Za-z]:\\[^\r\n]*>)') { $ms = $sw.ElapsedMilliseconds; break }
+            Start-Sleep -Milliseconds 100
+        }
+        $sw.Stop()
+        $out += $ms
+        & $PSMUX -L $NS kill-server 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 300
     }
-    $sw.Stop()
-    $times += $ms
-    & $PSMUX -L $NS kill-server 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 300
+    return $out
 }
-Write-Info "prompt visible at: $($times -join ', ') ms"
-$bad = @($times | Where-Object { $_ -lt 0 -or $_ -ge 1500 })
+$times = Measure-PromptMs 't'
+Write-Info "supplied host, prompt visible at: $($times -join ', ') ms"
+Remove-Item env:PSMUX_CONPTY_DIR -EA SilentlyContinue
+$inbox = Measure-PromptMs 'i'
+$env:PSMUX_CONPTY_DIR = $hostDir
+Write-Info "inbox conhost, prompt visible at: $($inbox -join ', ') ms"
+if ($savedShell) { $env:SHELL = $savedShell }
+$inboxOk = @($inbox | Where-Object { $_ -ge 0 })
+$inboxMedian = if ($inboxOk.Count -gt 0) { ($inboxOk | Sort-Object)[[int][Math]::Floor(($inboxOk.Count - 1) / 2)] } else { -1 }
+$limit = if ($inboxMedian -ge 0) { $inboxMedian + 1500 } else { 3000 }
+$bad = @($times | Where-Object { $_ -lt 0 -or $_ -ge $limit -or $_ -ge 3000 })
 if ($bad.Count -eq 0) {
-    Write-Pass "every run reached a prompt well inside the 3 s DA1 timeout: $($times -join ', ') ms"
+    Write-Pass "no DA1 hold: supplied host $($times -join ', ') ms against inbox median $inboxMedian ms (limit $limit ms)"
 } else {
-    Write-Fail "a pane still stalled: $($times -join ', ') ms (unanswered DA1 costs about 3000 ms)"
+    Write-Fail "a pane still stalled: supplied host $($times -join ', ') ms, inbox median $inboxMedian ms, limit $limit ms (unanswered DA1 costs about 3000 ms)"
 }
 
 & $PSMUX -L $NS kill-server 2>&1 | Out-Null

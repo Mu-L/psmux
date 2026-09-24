@@ -59,7 +59,13 @@ $script:TestsSkipped = 0
 # it: the pipe strips the markers below it.
 $PIPE_BRACKET_MIN_BUILD = 22523
 $OSBuild = [System.Environment]::OSVersion.Version.Build
-$PipeCarriesMarkers = $OSBuild -ge $PIPE_BRACKET_MIN_BUILD
+# The build describes the INBOX conhost.  Under PSMUX_CONPTY_DIR the panes run
+# on the console host the user supplied, and OpenConsole 1.24 carries the
+# markers on the pipe on 19045 (reporter's measurement on #597: 502 bytes with
+# both markers on every arm, wide payload byte exact), so the four build gated
+# assertions below are real assertions there, not skips.
+$SuppliedHost = [bool]$env:PSMUX_CONPTY_DIR -and (Test-Path (Join-Path $env:PSMUX_CONPTY_DIR 'conpty.dll'))
+$PipeCarriesMarkers = ($OSBuild -ge $PIPE_BRACKET_MIN_BUILD) -or $SuppliedHost
 
 function Write-Pass($msg) { Write-Host "  [PASS] $msg" -ForegroundColor Green; $script:TestsPassed++ }
 function Write-Fail($msg) { Write-Host "  [FAIL] $msg" -ForegroundColor Red; $script:TestsFailed++ }
@@ -199,7 +205,7 @@ function Invoke-Paste {
 }
 
 Write-Host "`n=== Issue #684: paste route ===" -ForegroundColor Yellow
-Write-Info "host build $OSBuild, pipe bracket gate $PIPE_BRACKET_MIN_BUILD, this conhost $(if ($PipeCarriesMarkers) { 'carries' } else { 'STRIPS' }) ESC[200~ on the input pipe"
+Write-Info "host build $OSBuild, pipe bracket gate $PIPE_BRACKET_MIN_BUILD, pane host $(if ($SuppliedHost) { "supplied via PSMUX_CONPTY_DIR=$env:PSMUX_CONPTY_DIR" } else { 'inbox conhost' }), which $(if ($PipeCarriesMarkers) { 'carries' } else { 'STRIPS' }) ESC[200~ on the input pipe"
 
 # 1. The pipe route, which is what this host does on its own.
 $pipe = Invoke-Paste -Tag "pipe" -PayloadFile $stdFile -Inject "0"

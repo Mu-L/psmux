@@ -120,6 +120,46 @@ $tagged = 0
 $suite = '<none>'
 $lastSuiteRead = [DateTime]::MinValue
 
+# Desktop access sampler. This watcher is a child of the runner, inside the
+# same lineage the suites run in, so what it can or cannot do with the desktop
+# is what the suites can or cannot do. On 2026-09-24 that lineage lost the
+# clipboard and the foreground for fifty minutes (see the witness note in
+# run_all_tests.ps1) and nothing recorded when. Every 750 ms tick probes once;
+# only transitions are written, to <run dir>\ui_access.log, with the suite that
+# was running at the time.
+$uiLog = Join-Path (Split-Path $OutFile -Parent) 'ui_access.log'
+$uiState = ''
+try {
+    if (-not ('SpawnWatchUi' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SpawnWatchUi {
+    [DllImport("user32.dll", SetLastError=true)] static extern bool OpenClipboard(IntPtr h);
+    [DllImport("user32.dll")] static extern bool CloseClipboard();
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    public static string Probe() {
+        bool ok = OpenClipboard(IntPtr.Zero);
+        int err = ok ? 0 : Marshal.GetLastWin32Error();
+        if (ok) CloseClipboard();
+        string r = "";
+        if (!ok) r += "clipboard-denied(err=" + err + ")";
+        if (GetForegroundWindow() == IntPtr.Zero) r += (r.Length > 0 ? " " : "") + "no-foreground";
+        return r;
+    }
+}
+'@ -ErrorAction Stop
+    }
+} catch { }
+function Sample-UiAccess {
+    $r = ''
+    try { $r = [SpawnWatchUi]::Probe() } catch { return }
+    if ($r -eq $script:uiState) { return }
+    $script:uiState = $r
+    $msg = if ($r) { "DESKTOP REFUSED $r" } else { "desktop usable again" }
+    try { [System.IO.File]::AppendAllText($uiLog, ("[{0}] watcher (suite={1}): {2}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $suite, $msg)) } catch { }
+}
+
 while ($true) {
     if ($sw.Elapsed.TotalSeconds -ge $deadline) { break }
 
@@ -129,6 +169,11 @@ while ($true) {
     } catch [System.Management.ManagementException] {
         # Timeout tick: the only place the runner liveness check needs to happen.
         if (-not (Get-Process -Id $RunnerPid -ErrorAction SilentlyContinue)) { break }
+        if (([DateTime]::Now - $lastSuiteRead).TotalMilliseconds -ge 500) {
+            $lastSuiteRead = [DateTime]::Now
+            try { $s = [System.IO.File]::ReadAllText($SuiteFile); if ($s) { $suite = $s.Trim() } } catch { }
+        }
+        Sample-UiAccess
         continue
     } catch {
         [System.IO.File]::AppendAllText($OutFile, "# watcher error: $($_.Exception.Message)`r`n")

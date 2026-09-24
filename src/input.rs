@@ -2715,11 +2715,19 @@ pub enum PasteRoute {
 /// * `child_reads_vt_bytes` is the #98 guard and is never overridden.
 /// * `build` of `None` keeps the pipe, the same conservatism
 ///   `conpty_needs_mouse_record_bypass` applies to an unknown build.
+/// * `supplied_host` is true when the pane runs under the console host the
+///   user pointed `PSMUX_CONPTY_DIR` at.  The build number describes the inbox
+///   conhost, not that host: on 19045 with OpenConsole 1.24 the pipe carries
+///   the markers (measured on #597 with `PSMUX_PASTE_INJECT=0`, 502 bytes with
+///   both markers, wide payload byte exact), so the cheaper route is right and
+///   the build gate does not apply.  `PSMUX_PASTE_INJECT=1` still wins, for a
+///   supplied host that turns out to strip them.
 pub fn choose_paste_route(
     bracket: bool,
     build: Option<u32>,
     child_reads_vt_bytes: bool,
     forced: Option<bool>,
+    supplied_host: bool,
 ) -> PasteRoute {
     if !bracket {
         return PasteRoute::Pipe;
@@ -2733,10 +2741,20 @@ pub fn choose_paste_route(
     if forced == Some(true) {
         return PasteRoute::Inject;
     }
+    if supplied_host {
+        return PasteRoute::Pipe;
+    }
     match build {
         Some(b) if b < PASTE_PIPE_BRACKET_MIN_BUILD => PasteRoute::Inject,
         _ => PasteRoute::Pipe,
     }
+}
+
+/// Whether the panes of this process run under a user supplied console host
+/// (`PSMUX_CONPTY_DIR`) rather than the inbox conhost.
+#[cfg(windows)]
+pub fn pane_host_is_supplied() -> bool {
+    portable_pty::win::conpty_source() == portable_pty::win::ConPtySource::Directory
 }
 
 /// Send one pane's copy of a paste, over whichever channel
@@ -2750,15 +2768,16 @@ fn deliver_paste_to_pane(pane: &mut crate::types::Pane, text: &str, use_bracket:
         let vt = crate::window_ops::pane_reads_vt_bytes(pane);
         let build = crate::ssh_input::windows_build_number();
         let forced = forced_paste_injection();
-        let route = choose_paste_route(true, build, vt, forced);
+        let supplied = pane_host_is_supplied();
+        let route = choose_paste_route(true, build, vt, forced, supplied);
         // Every input to the decision, because the bytes a pane receives look
         // the same on a host where both channels work and the only way to tell
         // which one carried them is this line.
         crate::debug_log::input_log(
             "paste",
             &format!(
-                "route decision: vt_byte_reader={} build={:?} gate={} {}={:?} -> {:?}",
-                vt, build, PASTE_PIPE_BRACKET_MIN_BUILD, PASTE_INJECT_ENV, forced, route
+                "route decision: vt_byte_reader={} build={:?} gate={} {}={:?} supplied_host={} -> {:?}",
+                vt, build, PASTE_PIPE_BRACKET_MIN_BUILD, PASTE_INJECT_ENV, forced, supplied, route
             ),
         );
         route
