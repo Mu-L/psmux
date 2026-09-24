@@ -765,9 +765,9 @@ if (-not (Test-Path $injectorExe)) {
             Write-Fail "$route select-pane -t S:1.1 moved the client to window $afterCur (panes $afterPanes)"
         }
         if ($alive) {
-            Write-Pass "$route: the attached client survived the select-pane"
+            Write-Pass "${route}: the attached client survived the select-pane"
         } else {
-            Write-Fail "$route: the attached client exited during the select-pane"
+            Write-Fail "${route}: the attached client exited during the select-pane"
         }
 
         # select-window -t +1 and -t {end}
@@ -816,7 +816,7 @@ if (-not (Test-Path $injectorExe)) {
         if ($route -eq 'binding') {
             & $injectorExe $proc.Id '^b{SLEEP:500}j{SLEEP:1200}' | Out-Null
         } else {
-            & $injectorExe $proc.Id '^b{SLEEP:500}:{SLEEP:600}select-window -t {end}{SLEEP:300}{ENTER}{SLEEP:1200}' | Out-Null
+            & $injectorExe $proc.Id '^b{SLEEP:500}:{SLEEP:600}select-window -t {LBRACE}end{RBRACE}{SLEEP:300}{ENTER}{SLEEP:1200}' | Out-Null
         }
         Start-Sleep -Milliseconds 1200
         $after = Get-Cur

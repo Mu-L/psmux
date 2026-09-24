@@ -2600,6 +2600,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, p); });
                         }
                         if app.windows[app.active_idx].active_path != old_path {
+                            // tmux pushes the pane we came from onto
+                            // `w->last_panes` inside `window_set_active_pane(w,
+                            // wp, 1)` (window.c), so a `-t` select IS what
+                            // makes a later `select-pane -l` work.  psmux only
+                            // recorded it for the directional forms, so two
+                            // `-t` selects in a row left `-l` with nothing to
+                            // go back to (#693 item 5).
+                            app.last_pane_path = old_path;
                             unzoom_if_zoomed(&mut app);
                         }
                         let win = &mut app.windows[app.active_idx];
