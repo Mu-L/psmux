@@ -1975,6 +1975,13 @@ impl AppState {
         // Drop a leading `session:`; tmux splits on the FIRST colon too.
         let body = match raw.find(':') { Some(p) => &raw[p + 1..], None => raw };
         let body = body.trim();
+        // tmux's `=` exact-match marker (#558) sets CMD_FIND_EXACT_WINDOW and
+        // is not part of the name; `cmd_find_target` strips it before the
+        // resolver ever sees the token. psmux only ever matches a window name
+        // exactly anyway, so dropping it is the whole of it. Without this
+        // `select-window -t :=2` looked for a window literally called "=2"
+        // (#693 item 4 routed select-window through here).
+        let body = crate::cli::strip_exact_match_prefix(body);
         // tmux reports only the WINDOW part: `swap-window -t p:77` prints
         // "can't find window: 77", not the whole "p:77".
         let missing = || format!("can't find window: {}", body);
