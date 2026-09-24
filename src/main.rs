@@ -951,22 +951,15 @@ fn run_main() -> io::Result<()> {
             // died in the CLI with "no server running on session '-1'", and
             // `-t {last}` the same way, so neither ever reached the server that
             // knows what they mean. Bare NAMES still mean a session.
-            let is_window_move = args.iter().any(|a|
-                a == "move-window" || a == "movew" || a == "swap-window" || a == "swapw");
-            let looks_like_window = |t: &str| {
-                if t.parse::<usize>().is_ok() { return true; }
-                if matches!(t, "!" | "^" | "$") { return true; }
-                if t.starts_with('{') && t.ends_with('}') && t.len() > 2 { return true; }
-                if let Some(n) = t.strip_prefix(['+', '-']) {
-                    return n.is_empty() || n.chars().all(|c| c.is_ascii_digit());
-                }
-                false
-            };
-            let target: String = if is_window_move && looks_like_window(target) {
-                format!(":{}", target)
-            } else {
-                target.to_string()
-            };
+            // `select-window` joined them in issue #692: `select-window -t 0`
+            // died here with "no server running on session '<ns>__0'" while
+            // `-t :0` worked. The command list and the shape test now live in
+            // one place, crate::cli::window_target_command.
+            let target: String = args
+                .iter()
+                .find(|a| crate::cli::window_target_command(a))
+                .map(|c| crate::cli::coerce_bare_window_target(c, target))
+                .unwrap_or_else(|| target.to_string());
             // Extract just the session name for port file lookup
             let parsed_target = crate::cli::parse_target(&target);
             let has_explicit_session = parsed_target.session.is_some();

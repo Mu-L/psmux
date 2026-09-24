@@ -935,6 +935,65 @@ fn read_fresh_startup_error_at(path: &str, since_epoch: u64) -> Option<(String, 
     Some((err_lines.join(" "), path.to_string()))
 }
 
+/// Make the window at `internal_idx` the active one, the way tmux's
+/// `session_select` does: remember the last window, clear the new window's
+/// activity, bell and silence alerts (`server-client.c`
+/// `s->curw->flags &= ~WINLINK_ALERTFLAGS`) and resize its panes.
+///
+/// Returns true when the active window actually moved. Three request arms and
+/// `SelectPaneTarget` shared one copy of this body; they now share one
+/// function, so a change to what "focusing a window" means cannot land in
+/// three places out of four.
+pub(crate) fn focus_window_at(app: &mut AppState, internal_idx: usize) -> bool {
+    if internal_idx >= app.windows.len() || internal_idx == app.active_idx {
+        return false;
+    }
+    crate::copy_mode::switch_with_copy_save(app, |app| {
+        app.last_window_idx = app.active_idx;
+        app.active_idx = internal_idx;
+    });
+    if let Some(win) = app.windows.get_mut(internal_idx) {
+        win.activity_flag = false;
+        win.bell_flag = false;
+        win.silence_flag = false;
+    }
+    crate::tree::resize_all_panes(app);
+    true
+}
+
+/// Record the pane focus notifications a change of active pane owes.
+///
+/// tmux moves the active pane through `window_set_active_pane`, which calls
+/// `window_pane_update_focus` on the old pane and then on the new one
+/// (window.c:735-739); those fire `pane-focus-out` and `pane-focus-in`
+/// (window.c:700, window.c:706). Both are gated on the `focus-events` option,
+/// the same gate psmux already puts on the escape sequences it forwards for a
+/// client's terminal focus, so a session with `focus-events off` stays silent.
+///
+/// Before issue #691 these two hooks only ever fired for the CLIENT's terminal
+/// gaining or losing focus, so moving between panes, which is what their names
+/// describe, fired nothing at all.
+pub(crate) fn note_pane_focus_change(app: &AppState, events: &mut Vec<&'static str>) {
+    if !app.focus_events {
+        return;
+    }
+    events.push("pane-focus-out");
+    events.push("pane-focus-in");
+}
+
+/// The (window id, pane id) the session is focused on, which is what tmux
+/// compares when it decides whether a `select-pane` changed anything
+/// (cmd-select-pane.c:269, `if (wp == w->active) return`).
+pub(crate) fn active_pane_identity(app: &AppState) -> (usize, usize) {
+    match app.windows.get(app.active_idx) {
+        Some(win) => (
+            win.id,
+            crate::tree::get_active_pane_id(&win.root, &win.active_path).unwrap_or(usize::MAX),
+        ),
+        None => (usize::MAX, usize::MAX),
+    }
+}
+
 /// Absolute path to `~/.psmux/config-warnings.log`, or None if no home dir.
 pub(crate) fn config_warnings_log_path() -> Option<String> {
     Some(format!("{}\\config-warnings.log", crate::paths::psmux_dir_opt()?))
@@ -2084,6 +2143,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     );
                     let is_temp_focus = matches!(&req, CtrlReq::FocusTargetTemp { .. });
                     let mut hook_event: Option<&str> = None;
+                    // Notification hooks (issue #691). `hook_event` is the ONE
+                    // `after-<command>` a request may fire, the #690 rule; the
+                    // notifications tmux fires from `events_fire_*` are a
+                    // different thing and several can belong to one request
+                    // (a `select-pane` fires pane-focus-out on the old pane and
+                    // pane-focus-in on the new one, window.c:706, and then its
+                    // own after hook). They run in order, before `hook_event`,
+                    // the way tmux's immediate events run before the command
+                    // queue reaches the inserted hook.
+                    let mut notify_events: Vec<&str> = Vec::new();
                     // Track active_idx changes for debugging window-switch issues
                     let _prev_active_idx = app.active_idx;
                     let _req_tag: &str = match &req {
@@ -2156,7 +2225,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // runs at the loop top during an idle gap (Tier 3), so a burst
                     // of window-creates never chains blocking spawns that stall
                     // other clients' commands.
-                    resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
+                    resize_all_panes(&mut app); meta_dirty = true; notify_events.push("window-linked"); hook_event = Some("after-new-window");
                 }
                 CtrlReq::NewWindowPrint(cmd, name, detached, start_dir, format_str, resp, title, empty, env_sets) => {
                     if let Some(cmds) = app.hooks.get("before-new-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
@@ -2189,7 +2258,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // runs at the loop top during an idle gap (Tier 3), so a burst
                     // of window-creates never chains blocking spawns that stall
                     // other clients' commands.
-                    resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
+                    resize_all_panes(&mut app); meta_dirty = true; notify_events.push("window-linked"); hook_event = Some("after-new-window");
                 }
                 CtrlReq::SplitWindow(k, cmd, detached, start_dir, split_size, resp, title, env_sets, zoom_after_split) => {
                     if let Some(cmds) = app.hooks.get("before-split-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
@@ -2417,59 +2486,66 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::FocusWindow(wid) => {
                     // wid is a display index (same as tmux window number), convert to internal array index
                     if let Some(internal_idx) = app.win_pos(wid) {
-                        if internal_idx != app.active_idx {
-                            switch_with_copy_save(&mut app, |app| {
-                                app.last_window_idx = app.active_idx;
-                                app.active_idx = internal_idx;
-                            });
-                            // Clear activity/bell/silence flags on the newly-focused window
-                            if let Some(win) = app.windows.get_mut(internal_idx) {
-                                win.activity_flag = false;
-                                win.bell_flag = false;
-                                win.silence_flag = false;
-                            }
-                            // Lazily resize panes in the newly-focused window
-                            resize_all_panes(&mut app);
-                        }
+                        focus_window_at(&mut app, internal_idx);
                     }
                     meta_dirty = true;
                     hook_event = Some("after-select-window");
                 }
                 CtrlReq::FocusWindowByName(ref name) => {
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.name == *name) {
-                        if internal_idx != app.active_idx {
-                            switch_with_copy_save(&mut app, |app| {
-                                app.last_window_idx = app.active_idx;
-                                app.active_idx = internal_idx;
-                            });
-                            if let Some(win) = app.windows.get_mut(internal_idx) {
-                                win.activity_flag = false;
-                                win.bell_flag = false;
-                                win.silence_flag = false;
-                            }
-                            resize_all_panes(&mut app);
-                        }
+                        focus_window_at(&mut app, internal_idx);
                     }
                     meta_dirty = true;
                     hook_event = Some("after-select-window");
                 }
                 CtrlReq::FocusWindowById(id) => {
                     if let Some(internal_idx) = app.windows.iter().position(|w| w.id == id) {
-                        if internal_idx != app.active_idx {
-                            switch_with_copy_save(&mut app, |app| {
-                                app.last_window_idx = app.active_idx;
-                                app.active_idx = internal_idx;
-                            });
-                            if let Some(win) = app.windows.get_mut(internal_idx) {
-                                win.activity_flag = false;
-                                win.bell_flag = false;
-                                win.silence_flag = false;
-                            }
-                            resize_all_panes(&mut app);
-                        }
+                        focus_window_at(&mut app, internal_idx);
                     }
                     meta_dirty = true;
                     hook_event = Some("after-select-window");
+                }
+                // One request for the whole `-t` of a `select-pane` (#691).
+                CtrlReq::SelectPaneTarget { win, win_is_id, ref win_name, pane, pane_is_id, fire_hook } => {
+                    let before = active_pane_identity(&app);
+                    let internal_idx = if let Some(w) = win {
+                        if win_is_id {
+                            app.windows.iter().position(|x| x.id == w)
+                        } else {
+                            app.win_pos(w)
+                        }
+                    } else if let Some(name) = win_name.as_deref() {
+                        app.windows.iter().position(|x| x.name == name)
+                    } else {
+                        None
+                    };
+                    if let Some(i) = internal_idx {
+                        focus_window_at(&mut app, i);
+                    }
+                    if let Some(p) = pane {
+                        let old_path = app.windows[app.active_idx].active_path.clone();
+                        if pane_is_id {
+                            switch_with_copy_save(&mut app, |app| { focus_pane_by_id(app, p); });
+                        } else {
+                            switch_with_copy_save(&mut app, |app| { focus_pane_by_index(app, p); });
+                        }
+                        if app.windows[app.active_idx].active_path != old_path {
+                            unzoom_if_zoomed(&mut app);
+                        }
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &win.active_path) {
+                            crate::tree::touch_mru(&mut win.pane_mru, pid);
+                        }
+                    }
+                    meta_dirty = true;
+                    // cmd-select-pane.c:269 returns before the hook when the
+                    // target pane is already the active one.
+                    if active_pane_identity(&app) != before {
+                        note_pane_focus_change(&app, &mut notify_events);
+                        if fire_hook {
+                            hook_event = Some("after-select-pane");
+                        }
+                    }
                 }
                 CtrlReq::FocusPane(pid) => {
                     let old_path = app.windows[app.active_idx].active_path.clone();
@@ -2614,6 +2690,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // operation. A duplicate attach for the same connection
                     // must not leave the session permanently ghost-attached.
                     if app.register_client(cid, false) {
+                        // A client that attaches here has just changed the
+                        // session it is looking at, which is exactly when tmux
+                        // fires it: server-client.c:448
+                        // `server_client_set_session` calls
+                        // `server_client_fire_session_changed(c, old)` at :472
+                        // for every set, attach and switch-client alike, and
+                        // that fires client-session-changed at :415. psmux runs
+                        // one server per session, so the session a client
+                        // switches TO is this server and the attach is the
+                        // switch (issue #691).
+                        notify_events.push("client-session-changed");
                         hook_event = Some("client-attached");
                         // update-environment: refresh env vars from the attaching client's environment
                         let update_vars = app.update_environment.clone();
@@ -3778,6 +3865,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::SelectPane(dir, keep_zoom) => {
                     if let Some(cmds) = app.hooks.get("before-select-pane") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    let _pane_before = active_pane_identity(&app);
                     // Auto-unzoom when navigating to another pane (tmux behavior).
                     // For directional nav: unzoom first so compute_rects uses
                     // real geometry, then re-zoom only if focus didn't change.
@@ -3915,7 +4003,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         _ => {}
                     }
                     meta_dirty = true;
-                    hook_event = Some("after-select-pane");
+                    // tmux fires `after-select-pane` from the activation at
+                    // cmd-select-pane.c:276, which line :269 skips when the
+                    // pane did not move; `-m`, `-M`, `-e` and `-d` return
+                    // earlier still (cmd-select-pane.c:100, :180) and never
+                    // reach it.
+                    if active_pane_identity(&app) != _pane_before {
+                        note_pane_focus_change(&app, &mut notify_events);
+                        hook_event = Some("after-select-pane");
+                    }
                 }
                 CtrlReq::SelectWindow(idx) => {
                     if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
@@ -4022,6 +4118,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     resize_all_panes(&mut app);
                     meta_dirty = true;
                     state_dirty = true;
+                    // A killed window leaves the session's window list, which
+                    // is what tmux calls unlinking: session.c:349
+                    // `session_detach` fires window-unlinked before it removes
+                    // the winlink (issue #691).
+                    notify_events.push("window-unlinked");
                     hook_event = Some("window-closed");
                 }
                 CtrlReq::KillWindowTarget { win, win_is_id, name, resp } => {
@@ -4049,6 +4150,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             resize_all_panes(&mut app);
                             meta_dirty = true;
                             state_dirty = true;
+                            notify_events.push("window-unlinked");
                             hook_event = Some("window-closed");
                             let _ = resp.send(Ok(()));
                         }
@@ -4624,6 +4726,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         Ok(broken) => {
                             crate::resize_window::refresh_dynamic_window_sizes(&mut app);
                             resize_all_panes(&mut app);
+                            // break-pane puts the pane in a NEW window, which
+                            // tmux links into the session: cmd-break-pane.c:182
+                            // `session_attach`, and session.c:333 fires
+                            // window-linked from there (issue #691).
+                            notify_events.push("window-linked");
                             hook_event = Some("after-break-pane");
                             meta_dirty = true;
                             // -P prints where the pane ended up, expanded
@@ -5354,6 +5461,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             // rendering the old order (#601).
                             state_dirty = true;
                             meta_dirty = true;
+                            // psmux extension, symmetric with after-swap-pane,
+                            // which has fired since long before #691 while
+                            // after-swap-window fired nothing. Upstream tmux
+                            // gives neither command a hook (cmd-swap-window.c
+                            // `.flags = 0`, and no swap-window entry in
+                            // options-table.c's after hook list), so docs must
+                            // call both psmux's own.
+                            hook_event = Some("after-swap-window");
                             let _ = resp.send(Ok(()));
                         }
                     }
@@ -5666,6 +5781,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     resize_all_panes(&mut app);
                     meta_dirty = true;
                     state_dirty = true;
+                    // tmux gives select-layout the generic after hook:
+                    // cmd-select-layout.c:41 `.flags = CMD_AFTERHOOK`, which
+                    // cmd-queue.c:635 turns into one `after-select-layout`
+                    // (issue #691, it fired nothing before).
+                    hook_event = Some("after-select-layout");
                 }
                 CtrlReq::NextLayout => {
                     unzoom_if_zoomed(&mut app);
@@ -7120,6 +7240,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 crate::debug_log::server_log("switch", &format!(
                     "active_idx changed {} -> {} by req={} hook={:?}",
                     _prev_active_idx, app.active_idx, _req_tag, hook_event));
+            }
+            // Notification hooks first (issue #691): tmux's events_fire_* run
+            // inside the command, before the command queue reaches the
+            // after-<command> hook cmdq_fire_command inserted for it.
+            for event in std::mem::take(&mut notify_events) {
+                if crate::commands::hook_debug_enabled() {
+                    crate::commands::hook_debug_trace(&format!("{} req={}", event, _req_tag));
+                }
+                let cmds: Vec<String> = app.hooks.get(event).cloned().unwrap_or_default();
+                for cmd in cmds {
+                    let _ = execute_command_string(&mut app, &cmd);
+                }
             }
             // Fire any hooks registered for the event that just occurred
             if let Some(event) = hook_event {

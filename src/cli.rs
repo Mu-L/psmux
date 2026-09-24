@@ -1025,6 +1025,76 @@ pub fn strip_exact_match_prefix(target: &str) -> &str {
     target.strip_prefix('=').unwrap_or(target)
 }
 
+/// Does a bare `-t` token name a WINDOW rather than a session?
+///
+/// tmux's window table (`cmd-find.c:51`, `cmd_find_window_table`) is
+/// `{start} ^`, `{last} !`, `{end} $`, `{next} +`, `{previous} -`, and
+/// `cmd-find.c:443` tries a plain number as a window index before anything
+/// else. A bare NAME stays ambiguous and keeps psmux's session meaning.
+pub fn bare_target_names_a_window(target: &str) -> bool {
+    if target.parse::<usize>().is_ok() {
+        return true;
+    }
+    if matches!(target, "!" | "^" | "$") {
+        return true;
+    }
+    if target.starts_with('{') && target.ends_with('}') && target.len() > 2 {
+        return true;
+    }
+    if let Some(n) = target.strip_prefix(['+', '-']) {
+        return n.is_empty() || n.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+/// Commands whose `-t` is a window target, where a bare token must be read as
+/// a window before it is read as a session.
+///
+/// tmux resolves such a `-t` through `cmd_find_get_window` (`cmd-find.c:328`),
+/// which uses the CURRENT session and asks
+/// `cmd_find_get_window_with_session` first; only if that fails does it try
+/// the token as a session itself (`cmd-find.c:348`). psmux's `parse_target`
+/// reads any bare token as a session name (`"A bare string without ':' or
+/// '.' is always a session name, even if numeric"`), so `select-window -t 0`
+/// looked for a SESSION called `0`: on the CLI that died with
+/// `no server running on session '<ns>__0'`, and from a binding, the control
+/// socket or the `:` prompt it silently selected nothing (issue #692).
+///
+/// `move-window` and `swap-window` were coerced here first (issue #602).
+/// `select-window` joins them; commands that resolve their own `-t`
+/// (kill-window, break-pane, join-pane) are deliberately left alone.
+pub fn window_target_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "move-window" | "movew" | "swap-window" | "swapw" | "select-window" | "selectw"
+    )
+}
+
+/// Put the colon back on a bare window target, so the generic parser reads it
+/// as a window in the current session (tmux `cmd_find_get_window`).
+///
+/// Returns the target unchanged when the command's `-t` is not a window
+/// target or the token is not window-shaped.
+///
+/// `select-window` takes only the plain index, which is the form
+/// `cmd-find.c:443` resolves and the one issue #692 reports. The relative and
+/// symbolic forms (`+2`, `!`, `{end}`) are resolved server side by
+/// `move-window`/`swap-window`'s own #602 resolver and by nothing else, so
+/// coercing them for `select-window` would only turn a loud CLI error into a
+/// silent no-op.
+pub fn coerce_bare_window_target(cmd: &str, target: &str) -> String {
+    let plain = strip_exact_match_prefix(target);
+    let window_shaped = match cmd {
+        "select-window" | "selectw" => plain.parse::<usize>().is_ok(),
+        _ => bare_target_names_a_window(plain),
+    };
+    if window_target_command(cmd) && window_shaped {
+        format!(":{}", plain)
+    } else {
+        target.to_string()
+    }
+}
+
 /// Parse a tmux-style target specification
 pub fn parse_target(target: &str) -> ParsedTarget {
     let mut result = ParsedTarget::default();
@@ -1472,3 +1542,7 @@ mod tests_issue558_eq_prefix;
 #[cfg(test)]
 #[path = "../tests-rs/test_discussion571_attached_global_args.rs"]
 mod tests_discussion571_attached_global_args;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue692_select_window_targets.rs"]
+mod tests_issue692_select_window_targets;
