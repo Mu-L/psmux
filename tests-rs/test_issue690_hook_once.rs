@@ -36,15 +36,21 @@
 use super::*;
 
 /// One request, whatever the form: this is the property #690 broke.
+///
+/// The `None` in the second position is the RAW `-t`, which issue #693 item 4
+/// added so `select-window` can resolve `+1`, `!` and `{end}` through the same
+/// resolver move-window uses (tmux cmd-find.c:51-58 and :390-417). Passing
+/// None here keeps every case below on the pre-resolved window/id/name inputs
+/// #690 is about; the raw spec forms have their own file.
 fn count(args: &[&str], win: Option<usize>, is_id: bool, name: Option<&str>) -> usize {
-    select_window_requests(args, win, is_id, name).len()
+    select_window_requests(args, None, win, is_id, name).0.len()
 }
 
 #[test]
 fn issue690_index_target_emits_one_request() {
     // `select-window -t s:0`, the reporter's command.  The outer -t is gone by
     // the time the arm sees the args, so this is what it gets.
-    let reqs = select_window_requests(&[], Some(0), false, None);
+    let reqs = select_window_requests(&[], None, Some(0), false, None).0;
     assert_eq!(reqs.len(), 1, "one select-window must emit one window request");
     assert!(
         matches!(reqs[0], CtrlReq::SelectWindow(0)),
@@ -61,7 +67,7 @@ fn issue690_index_target_does_not_also_focus() {
         (&[][..], Some(3), false, None),
         (&["-T"][..], Some(1), false, None),
     ] {
-        let reqs = select_window_requests(args, win, is_id, name);
+        let reqs = select_window_requests(args, None, win, is_id, name).0;
         assert_eq!(reqs.len(), 1, "args {:?} emitted {} requests", args, reqs.len());
         assert!(
             !reqs.iter().any(|r| matches!(r, CtrlReq::FocusWindow(_))),
@@ -73,14 +79,14 @@ fn issue690_index_target_does_not_also_focus() {
 #[test]
 fn issue690_window_id_target_stays_an_id() {
     // #497: an @id must never be re-sent as an index.
-    let reqs = select_window_requests(&[], Some(2), true, None);
+    let reqs = select_window_requests(&[], None, Some(2), true, None).0;
     assert_eq!(reqs.len(), 1);
     assert!(matches!(reqs[0], CtrlReq::FocusWindowById(2)));
 }
 
 #[test]
 fn issue690_window_name_target_focuses_by_name() {
-    let reqs = select_window_requests(&[], None, false, Some("editor"));
+    let reqs = select_window_requests(&[], None, None, false, Some("editor")).0;
     assert_eq!(reqs.len(), 1);
     match &reqs[0] {
         CtrlReq::FocusWindowByName(name) => assert_eq!(name, "editor"),
@@ -91,7 +97,7 @@ fn issue690_window_name_target_focuses_by_name() {
 #[test]
 fn issue690_positional_index_wins_over_target() {
     // psmux accepts tmux's window number positionally.  It decides alone.
-    let reqs = select_window_requests(&["2"], Some(1), false, None);
+    let reqs = select_window_requests(&["2"], None, Some(1), false, None).0;
     assert_eq!(reqs.len(), 1);
     assert!(matches!(reqs[0], CtrlReq::SelectWindow(2)));
 }
@@ -101,15 +107,15 @@ fn issue690_relative_flags_are_the_whole_operation() {
     // cmd-select-window.c tests -n, then -p, then -l, and only falls through
     // to the -t target when none is given.  psmux used to select the target
     // AND move, which is two selections and two firings for one command.
-    let next = select_window_requests(&["-n"], Some(0), false, None);
+    let next = select_window_requests(&["-n"], None, Some(0), false, None).0;
     assert_eq!(next.len(), 1);
     assert!(matches!(next[0], CtrlReq::NextWindow));
 
-    let prev = select_window_requests(&["-p"], Some(0), false, None);
+    let prev = select_window_requests(&["-p"], None, Some(0), false, None).0;
     assert_eq!(prev.len(), 1);
     assert!(matches!(prev[0], CtrlReq::PrevWindow));
 
-    let last = select_window_requests(&["-l"], Some(0), false, None);
+    let last = select_window_requests(&["-l"], None, Some(0), false, None).0;
     assert_eq!(last.len(), 1);
     assert!(matches!(last[0], CtrlReq::LastWindow));
 
@@ -122,7 +128,7 @@ fn issue690_relative_flags_are_the_whole_operation() {
 #[test]
 fn issue690_relative_beats_an_id_target_too() {
     // An @id target with -n must not focus the id and then move.
-    let reqs = select_window_requests(&["-n"], Some(4), true, None);
+    let reqs = select_window_requests(&["-n"], None, Some(4), true, None).0;
     assert_eq!(reqs.len(), 1);
     assert!(matches!(reqs[0], CtrlReq::NextWindow));
 }
@@ -143,7 +149,7 @@ fn issue690_every_form_emits_at_most_one() {
         for win in [None, Some(0usize), Some(5usize)] {
             for is_id in [false, true] {
                 for name in [None, Some("win")] {
-                    let n = select_window_requests(args, win, is_id, name).len();
+                    let n = select_window_requests(args, None, win, is_id, name).0.len();
                     assert!(
                         n <= 1,
                         "args {:?} win {:?} is_id {} name {:?} emitted {} window requests, #690 is exactly that",

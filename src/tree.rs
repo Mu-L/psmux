@@ -960,6 +960,69 @@ pub fn focus_pane_by_index(app: &mut AppState, idx: usize) {
     }
 }
 
+/// Every pane path in a window's tree, in pane-index order.
+pub fn pane_paths(node: &Node) -> Vec<Vec<usize>> {
+    fn rec(node: &Node, path: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        match node {
+            Node::Leaf(_) => out.push(path.clone()),
+            Node::Split { children, .. } => {
+                for (i, c) in children.iter().enumerate() {
+                    path.push(i);
+                    rec(c, path, out);
+                    path.pop();
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut path = Vec::new();
+    rec(node, &mut path, &mut out);
+    out
+}
+
+/// Vec position of the window that holds pane `%pid`.
+pub fn find_window_pos_of_pane_id(app: &AppState, pid: usize) -> Option<usize> {
+    app.windows.iter().position(|w| {
+        pane_paths(&w.root).into_iter().any(|p| get_active_pane_id(&w.root, &p) == Some(pid))
+    })
+}
+
+/// Make pane index `idx` the active pane OF THE WINDOW at `win_pos`, without
+/// making that window the session's current window.
+///
+/// This is tmux's `window_set_active_pane(w, wp, 1)`, which cmd-select-pane.c
+/// calls on the TARGET window (`wl->window`, :274) and never follows with a
+/// `session_select`. psmux used to move the current window first, so
+/// `select-pane -t s:1.0` switched the user's window as a side effect
+/// (issue #693 item 3).
+///
+/// Returns true when the window's active pane actually moved.
+pub fn set_window_active_pane_by_index(app: &mut AppState, win_pos: usize, idx: usize) -> bool {
+    let Some(win) = app.windows.get_mut(win_pos) else { return false };
+    let paths = pane_paths(&win.root);
+    let Some(path) = paths.get(idx) else { return false };
+    if win.active_path == *path { return false; }
+    win.active_path = path.clone();
+    if let Some(pid) = get_active_pane_id(&win.root, &win.active_path) {
+        touch_mru(&mut win.pane_mru, pid);
+    }
+    true
+}
+
+/// `set_window_active_pane_by_index` for a `%id` target.
+pub fn set_window_active_pane_by_id(app: &mut AppState, win_pos: usize, pid: usize) -> bool {
+    let Some(win) = app.windows.get_mut(win_pos) else { return false };
+    let paths = pane_paths(&win.root);
+    let target = paths.into_iter().find(|p| {
+        get_active_pane_id(&win.root, p) == Some(pid)
+    });
+    let Some(path) = target else { return false };
+    if win.active_path == path { return false; }
+    win.active_path = path;
+    touch_mru(&mut win.pane_mru, pid);
+    true
+}
+
 /// Count the number of leaf (pane) nodes in a tree.
 pub fn count_panes(node: &Node) -> usize {
     match node {

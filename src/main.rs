@@ -2516,7 +2516,13 @@ fn run_main() -> io::Result<()> {
                 // target, so the fully-qualified sess:win.pane form was the
                 // only pane-addressing form with no error signal.
                 cmd.push('\n');
-                send_control(cmd)?;
+                // #693 item 5: `select-pane -l` with no last pane is
+                // "no last pane" at exit 1 (cmd-select-pane.c:176).
+                let resp = send_control_with_response(cmd)?;
+                if resp.trim_start().starts_with("ERROR") {
+                    eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // select-window - Select a window
@@ -2541,9 +2547,16 @@ fn run_main() -> io::Result<()> {
                 // Target validation happens in the shared
                 // cli_validate_window_pane_target() before dispatch (#554);
                 // it covers the ':' window form this arm used to check plus
-                // the pane forms it never did.
+                // the pane forms it never did.  The symbolic and offset forms
+                // are deliberately NOT pre-validated there (only the server
+                // knows what `!` or `{end}` resolves to), so the server's
+                // reply is what makes them exit 1 (#693 item 4).
                 cmd.push('\n');
-                send_control(cmd)?;
+                let resp = send_control_with_response(cmd)?;
+                if resp.trim_start().starts_with("ERROR") {
+                    eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // list-panes - List all panes
@@ -3559,7 +3572,14 @@ fn run_main() -> io::Result<()> {
             }
             // last-pane - Select last used pane
             "last-pane" | "lastp" => {
-                send_control("last-pane\n".to_string())?;
+                // tmux errors "no last pane" at exit 1 when the window has
+                // none (cmd-select-pane.c:176); psmux exited 0 in silence
+                // (#693 item 5).
+                let resp = send_control_with_response("last-pane\n".to_string())?;
+                if resp.trim_start().starts_with("ERROR") {
+                    eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // next-window - Move to next window
@@ -4916,12 +4936,26 @@ fn run_main() -> io::Result<()> {
             // link-window - Link a window
             "link-window" | "linkw" => {
                 let full = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
-                send_control(format!("{}\n", full))?;
+                // #693 item 1: an unresolvable -s, or a destination index
+                // already in use, is tmux's message at exit 1, not a silent
+                // rc=0 no-op.
+                let resp = send_control_with_response(format!("{}\n", full))?;
+                if resp.trim_start().starts_with("ERROR") {
+                    eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             // unlink-window - Unlink a window
             "unlink-window" | "unlinkw" => {
-                send_control("unlink-window\n".to_string())?;
+                // #693 item 2: the -t names the window to unlink and has to
+                // travel; it used to be dropped and the ACTIVE window went.
+                let full = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
+                let resp = send_control_with_response(format!("{}\n", full))?;
+                if resp.trim_start().starts_with("ERROR") {
+                    eprintln!("psmux: {}", resp.trim_start().trim_start_matches("ERROR:").trim());
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             _ => {

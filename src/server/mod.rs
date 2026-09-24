@@ -961,6 +961,39 @@ pub(crate) fn focus_window_at(app: &mut AppState, internal_idx: usize) -> bool {
     true
 }
 
+/// The pane path a `select-pane -l` / `last-pane` would switch to, or None
+/// when tmux would answer `no last pane`.
+///
+/// tmux's cmd-select-pane.c:165-177, verbatim in shape:
+///
+/// ```c
+/// lastwp = TAILQ_FIRST(&w->last_panes);
+/// if (lastwp == NULL && window_count_panes(w, 1) == 2) {
+///     lastwp = TAILQ_PREV(w->active, window_panes, entry);
+///     if (lastwp == NULL) lastwp = TAILQ_NEXT(w->active, entry);
+/// }
+/// if (lastwp == NULL) { cmdq_error(item, "no last pane"); return (CMD_RETURN_ERROR); }
+/// ```
+///
+/// So: the remembered pane, else the sibling of a two pane window that was
+/// never switched inside, else nothing at all. psmux had the first rule, an
+/// index-flipping guess in place of the second, and no diagnostic for the
+/// third (issue #693 item 5).
+pub(crate) fn last_pane_path(app: &AppState) -> Option<Vec<usize>> {
+    let win = app.windows.get(app.active_idx)?;
+    if !app.last_pane_path.is_empty()
+        && app.last_pane_path != win.active_path
+        && path_exists(&win.root, &app.last_pane_path)
+    {
+        return Some(app.last_pane_path.clone());
+    }
+    let paths = crate::tree::pane_paths(&win.root);
+    if paths.len() == 2 {
+        return paths.into_iter().find(|p| *p != win.active_path);
+    }
+    None
+}
+
 /// Record the pane focus notifications a change of active pane owes.
 ///
 /// tmux moves the active pane through `window_set_active_pane`, which calls
@@ -2519,9 +2552,46 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         None
                     };
-                    if let Some(i) = internal_idx {
-                        focus_window_at(&mut app, i);
-                    }
+                    // tmux's cmd-select-pane.c sets the active pane INSIDE the
+                    // target window (`window_set_active_pane(w, wp, 1)`, :274,
+                    // where `w` is `target->wl->window`) and never calls
+                    // `session_select`, so the session's current window does
+                    // not move. psmux used to focus the window first, which is
+                    // why `select-pane -t s:1.0` switched the user's window
+                    // (issue #693 item 3).
+                    //
+                    // A bare `%id` names its own window (CMD_FIND_PANE), so it
+                    // reaches another window the same way an explicit
+                    // `sess:N.M` does and must leave the current window alone
+                    // just as much.
+                    let target_window = match internal_idx {
+                        Some(i) => Some(i),
+                        None => match (pane, pane_is_id) {
+                            (Some(p), true) => crate::tree::find_window_pos_of_pane_id(&app, p),
+                            _ => None,
+                        },
+                    };
+                    let other_window = target_window.filter(|i| *i != app.active_idx);
+                    if let Some(i) = other_window {
+                        let moved = match (pane, pane_is_id) {
+                            (Some(p), true) => crate::tree::set_window_active_pane_by_id(&mut app, i, p),
+                            (Some(p), false) => crate::tree::set_window_active_pane_by_index(&mut app, i, p),
+                            // `select-pane -t <window>` with no pane part names
+                            // that window's already active pane, so nothing
+                            // moves anywhere (tmux: `wp == w->active`, :269).
+                            (None, _) => false,
+                        };
+                        meta_dirty = true;
+                        if moved {
+                            // The active pane of ANOTHER window changed, which
+                            // `active_pane_identity` (the current window's) can
+                            // never see, so the hook is decided here.
+                            note_pane_focus_change(&app, &mut notify_events);
+                            if fire_hook {
+                                hook_event = Some("after-select-pane");
+                            }
+                        }
+                    } else {
                     if let Some(p) = pane {
                         let old_path = app.windows[app.active_idx].active_path.clone();
                         if pane_is_id {
@@ -2545,6 +2615,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if fire_hook {
                             hook_event = Some("after-select-pane");
                         }
+                    }
                     }
                 }
                 CtrlReq::FocusPane(pid) => {
@@ -3922,13 +3993,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                         "last" => {
-                            // select-pane -l: switch to last active pane
+                            // select-pane -l: switch to last active pane.  The
+                            // target (and the `no last pane` refusal) is
+                            // decided in one place, `last_pane_path`, which is
+                            // tmux's cmd-select-pane.c:165-177; the request
+                            // that carries the diagnostic to the caller is
+                            // `CtrlReq::LastPane` (#693 item 5).
                             let old_path = app.windows[app.active_idx].active_path.clone();
+                            let target = last_pane_path(&app);
                             switch_with_copy_save(&mut app, |app| {
-                                let win = &mut app.windows[app.active_idx];
-                                if !app.last_pane_path.is_empty() {
+                                if let Some(t) = target {
+                                    let win = &mut app.windows[app.active_idx];
                                     let tmp = win.active_path.clone();
-                                    win.active_path = app.last_pane_path.clone();
+                                    win.active_path = t;
                                     app.last_pane_path = tmp;
                                 }
                             });
@@ -4671,21 +4748,28 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                     hook_event = Some("after-select-window");
                 }
-                CtrlReq::LastPane => {
-                    switch_with_copy_save(&mut app, |app| {
-                        let win = &mut app.windows[app.active_idx];
-                        if !app.last_pane_path.is_empty() && path_exists(&win.root, &app.last_pane_path) {
-                            let tmp = win.active_path.clone();
-                            win.active_path = app.last_pane_path.clone();
-                            app.last_pane_path = tmp;
-                        } else if !win.active_path.is_empty() {
-                            let last = win.active_path.last_mut();
-                            if let Some(idx) = last {
-                                *idx = (*idx + 1) % 2;
+                CtrlReq::LastPane { resp } => {
+                    match last_pane_path(&app) {
+                        Some(target) => {
+                            switch_with_copy_save(&mut app, |app| {
+                                let win = &mut app.windows[app.active_idx];
+                                let tmp = win.active_path.clone();
+                                win.active_path = target;
+                                app.last_pane_path = tmp;
+                            });
+                            let win = &mut app.windows[app.active_idx];
+                            if let Some(pid) = get_active_pane_id(&win.root, &win.active_path) {
+                                crate::tree::touch_mru(&mut win.pane_mru, pid);
                             }
+                            unzoom_if_zoomed(&mut app);
+                            meta_dirty = true;
+                            note_pane_focus_change(&app, &mut notify_events);
+                            let _ = resp.send(Ok(()));
                         }
-                    });
-                    meta_dirty = true;
+                        // cmd-select-pane.c:175-177.  psmux exited 0 in silence
+                        // here (issue #693 item 5).
+                        None => { let _ = resp.send(Err("no last pane".to_string())); }
+                    }
                 }
                 CtrlReq::RotateWindow(upward) => {
                     rotate_panes(&mut app, upward);
@@ -5473,58 +5557,179 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::LinkWindow(src_idx_opt, dst_idx_opt) => {
+                CtrlReq::LinkWindowReq { ref src, ref dst, detach, kill, after, before, ref resp } => {
                     // link-window: within a single session, create a linked window
                     // referencing the source window. Since PTY handles can't be shared
                     // across windows, this spawns a new shell and marks it as linked.
-                    let src = src_idx_opt.unwrap_or(app.active_idx);
-                    if src < app.windows.len() {
-                        let src_id = app.windows[src].id;
-                        let src_name = app.windows[src].name.clone();
-                        let pty_system = portable_pty::native_pty_system();
-                        match crate::pane::create_window(&*pty_system, &mut app, None, None, false) {
-                            Ok(()) => {
-                                let new_idx = app.windows.len() - 1;
-                                app.windows[new_idx].linked_from = Some(src_id);
-                                app.windows[new_idx].name = src_name;
-                                if let Some(dst) = dst_idx_opt {
-                                    if app.window_indices_valid() {
-                                        // dst is a display index; place the newly
-                                        // created (active) linked window there.
-                                        app.move_active_window_to_index(dst);
-                                    } else if dst < new_idx {
-                                        let win = app.windows.remove(new_idx);
-                                        app.windows.insert(dst, win);
-                                        if app.active_idx > dst && app.active_idx <= new_idx {
-                                            app.active_idx = app.active_idx.saturating_sub(1);
+                    //
+                    // `-s` and `-t` are RAW specs resolved by the shared #602
+                    // resolver, so a session qualified source (`-s sess:0`)
+                    // reads, and a destination index that no window holds yet
+                    // is a free slot rather than an error
+                    // (CMD_FIND_WINDOW_INDEX, cmd-move-window.c:83). Both used
+                    // to be `trim_start_matches(':').parse::<usize>()`, which
+                    // read neither (#693 item 1).
+                    let resolved = (|| -> Result<(usize, Option<usize>), String> {
+                        let spos = match src.as_deref() {
+                            Some(s) => app.resolve_window_spec(s, false)?.pos()
+                                .ok_or_else(|| format!("can't find window: {}", s))?,
+                            None => app.active_idx,
+                        };
+                        let didx = match dst.as_deref() {
+                            Some(d) => Some(match app.resolve_window_spec(d, true)? {
+                                crate::types::WindowTarget::Pos(p) => app.win_display_index(p),
+                                crate::types::WindowTarget::FreeIndex(i) => i,
+                            }),
+                            None => None,
+                        };
+                        Ok((spos, didx))
+                    })();
+                    match resolved {
+                        Err(msg) => {
+                            app.status_message = Some((format!("link-window: {}", msg), std::time::Instant::now(), None));
+                            state_dirty = true;
+                            let _ = resp.send(Err(msg));
+                        }
+                        Ok((spos, didx)) => {
+                            // -a / -b shuffle the destination up so the link
+                            // lands after / before it (cmd-move-window.c:94).
+                            let mut didx = didx;
+                            if after || before {
+                                if let Some(i) = didx.as_mut() {
+                                    if after { *i += 1; }
+                                    app.shuffle_window_indices_up(*i);
+                                }
+                            }
+                            // -k kills whatever already holds the destination,
+                            // otherwise an occupied index is tmux's
+                            // "index in use: N" at exit 1 (server_link_window).
+                            let occupied = didx.and_then(|i| app.win_pos(i));
+                            let mut refused = None;
+                            if let Some(pos) = occupied {
+                                if kill {
+                                    let mut win = app.windows.remove(pos);
+                                    kill_all_children(&mut win.root);
+                                    app.on_window_removed(pos);
+                                    if app.active_idx >= app.windows.len() && !app.windows.is_empty() {
+                                        app.active_idx = app.windows.len() - 1;
+                                    }
+                                    notify_events.push("window-unlinked");
+                                } else {
+                                    refused = Some(format!("index in use: {}", didx.unwrap_or(0)));
+                                }
+                            }
+                            if let Some(msg) = refused {
+                                app.status_message = Some((format!("link-window: {}", msg), std::time::Instant::now(), None));
+                                state_dirty = true;
+                                let _ = resp.send(Err(msg));
+                            } else {
+                            let spos = spos.min(app.windows.len().saturating_sub(1));
+                            let src_id = app.windows[spos].id;
+                            let src_name = app.windows[spos].name.clone();
+                            let prev_active_id = app.windows.get(app.active_idx).map(|w| w.id);
+                            let pty_system = portable_pty::native_pty_system();
+                            match crate::pane::create_window(&*pty_system, &mut app, None, None, false) {
+                                Ok(()) => {
+                                    let new_idx = app.windows.len() - 1;
+                                    app.windows[new_idx].linked_from = Some(src_id);
+                                    app.windows[new_idx].name = src_name;
+                                    let new_id = app.windows[new_idx].id;
+                                    if let Some(d) = didx {
+                                        if app.window_indices_valid() {
+                                            // d is a display index; place the newly
+                                            // created (active) linked window there.
+                                            app.move_active_window_to_index(d);
+                                        } else if d < new_idx {
+                                            let win = app.windows.remove(new_idx);
+                                            app.windows.insert(d, win);
+                                            if app.active_idx > d && app.active_idx <= new_idx {
+                                                app.active_idx = app.active_idx.saturating_sub(1);
+                                            }
                                         }
                                     }
+                                    // Without -d the linked window is selected
+                                    // (tmux passes !dflag to server_link_window);
+                                    // with -d the current window stays put.
+                                    if detach {
+                                        if let Some(p) = prev_active_id
+                                            .and_then(|id| app.windows.iter().position(|w| w.id == id))
+                                        {
+                                            app.active_idx = p;
+                                        }
+                                    } else if let Some(p) = app.windows.iter().position(|w| w.id == new_id) {
+                                        if p != app.active_idx {
+                                            app.last_window_idx = app.active_idx;
+                                        }
+                                        app.active_idx = p;
+                                    }
+                                    resize_all_panes(&mut app);
+                                    meta_dirty = true;
+                                    hook_event = Some("window-linked");
+                                    let _ = resp.send(Ok(()));
                                 }
-                                resize_all_panes(&mut app);
-                                meta_dirty = true;
-                                hook_event = Some("window-linked");
+                                Err(e) => {
+                                    let msg = format!("create window failed: {}", e);
+                                    app.status_message = Some((format!("link-window: {}", msg), std::time::Instant::now(), None));
+                                    let _ = resp.send(Err(msg));
+                                }
                             }
-                            Err(_e) => {
-                                app.status_message = Some(("link-window: failed to create linked window".to_string(), std::time::Instant::now(), None));
                             }
                         }
-                    } else {
-                        app.status_message = Some(("link-window: source window not found".to_string(), std::time::Instant::now(), None));
                     }
                     state_dirty = true;
                 }
-                CtrlReq::UnlinkWindow => {
-                    if app.windows.len() > 1 {
-                        let removed_pos = app.active_idx;
-                        let mut win = app.windows.remove(removed_pos);
-                        kill_all_children(&mut win.root);
-                        app.on_window_removed(removed_pos);
-                        if app.active_idx >= app.windows.len() {
-                            app.active_idx = app.windows.len() - 1;
+                CtrlReq::UnlinkWindowReq { ref target, ref resp } => {
+                    // tmux's unlink branch acts on `target->wl`
+                    // (cmd-kill-window.c:75-83), the window its own `-t` named.
+                    // psmux always removed `app.active_idx` and only looked
+                    // right because the generic temp focus had moved the active
+                    // window onto the target first (#693 item 2).
+                    let resolved = match target.as_deref() {
+                        Some(t) => app.resolve_window_spec(t, false)
+                            .and_then(|w| w.pos().ok_or_else(|| format!("can't find window: {}", t))),
+                        None => Ok(app.active_idx),
+                    };
+                    match resolved {
+                        Err(msg) => {
+                            app.status_message = Some((format!("unlink-window: {}", msg), std::time::Instant::now(), None));
+                            state_dirty = true;
+                            let _ = resp.send(Err(msg));
                         }
-                        resize_all_panes(&mut app);
-                        meta_dirty = true;
-                        hook_event = Some("window-unlinked");
+                        Ok(removed_pos) if app.windows.len() > 1 => {
+                            let mut win = app.windows.remove(removed_pos);
+                            kill_all_children(&mut win.root);
+                            app.on_window_removed(removed_pos);
+                            if app.active_idx >= app.windows.len() {
+                                app.active_idx = app.windows.len() - 1;
+                            }
+                            resize_all_panes(&mut app);
+                            meta_dirty = true;
+                            state_dirty = true;
+                            hook_event = Some("window-unlinked");
+                            let _ = resp.send(Ok(()));
+                        }
+                        Ok(_) => { let _ = resp.send(Ok(())); }
+                    }
+                }
+                CtrlReq::SelectWindowSpec { ref spec, ref resp } => {
+                    // Every symbolic and offset form goes through the same
+                    // resolver move-window and swap-window have used since
+                    // #602; select-window simply never called it (#693 item 4).
+                    if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
+                    match app.resolve_window_spec(spec, false).and_then(|w| {
+                        w.pos().ok_or_else(|| format!("can't find window: {}", spec))
+                    }) {
+                        Ok(pos) => {
+                            focus_window_at(&mut app, pos);
+                            meta_dirty = true;
+                            hook_event = Some("after-select-window");
+                            let _ = resp.send(Ok(()));
+                        }
+                        Err(msg) => {
+                            app.status_message = Some((format!("select-window: {}", msg), std::time::Instant::now(), None));
+                            state_dirty = true;
+                            let _ = resp.send(Err(msg));
+                        }
                     }
                 }
                 CtrlReq::SetSessionGroup(group_name) => {

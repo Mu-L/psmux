@@ -2696,6 +2696,21 @@ pub enum CtrlReq {
     SendKeysX(String),  // send-keys -X copy-mode-command
     SelectPane(String, bool),
     SelectWindow(usize),
+    /// `select-window -t <spec>` where the spec is anything but a plain index:
+    /// an `@id`, a window name, the `+N`/`-N` offsets or the `!`/`^`/`$` and
+    /// `{last}`/`{start}`/`{end}`/`{next}`/`{previous}` symbols.
+    ///
+    /// tmux maps the braced spellings through `cmd_find_window_table`
+    /// (cmd-find.c:51-58) and resolves the rest in
+    /// `cmd_find_get_window_with_session` (cmd-find.c:364-457), which is the
+    /// same resolver move-window and swap-window have used since issue #602.
+    /// `select-window` simply never called it, so every symbolic form died on
+    /// the CLI with `no server running on session '<ns>__+1'` (issue #693
+    /// item 4).
+    SelectWindowSpec {
+        spec: String,
+        resp: mpsc::Sender<Result<(), String>>,
+    },
     ListPanes(mpsc::Sender<String>),
     ListPanesFormat(mpsc::Sender<String>, String),
     ListAllPanes(mpsc::Sender<String>),
@@ -2771,7 +2786,16 @@ pub enum CtrlReq {
     /// Like DisplayMessage but resolves -t %N pane ID instead of position. (Issue #332.)
     DisplayMessageById(mpsc::Sender<String>, String, usize, bool, Option<u64>),  // resp, format, pane_id, set_status_bar, duration_override_ms
     LastWindow,
-    LastPane,
+    /// `last-pane` / `select-pane -l`.
+    ///
+    /// tmux's cmd-select-pane.c:166-177 takes the window's last pane, falls
+    /// back to the sibling when the window has exactly two panes and neither
+    /// was ever visited, and otherwise fails with `no last pane` at exit 1.
+    /// psmux exited 0 in silence for both of those (issue #693 item 5), so the
+    /// reply channel carries tmux's diagnostic.
+    LastPane {
+        resp: mpsc::Sender<Result<(), String>>,
+    },
     /// `rotate-window`. The flag is tmux's `-U` (its default): true moves the
     /// first pane to the last cell, false is `-D`.
     RotateWindow(bool),
@@ -2916,9 +2940,43 @@ pub enum CtrlReq {
         detach: bool,
         resp: mpsc::Sender<Result<(), String>>,
     },
-    /// link-window: (source window index, target insertion index)
-    LinkWindow(Option<usize>, Option<usize>),
-    UnlinkWindow,
+    /// `link-window`. `src` (`-s`, default the current window) and `dst`
+    /// (`-t`) are RAW tmux target specs, the way `MoveWindow`'s and
+    /// `SwapWindow`'s are.
+    ///
+    /// The `-s` parser used to be `w[1].trim_start_matches(':').parse()`, which
+    /// cannot read a session qualified source, and the `-t` never reached the
+    /// arm at all because `without_outer_target` stripped it and the generic
+    /// temp focus then refused a destination index that no window holds yet
+    /// (issue #693 item 1). In tmux that `-t` is `CMD_FIND_WINDOW_INDEX`
+    /// (cmd-move-window.c:83, shared by move-window and link-window), so it
+    /// need not exist, exactly like break-pane's.
+    LinkWindowReq {
+        src: Option<String>,
+        dst: Option<String>,
+        /// `-d`: do not select the linked window (tmux passes `!dflag` to
+        /// `server_link_window` as its select flag, cmd-move-window.c:103).
+        detach: bool,
+        /// `-k`: kill the window already holding the destination index.
+        kill: bool,
+        /// `-a` / `-b`: land after / before the destination
+        /// (`winlink_shuffle_up`, cmd-move-window.c:94-101).
+        after: bool,
+        before: bool,
+        resp: mpsc::Sender<Result<(), String>>,
+    },
+    /// `unlink-window`. `target` is the RAW `-t` spec, or None for the current
+    /// window (tmux's `.target = { 't', CMD_FIND_WINDOW, 0 }`,
+    /// cmd-kill-window.c:54, and the unlink branch at :75-83 acts on
+    /// `target->wl`).
+    ///
+    /// It used to carry nothing and always removed `app.active_idx`; the only
+    /// reason a `-t` looked honoured was the generic temp focus moving the
+    /// active window to the target first (issue #693 item 2).
+    UnlinkWindowReq {
+        target: Option<String>,
+        resp: mpsc::Sender<Result<(), String>>,
+    },
     /// Set session group (used by new-session -t)
     SetSessionGroup(String),
     FindWindow(mpsc::Sender<String>, String),
