@@ -5595,7 +5595,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     match resolved {
                         Err(msg) => {
                             app.status_message = Some((format!("link-window: {}", msg), std::time::Instant::now(), None));
-                            state_dirty = true;
                             let _ = resp.send(Err(msg));
                         }
                         Ok((spos, didx)) => {
@@ -5628,7 +5627,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                             if let Some(msg) = refused {
                                 app.status_message = Some((format!("link-window: {}", msg), std::time::Instant::now(), None));
-                                state_dirty = true;
                                 let _ = resp.send(Err(msg));
                             } else {
                             let spos = spos.min(app.windows.len().saturating_sub(1));
@@ -5684,6 +5682,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             }
                         }
                     }
+                    // Every arm above changes something a client shows (a
+                    // status message on the refusals, the window list on
+                    // success), so one mark here covers them all.
                     state_dirty = true;
                 }
                 CtrlReq::UnlinkWindowReq { ref target, ref resp } => {

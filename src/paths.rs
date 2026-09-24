@@ -45,9 +45,10 @@ fn windows_profile_dir() -> Option<String> {
     #[link(name = "kernel32")]
     extern "system" {
         fn GetCurrentProcess() -> *mut c_void;
-        fn OpenProcessToken(process: *mut c_void, access: u32, token: *mut *mut c_void) -> i32;
-        // isize handle to match every other CloseHandle declaration in the
-        // crate (clashing_extern_declarations); cast at the call site.
+        // isize handles to match the declarations in platform.rs
+        // (clashing_extern_declarations, reported on PR 682); cast at the
+        // call site.
+        fn OpenProcessToken(process: isize, access: u32, token: *mut isize) -> i32;
         fn CloseHandle(h: isize) -> i32;
     }
     #[link(name = "userenv")]
@@ -56,14 +57,14 @@ fn windows_profile_dir() -> Option<String> {
     }
     const TOKEN_QUERY: u32 = 0x0008;
     unsafe {
-        let mut token: *mut c_void = std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+        let mut token: isize = 0;
+        if OpenProcessToken(GetCurrentProcess() as isize, TOKEN_QUERY, &mut token) == 0 {
             return None;
         }
         let mut buf = [0u16; 512];
         let mut len = buf.len() as u32;
-        let ok = GetUserProfileDirectoryW(token, buf.as_mut_ptr(), &mut len);
-        CloseHandle(token as isize);
+        let ok = GetUserProfileDirectoryW(token as *mut c_void, buf.as_mut_ptr(), &mut len);
+        CloseHandle(token);
         if ok == 0 || len == 0 {
             return None;
         }
