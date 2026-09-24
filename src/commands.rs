@@ -1448,13 +1448,21 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
         "select-window" | "selectw" => {
             if let Some(t_pos) = parts.iter().position(|p| *p == "-t") {
                 if let Some(t) = parts.get(t_pos + 1) {
-                    if let Some(idx) = parse_window_target(t) {
-                        if let Some(internal_idx) = app.win_pos(idx) {
-                            switch_with_copy_save(app, |app| {
-                                app.last_window_idx = app.active_idx;
-                                app.active_idx = internal_idx;
-                            });
-                        }
+                    // The shared #602 resolver, so `+1`, `!` and `{end}` mean
+                    // here what they mean to move-window (#693 item 4).
+                    // `parse_window_target` only ever understood a plain
+                    // index, so every symbolic form was a silent no-op.
+                    let resolved = match crate::server::connection::select_window_spec(Some(t)) {
+                        Some(spec) => app.resolve_window_spec(&spec, false)
+                            .map(|w| w.pos())
+                            .unwrap_or(None),
+                        None => parse_window_target(t).and_then(|idx| app.win_pos(idx)),
+                    };
+                    if let Some(internal_idx) = resolved {
+                        switch_with_copy_save(app, |app| {
+                            app.last_window_idx = app.active_idx;
+                            app.active_idx = internal_idx;
+                        });
                     }
                 }
             }
@@ -1463,11 +1471,18 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             // Save/restore copy mode across pane switches (tmux parity #43)
             let is_last = parts.iter().any(|p| *p == "-l");
             if is_last {
+                // One rule for what "the last pane" is, tmux's
+                // cmd-select-pane.c:165-177 (#693 item 5).
+                let target = crate::server::last_pane_path(app);
+                if target.is_none() {
+                    app.status_message = Some(("no last pane".to_string(), Instant::now(), None));
+                    return Ok(());
+                }
                 switch_with_copy_save(app, |app| {
-                    let win = &mut app.windows[app.active_idx];
-                    if !app.last_pane_path.is_empty() {
+                    if let Some(t) = target {
+                        let win = &mut app.windows[app.active_idx];
                         let tmp = win.active_path.clone();
-                        win.active_path = app.last_pane_path.clone();
+                        win.active_path = t;
                         app.last_pane_path = tmp;
                     }
                 });
@@ -1536,14 +1551,20 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "last-pane" | "lastp" => {
-            switch_with_copy_save(app, |app| {
-                let win = &mut app.windows[app.active_idx];
-                if !app.last_pane_path.is_empty() {
-                    let tmp = win.active_path.clone();
-                    win.active_path = app.last_pane_path.clone();
-                    app.last_pane_path = tmp;
+            let target = crate::server::last_pane_path(app);
+            match target {
+                None => {
+                    app.status_message = Some(("no last pane".to_string(), Instant::now(), None));
                 }
-            });
+                Some(t) => {
+                    switch_with_copy_save(app, |app| {
+                        let win = &mut app.windows[app.active_idx];
+                        let tmp = win.active_path.clone();
+                        win.active_path = t;
+                        app.last_pane_path = tmp;
+                    });
+                }
+            }
         }
         "rename-window" | "renamew" => {
             if let Some(name) = parts.get(1) {
@@ -2460,47 +2481,116 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                // Intra-session link-window: parse -s and -t flags
-                let src_idx = parts.windows(2).find(|w| w[0] == "-s")
-                    .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
-                let dst_idx = parts.windows(2).find(|w| w[0] == "-t")
-                    .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
-                let src = src_idx.unwrap_or(app.active_idx);
-                if src < app.windows.len() {
-                    let src_id = app.windows[src].id;
-                    let src_name = app.windows[src].name.clone();
-                    let pty_system = portable_pty::native_pty_system();
-                    if let Ok(()) = crate::pane::create_window(&*pty_system, app, None, None, false) {
-                        let new_idx = app.windows.len() - 1;
-                        app.windows[new_idx].linked_from = Some(src_id);
-                        app.windows[new_idx].name = src_name;
-                        if let Some(dst) = dst_idx {
-                            if app.window_indices_valid() {
-                                app.move_active_window_to_index(dst);
-                            } else if dst < new_idx {
-                                let win = app.windows.remove(new_idx);
-                                app.windows.insert(dst, win);
+                // Same shared resolver the server and the CLI use, so a
+                // config file, a binding and `psmux link-window` agree on what
+                // `-s sess:0` and `-t 5` mean (#693 item 1). `-s` and `-t`
+                // used to be `trim_start_matches(':').parse::<usize>()`, which
+                // read neither a session qualified source nor a destination
+                // index that no window holds yet.
+                let src = parts.windows(2).find(|w| w[0] == "-s").map(|w| w[1].to_string());
+                let dst = parts.windows(2).find(|w| w[0] == "-t").map(|w| w[1].to_string());
+                let has = |f: &str| parts[1..].iter().any(|a| *a == f);
+                let resolved = (|| -> Result<(usize, Option<usize>), String> {
+                    let spos = match src.as_deref() {
+                        Some(s) => app.resolve_window_spec(s, false)?.pos()
+                            .ok_or_else(|| format!("can't find window: {}", s))?,
+                        None => app.active_idx,
+                    };
+                    let didx = match dst.as_deref() {
+                        Some(d) => Some(match app.resolve_window_spec(d, true)? {
+                            crate::types::WindowTarget::Pos(p) => app.win_display_index(p),
+                            crate::types::WindowTarget::FreeIndex(i) => i,
+                        }),
+                        None => None,
+                    };
+                    Ok((spos, didx))
+                })();
+                match resolved {
+                    Err(msg) => {
+                        app.status_message = Some((format!("link-window: {}", msg), Instant::now(), None));
+                    }
+                    Ok((src_pos, mut didx)) => {
+                        if has("-a") || has("-b") {
+                            if let Some(i) = didx.as_mut() {
+                                if has("-a") { *i += 1; }
+                                app.shuffle_window_indices_up(*i);
                             }
                         }
-                        fire_hooks(app, "window-linked");
+                        let occupied = didx.and_then(|i| app.win_pos(i));
+                        if occupied.is_some() && !has("-k") {
+                            app.status_message = Some((format!("link-window: index in use: {}", didx.unwrap_or(0)), Instant::now(), None));
+                        } else {
+                            if let Some(pos) = occupied {
+                                let mut win = app.windows.remove(pos);
+                                kill_all_children(&mut win.root);
+                                app.on_window_removed(pos);
+                                if app.active_idx >= app.windows.len() && !app.windows.is_empty() {
+                                    app.active_idx = app.windows.len() - 1;
+                                }
+                            }
+                            let src_pos = src_pos.min(app.windows.len().saturating_sub(1));
+                            let src_id = app.windows[src_pos].id;
+                            let src_name = app.windows[src_pos].name.clone();
+                            let prev_active_id = app.windows.get(app.active_idx).map(|w| w.id);
+                            let pty_system = portable_pty::native_pty_system();
+                            if let Ok(()) = crate::pane::create_window(&*pty_system, app, None, None, false) {
+                                let new_idx = app.windows.len() - 1;
+                                app.windows[new_idx].linked_from = Some(src_id);
+                                app.windows[new_idx].name = src_name;
+                                let new_id = app.windows[new_idx].id;
+                                if let Some(d) = didx {
+                                    if app.window_indices_valid() {
+                                        app.move_active_window_to_index(d);
+                                    } else if d < new_idx {
+                                        let win = app.windows.remove(new_idx);
+                                        app.windows.insert(d, win);
+                                    }
+                                }
+                                if has("-d") {
+                                    if let Some(p) = prev_active_id
+                                        .and_then(|id| app.windows.iter().position(|w| w.id == id))
+                                    {
+                                        app.active_idx = p;
+                                    }
+                                } else if let Some(p) = app.windows.iter().position(|w| w.id == new_id) {
+                                    if p != app.active_idx { app.last_window_idx = app.active_idx; }
+                                    app.active_idx = p;
+                                }
+                                fire_hooks(app, "window-linked");
+                            }
+                        }
                     }
-                } else {
-                    app.status_message = Some(("link-window: source window not found".to_string(), Instant::now(), None));
                 }
             }
         }
         "unlink-window" | "unlinkw" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
-            } else if app.windows.len() > 1 {
-                let removed_pos = app.active_idx;
-                let mut win = app.windows.remove(removed_pos);
-                kill_all_children(&mut win.root);
-                app.on_window_removed(removed_pos);
-                if app.active_idx >= app.windows.len() {
-                    app.active_idx = app.windows.len() - 1;
+            } else {
+                // tmux unlinks the window its own -t names
+                // (cmd-kill-window.c:75-83); this always removed the ACTIVE
+                // window (#693 item 2).
+                let target = parts.windows(2).find(|w| w[0] == "-t").map(|w| w[1].to_string());
+                let resolved = match target.as_deref() {
+                    Some(t) => app.resolve_window_spec(t, false)
+                        .and_then(|w| w.pos().ok_or_else(|| format!("can't find window: {}", t))),
+                    None => Ok(app.active_idx),
+                };
+                match resolved {
+                    Err(msg) => {
+                        app.status_message = Some((format!("unlink-window: {}", msg), Instant::now(), None));
+                    }
+                    Ok(removed_pos) if app.windows.len() > 1 => {
+                        let mut win = app.windows.remove(removed_pos);
+                        kill_all_children(&mut win.root);
+                        app.on_window_removed(removed_pos);
+                        if app.active_idx >= app.windows.len() {
+                            app.active_idx = app.windows.len() - 1;
+                        }
+                        fire_hooks(app, "window-unlinked");
+                    }
+                    Ok(_) => {}
                 }
-                fire_hooks(app, "window-unlinked");
             }
         }
         "move-pane" | "movep" => {

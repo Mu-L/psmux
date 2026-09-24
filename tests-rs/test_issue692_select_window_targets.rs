@@ -95,11 +95,18 @@ fn issue692_move_and_swap_window_keep_their_symbolic_forms() {
         );
         assert!(bare_target_names_a_window(t), "{} is window shaped", t);
     }
-    // select-window takes only the plain index: nothing else resolves those
-    // forms for it, so coercing them would turn a loud CLI error into a
-    // silent no-op.
-    for t in ["+", "-", "!", "{end}"] {
-        assert_eq!(coerce_bare_window_target("select-window", t), t);
+    // When #692 landed, select-window took only the plain index, because
+    // nothing resolved the other forms for it and coercing them would have
+    // turned a loud CLI error into a silent no-op.  Issue #693 item 4 routed
+    // select-window through that same resolver on every route, so it now takes
+    // the whole shape too; tmux maps the braced spellings in
+    // `cmd_find_window_table` (cmd-find.c:51-58) and resolves the offsets at
+    // cmd-find.c:390-417, for every window command alike.
+    for t in ["+", "-", "+2", "-3", "!", "^", "$", "{end}", "{last}"] {
+        assert_eq!(
+            coerce_bare_window_target("select-window", t), format!(":{}", t),
+            "select-window -t {} is a window spec too (#693 item 4)", t
+        );
     }
 }
 

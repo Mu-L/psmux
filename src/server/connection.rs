@@ -316,25 +316,37 @@ fn without_outer_target<'a>(cmd: &str, args: &[&'a str]) -> Vec<&'a str> {
 /// number.
 pub(crate) fn select_window_requests(
     args: &[&str],
+    raw_target: Option<&str>,
     target_win: Option<usize>,
     target_win_is_id: bool,
     target_win_name: Option<&str>,
-) -> Vec<CtrlReq> {
+) -> (Vec<CtrlReq>, Option<mpsc::Receiver<Result<(), String>>>) {
     if args.iter().any(|a| *a == "-n") {
-        return vec![CtrlReq::NextWindow];
+        return (vec![CtrlReq::NextWindow], None);
     }
     if args.iter().any(|a| *a == "-p") {
-        return vec![CtrlReq::PrevWindow];
+        return (vec![CtrlReq::PrevWindow], None);
     }
     if args.iter().any(|a| *a == "-l") {
-        return vec![CtrlReq::LastWindow];
+        return (vec![CtrlReq::LastWindow], None);
+    }
+    // Issue #693 item 4: everything the `-t` can name goes through the ONE
+    // resolver move-window and swap-window have used since #602, which is
+    // tmux's `cmd_find_get_window_with_session` in the same order: `@id`, the
+    // `+N`/`-N` offsets, the `!`/`^`/`$` symbols and their braced spellings,
+    // a display index, then an exact window name. `select-window` never
+    // called it, so `-t +1` was read as the literal index 1 and `-t !`,
+    // `-t {end}`, `-t -` and `-t +` died on the CLI as session names.
+    if let Some(spec) = select_window_spec(raw_target) {
+        let (s, r) = mpsc::channel();
+        return (vec![CtrlReq::SelectWindowSpec { spec, resp: s }], Some(r));
     }
     if target_win_is_id {
         // #497: an @id target must never be re-sent as an INDEX.
-        return match target_win {
+        return (match target_win {
             Some(id) => vec![CtrlReq::FocusWindowById(id)],
             None => Vec::new(),
-        };
+        }, None);
     }
     let idx = args
         .iter()
@@ -342,12 +354,58 @@ pub(crate) fn select_window_requests(
         .and_then(|s| s.parse::<usize>().ok())
         .or(target_win);
     if let Some(idx) = idx {
-        return vec![CtrlReq::SelectWindow(idx)];
+        return (vec![CtrlReq::SelectWindow(idx)], None);
     }
-    match target_win_name {
+    (match target_win_name {
         Some(name) => vec![CtrlReq::FocusWindowByName(name.to_string())],
         None => Vec::new(),
+    }, None)
+}
+
+/// The raw `-t` of a `select-window` that names a WINDOW, so the server side
+/// resolver decides what it means; None when it names a session (or nothing),
+/// which psmux has always routed by session name and which #693 does not
+/// change.
+///
+/// tmux tries the token as a window first and only falls back to a session
+/// (cmd-find.c:344-350); psmux runs one server per session, so the session
+/// fallback is the CLI's routing step and a bare NAME never reaches here as a
+/// window.
+pub(crate) fn select_window_spec(raw_target: Option<&str>) -> Option<String> {
+    let t = raw_target?.trim();
+    if t.is_empty() { return None; }
+    // A `.pane` component belongs to the pane focus, not to the window
+    // resolver: `select-window -t @2.0` and `-t sess:1.0` both name window
+    // @2 / window 1 (#497).  Only an UNAMBIGUOUS suffix is split off, because
+    // a window NAME may legitimately contain a dot, which is the same rule
+    // `cli_validate_window_pane_target` uses.
+    let (prefix, rest) = match t.find(':') {
+        Some(c) => (&t[..=c], &t[c + 1..]),
+        None => ("", t),
+    };
+    let rest = rest.trim();
+    let window_part = match rest.rfind('.') {
+        Some(d) => {
+            let pane = &rest[d + 1..];
+            let unambiguous = !pane.is_empty()
+                && (pane.starts_with('%')
+                    || pane.chars().all(|c| c.is_ascii_digit())
+                    || matches!(pane, "+" | "-"));
+            if unambiguous { &rest[..d] } else { rest }
+        }
+        None => rest,
+    };
+    let window_part = window_part.trim();
+    // `sess:` with nothing after it means that session's current window,
+    // which is where we already are.
+    if window_part.is_empty() { return None; }
+    if !prefix.is_empty() {
+        return Some(format!("{}{}", prefix, window_part));
     }
+    if window_part.starts_with('@') || crate::cli::bare_target_names_a_window(window_part) {
+        return Some(window_part.to_string());
+    }
+    None
 }
 
 /// Does this `select-pane` carry an operation of its own, one that
@@ -490,6 +548,66 @@ pub fn parse_break_pane_args(
         None
     };
     (req, print)
+}
+
+/// A `link-window` command line, shared by the plain CLI route and the
+/// control / in-TUI route so both agree (issue #693 item 1).
+///
+/// tmux's flag set is `"abdks:t:"` (cmd-move-window.c:49), `-s` is
+/// `CMD_FIND_WINDOW` and `-t` is the `CMD_FIND_WINDOW / CMD_FIND_WINDOW_INDEX`
+/// destination (:83), so the destination need not exist yet. psmux read both
+/// as `trim_start_matches(':').parse::<usize>()`, which could not read a
+/// session qualified `-s sess:0` at all.
+///
+/// `outer_target` is the `-t` value the generic target parser already peeled
+/// off the command line.
+pub struct LinkWindowArgs {
+    pub src: Option<String>,
+    pub dst: Option<String>,
+    pub detach: bool,
+    pub kill: bool,
+    pub after: bool,
+    pub before: bool,
+}
+
+pub fn parse_link_window_args(args: &[&str], outer_target: Option<&str>) -> LinkWindowArgs {
+    let mut out = LinkWindowArgs {
+        src: None,
+        dst: outer_target.map(|t| t.to_string()),
+        detach: false,
+        kill: false,
+        after: false,
+        before: false,
+    };
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "-d" => out.detach = true,
+            "-k" => out.kill = true,
+            "-a" => out.after = true,
+            "-b" => out.before = true,
+            "-s" => { if let Some(v) = args.get(i + 1) { out.src = Some(v.trim_matches('"').to_string()); i += 1; } }
+            "-t" => { if let Some(v) = args.get(i + 1) { out.dst = Some(v.trim_matches('"').to_string()); i += 1; } }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The `-t` of an `unlink-window` (tmux flag set `"kt:"`,
+/// cmd-kill-window.c:51). It never reached the arm before, so the command
+/// always unlinked the ACTIVE window (issue #693 item 2).
+pub fn parse_unlink_window_target(args: &[&str], outer_target: Option<&str>) -> Option<String> {
+    let mut target = outer_target.map(|t| t.to_string());
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-t" {
+            if let Some(v) = args.get(i + 1) { target = Some(v.trim_matches('"').to_string()); i += 1; }
+        }
+        i += 1;
+    }
+    target
 }
 
 /// Parsed `new-pane` flags. Semantics match tmux `cmd-split-window.c`:
@@ -1039,9 +1157,15 @@ if control_echo || control_noecho {
         // yet (cmd-break-pane.c:43, CMD_FIND_WINDOW_INDEX), and its own parser
         // owns it. Temp-focusing it used to be the only reason `break-pane -t`
         // preserved the current window (#689).
+        // link-window's -t is a DESTINATION window index that need not exist
+        // yet either (cmd-move-window.c:83, the CMD_FIND_WINDOW_INDEX shared
+        // with move-window), and unlink-window's -t names the window to
+        // unlink; both now own their target, so the temp focus must not eat it
+        // (issue #693 items 1 and 2).
         let skip_target_focus = matches!(cmd_name, "join-pane" | "joinp" | "move-pane" | "movep"
             | "move-window" | "movew" | "swap-window" | "swapw"
             | "break-pane" | "breakp"
+            | "link-window" | "linkw" | "unlink-window" | "unlinkw"
             | "switch-client" | "switchc" | "resize-window" | "resizew"
             | "kill-window" | "killw" | "detach-client" | "detach");
         // capture-pane -t %N resolves the pane id inside the capture itself;
@@ -1074,14 +1198,32 @@ if control_echo || control_noecho {
                     let _ = tx_ctrl.send(req);
                 }
             } else if is_focus_cmd {
-                if let Some(wid) = ctrl_target_win {
-                    if ctrl_target_win_is_id {
-                        let _ = tx_ctrl.send(CtrlReq::FocusWindowById(wid));
-                    } else {
-                        let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
+                // #693 item 4: select-window resolves its whole `-t` through
+                // the one shared resolver on this route too, so `-t +1`,
+                // `-t !` and `-t {end}` mean the same thing from a control
+                // client as they do from move-window.
+                let (reqs, resp_r) = select_window_requests(
+                    &filtered_args, ctrl_raw_target.as_deref(), ctrl_target_win,
+                    ctrl_target_win_is_id, ctrl_target_win_name.as_deref());
+                let decided = !reqs.is_empty();
+                for req in reqs {
+                    let _ = tx_ctrl.send(req);
+                }
+                if let Some(r) = resp_r {
+                    if let Ok(Err(e)) = r.recv_timeout(Duration::from_secs(5)) {
+                        focus_err = Some(e);
                     }
-                } else if let Some(ref wname) = ctrl_target_win_name {
-                    let _ = tx_ctrl.send(CtrlReq::FocusWindowByName(wname.clone()));
+                }
+                if !decided {
+                    if let Some(wid) = ctrl_target_win {
+                        if ctrl_target_win_is_id {
+                            let _ = tx_ctrl.send(CtrlReq::FocusWindowById(wid));
+                        } else {
+                            let _ = tx_ctrl.send(CtrlReq::FocusWindow(wid));
+                        }
+                    } else if let Some(ref wname) = ctrl_target_win_name {
+                        let _ = tx_ctrl.send(CtrlReq::FocusWindowByName(wname.clone()));
+                    }
                 }
                 if let Some(pid) = ctrl_target_pane {
                     if ctrl_pane_is_id {
@@ -1400,9 +1542,13 @@ let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "
 // (cmd-break-pane.c:43, CMD_FIND_WINDOW_INDEX), and break-pane's own parser
 // owns it. The temporary focus was the ONLY reason `break-pane -t` left the
 // current window alone, which is why bare `break-pane -d` still switched (#689).
+// link-window's -t is the same CMD_FIND_WINDOW_INDEX destination
+// (cmd-move-window.c:83) and unlink-window's -t names the window to unlink
+// (cmd-kill-window.c:75-83); both own their target now (#693 items 1 and 2).
 let skip_target_focus = matches!(cmd, "join-pane" | "joinp" | "move-pane" | "movep"
     | "move-window" | "movew" | "swap-window" | "swapw"
     | "break-pane" | "breakp"
+    | "link-window" | "linkw" | "unlink-window" | "unlinkw"
     | "switch-client" | "switchc" | "resize-window" | "resizew"
     | "kill-window" | "killw" | "detach-client" | "detach");
 let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_id {
@@ -2062,15 +2208,41 @@ match cmd {
         if title.is_some() || pane_style.is_some() {
             let _ = tx.send(CtrlReq::SetPaneAttrs { title, style: pane_style });
         }
-        if !dir.is_empty() {
+        if dir == "last" {
+            // #693 item 5: `select-pane -l` with no last pane is tmux's
+            // "no last pane" at exit 1 (cmd-select-pane.c:176), not a silent
+            // success. It is the same operation as `last-pane`, so it takes
+            // the same request.
+            let (resp_s, resp_r) = mpsc::channel();
+            let _ = tx.send(CtrlReq::LastPane { resp: resp_s });
+            if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+                if !persistent {
+                    let _ = writeln!(write_stream, "ERROR: {}", e);
+                    let _ = write_stream.flush();
+                }
+            }
+        } else if !dir.is_empty() {
             let keep_zoom = args.iter().any(|a| *a == "-Z");
             let _ = tx.send(CtrlReq::SelectPane(dir.to_string(), keep_zoom));
         }
     }
     "select-window" | "selectw" => {
         // Exactly one window request per command, chosen in one place (#690).
-        for req in select_window_requests(&args, target_win, target_win_is_id, target_win_name.as_deref()) {
+        let (reqs, resp_r) = select_window_requests(
+            &args, raw_target.as_deref(), target_win, target_win_is_id,
+            target_win_name.as_deref());
+        for req in reqs {
             let _ = tx.send(req);
+        }
+        // #693 item 4: a spec that resolves to no window is tmux's
+        // "can't find window: N" at exit 1, not a silent no-op.
+        if let Some(r) = resp_r {
+            if let Ok(Err(e)) = r.recv_timeout(Duration::from_secs(5)) {
+                if !persistent {
+                    let _ = writeln!(write_stream, "ERROR: {}", e);
+                    let _ = write_stream.flush();
+                }
+            }
         }
     }
     "list-panes" | "lsp" => {
@@ -2511,7 +2683,18 @@ match cmd {
         if !persistent { break; }
     }
     "last-window" | "last" => { let _ = tx.send(CtrlReq::LastWindow); }
-    "last-pane" | "lastp" => { let _ = tx.send(CtrlReq::LastPane); }
+    "last-pane" | "lastp" => {
+        // tmux's last-pane shares cmd_select_pane_exec with `select-pane -l`,
+        // so it owes the same `no last pane` at exit 1 (cmd-select-pane.c:176).
+        let (resp_s, resp_r) = mpsc::channel();
+        let _ = tx.send(CtrlReq::LastPane { resp: resp_s });
+        if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+            if !persistent {
+                let _ = writeln!(write_stream, "ERROR: {}", e);
+                let _ = write_stream.flush();
+            }
+        }
+    }
     "rotate-window" | "rotatew" => {
         // tmux tests for -D alone and falls through to the -U branch for
         // everything else, so bare `rotate-window` is `-U`.  This arm used to
@@ -3381,15 +3564,32 @@ match cmd {
         }
     }
     "link-window" | "linkw" => {
-        // Parse -s source_window and -t target_index
-        let src_idx = args.windows(2).find(|w| w[0] == "-s")
-            .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
-        let dst_idx = args.windows(2).find(|w| w[0] == "-t")
-            .and_then(|w| w[1].trim_start_matches(':').parse::<usize>().ok());
-        let _ = tx.send(CtrlReq::LinkWindow(src_idx, dst_idx));
+        // `-s` and `-t` are RAW specs now (#693 item 1): a session qualified
+        // source reads, and the destination need not exist yet.
+        let la = parse_link_window_args(&args, raw_target.as_deref());
+        let (resp_s, resp_r) = mpsc::channel();
+        let _ = tx.send(CtrlReq::LinkWindowReq {
+            src: la.src, dst: la.dst, detach: la.detach,
+            kill: la.kill, after: la.after, before: la.before,
+            resp: resp_s,
+        });
+        if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+            if !persistent {
+                let _ = writeln!(write_stream, "ERROR: {}", e);
+                let _ = write_stream.flush();
+            }
+        }
     }
     "unlink-window" | "unlinkw" => {
-        let _ = tx.send(CtrlReq::UnlinkWindow);
+        let target = parse_unlink_window_target(&args, raw_target.as_deref());
+        let (resp_s, resp_r) = mpsc::channel();
+        let _ = tx.send(CtrlReq::UnlinkWindowReq { target, resp: resp_s });
+        if let Ok(Err(e)) = resp_r.recv_timeout(Duration::from_secs(5)) {
+            if !persistent {
+                let _ = writeln!(write_stream, "ERROR: {}", e);
+                let _ = write_stream.flush();
+            }
+        }
     }
     "find-window" | "findw" => {
         let pattern = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"").to_string();
@@ -4765,9 +4965,28 @@ fn dispatch_control_command(
             }
             true
         }
+        "link-window" | "linkw" => {
+            let la = parse_link_window_args(args, raw_target);
+            let (resp_s, resp_r) = mpsc::channel();
+            let _ = tx.send(CtrlReq::LinkWindowReq {
+                src: la.src, dst: la.dst, detach: la.detach,
+                kill: la.kill, after: la.after, before: la.before,
+                resp: resp_s,
+            });
+            match resp_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                _ => { let _ = resp_tx.send(String::new()); }
+            }
+            true
+        }
         "unlink-window" | "unlinkw" => {
-            let _ = tx.send(CtrlReq::UnlinkWindow);
-            let _ = resp_tx.send(String::new());
+            let target = parse_unlink_window_target(args, raw_target);
+            let (resp_s, resp_r) = mpsc::channel();
+            let _ = tx.send(CtrlReq::UnlinkWindowReq { target, resp: resp_s });
+            match resp_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                _ => { let _ = resp_tx.send(String::new()); }
+            }
             true
         }
         "select-window" | "selectw" => {
@@ -5428,8 +5647,12 @@ fn dispatch_control_command(
             true
         }
         "last-pane" | "lastp" => {
-            let _ = tx.send(CtrlReq::LastPane);
-            let _ = resp_tx.send(String::new());
+            let (resp_s, resp_r) = mpsc::channel();
+            let _ = tx.send(CtrlReq::LastPane { resp: resp_s });
+            match resp_r.recv_timeout(Duration::from_secs(5)) {
+                Ok(Err(e)) => { let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", e)); }
+                _ => { let _ = resp_tx.send(String::new()); }
+            }
             true
         }
         "next-window" | "next" => {
@@ -5688,3 +5911,7 @@ mod tests_issue690_hook_once;
 #[cfg(test)]
 #[path = "../../tests-rs/test_issue691_hook_table.rs"]
 mod tests_issue691_hook_table;
+
+#[cfg(test)]
+#[path = "../../tests-rs/test_issue693_targets.rs"]
+mod tests_issue693_targets;

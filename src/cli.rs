@@ -1076,18 +1076,17 @@ pub fn window_target_command(cmd: &str) -> bool {
 /// Returns the target unchanged when the command's `-t` is not a window
 /// target or the token is not window-shaped.
 ///
-/// `select-window` takes only the plain index, which is the form
-/// `cmd-find.c:443` resolves and the one issue #692 reports. The relative and
-/// symbolic forms (`+2`, `!`, `{end}`) are resolved server side by
-/// `move-window`/`swap-window`'s own #602 resolver and by nothing else, so
-/// coercing them for `select-window` would only turn a loud CLI error into a
-/// silent no-op.
+/// `select-window` took only the plain index when issue #692 landed, because
+/// the relative and symbolic forms (`+2`, `!`, `{end}`) were resolved server
+/// side by `move-window`/`swap-window`'s own #602 resolver and by nothing
+/// else, so coercing them would only have turned a loud CLI error into a
+/// silent no-op. Issue #693 item 4 routes `select-window` through that same
+/// resolver on every route, so it now takes the whole shape, exactly as
+/// tmux's `cmd_find_window_table` (cmd-find.c:51-58) and the offset branch
+/// (cmd-find.c:390-417) do.
 pub fn coerce_bare_window_target(cmd: &str, target: &str) -> String {
     let plain = strip_exact_match_prefix(target);
-    let window_shaped = match cmd {
-        "select-window" | "selectw" => plain.parse::<usize>().is_ok(),
-        _ => bare_target_names_a_window(plain),
-    };
+    let window_shaped = bare_target_names_a_window(plain);
     if window_target_command(cmd) && window_shaped {
         format!(":{}", plain)
     } else {
