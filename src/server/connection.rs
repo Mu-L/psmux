@@ -374,14 +374,36 @@ pub(crate) fn select_window_requests(
 pub(crate) fn select_window_spec(raw_target: Option<&str>) -> Option<String> {
     let t = raw_target?.trim();
     if t.is_empty() { return None; }
-    if let Some(colon) = t.find(':') {
-        // `sess:` with nothing after it means that session's current window,
-        // which is where we already are.
-        if t[colon + 1..].trim().is_empty() { return None; }
-        return Some(t.to_string());
+    // A `.pane` component belongs to the pane focus, not to the window
+    // resolver: `select-window -t @2.0` and `-t sess:1.0` both name window
+    // @2 / window 1 (#497).  Only an UNAMBIGUOUS suffix is split off, because
+    // a window NAME may legitimately contain a dot, which is the same rule
+    // `cli_validate_window_pane_target` uses.
+    let (prefix, rest) = match t.find(':') {
+        Some(c) => (&t[..=c], &t[c + 1..]),
+        None => ("", t),
+    };
+    let rest = rest.trim();
+    let window_part = match rest.rfind('.') {
+        Some(d) => {
+            let pane = &rest[d + 1..];
+            let unambiguous = !pane.is_empty()
+                && (pane.starts_with('%')
+                    || pane.chars().all(|c| c.is_ascii_digit())
+                    || matches!(pane, "+" | "-"));
+            if unambiguous { &rest[..d] } else { rest }
+        }
+        None => rest,
+    };
+    let window_part = window_part.trim();
+    // `sess:` with nothing after it means that session's current window,
+    // which is where we already are.
+    if window_part.is_empty() { return None; }
+    if !prefix.is_empty() {
+        return Some(format!("{}{}", prefix, window_part));
     }
-    if t.starts_with('@') || crate::cli::bare_target_names_a_window(t) {
-        return Some(t.to_string());
+    if window_part.starts_with('@') || crate::cli::bare_target_names_a_window(window_part) {
+        return Some(window_part.to_string());
     }
     None
 }

@@ -103,18 +103,33 @@ else { Write-Fail "unexpected error output: $($err.Trim())" }
 if ($winBefore -eq $winAfter) { Write-Pass "active window untouched" }
 else { Write-Fail "active window changed on error: $winBefore -> $winAfter" }
 
-# === TEST 5: control - plain select-pane -t (no -T) still moves focus ===
-Write-Host "`n[Test 5] plain select-pane -t %1 still moves focus (regression guard)" -ForegroundColor Yellow
+# === TEST 5: control - plain select-pane -t (no -T) sets the ACTIVE PANE ===
+#
+# Changed by issue #693 item 3.  This used to assert that `select-pane -t %1`
+# from window 1 SWITCHED the session to window 0, because that is what psmux
+# did.  tmux does not: cmd-select-pane.c:274 calls
+# `window_set_active_pane(w, wp, 1)` on the TARGET window (`w` is
+# `target->wl->window`) and the file never calls `session_select`, so the
+# session's current window stays where it is.  A bare `%id` is CMD_FIND_PANE
+# and names its own window, so it obeys the same rule.  `select-window` is
+# the command that changes windows.
+#
+# The regression this test guards is still guarded: a plain `-t` (no -T/-P)
+# must MOVE the pane, which is what separates it from the #592 attribute only
+# forms below.
+Write-Host "`n[Test 5] plain select-pane -t %1 sets window 0's active pane and stays on window 1" -ForegroundColor Yellow
 & $PSMUX -L $SOCK select-window -t :1 | Out-Null
+Start-Sleep -Milliseconds 300
+& $PSMUX -L $SOCK select-pane -t '%2' 2>&1 | Out-Null   # park window 0 on %2
 Start-Sleep -Milliseconds 300
 $winBefore = Get-WinIndex
 & $PSMUX -L $SOCK select-pane -t '%1' 2>&1 | Out-Null
 Start-Sleep -Milliseconds 400
 $winAfter = Get-WinIndex
-$activeAfter = Get-ActivePane
-if ($winBefore -eq "1" -and $winAfter -eq "0" -and $activeAfter -eq '%1') {
-    Write-Pass "plain -t focus move preserved (win $winBefore->$winAfter, pane $activeAfter)"
-} else { Write-Fail "plain -t focus broken: win $winBefore->$winAfter pane $activeAfter" }
+$w0active = (& $PSMUX -L $SOCK list-panes -t ":0" -F '#{pane_id}#{?pane_active,*,}' 2>&1 | Where-Object { $_ -match '\*$' }) -replace '\*$',''
+if ($winBefore -eq "1" -and $winAfter -eq "1" -and $w0active -eq '%1') {
+    Write-Pass "plain -t moved window 0's active pane to %1 and left the session on window $winAfter (cmd-select-pane.c:274)"
+} else { Write-Fail "plain -t: win $winBefore->$winAfter (want 1->1), window 0 active pane $w0active (want %1)" }
 
 # === TEST 6: -P style with -t does not move focus ===
 Write-Host "`n[Test 6] -t %2 -P style does not move focus" -ForegroundColor Yellow
