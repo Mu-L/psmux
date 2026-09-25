@@ -63,6 +63,22 @@ $okWin = (DstWin) -eq "1"; $okPane = (DstWin1Pane) -eq "1"
 if ($r -match "OK" -and $okWin -and $okPane) { P "cross-session session:window.pane landed on window 1 pane 1" }
 else { F "resp='$r' dstWin=$(DstWin) dstPane=$(DstWin1Pane) (want win1 pane1)" }
 
+# Case 3: the SAME session shape, session:window.pane where session is the
+# client's own. tmux's cmd-switch-client sets the window's active pane and
+# then the session's current window (cmd-switch-client.c:140-151) for every
+# -t shape; case 2 above is the cross session half, this is the other half.
+& $PSMUX switch-client -t $SRC 2>&1 | Out-Null; Start-Sleep -Seconds 2
+& $PSMUX new-window -t $SRC -n swin1 pwsh -NoProfile; Start-Sleep -Seconds 2
+& $PSMUX split-window -h -t "${SRC}:1" pwsh -NoProfile; Start-Sleep -Seconds 2
+& $PSMUX select-pane -t "${SRC}:1.0" 2>&1 | Out-Null
+& $PSMUX select-window -t "${SRC}:0" 2>&1 | Out-Null; Start-Sleep -Milliseconds 600
+function SrcWin() { ((& $PSMUX list-windows -t $SRC -F '#{window_index}:#{window_active}') | Where-Object { $_ -match ':1$' }) -replace ':1','' }
+function SrcWin1Pane() { ((& $PSMUX list-panes -t "${SRC}:1" -F '#{pane_index}:#{pane_active}') | Where-Object { $_ -match ':1$' }) -replace ':1','' }
+$r = Send-ToSrc "${SRC}:1.1"; Start-Sleep -Seconds 2
+$okWin = (SrcWin) -eq "1"; $okPane = (SrcWin1Pane) -eq "1"
+if ($r -match "OK" -and $okWin -and $okPane) { P "same-session session:window.pane landed on window 1 pane 1" }
+else { F "same-session resp='$r' srcWin=$(SrcWin) srcPane=$(SrcWin1Pane) (want win1 pane1)" }
+
 Write-Host "`n=== Results: Passed=$($script:pass) Failed=$($script:fail) ===" -ForegroundColor Cyan
 try { Stop-Process -Id $proc.Id -Force -EA SilentlyContinue } catch {}
 foreach ($s in @($SRC,$DST)) { & $PSMUX kill-session -t $s 2>&1 | Out-Null }

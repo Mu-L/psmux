@@ -6492,9 +6492,44 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                             Err(format!("can't find pane: %{}", pid))
                                         }
                                     } else {
-                                        switch_with_copy_save(&mut app, |app| { crate::tree::focus_pane_by_index(app, pid); });
-                                        unzoom_if_zoomed(&mut app);
-                                        Ok(true)
+                                        // tmux (cmd-switch-client.c:140-151):
+                                        // window_set_active_pane on the TARGET
+                                        // window, then session_set_current to
+                                        // it. focus_pane_by_index works on the
+                                        // active window, so a `s:1.1` sent from
+                                        // window 0 used to pick pane 1 of window
+                                        // 0 and never move (test_issue483
+                                        // case 3: srcWin=0 srcPane=0). Resolve
+                                        // the window part first.
+                                        let target_win = if let Some(w) = pt.window {
+                                            if pt.window_is_id {
+                                                app.windows.iter().position(|x| x.id == w)
+                                            } else {
+                                                app.win_pos(w)
+                                            }
+                                        } else if let Some(ref wname) = pt.window_name {
+                                            app.windows.iter().position(|x| x.name == *wname)
+                                        } else {
+                                            Some(app.active_idx)
+                                        };
+                                        match target_win {
+                                            Some(i) => {
+                                                switch_with_copy_save(&mut app, |app| {
+                                                    if i != app.active_idx {
+                                                        app.last_window_idx = app.active_idx;
+                                                        app.active_idx = i;
+                                                    }
+                                                    crate::tree::focus_pane_by_index(app, pid);
+                                                });
+                                                if let Some(win) = app.windows.get_mut(i) {
+                                                    win.activity_flag = false; win.bell_flag = false; win.silence_flag = false;
+                                                }
+                                                unzoom_if_zoomed(&mut app);
+                                                resize_all_panes(&mut app);
+                                                Ok(true)
+                                            }
+                                            None => Err(format!("can't find window: {}", raw)),
+                                        }
                                     }
                                 } else if let Some(w) = pt.window {
                                     let internal = if pt.window_is_id {

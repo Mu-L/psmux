@@ -969,3 +969,9 @@ try {
     Write-Host "  could not write metrics: $_" -ForegroundColor DarkYellow
 }
 Write-Host ""
+
+# The runner scores a suite by its exit code as well as its FAIL lines; a
+# suite that prints FAIL and exits 0 is a suite the runner cannot trust
+# (sweep 2026-09-24_23-37-41 read this one as "25P/2F exit=0").
+if ($FAIL -gt 0) { exit 1 }
+exit 0

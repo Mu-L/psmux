@@ -142,8 +142,21 @@ param(
     # this 32 core box is eight cores busy, which one sibling cargo build
     # already exceeds.
     [double]$QuietLoadPct = 25.0,
-    # Kept as a backstop on how bad that second wait may get.
-    [int]$P90LimitMs = 300,
+    # Kept as a backstop on how bad that second wait may get. It is NOT a
+    # partial wait any more: traced on 2026-09-25 (PSMUX_WARM_TRACE), the
+    # surge that claim 2 opens spawns its batch four at a time, and those
+    # boots lengthen the neighbouring spare's READY time from 427 to 666 ms,
+    # so the 4th creation of a 150 ms cadence can pay a whole boot remainder
+    # just as the 3rd does. The gate read that as p90 = 302 and 333 against
+    # 300 on a quiet machine, with p50 at 16 ms and the slow count inside its
+    # budget, so the backstop sat on the measurement. A full pwsh boot
+    # remainder is the honest bound; 600 ms is one, and anything past it is
+    # the blow-up the max limit below describes. Measured with the same
+    # cadence, to the prompt: pool 2 = [91,72,228,170,94,126,73,145,77,81],
+    # pool 3 = [92,71,84,135,86,72,82,68,142,73], pool 4 = [92,80,69,71,70,
+    # 69,80,70,83,70]. A deeper default pool is what makes every creation
+    # flat, at ~45 MB idle per extra spare; `warm-pool-size` exists for it.
+    [int]$P90LimitMs = 600,
     # max only catches a blow-up. The floor for one creation in a run of ten is
     # a whole shell startup, because no pool can produce a booted shell faster
     # than a shell boots, and a pwsh cold start measures 600 to 900ms on this
