@@ -6435,6 +6435,7 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                 PasteHeadEvidence {
                     gesture_open: paste_gesture.is_open(),
                     clip_head: paste_clip_head.get(),
+                    held_for: paste_pend_start.map(|s| s.elapsed()).unwrap_or_default(),
                 }
             } else {
                 PasteHeadEvidence::default()
@@ -8665,7 +8666,30 @@ struct PasteHeadEvidence<'a> {
     /// prefix of it is the strongest evidence available at the first
     /// character.
     clip_head: Option<&'a str>,
+    /// How long the pending buffer has been held so far.
+    held_for: Duration,
 }
+
+/// How long a lone character that matches the clipboard's first character is
+/// held before it is committed as typing.
+///
+/// The clipboard prefix is evidence at the FIRST character, and it needs only
+/// as long as the second character of a real paste takes to arrive. On the
+/// host that drips (Windows 10 19045, #684 follow up) that is under a
+/// millisecond: 70 characters in 20 ms measured by the reporter, 2 ms in the
+/// drip harness. A typed character never has a follow up inside 3 ms, so the
+/// hold ends there and the keystroke goes out as typing 3 ms late instead of
+/// 20. The keystroke gate measured the 20 ms version as one sample in forty
+/// waiting out the whole window (p99 23 ms against an 8 ms bar, and 32 ms
+/// against the 25 ms absolute bar in test_perf_vs_terminals) whenever the
+/// clipboard happened to start with a character the bench typed, which is
+/// exactly the shape a user hits after copying a command and typing its first
+/// letter. 3 ms is ten times the measured gap and still inside the 6 ms
+/// "over the ConPTY floor" p99 budget. Once a second character has arrived
+/// the ordinary 20 ms window applies, since that is a burst and no longer a
+/// keystroke.
+#[cfg(windows)]
+const PASTE_HEAD_PREFIX_HOLD: Duration = Duration::from_millis(3);
 
 #[cfg(windows)]
 impl<'a> PasteHeadEvidence<'a> {
@@ -8682,7 +8706,16 @@ impl<'a> PasteHeadEvidence<'a> {
     }
 
     fn head_of_paste(&self, pend: &str) -> bool {
-        self.gesture_open || self.clipboard_starts_with(pend)
+        if self.gesture_open {
+            return true;
+        }
+        if !self.clipboard_starts_with(pend) {
+            return false;
+        }
+        // One character on prefix evidence alone: hold it for
+        // PASTE_HEAD_PREFIX_HOLD and no longer. Two characters is a burst
+        // shape and keeps the full window.
+        pend.chars().count() >= 2 || self.held_for < PASTE_HEAD_PREFIX_HOLD
     }
 }
 
