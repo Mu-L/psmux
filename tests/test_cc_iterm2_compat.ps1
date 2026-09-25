@@ -188,13 +188,19 @@ Send-CC $cc "rename-window -t liveA liveA_renamed"
 $ev = Drain-Notifications $cc 1000
 if ($ev -match "%window-renamed @\d+ liveA_renamed") { P "%window-renamed" } else { F "no %window-renamed" }
 
-# Select first window by index 0 to fire after-select-window
+# Select first window by index 0 to fire after-select-window.
+# The notification may be written before or after the command's %end (tmux
+# makes no promise either way), and Read-Reply consumes everything up to
+# %end, so the reply is kept and searched too. Sweep 2026-09-24_23-37-41
+# lost it that way under load, 28P/1F, with an empty drain.
 Send-CC $cc "select-window -t :0"
-[void](Read-Reply $cc 1500)
-Start-Sleep -Milliseconds 400
-$ev = Drain-Notifications $cc 1000
-if ($ev -match "%session-window-changed \`$\d+ @\d+") { P "%session-window-changed on select-window" }
-else { F "no %session-window-changed: $ev" }
+$reply = Read-Reply $cc 1500
+$ev = $reply + (Drain-Notifications $cc 2000)
+if ($ev -match "%session-window-changed \`$\d+ @\d+") {
+    $where = if ($reply -match "%session-window-changed") { "before %end" } else { "after %end" }
+    P "%session-window-changed on select-window (arrived $where)"
+}
+else { F "no %session-window-changed: reply=[$($reply.Trim())] drain=[$($ev.Trim())]" }
 
 Send-CC $cc "kill-window -t liveA_renamed"
 [void](Read-Reply $cc 1500)
