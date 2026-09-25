@@ -4485,9 +4485,37 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     app.hooks.clear();
                     app.defaults_suppressed = false;
                     crate::config::populate_default_bindings(&mut app);
+                    // The shell this standby booted with. Its window 0 pane
+                    // and every spare in its pool are already running it.
+                    let shell_at_boot = app.default_shell.clone();
                     load_config(&mut app);
                     // Surface config warnings to the claiming client (#370 follow-up).
                     write_config_warnings_log(&app.config_warnings);
+                    // A standby parses the config at ITS boot, which is when
+                    // the previous session's server spawned it. If default-shell
+                    // changed on disk since (a user editing
+                    // psmux.conf between two sessions; test_issue99 does it
+                    // three times in a row), the reload above fixes the option
+                    // but the pane the session opens with, and the spares
+                    // new-window will hand out, still run the OLD shell: the
+                    // suite's Git bash session came up on WSL bash, twice over.
+                    // tmux has no standby; a new session runs the current
+                    // default-shell, so respawn both. The pool half is what
+                    // warm_pane_sync::for_post_config does for a cold server;
+                    // the window 0 pane is the one thing that module never
+                    // touches, hence respawn_active_pane here, with -k, which
+                    // on a standby is a pane nobody has typed into.
+                    let shell_now = app.default_shell.clone();
+                    let shell_changed = shell_now != shell_at_boot;
+                    if shell_changed {
+                        warm_debug(&format!(
+                            "CLAIM: shell changed since standby boot ({:?} -> {:?}); respawning window 0 and the pool",
+                            shell_at_boot, shell_now
+                        ));
+                        if let Err(e) = respawn_active_pane(&mut app, Some(&*pty_system), None, true, None, false) {
+                            warm_debug(&format!("CLAIM: window 0 respawn failed: {}", e));
+                        }
+                    }
                     // Config may set pane-border-status (#288)
                     resize_all_panes(&mut app);
                     // Update shared aliases after config reload
@@ -4540,11 +4568,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // triggers in warm_pane_sync.  This is AFTER the claim
                     // response on purpose: the client is already unblocked, so
                     // the refill costs the user nothing.
-                    if env_adopted {
+                    if env_adopted || shell_changed {
                         crate::warm_pane_sync::apply(
                             &mut app,
                             &*pty_system,
-                            crate::warm_pane_sync::WarmPaneSync::Respawn("claim: client environment adopted"),
+                            crate::warm_pane_sync::WarmPaneSync::Respawn(if shell_changed {
+                                "claim: default-shell changed since the standby booted"
+                            } else {
+                                "claim: client environment adopted"
+                            }),
                         );
                     }
                     hook_event = Some("after-rename-session");
